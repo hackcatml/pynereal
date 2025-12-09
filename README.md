@@ -1,14 +1,11 @@
 # PyneReal
-___
 Run your crypto trading strategy in real time without TradingView
 
 # Prerequisites
-___
 python >= 3.11\
 [PyneCore](https://github.com/PyneSys/pynecore) strategy (converted from your pinescript strategy)
 
 # Quick Example
-___
 Follow the steps below to see how it works.\
 The `demo_1m.py` script runs on Bitget BTC/USDT Futures in real time on the 1-minute timeframe.\
 You will see webhook alert messages when `strategy.entry` or `strategy.close` is triggered.
@@ -29,7 +26,6 @@ You will see webhook alert messages when `strategy.entry` or `strategy.close` is
 
 
 # How to run your strategy?
-___
 1. Prepare your PyneCore strategy file.
 2. Download OHLCV data for the trading pair.\
 e.g., `pyne data download ccxt --symbol "BITGET:BTC/USDT:USDT" --timeframe 5 --from "2025-09-01"`
@@ -43,7 +39,6 @@ When you backtest your strategy, set `enabled = false` under the `realtime` sect
 
 # Features
 ## Webhook signal
-___
 Enable the webhook feature by setting `enabled = true` in the `webhook` section of `realtime_trade.toml`.\
 Add your webhook url there.\
 When using `strategy.entry` or `strategy.close`, provide an alert_message in JSON format:
@@ -53,14 +48,12 @@ Currently, webhook signals are triggered only on `strategy.entry` and `strategy.
 
 
 ## Send Telegram message
-___
 If webhook signaling is enabled, you can automatically send Telegram notifications as well.\
 Enable it by setting `telegram_notification = true` in `realtime_trade.toml`.\
 You must also fill in your `.env` file with your Telegram bot token and chat ID.
 
 
 ## Custom input
-___
 PyneCore does not yet support Pine Script’s `request.security` feature.\
 To use higher-timeframe (HTF) values, you must calculate them before running the script.\
 In the modules directory, you will find several examples:\
@@ -69,14 +62,14 @@ In the modules directory, you will find several examples:\
 `bb1d_calc.py` — daily Bollinger Band calculator
 
 How to apply?\
-(1) If it's just for backtesting\
+(1) If it's just for backtesting
 - Go to `pynecore/cli/commands/run.py` and search for the string `module calculation`.
 - There’s a bb1d and weekly high–low calculation example. Uncomment it.
 - Also uncomment the keys and values in the `custom_inputs` parameter a few lines below.
 - Go to the `demo_1m.py` strategy file and uncomment the Custom Inputs section.
 - The HTF calculation result will be used in backtesting.
 
-(2) If it's for real-time trading\
+(2) If it's for real-time trading
 - Go to `main.py` and search for the string `module calculation`.
 - There are two places where module calculation occurs:\
 one in the `Ready Script Runner` region and another in the `Script Run Loop` region.\
@@ -88,7 +81,6 @@ Yes, it's a little bit annoying to set up.\
 Conveniently injecting custom inputs into the script is on my TODO list for now.
 
 ## Backtesting
-___
 You can still use the standard pyne command for backtesting.\
 Make sure to set:\
 `no_report = false` under the `pyne` section\
@@ -97,7 +89,6 @@ Then run: `pyne run <your strategy.py> <ohlcv file>`
 
 
 # Risk Warning
-___
 This project is still in development.\
 Cannot guarantee it works properly.\
 Use it at your own risk.\
@@ -106,11 +97,9 @@ I don't take any responsibility for your loss.
 
 
 # License
-___
 Apache License Version 2.0
 
 
 # Acknowledgements
-___
 - [PyneCore](https://github.com/PyneSys/pynecore)
 
