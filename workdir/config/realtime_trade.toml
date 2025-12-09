@@ -1,0 +1,17 @@
+[pyne]
+no_logo = true                  # no print pyne logo?
+no_progress = true              # no progress bar?
+no_report = true                # no .csv report?
+
+[realtime]
+enabled = true
+provider = "ccxt"               # Data provider
+exchange = "bitget"             # Exchange name
+symbol = "BTC/USDT:USDT"        # pyne data download ccxt --list-symbols --symbol BITGET
+timeframe = "1m"                # 1m, 5m, 1h, 1D, 1W, 1M
+script_name = "demo_1m.py"      # PyneCore strategy name
+
+[webhook]
+enabled = true
+url = "http://localhost:8884/webhook"   # URL for your webhook server
+telegram_notification = false           # Send telegram bot notification. You have to put BOT_TOKEN, CHAT_ID in the .env file

@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "pynecore" = "pynecore", "modules" = "modules" }
+#packages.find = { where = ["src"] }
+include-package-data = true
+zip-safe = false  # Critical for import hooks
+
+[tool.setuptools.package-data]
+"pynecore" = ["*.pyi"]
+
+[tool.distutils]
+egg_info.egg_base = "build"
+
+[project]
+name = "pynesys-pynecore"
+version = "6.3.5" # PineVersion.Major.Minor
+description = "Python based Pine Script like runtime and API"
+authors = [{ name = "PYNESYS LLC", email = "hello@pynesys.com" }]
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+
+#
+# Dependencies
+#
+
+# No dependencies for core functionality, it has only a minimal CLI functionality
+dependencies = []
+
+# With user-friendly CLI
+optional-dependencies.cli = ["typer", "rich", "tzdata"]
+
+# All optional dependencies for cli and all built-in providers
+optional-dependencies.all = ["typer", "rich", "httpx", "ccxt", "pycryptodome", "tzdata"]
+
+#Optional dependencies for development
+optional-dependencies.dev = ["pytest", "pytest-spec"]
+
+### Providers
+
+# For all providers to work (CCXT, Capital.com)
+optional-dependencies.providers = ["httpx", "ccxt", "pycryptodome"]
+
+# For CCXT provider to work
+optional-dependencies.ccxt = ["ccxt"]
+
+# For Capital.com provider to work
+optional-dependencies.capitalcom = ["httpx", "pycryptodome"]
+
+
+#
+# Commands
+#
+
+scripts.pyne = "pynecore.cli:app"
+
+
+#
+# URLs
+#
+
+[project.urls]
+"Homepage" = "https://pynecore.org"
+"Repository" = "https://github.com/pynesys/pynecore"
+"Documentation" = "https://pynecore.org/docs"
+"Issues" = "https://github.com/pynesys/pynecore/issues"
+
+# Social
+"X" = "https://x.com/pynesys"
+"Discord" = "https://discord.com/invite/jegnhtq6gy"
+"Reddit" = "https://www.reddit.com/r/pynesys"
+"Discussions" = "https://github.com/PyneSys/pynecore/discussions"

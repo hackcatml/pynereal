@@ -1,0 +1,41 @@
+Metadata-Version: 2.4
+Name: pynesys-pynecore
+Version: 6.3.5
+Summary: Python based Pine Script like runtime and API
+Author-email: PYNESYS LLC <hello@pynesys.com>
+License: Apache-2.0
+Project-URL: Homepage, https://pynecore.org
+Project-URL: Repository, https://github.com/pynesys/pynecore
+Project-URL: Documentation, https://pynecore.org/docs
+Project-URL: Issues, https://github.com/pynesys/pynecore/issues
+Project-URL: X, https://x.com/pynesys
+Project-URL: Discord, https://discord.com/invite/jegnhtq6gy
+Project-URL: Reddit, https://www.reddit.com/r/pynesys
+Project-URL: Discussions, https://github.com/PyneSys/pynecore/discussions
+Classifier: Programming Language :: Python :: 3
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Provides-Extra: cli
+Requires-Dist: typer; extra == "cli"
+Requires-Dist: rich; extra == "cli"
+Requires-Dist: tzdata; extra == "cli"
+Provides-Extra: all
+Requires-Dist: typer; extra == "all"
+Requires-Dist: rich; extra == "all"
+Requires-Dist: httpx; extra == "all"
+Requires-Dist: ccxt; extra == "all"
+Requires-Dist: pycryptodome; extra == "all"
+Requires-Dist: tzdata; extra == "all"
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-spec; extra == "dev"
+Provides-Extra: providers
+Requires-Dist: httpx; extra == "providers"
+Requires-Dist: ccxt; extra == "providers"
+Requires-Dist: pycryptodome; extra == "providers"
+Provides-Extra: ccxt
+Requires-Dist: ccxt; extra == "ccxt"
+Provides-Extra: capitalcom
+Requires-Dist: httpx; extra == "capitalcom"
+Requires-Dist: pycryptodome; extra == "capitalcom"

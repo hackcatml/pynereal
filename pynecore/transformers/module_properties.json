@@ -1,0 +1,890 @@
+{
+  "lib": {
+    "bar_index": {
+      "type": "variable"
+    },
+    "close": {
+      "type": "variable"
+    },
+    "dayofmonth": {
+      "type": "property"
+    },
+    "dayofweek": {
+      "type": "property"
+    },
+    "high": {
+      "type": "variable"
+    },
+    "hl2": {
+      "type": "variable"
+    },
+    "hlc3": {
+      "type": "variable"
+    },
+    "hlcc4": {
+      "type": "variable"
+    },
+    "hour": {
+      "type": "property"
+    },
+    "last_bar_index": {
+      "type": "variable"
+    },
+    "last_bar_time": {
+      "type": "variable"
+    },
+    "low": {
+      "type": "variable"
+    },
+    "minute": {
+      "type": "property"
+    },
+    "month": {
+      "type": "property"
+    },
+    "na": {
+      "type": "property"
+    },
+    "ohlc4": {
+      "type": "variable"
+    },
+    "open": {
+      "type": "variable"
+    },
+    "second": {
+      "type": "property"
+    },
+    "time": {
+      "type": "property"
+    },
+    "time_close": {
+      "type": "property"
+    },
+    "volume": {
+      "type": "variable"
+    },
+    "weekofyear": {
+      "type": "property"
+    },
+    "year": {
+      "type": "property"
+    }
+  },
+  "lib.adjustment": {
+    "dividends": {
+      "type": "variable"
+    },
+    "none": {
+      "type": "variable"
+    },
+    "splits": {
+      "type": "variable"
+    }
+  },
+  "lib.alert": {},
+  "lib.array": {
+    "Number": {
+      "type": "variable"
+    }
+  },
+  "lib.barmerge": {
+    "gaps_off": {
+      "type": "variable"
+    },
+    "gaps_on": {
+      "type": "variable"
+    },
+    "lookahead_off": {
+      "type": "variable"
+    },
+    "lookahead_on": {
+      "type": "variable"
+    }
+  },
+  "lib.barstate": {
+    "isconfirmed": {
+      "type": "property"
+    },
+    "isfirst": {
+      "type": "variable"
+    },
+    "ishistory": {
+      "type": "property"
+    },
+    "islast": {
+      "type": "variable"
+    },
+    "islastconfirmedhistory": {
+      "type": "property"
+    },
+    "isnew": {
+      "type": "property"
+    },
+    "isrealtime": {
+      "type": "property"
+    }
+  },
+  "lib.box": {
+    "all": {
+      "type": "property"
+    }
+  },
+  "lib.chart": {
+    "bg_color": {
+      "type": "variable"
+    },
+    "fg_color": {
+      "type": "variable"
+    },
+    "is_heikinashi": {
+      "type": "variable"
+    },
+    "is_kagi": {
+      "type": "variable"
+    },
+    "is_linebreak": {
+      "type": "variable"
+    },
+    "is_pnf": {
+      "type": "variable"
+    },
+    "is_range": {
+      "type": "variable"
+    },
+    "is_renko": {
+      "type": "variable"
+    },
+    "is_standard": {
+      "type": "variable"
+    },
+    "left_visible_bar_time": {
+      "type": "property"
+    },
+    "right_visible_bar_time": {
+      "type": "property"
+    }
+  },
+  "lib.color": {
+    "aqua": {
+      "type": "variable"
+    },
+    "black": {
+      "type": "variable"
+    },
+    "blue": {
+      "type": "variable"
+    },
+    "fuchsia": {
+      "type": "variable"
+    },
+    "gray": {
+      "type": "variable"
+    },
+    "green": {
+      "type": "variable"
+    },
+    "lime": {
+      "type": "variable"
+    },
+    "maroon": {
+      "type": "variable"
+    },
+    "navy": {
+      "type": "variable"
+    },
+    "olive": {
+      "type": "variable"
+    },
+    "orange": {
+      "type": "variable"
+    },
+    "purple": {
+      "type": "variable"
+    },
+    "red": {
+      "type": "variable"
+    },
+    "silver": {
+      "type": "variable"
+    },
+    "teal": {
+      "type": "variable"
+    },
+    "white": {
+      "type": "variable"
+    },
+    "yellow": {
+      "type": "variable"
+    }
+  },
+  "lib.currency": {},
+  "lib.dayofweek": {
+    "friday": {
+      "type": "variable"
+    },
+    "monday": {
+      "type": "variable"
+    },
+    "saturday": {
+      "type": "variable"
+    },
+    "sunday": {
+      "type": "variable"
+    },
+    "thursday": {
+      "type": "variable"
+    },
+    "tuesday": {
+      "type": "variable"
+    },
+    "wednesday": {
+      "type": "variable"
+    }
+  },
+  "lib.display": {
+    "all": {
+      "type": "variable"
+    },
+    "data_window": {
+      "type": "variable"
+    },
+    "none": {
+      "type": "variable"
+    },
+    "pane": {
+      "type": "variable"
+    },
+    "price_scale": {
+      "type": "variable"
+    },
+    "status_line": {
+      "type": "variable"
+    }
+  },
+  "lib.extend": {
+    "both": {
+      "type": "variable"
+    },
+    "left": {
+      "type": "variable"
+    },
+    "none": {
+      "type": "variable"
+    },
+    "right": {
+      "type": "variable"
+    }
+  },
+  "lib.font": {
+    "family_default": {
+      "type": "variable"
+    },
+    "family_monospace": {
+      "type": "variable"
+    }
+  },
+  "lib.format": {
+    "inherit": {
+      "type": "variable"
+    },
+    "mintick": {
+      "type": "variable"
+    },
+    "percent": {
+      "type": "variable"
+    },
+    "price": {
+      "type": "variable"
+    },
+    "volume": {
+      "type": "variable"
+    }
+  },
+  "lib.hline": {},
+  "lib.label": {
+    "all": {
+      "type": "property"
+    },
+    "style_arrowdown": {
+      "type": "variable"
+    },
+    "style_arrowup": {
+      "type": "variable"
+    },
+    "style_circle": {
+      "type": "variable"
+    },
+    "style_cross": {
+      "type": "variable"
+    },
+    "style_diamond": {
+      "type": "variable"
+    },
+    "style_flag": {
+      "type": "variable"
+    },
+    "style_label_center": {
+      "type": "variable"
+    },
+    "style_label_down": {
+      "type": "variable"
+    },
+    "style_label_left": {
+      "type": "variable"
+    },
+    "style_label_lower_left": {
+      "type": "variable"
+    },
+    "style_label_lower_right": {
+      "type": "variable"
+    },
+    "style_label_right": {
+      "type": "variable"
+    },
+    "style_label_up": {
+      "type": "variable"
+    },
+    "style_label_upper_left": {
+      "type": "variable"
+    },
+    "style_label_upper_right": {
+      "type": "variable"
+    },
+    "style_none": {
+      "type": "variable"
+    },
+    "style_square": {
+      "type": "variable"
+    },
+    "style_text_outline": {
+      "type": "variable"
+    },
+    "style_triangledown": {
+      "type": "variable"
+    },
+    "style_triangleup": {
+      "type": "variable"
+    },
+    "style_xcross": {
+      "type": "variable"
+    }
+  },
+  "lib.line": {
+    "all": {
+      "type": "property"
+    },
+    "style_arrow_both": {
+      "type": "variable"
+    },
+    "style_arrow_left": {
+      "type": "variable"
+    },
+    "style_arrow_right": {
+      "type": "variable"
+    },
+    "style_dashed": {
+      "type": "variable"
+    },
+    "style_dotted": {
+      "type": "variable"
+    },
+    "style_solid": {
+      "type": "variable"
+    }
+  },
+  "lib.linefill": {},
+  "lib.location": {
+    "abovebar": {
+      "type": "variable"
+    },
+    "absolute": {
+      "type": "variable"
+    },
+    "belowbar": {
+      "type": "variable"
+    },
+    "bottom": {
+      "type": "variable"
+    },
+    "top": {
+      "type": "variable"
+    }
+  },
+  "lib.log": {
+    "logger": {
+      "type": "variable"
+    }
+  },
+  "lib.map": {
+    "TKey": {
+      "type": "variable"
+    },
+    "TValue": {
+      "type": "variable"
+    }
+  },
+  "lib.math": {
+    "e": {
+      "type": "variable"
+    },
+    "phi": {
+      "type": "variable"
+    },
+    "pi": {
+      "type": "variable"
+    },
+    "rphi": {
+      "type": "variable"
+    }
+  },
+  "lib.matrix": {},
+  "lib.order": {
+    "ascending": {
+      "type": "variable"
+    },
+    "descending": {
+      "type": "variable"
+    }
+  },
+  "lib.plot": {},
+  "lib.polyline": {
+    "all": {
+      "type": "property"
+    },
+    "style_arrow_both": {
+      "type": "variable"
+    },
+    "style_arrow_left": {
+      "type": "variable"
+    },
+    "style_arrow_right": {
+      "type": "variable"
+    },
+    "style_dashed": {
+      "type": "variable"
+    },
+    "style_dotted": {
+      "type": "variable"
+    },
+    "style_solid": {
+      "type": "variable"
+    }
+  },
+  "lib.position": {
+    "bottom_center": {
+      "type": "variable"
+    },
+    "bottom_left": {
+      "type": "variable"
+    },
+    "bottom_right": {
+      "type": "variable"
+    },
+    "middle_center": {
+      "type": "variable"
+    },
+    "middle_left": {
+      "type": "variable"
+    },
+    "middle_right": {
+      "type": "variable"
+    },
+    "top_center": {
+      "type": "variable"
+    },
+    "top_left": {
+      "type": "variable"
+    },
+    "top_right": {
+      "type": "variable"
+    }
+  },
+  "lib.runtime": {},
+  "lib.scale": {
+    "left": {
+      "type": "variable"
+    },
+    "none": {
+      "type": "variable"
+    },
+    "right": {
+      "type": "variable"
+    }
+  },
+  "lib.session": {
+    "extended": {
+      "type": "variable"
+    },
+    "isfirstbar": {
+      "type": "property"
+    },
+    "isfirstbar_regular": {
+      "type": "property"
+    },
+    "islastbar": {
+      "type": "property"
+    },
+    "islastbar_regular": {
+      "type": "property"
+    },
+    "ismarket": {
+      "type": "property"
+    },
+    "ispostmarket": {
+      "type": "property"
+    },
+    "ispremarket": {
+      "type": "property"
+    },
+    "regular": {
+      "type": "variable"
+    }
+  },
+  "lib.shape": {
+    "arrowdown": {
+      "type": "variable"
+    },
+    "arrowup": {
+      "type": "variable"
+    },
+    "circle": {
+      "type": "variable"
+    },
+    "cross": {
+      "type": "variable"
+    },
+    "diamond": {
+      "type": "variable"
+    },
+    "flag": {
+      "type": "variable"
+    },
+    "labeldown": {
+      "type": "variable"
+    },
+    "labelup": {
+      "type": "variable"
+    },
+    "square": {
+      "type": "variable"
+    },
+    "triangledown": {
+      "type": "variable"
+    },
+    "triangleup": {
+      "type": "variable"
+    },
+    "xcross": {
+      "type": "variable"
+    }
+  },
+  "lib.size": {
+    "auto": {
+      "type": "variable"
+    },
+    "huge": {
+      "type": "variable"
+    },
+    "large": {
+      "type": "variable"
+    },
+    "normal": {
+      "type": "variable"
+    },
+    "small": {
+      "type": "variable"
+    },
+    "tiny": {
+      "type": "variable"
+    }
+  },
+  "lib.strategy": {
+    "cash": {
+      "type": "variable"
+    },
+    "equity": {
+      "type": "property"
+    },
+    "eventrades": {
+      "type": "property"
+    },
+    "fixed": {
+      "type": "variable"
+    },
+    "grossloss": {
+      "type": "property"
+    },
+    "grossprofit": {
+      "type": "property"
+    },
+    "initial_capital": {
+      "type": "property"
+    },
+    "long": {
+      "type": "variable"
+    },
+    "losstrades": {
+      "type": "property"
+    },
+    "max_drawdown": {
+      "type": "property"
+    },
+    "max_runup": {
+      "type": "property"
+    },
+    "netprofit": {
+      "type": "property"
+    },
+    "openprofit": {
+      "type": "property"
+    },
+    "percent_of_equity": {
+      "type": "variable"
+    },
+    "position_avg_price": {
+      "type": "property"
+    },
+    "position_size": {
+      "type": "property"
+    },
+    "short": {
+      "type": "variable"
+    }
+  },
+  "lib.strategy.closedtrades": {
+    "closedtrades": {
+      "type": "property"
+    }
+  },
+  "lib.strategy.commission": {
+    "cash_per_contract": {
+      "type": "variable"
+    },
+    "cash_per_order": {
+      "type": "variable"
+    },
+    "percent": {
+      "type": "variable"
+    }
+  },
+  "lib.strategy.direction": {
+    "all": {
+      "type": "variable"
+    },
+    "long": {
+      "type": "variable"
+    },
+    "short": {
+      "type": "variable"
+    }
+  },
+  "lib.strategy.oca": {
+    "cancel": {
+      "type": "variable"
+    },
+    "none": {
+      "type": "variable"
+    },
+    "reduce": {
+      "type": "variable"
+    }
+  },
+  "lib.strategy.opentrades": {
+    "opentrades": {
+      "type": "property"
+    }
+  },
+  "lib.strategy.risk": {},
+  "lib.string": {},
+  "lib.syminfo": {
+    "basecurrency": {
+      "type": "variable"
+    },
+    "country": {
+      "type": "variable"
+    },
+    "currency": {
+      "type": "variable"
+    },
+    "description": {
+      "type": "variable"
+    },
+    "industry": {
+      "type": "variable"
+    },
+    "minmove": {
+      "type": "variable"
+    },
+    "mintick": {
+      "type": "variable"
+    },
+    "period": {
+      "type": "variable"
+    },
+    "pointvalue": {
+      "type": "variable"
+    },
+    "prefix": {
+      "type": "variable"
+    },
+    "pricescale": {
+      "type": "variable"
+    },
+    "root": {
+      "type": "variable"
+    },
+    "sector": {
+      "type": "variable"
+    },
+    "session": {
+      "type": "variable"
+    },
+    "target_price_average": {
+      "type": "variable"
+    },
+    "target_price_date": {
+      "type": "variable"
+    },
+    "target_price_high": {
+      "type": "variable"
+    },
+    "target_price_low": {
+      "type": "variable"
+    },
+    "ticker": {
+      "type": "variable"
+    },
+    "tickerid": {
+      "type": "variable"
+    },
+    "timezone": {
+      "type": "variable"
+    },
+    "type": {
+      "type": "variable"
+    },
+    "volumetype": {
+      "type": "variable"
+    }
+  },
+  "lib.ta": {
+    "accdist": {
+      "type": "property"
+    },
+    "iii": {
+      "type": "property"
+    },
+    "nvi": {
+      "type": "property"
+    },
+    "obv": {
+      "type": "property"
+    },
+    "pvi": {
+      "type": "property"
+    },
+    "pvt": {
+      "type": "property"
+    },
+    "tr": {
+      "type": "property"
+    },
+    "wad": {
+      "type": "property"
+    },
+    "wvad": {
+      "type": "property"
+    }
+  },
+  "lib.table": {
+    "all": {
+      "type": "property"
+    }
+  },
+  "lib.text": {
+    "align_bottom": {
+      "type": "variable"
+    },
+    "align_center": {
+      "type": "variable"
+    },
+    "align_left": {
+      "type": "variable"
+    },
+    "align_right": {
+      "type": "variable"
+    },
+    "align_top": {
+      "type": "variable"
+    },
+    "format_bold": {
+      "type": "variable"
+    },
+    "format_italic": {
+      "type": "variable"
+    },
+    "format_none": {
+      "type": "variable"
+    },
+    "wrap_auto": {
+      "type": "variable"
+    },
+    "wrap_none": {
+      "type": "variable"
+    }
+  },
+  "lib.timeframe": {
+    "isdaily": {
+      "type": "property"
+    },
+    "isdwm": {
+      "type": "property"
+    },
+    "isintraday": {
+      "type": "property"
+    },
+    "isminutes": {
+      "type": "property"
+    },
+    "ismonthly": {
+      "type": "property"
+    },
+    "isseconds": {
+      "type": "property"
+    },
+    "isticks": {
+      "type": "property"
+    },
+    "isweekly": {
+      "type": "property"
+    },
+    "main_period": {
+      "type": "property"
+    },
+    "multiplier": {
+      "type": "property"
+    },
+    "period": {
+      "type": "property"
+    }
+  },
+  "lib.xloc": {
+    "bar_index": {
+      "type": "variable"
+    },
+    "bar_time": {
+      "type": "variable"
+    }
+  },
+  "lib.yloc": {
+    "abovebar": {
+      "type": "variable"
+    },
+    "belowbar": {
+      "type": "variable"
+    },
+    "price": {
+      "type": "variable"
+    }
+  }
+}

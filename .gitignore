@@ -1,0 +1,7 @@
+venv
+tests
+.idea
+__pycache__
+test.py
+.env
+workdir/scripts/*.toml
