@@ -48,7 +48,7 @@ def alert(
 
         current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        # 쌍따옴표로 감싸지지 않은 문자열이 전달된 경우 쌍따옴표로 감싸기
+        # Wrap the string in double quotes if it is passed without being enclosed in double quotes.
         s = re.sub(r'"message"\s*:\s*(?![{["0-9])([A-Za-z][A-Za-z0-9 ]*)',
                    r'"message": "\1"',
                    message)
