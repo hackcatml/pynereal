@@ -1,13 +1,24 @@
 # PyneReal
 Run your crypto trading strategy in real time without TradingView
 
+# Why you need this
+If you’re an active system trader who relies on TradingView strategies, you’ve probably experienced this before:\
+moments when an alert didn’t arrive in time and you missed an entry, alerts firing at the wrong price levels,\
+or alerts arriving two or three minutes late, causing a significant mismatch with your strategy.
+
+System errors like these can happen at any time, but what really drives you crazy is not being able to find the cause.
+
+This project puts the entire strategy-running environment under your control with rich python enviornment, \
+so even when unexpected issues occur, you can quickly identify the root cause and fix it.\
+You can also apply Python’s unlimited extensibility directly to your strategy.
+
 # Prerequisites
 python >= 3.11\
 [PyneCore](https://github.com/PyneSys/pynecore) strategy (converted from your pinescript strategy)
 
 # Quick Example
 Follow the steps below to see how it works.\
-The `demo_1m.py` script runs on Bitget BTC/USDT Futures in real time on the 1-minute timeframe.\
+The `demo_1m.py` script in the `workdir/scripts` directory runs on Bitget BTC/USDT Futures in real time on the 1-minute timeframe.\
 You will see webhook alert messages when `strategy.entry` or `strategy.close` is triggered.
 
 1. Clone\
@@ -26,22 +37,26 @@ You will see webhook alert messages when `strategy.entry` or `strategy.close` is
 
 
 # How to run your strategy?
-1. Prepare your PyneCore strategy file.
+1. Prepare your [PyneCore strategy](https://pynecore.org/docs/strategy/) file.
 2. Download OHLCV data for the trading pair.\
 e.g., `pyne data download ccxt --symbol "BITGET:BTC/USDT:USDT" --timeframe 5 --from "2025-09-01"`
 3. Thoroughly test your strategy in backtesting mode.\
 When you backtest your strategy, set `enabled = false` under the `realtime` section in `realtime_trade.toml`, then run:\
 `pyne run <your strategy.py> <ohlcv file>`
-4. Fill the `realtime_trade.toml`
+4. Fill the `realtime_trade.toml` in the `workdir/config` directory.
 5. Finally, start the program:\
 `python main.py`
 
+Notes:\
+Every time you start the program, it will download the OHLCV data file again from the same starting point if a data file already downloaded exists in the `workdir/data` directory.
+If not, it will download two months of data up to the current time.\
+If it's the 1m timeframe, it always downloads one month of data.
 
 # Features
 ## Webhook signal
 Enable the webhook feature by setting `enabled = true` in the `webhook` section of `realtime_trade.toml`.\
 Add your webhook url there.\
-When using `strategy.entry` or `strategy.close`, provide an alert_message in JSON format:
+When using `strategy.entry` or `strategy.close`, provide an `alert_message` in JSON format:
 e.g., `strategy.entry("Long 1", strategy.long, alert_message=f'{{"signal": "Long 1", "price": {close}}}',
                        comment=f"Long 1 at rsi: {rsi}", record=True)`\
 Currently, webhook signals are triggered only on `strategy.entry` and `strategy.close` events. 
@@ -61,15 +76,15 @@ In the modules directory, you will find several examples:\
 `weekly_hl_calc.py` — weekly high/low calculator\
 `bb1d_calc.py` — daily Bollinger Band calculator
 
-How to apply?\
-(1) If it's just for backtesting
+How to apply?
+1. If it's just for backtesting
 - Go to `pynecore/cli/commands/run.py` and search for the string `module calculation`.
 - There’s a bb1d and weekly high–low calculation example. Uncomment it.
 - Also uncomment the keys and values in the `custom_inputs` parameter a few lines below.
 - Go to the `demo_1m.py` strategy file and uncomment the Custom Inputs section.
 - The HTF calculation result will be used in backtesting.
 
-(2) If it's for real-time trading
+2. If it's for real-time trading
 - Go to `main.py` and search for the string `module calculation`.
 - There are two places where module calculation occurs:\
 one in the `Ready Script Runner` region and another in the `Script Run Loop` region.\
@@ -84,7 +99,7 @@ Conveniently injecting custom inputs into the script is on my TODO list for now.
 You can still use the standard pyne command for backtesting.\
 Make sure to set:\
 `no_report = false` under the `pyne` section\
-`enabled = false` under the `realtime` section in `realtime_trade.toml`\
+`enabled = false` under the `realtime` section in `realtime_trade.toml` in the `workdir/config` directory.\
 Then run: `pyne run <your strategy.py> <ohlcv file>`
 
 
