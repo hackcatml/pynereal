@@ -25,7 +25,8 @@ from pynecore.cli.app import app_state
 # -------------------------------------------------------------
 def get_ohlcv_data(provider: str, symbol: str, timeframe: str, since: str | None) -> bool:
     today = datetime.today()
-    month_ago = 1 if timeframe == "1" else 2    # 1분봉의 경우 1달치 그외는 2달치 데이터 다운로드
+    # For the 1-minute timeframe, download 1 month of data; for all other timeframes, download 2 months of data.
+    month_ago = 1 if timeframe == "1" else 2
 
     past = (today - relativedelta(months=month_ago)).strftime("%Y-%m-%d")
     if timeframe != "1" and since is not None:
@@ -63,7 +64,8 @@ def update_ohlcv_data(filepath: str, candle_datas: list) -> int:
         for candle_data in candle_datas:
             timestamp = int(candle_data[0] / 1000)
             open_price = candle_data[1]
-            # 파일에 기록되어 있는 마지막 캔들의 open 과 덮어쓰려고 하는 open 값이 다르면 파일에 기록되어 있는 open 을 사용
+            # If the open price of the last candle in the file differs from the open price you’re trying to overwrite,
+            # use the open price recorded in the file instead.
             if (timestamp == last_timestamp) and (open_price != last_open_price):
                 open_price = last_open_price
             high_price = candle_data[2]
@@ -90,7 +92,7 @@ def update_ohlcv_data(filepath: str, candle_datas: list) -> int:
 def ready_scrip_runner(script_path: Path, data_path: Path, data_toml_path: Path) -> tuple[ScriptRunner,
 AppendableIterable[OHLCV]] | None:
     """
-    마지막 확정봉에 script 를 돌리기전 pre-run script 를 준비하는 단계
+    A stage for preparing the pre-run script before running the script on the last confirmed candle.
     """
     # Get symbol info for the data
     syminfo = SymInfo.load_toml(data_toml_path)
@@ -106,7 +108,7 @@ AppendableIterable[OHLCV]] | None:
         if gaps > 0:
             size = size - gaps
         ohlcv_iter: Iterator[OHLCV] = reader.read_from(int(time_from.timestamp()), int(time_to.timestamp()))
-        # 가변적인 iter 준비
+        # Prepare a mutable iterator.
         stream: AppendableIterable[OHLCV] = AppendableIterable(ohlcv_iter, feed_in_background=True)
 
         from pynecore.cli.app import app_state
@@ -147,7 +149,6 @@ AppendableIterable[OHLCV]] | None:
                 if lib_path_added:
                     sys.path.remove(str(lib_dir))
 
-            # runner 및 가변적인 iter 반환
             return runner, stream
 
 
@@ -206,7 +207,7 @@ async def watch_trades_loop(
 
 
 # ============================================================
-# region Timeframe parsing  # str 타임프레임을 ms 로 전환
+# region Timeframe parsing
 # ============================================================
 def parse_timeframe_to_ms(tf: str) -> int:
     unit = tf[-1]
@@ -230,12 +231,12 @@ async def collected_bars_fix_loop(
     check_interval_sec: float = 0.1,
 ) -> None:
     """
-    별도로 돌아가는 태스크.
-    주기적으로 collected_bars 를 보고, 봉 갱신 시점에 "새 봉이 있어야 하는데 없다" 라고 판단되면
-    fake new candle 생성하여 collected_bars 를 보정하는 역할.
+    A separately running task.
+    It periodically checks collected_bars and, if it determines that a new candle should exist at the expected bar update time
+    but doesn’t, it creates a fake new candle to correct collected_bars.
     """
     timeframe_ms = parse_timeframe_to_ms(timeframe)
-    grace_ms = 0.2 * 1000  # 유예시간 0.2초
+    grace_ms = 0.2 * 1000  # Grace period: 0.2 seconds
     exchange = getattr(ccxt, exchange_name)(config={})
 
     while True:
@@ -249,7 +250,7 @@ async def collected_bars_fix_loop(
             now_ms = datetime.now().timestamp() * 1000
         missing_ts: int | None = None
 
-        # lock 안에서 상태 확인하고, 누락된 봉의 timestamp(missing_ts) 결정
+        # Check the current state and determine the timestamp of the missing candle (missing_ts).
         async with state.lock:
             bars = state.collected_bars
             if len(bars) < 2:
@@ -258,21 +259,21 @@ async def collected_bars_fix_loop(
             last_bar_open_ts = bars[-1][0]
             expected_next_bar_ts = last_bar_open_ts + timeframe_ms
 
-            # expected_next_bar_ts 시각이 지났는데도 그 timestamp 봉이 없으면 누락으로 판단
+            # If the expected_next_bar_ts time has passed and the candle for that timestamp still doesn’t exist, treat it as missing.
             if now_ms >= expected_next_bar_ts + grace_ms:
                 has_next_bar = any(b[0] == expected_next_bar_ts for b in bars)
                 if not has_next_bar:
-                    # 이미 이 timestamp 에 대해 한 번 TV fallback 을 했으면 다시 안 함
+                    # If this timestamp has already been fixed once, do not fix it again.
                     if state.last_fix_bar_ts != expected_next_bar_ts:
                         missing_ts = expected_next_bar_ts
 
-            # 누락된 봉이 없으면 다음 턴으로
+            # If no candle is missing, move on to the next iteration.
             if missing_ts is None:
                 continue
 
             prev_close = bars[-1][4]
 
-            # 이전 봉 close 값으로 시작봉 구성
+            # Construct the opening candle using the previous candle’s close value.
             fake_new_candle = [missing_ts, prev_close, prev_close, prev_close, prev_close, 0.01]
             bars.append(fake_new_candle)
             state.last_fix_bar_ts = missing_ts
@@ -299,7 +300,7 @@ async def script_run_loop(
     if tf_modifier == "h":
         tf_multiplier = f"{int(tf_multiplier) * 60}"
 
-    # ohlcv 데이터 파일이 이미 있는 경우 파일의 첫번째 timestamp 값 얻어와서 추후 동일한 시작점에서부터 다운로드 할 수 있도록 함
+    # If the OHLCV data file already exists, retrieve the first timestamp so that future downloads can start from the same point.
     if provider == "" or exchange_name == "" or symbol == "" or tf == "":
         print("provider, exchange, symbol, timeframe is empty")
         sys.exit(1)
@@ -317,14 +318,12 @@ async def script_run_loop(
             start_timestamp_ohlcv_file = reader.start_timestamp
             reader.close()
 
-    # 모든 data 파일 삭제
+    # Remove all the data file
     for file_path in [ohlcv_file_path, toml_file_path]:
         if file_path.exists():
             os.remove(file_path)
 
-    # 분봉, 시간봉의 경우 캔들 생성후 timeframe 의 1/5 만큼 지난 시점에 캔들 데이터 무결성 검사. e.g., 5분봉의 경우 1분 지난시점, 1시간봉의 경우 12분 지난 시점
-    # 그 외 일봉, 주봉 등은 1시간 지난 시점에 캔들 open 값무결성 검사
-    # 분봉, 시간봉의 경우 1/2 만큼 지난 시점에 script pre-run. 그외는 12시간 지난 시점에 pre-run
+    # Run the script pre-run stage after half of the timeframe has passed
     timeframe_ms = parse_timeframe_to_ms(tf)
     pre_run_script_time = timeframe_ms / 2
     fixed_candle_open_price: float = 0.0
@@ -333,12 +332,13 @@ async def script_run_loop(
     stream = None
 
     while True:
-        await asyncio.sleep(0.1)  # 너무 자주 체크하면 비효율 → 0.1초면 충분
+        await asyncio.sleep(0.1)  # Inefficient if checked too often
 
         async with state.lock:
             bars = state.collected_bars
-            # collected_bars 의 첫번째 봉 데이터는 미완성 봉. 2번째 봉 데이터 부터는 완성된 봉. 2번째 봉 데이터 받기 시작할때 5분봉 OHLCV 데이터 받아오기
-            # 3번째 봉 데이터 받기 시작할때 2번째 봉 데이터가 완성됨
+            # The first candle in collected_bars is an incomplete candle. From the second candle onward, candles are completed.
+            # When the second candle starts arriving, download the 5-minute OHLCV data file.
+            # When the third candle starts arriving, the second candle becomes finalized.
             if len(bars) == 2 and not os.path.exists(ohlcv_file_path):
                 with ThreadPoolExecutor() as executor:
                     data_timeframe = tf
@@ -346,7 +346,8 @@ async def script_run_loop(
                         data_timeframe = tf_multiplier
                     elif tf_modifier == "h":
                         data_timeframe = f"{int(tf_multiplier) * 60}"
-                    # 기존 ohlcv 파일 있었다면 해당 파일의 첫번째 timestamp 부터 다운로드, 기존 파일 없었다면 2달치 데이터 다운로드
+                    # If an existing OHLCV file is present, download data starting from its first timestamp.
+                    # If no file exists, download two months of data.
                     data_since = None if start_timestamp_ohlcv_file is None \
                         else datetime.fromtimestamp(start_timestamp_ohlcv_file).strftime("%Y-%m-%d")
                     future = executor.submit(get_ohlcv_data, provider=provider,
@@ -357,7 +358,6 @@ async def script_run_loop(
                         print(f"Downloaded {exchange_name} {data_timeframe} OHLCV file successfully")
                     else:
                         print(f"Failed to download {data_timeframe} ohlcv data...retrying...")
-                        # 모든 data 파일 삭제
                         for file_path in [ohlcv_file_path, toml_file_path]:
                             if file_path.exists():
                                 os.remove(file_path)
@@ -365,7 +365,7 @@ async def script_run_loop(
             # Pre-run the script
             if len(bars) == 2 and datetime.now().timestamp() * 1000 >= bars[1][
                 0] + pre_run_script_time and runner is None:
-                # Check candle open price. 종종 직전 봉의 close 값이랑 현재봉의 open 값이 틀림
+                # Check candle open price. Sometimes the previous candle close and current candle open don't match.
                 # print(f"check candle open price at {bars[1][0]}")
                 fixed_candle_open_price = 0.0
                 need_fix = False
@@ -394,18 +394,19 @@ async def script_run_loop(
                         # print("Candle open price fixing done")
                         writer.close()
 
-                # Script runner 준비
+                # Ready script runner
                 runner, stream = ready_scrip_runner(Path(script_path), Path(ohlcv_file_path),
                                                     Path(toml_file_path))
                 size = runner.last_bar_index + 1
-                # print("=== Pre-run 시작 (마지막 바 전까지) ===")
+                # print("=== Pre-run start (up to the last bar) ===")
                 for i in range(size - 1):
                     step_res = runner.step()
                     if step_res is None:
                         break
-                # print("=== Pre-run 끝 ===")
+                # print("=== Pre-run finished ===")
 
-            # 3번째 봉 데이터 받기 시작할때 2번째 봉 데이터가 완성되었으므로 해당 봉 데이터를 5분봉 OHLCV 데이터에 업데이트
+            # When the third candle starts arriving, the second candle becomes finalized,
+            # so update the 5-minute OHLCV data with that candle.
             if len(bars) >= 3:
                 # [confirmed bar, new bar] update to the ohlcv file
                 bars = bars[1:]
@@ -432,7 +433,7 @@ async def script_run_loop(
                         # "macro_low": macro_low
                     }
 
-                    # confirmed bar, new bar stream 에 업데이트
+                    # confirmed bar, new bar update to the stream
                     confirmed_bar_ohlcv = \
                         OHLCV(timestamp=int(bars[0][0] / 1000), open=bars[0][1],
                               high=bars[0][2],
@@ -449,7 +450,7 @@ async def script_run_loop(
                     stream.append(new_bar_ohlcv)
                     stream.finish()
 
-                    # 봉이 하나 추가되었으므로 last_bar_index 1 증가
+                    # Increase the last_bar_index since the new candle is added
                     runner.last_bar_index += incremented_size
                     runner.script.last_bar_index += incremented_size
 
@@ -459,7 +460,8 @@ async def script_run_loop(
                         if step_res is None:
                             break
 
-                # destroy() 로 script_module 제거(필수). 제거하지 않으면 ScriptRunner 로 스크립트를 다시 로드해도 기존 봉 데이터가 사용됨
+                # Remove the script_module using destroy() (required). If you don’t remove it,
+                # the ScriptRunner will reuse the previous candle data even when reloading the script.
                 runner.destroy()
                 runner = None
                 stream = None
@@ -478,18 +480,17 @@ async def main():
     realtime_section: dict = realtime_config.get("realtime", {})
     pyne_section: dict = realtime_config.get("pyne", {})
     if pyne_section.get("no_logo", False):
-        # pyne 커맨드 실행시 logo 출력 안되게 환경변수 설정
         os.environ['PYNE_NO_LOGO'] = "True"
         os.environ['PYNE_QUIET'] = "True"
 
-    # 스크립트 경로 설정
+    # Set the script path
     script_name = realtime_section.get("script_name", "")
     if script_name == "":
         print("script_name is empty")
         sys.exit(1)
     script_path = app_state.scripts_dir / script_name
 
-    # config 정보 불러오기
+    # Load config
     provider = realtime_section.get("provider", "")
     exchange_name = realtime_section.get("exchange", "")
     symbol = realtime_section.get("symbol", "")
