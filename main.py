@@ -399,6 +399,7 @@ async def script_run_loop(
                                                     Path(toml_file_path))
                 size = runner.last_bar_index + 1
                 # print("=== Pre-run start (up to the last bar) ===")
+                runner.script.pre_run = True
                 for i in range(size - 1):
                     step_res = runner.step()
                     if step_res is None:
@@ -455,6 +456,7 @@ async def script_run_loop(
                     runner.script.last_bar_index += incremented_size
 
                     # Calculate the last confirmed bar
+                    runner.script.pre_run = False
                     while True:
                         step_res = runner.step()
                         if step_res is None:
