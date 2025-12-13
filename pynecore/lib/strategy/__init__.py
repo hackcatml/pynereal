@@ -2016,3 +2016,9 @@ def get_custom_inputs() -> dict | NA[dict]:
 @module_property
 def telegram_notification() -> bool | NA[bool]:
     return lib._script.telegram_notification
+
+
+# noinspection PyProtectedMember
+@module_property
+def pre_run() -> bool | NA[bool]:
+    return lib._script.pre_run
