@@ -115,6 +115,7 @@ class Script:
     telegram_notification: bool = False
     telegram_token: str | None = None
     telegram_chat_id: str | None = None
+    pre_run: bool = False
 
     def save(self, path: Path):
         """
