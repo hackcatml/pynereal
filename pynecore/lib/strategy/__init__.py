@@ -837,7 +837,7 @@ class Position:
                         url = f"https://api.telegram.org/bot{lib._script.telegram_token}/sendMessage"
                         payload = {
                             "chat_id": lib._script.telegram_chat_id,
-                            "text": f"🚨 {json.dumps(json_alert_message).replace('\"', '')}",
+                            "text": f"🚨 [{lib._script.title}] {json.dumps(json_alert_message).replace('\"', '')}",
                             # "parse_mode": "Markdown"  # 굵게/이탤릭 등 쓰고 싶으면 선택
                         }
                         try:
