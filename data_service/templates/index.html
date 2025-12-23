@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>OHLCV Chart (data_service)</title>
+  <style>
+    body { margin:0; padding:0; background:#111; color:#eee; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+    #chart { width:100vw; height:100vh; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.9/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <div id="chart"></div>
+  <script>
+    const container = document.getElementById("chart");
+
+    const chart = LightweightCharts.createChart(container, {
+      layout: { background: { color: "#111111" }, textColor: "#d1d4dc" },
+      grid: { vertLines: { color: "#2b2b43" }, horzLines: { color: "#2b2b43" } },
+      timeScale: { timeVisible: true, secondsVisible: true },
+    });
+
+    const candleSeries = chart.addSeries(
+      LightweightCharts.CandlestickSeries,
+      {
+        upColor: "#26a69a",
+        downColor: "#ef5350",
+        borderUpColor: "#26a69a",
+        borderDownColor: "#ef5350",
+        wickUpColor: "#26a69a",
+        wickDownColor: "#ef5350",
+      }
+    );
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    // 최초 로드에서만 히스토리 준비될 때까지 재시도
+    async function loadInitialWithRetry() {
+      for (let i = 0; i < 30; i++) { // 최대 30초
+        try {
+          const resp = await fetch("/api/ohlcv?limit=2000");
+          const data = await resp.json();
+          if (Array.isArray(data) && data.length > 0) {
+            candleSeries.setData(data);
+            chart.timeScale().fitContent();
+            return;
+          }
+        } catch (e) {
+          // ignore
+        }
+        await sleep(1000);
+      }
+      console.error("Initial OHLCV not ready (timeout).");
+    }
+
+    loadInitialWithRetry();
+
+    let ws = null;
+    function connectWS() {
+      ws = new WebSocket(`ws://${location.host}/ws`);
+
+      ws.onopen = () => console.log("ws connected");
+
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "bar") {
+            candleSeries.update(msg.data);
+          }
+        } catch (e) {
+          console.error("ws parse error", e);
+        }
+      };
+
+      ws.onclose = () => setTimeout(connectWS, 1000);
+      ws.onerror = () => { try { ws.close(); } catch {} };
+    }
+
+    connectWS();
+
+    // keepalive
+    setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send("ping");
+    }, 15000);
+  </script>
+</body>
+</html>
