@@ -19,8 +19,6 @@ from . import oca as _oca
 
 from . import closedtrades, opentrades
 
-import json
-
 __all__ = [
     "fixed", "cash", "percent_of_equity",
     "long", "short", 'direction',
@@ -30,6 +28,39 @@ __all__ = [
 
     "closedtrades", "opentrades",
 ]
+
+def send_webhook_message(webhook_url: str, message: str):
+    import requests
+    import json
+    import re
+    # 쌍따옴표로 감싸지지 않은 문자열이 전달된 경우 쌍따옴표로 감싸기
+    s = re.sub(r'"message"\s*:\s*(?![{["0-9])([A-Za-z][A-Za-z0-9 ]*)',
+               r'"message": "\1"',
+               message)
+    json_alert_message = json.loads(s).get('message', '')
+    if json_alert_message != '':
+        payload = json_alert_message
+        try:
+            # timeout=(connect_timeout, read_timeout)
+            response = requests.post(webhook_url, json=payload, timeout=(5, 10))
+            response.raise_for_status()
+            print("Webhook response:", response.json())
+        except Exception as e:
+            print(f"Webhook error: {e}")
+
+    if telegram_notification():
+        url = f"https://api.telegram.org/bot{lib.script.telegram_token}/sendMessage"
+        payload = {
+            "chat_id": lib.script.telegram_chat_id,
+            "text": f"🚨 [{lib.script.title}] {json.dumps(json_alert_message).replace('\"', '')}",
+            # "parse_mode": "Markdown"  # 굵게/이탤릭 등 쓰고 싶으면 선택
+        }
+        try:
+            response = requests.get(url, params=payload, timeout=(5, 10))
+            response.raise_for_status()
+            print("Telegram response:", response.json())
+        except Exception as e:
+            print(f"Telegram notification error: {e}")
 
 #
 # Callable modules
@@ -816,36 +847,7 @@ class Position:
                 alert(order.alert_message)
                 # Send a webhook message and telegram notification
                 if (webhook_url := get_webhook_url()) is not None:
-                    import requests
-                    import re
-                    # 쌍따옴표로 감싸지지 않은 문자열이 전달된 경우 쌍따옴표로 감싸기
-                    s = re.sub(r'"message"\s*:\s*(?![{["0-9])([A-Za-z][A-Za-z0-9 ]*)',
-                               r'"message": "\1"',
-                               order.alert_message)
-                    json_alert_message = json.loads(s).get('message', '')
-                    if json_alert_message != '':
-                        payload = json_alert_message
-                        try:
-                            # timeout=(connect_timeout, read_timeout)
-                            response = requests.post(webhook_url, json=payload, timeout=(5, 10))
-                            response.raise_for_status()
-                            print("Webhook response:", response.json())
-                        except Exception as e:
-                            print(f"Webhook error: {e}")
-
-                    if telegram_notification():
-                        url = f"https://api.telegram.org/bot{lib._script.telegram_token}/sendMessage"
-                        payload = {
-                            "chat_id": lib._script.telegram_chat_id,
-                            "text": f"🚨 [{lib._script.title}] {json.dumps(json_alert_message).replace('\"', '')}",
-                            # "parse_mode": "Markdown"  # 굵게/이탤릭 등 쓰고 싶으면 선택
-                        }
-                        try:
-                            response = requests.get(url, params=payload, timeout=(5, 10))
-                            response.raise_for_status()
-                            print("Telegram response:", response.json())
-                        except Exception as e:
-                            print(f"Telegram notification error: {e}")
+                    send_webhook_message(webhook_url=webhook_url, message=order.alert_message)
 
     def fill_order(self, order: Order, price: float, h: float, l: float) -> bool:
         """
