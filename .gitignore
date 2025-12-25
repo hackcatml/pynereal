@@ -6,3 +6,12 @@ test.py
 test2.py
 .env
 workdir/scripts/*.toml
+
+# Ignore OHLCV and TOML files in workdir/data/
+workdir/data/ccxt*.ohlcv
+workdir/data/ccxt*.toml
+
+# Ignore all scripts except demo.py and demo_1m.py
+workdir/scripts/*
+!workdir/scripts/demo.py
+!workdir/scripts/demo_1m.py

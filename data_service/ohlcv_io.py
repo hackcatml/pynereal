@@ -19,7 +19,7 @@ def parse_timeframe_to_ms(tf: str) -> int:
 
 
 def download_history(provider: str, exchange: str, symbol: str, timeframe: str, since: Optional[str]) -> bool:
-    # pynecore download에서 timeframe은 분 단위 숫자를 쓰는 경우가 많음
+    # pynecore download uses timeframe as minutes in numeric format
     tf_modifier = timeframe[-1]
     tf_value = int(timeframe[:-1])
 
@@ -92,8 +92,7 @@ def fix_last_open_if_needed(ohlcv_path: str) -> float:
 
 def update_ohlcv_data(ohlcv_path: str, candle_datas: list) -> int:
     """
-    기존 main.py update_ohlcv_data 유지
-    candle_datas: [confirmed_bar, new_bar] 형태로 들어오는 것을 전제로 사용
+    candle_datas: Expected format is [confirmed_bar, new_bar]
     """
     incremental_size = 0
     last_timestamp = 0
@@ -110,11 +109,10 @@ def update_ohlcv_data(ohlcv_path: str, candle_datas: list) -> int:
             open_price = cd[1]
             if (ts_sec == last_timestamp) and (open_price != last_open_price):
                 open_price = last_open_price
+            original_size = writer.size
 
             writer.seek_to_timestamp(ts_sec)
             writer.truncate()
-            original_size = writer.size
-
             writer.write(
                 OHLCV(
                     timestamp=ts_sec,
@@ -129,3 +127,51 @@ def update_ohlcv_data(ohlcv_path: str, candle_datas: list) -> int:
         writer.close()
 
     return incremental_size
+
+
+def fetch_and_update_ohlcv_data(
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    ohlcv_path: str,
+) -> None:
+    """
+    Fetch and update candles using fetch_ohlcv.
+    Only used at the first pre_run after history download.
+
+    :param exchange: Exchange name (e.g., "binance")
+    :param symbol: Symbol (e.g., "BTC/USDT:USDT")
+    :param timeframe: Timeframe (e.g., "1m", "5m")
+    :param ohlcv_path: Path to OHLCV file
+    :return: Updated open price of the last candle
+    """
+    import ccxt
+    # Create ccxt client
+    client = getattr(ccxt, exchange)(config={})
+
+    # Read current last candle timestamp
+    with OHLCVReader(ohlcv_path) as reader:
+        size = reader.size
+        last_candle = reader.read(size - 1)
+        last_timestamp_sec = last_candle.timestamp
+        interval = reader.interval
+        reader.close()
+
+    # Fetch candles from exchange and update the ohlcv file
+    try:
+        res = client.fetch_ohlcv(
+            symbol=symbol,
+            timeframe=timeframe,
+            since=last_timestamp_sec * 1000 - interval * 1000,  # Convert to milliseconds
+            limit=None
+        )
+
+        if not res or len(res) == 0:
+            print(f"[fetch_and_update_ohlcv_data] No data received from exchange")
+            return None
+
+        update_ohlcv_data(ohlcv_path, res)
+
+    except Exception as e:
+        print(f"[fetch_and_update_ohlcv_data] Error fetching OHLCV: {e}")
+        return None

@@ -21,9 +21,6 @@ from pynecore.types.ohlcv import OHLCV
 DATA_WS = "ws://127.0.0.1:9001/ws"
 
 
-# -----------------------------
-# 그대로 이식: ready_scrip_runner
-# -----------------------------
 def ready_scrip_runner(script_path: Path, data_path: Path, data_toml_path: Path) -> tuple[ScriptRunner,
 AppendableIterable[OHLCV], OHLCVReader] | None:
     """
@@ -56,13 +53,13 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
 
             try:
                 #################################### Module calculation ####################################
-                # # bb1d / weekly high, low calculation
-                # from modules.bb1d_calc import get_bb1d_lower
-                # from modules.weekly_hl_calc import get_weekly_high_low
-                # bb1d_lower = get_bb1d_lower(str(data_path), period=20, mult=2.0,
-                #                             lookahead_on=True)
-                # macro_high, macro_low = get_weekly_high_low(str(data_path), ago=2, session_offset_hours=9,
-                #                                             lookahead_on=True)
+                # bb1d / weekly high, low calculation
+                from modules.bb1d_calc import get_bb1d_lower
+                from modules.weekly_hl_calc import get_weekly_high_low
+                bb1d_lower = get_bb1d_lower(str(data_path), period=20, mult=2.0,
+                                            lookahead_on=True)
+                macro_high, macro_low = get_weekly_high_low(str(data_path), ago=2, session_offset_hours=9,
+                                                            lookahead_on=True)
                 #################################### Module calculation ####################################
 
                 # Create script runner (this is where the import happens)
@@ -74,9 +71,9 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
                                           plot_path=None, strat_path=None, trade_path=None,
                                           realtime_config=realtime_config,
                                           custom_inputs={
-                                                # "bb1d_lower": bb1d_lower,
-                                                # "macro_high": macro_high,
-                                                # "macro_low": macro_low
+                                                "bb1d_lower": bb1d_lower,
+                                                "macro_high": macro_high,
+                                                "macro_low": macro_low
                                           })
                     runner.init_step()
             finally:
@@ -84,6 +81,7 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
                 if lib_path_added:
                     sys.path.remove(str(lib_dir))
 
+            # return reader too. So we can close it later
             return runner, stream, reader
 
 
@@ -187,20 +185,21 @@ async def main():
                 print("[runner] prerun_ready received but file missing:", ohlcv_path, toml_path)
                 continue
 
-            # 이미 준비돼 있으면 중복 pre-run 방지
+            # Prevent the duplicate prerun_ready event
             if ctx is not None:
                 continue
 
-            # Ready runner + stream (기존 로직)
+            # Ready runner + stream
             runner, stream, reader = ready_scrip_runner(script_path, ohlcv_path, toml_path)
 
-            # 기존 main.py pre-run 로직 그대로: 마지막 바 전까지 계산
+            # print("=== Pre-run start (up to the last bar) ===")
             size = runner.last_bar_index + 1
             runner.script.pre_run = True
             for _ in range(size - 1):
                 step_res = runner.step()
                 if step_res is None:
                     break
+            # print("=== Pre-run finished ===")
 
             # confirmed_bar_and_new_bar가 있다면 new bar ts를 추적에 사용
             confirmed_bar_and_new_bar = msg.get("confirmed_bar_and_new_bar")
@@ -208,7 +207,7 @@ async def main():
             if isinstance(confirmed_bar_and_new_bar, list) and len(confirmed_bar_and_new_bar) == 2:
                 last_new_ts_sec = int(confirmed_bar_and_new_bar[1][0] / 1000)
             else:
-                # fallback: 파일의 end_timestamp를 사용
+                # fallback: Use end_timestamp from the file
                 with OHLCVReader(ohlcv_path) as r:
                     last_new_ts_sec = int(r.end_timestamp)
                     r.close()
@@ -223,6 +222,7 @@ async def main():
             if ctx is None:
                 continue
 
+            ohlcv_path = msg.get("ohlcv_path", "")
             confirmed_bar_and_new_bar = msg.get("confirmed_bar_and_new_bar")
             confirmed_bar = confirmed_bar_and_new_bar[0]
             new_bar = confirmed_bar_and_new_bar[1]
@@ -230,35 +230,37 @@ async def main():
             confirmed_ohlcv = bar_list_to_ohlcv(confirmed_bar)
             new_ohlcv = bar_list_to_ohlcv(new_bar)
 
+            # Replace the last uncompleted bar with the confirmed bar and append the new bar.
             ctx.stream.replace_last(confirmed_ohlcv)
             ctx.stream.append(new_ohlcv)
             ctx.stream.finish()
 
+            # Check the interval is the same as the timeframe. If so, the incremented candle size is 1.
             timeframe_ms = parse_timeframe_to_ms(tf)
             interval_ms = (int(new_ohlcv.timestamp) - int(ctx.last_new_bar_ts_sec)) * 1000
             incremented_size = 1 if interval_ms == timeframe_ms else 0
 
             if incremented_size > 0:
                 #################################### Module calculation ####################################
-                # # bb1d / weekly high, low calculation
-                # from modules.bb1d_calc import get_bb1d_lower
-                # from modules.weekly_hl_calc import get_weekly_high_low
-                # bb1d_lower = get_bb1d_lower(ohlcv_file_path, period=20, mult=2.0, lookahead_on=True)
-                # macro_high, macro_low = get_weekly_high_low(ohlcv_file_path, ago=2, session_offset_hours=9,
-                #                                             lookahead_on=True)
+                # bb1d / weekly high, low calculation
+                from modules.bb1d_calc import get_bb1d_lower
+                from modules.weekly_hl_calc import get_weekly_high_low
+                bb1d_lower = get_bb1d_lower(ohlcv_path, period=20, mult=2.0, lookahead_on=True)
+                macro_high, macro_low = get_weekly_high_low(ohlcv_path, ago=2, session_offset_hours=9,
+                                                            lookahead_on=True)
                 #################################### Module calculation ####################################
 
                 # custom input update
                 ctx.runner.script.custom_inputs = {
-                    # "bb1d_lower": bb1d_lower,
-                    # "macro_high": macro_high,
-                    # "macro_low": macro_low
+                    "bb1d_lower": bb1d_lower,
+                    "macro_high": macro_high,
+                    "macro_low": macro_low
                 }
 
                 ctx.runner.last_bar_index += incremented_size
                 ctx.runner.script.last_bar_index += incremented_size
 
-                # 마지막 확정 봉 계산
+                # Calculate the last confirmed bar
                 ctx.runner.script.pre_run = False
                 while True:
                     step_res = ctx.runner.step()
@@ -271,7 +273,6 @@ async def main():
             ctx.stream = None
             ctx.reader.close()
             ctx = None
-            print(f"[runner] run done. new_ts={new_ohlcv.timestamp}")
 
         else:
             continue
