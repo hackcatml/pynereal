@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import os
-import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
-from pynecore.cli.app import app_state
-from state import DataState
+from config import DataServiceConfig
 from ohlcv_io import (
     parse_timeframe_to_ms,
     download_history,
@@ -17,25 +15,25 @@ from ohlcv_io import (
     fetch_and_update_ohlcv_data,
     update_ohlcv_data,
 )
+from state import DataState
 
 
 async def file_update_loop(
     *,
-    provider: str,
-    exchange: str,
-    symbol: str,
-    timeframe: str,
+    config: DataServiceConfig,
     ohlcv_path: Path,
     toml_path: Path,
     state: DataState,
     emit_event: Callable[[dict], Awaitable[None]],
     poll_sec: float = 0.1,
 ) -> None:
-    # Read history_since from realtime.toml
-    config_dir = app_state.config_dir
-    with open(config_dir / "realtime_trade.toml", "rb") as f:
-        realtime_config = tomllib.load(f)
-    realtime_section: dict = realtime_config.get("realtime", {})
+    provider = config.provider
+    exchange = config.exchange
+    symbol = config.symbol
+    timeframe = config.timeframe
+
+    # Get history_since from the config
+    realtime_section: dict = config.realtime_section
     history_since = realtime_section.get("history_since", "")
 
     start_timestamp: Optional[int] = None

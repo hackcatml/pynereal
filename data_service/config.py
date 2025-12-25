@@ -9,6 +9,10 @@ from pynecore.cli.app import app_state
 
 @dataclass(frozen=True)
 class DataServiceConfig:
+    pyne_section: dict
+    realtime_section: dict
+    webhook_section: dict
+
     provider: str
     exchange: str
     symbol: str
@@ -23,6 +27,7 @@ def load_config() -> DataServiceConfig:
 
     realtime = cfg.get("realtime", {})
     pyne = cfg.get("pyne", {})
+    webhook = cfg.get("webhook", {})
 
     if pyne.get("no_logo", False):
         os.environ["PYNE_NO_LOGO"] = "True"
@@ -36,4 +41,7 @@ def load_config() -> DataServiceConfig:
     if not provider or not exchange or not symbol or not timeframe:
         raise RuntimeError("Missing provider/exchange/symbol/timeframe in realtime_trade.toml")
 
-    return DataServiceConfig(provider=provider, exchange=exchange, symbol=symbol, timeframe=timeframe)
+    return DataServiceConfig(
+        pyne_section=pyne, realtime_section=realtime, webhook_section=webhook,
+        provider=provider, exchange=exchange, symbol=symbol, timeframe=timeframe
+    )

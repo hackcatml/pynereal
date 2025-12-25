@@ -68,10 +68,7 @@ async def main() -> None:
     t2 = asyncio.create_task(fix_missing_bars_loop(cfg.exchange, cfg.timeframe, state))
     t3 = asyncio.create_task(
         file_update_loop(
-            provider=cfg.provider,
-            exchange=cfg.exchange,
-            symbol=cfg.symbol,
-            timeframe=cfg.timeframe,
+            config=cfg,
             ohlcv_path=ohlcv_path,
             toml_path=toml_path,
             state=state,
