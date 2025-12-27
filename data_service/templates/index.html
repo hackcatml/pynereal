@@ -32,6 +32,11 @@
       }
     );
 
+    // Array to store markers
+    const markers = [];
+    const markerKeys = new Set(); // Track existing markers to prevent duplicates
+    let seriesMarkers = null;
+
     function sleep(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
     }
@@ -68,6 +73,56 @@
           const msg = JSON.parse(ev.data);
           if (msg.type === "bar") {
             candleSeries.update(msg.data);
+          } else if (msg.type === "trade_entry") {
+            // Create unique key for this marker
+            const markerKey = `entry_${msg.time}_${msg.id}`;
+
+            // Skip if marker already exists
+            if (markerKeys.has(markerKey)) {
+              return;
+            }
+
+            // Add entry marker
+            markers.push({
+              time: msg.time,
+              position: "belowBar",
+              color: "#2196F3",
+              shape: "arrowUp",
+              text: "Entry @ " + msg.price.toFixed(2),
+            });
+            markerKeys.add(markerKey);
+
+            // Update markers using createSeriesMarkers
+            if (seriesMarkers) {
+              seriesMarkers.remove();
+            }
+            seriesMarkers = LightweightCharts.createSeriesMarkers(candleSeries, markers);
+            console.log("Entry marker added:", msg);
+          } else if (msg.type === "trade_close") {
+            // Create unique key for this marker
+            const markerKey = `close_${msg.time}_${msg.id}`;
+
+            // Skip if marker already exists
+            if (markerKeys.has(markerKey)) {
+              return;
+            }
+
+            // Add close marker
+            markers.push({
+              time: msg.time,
+              position: "aboveBar",
+              color: msg.profit >= 0 ? "#4CAF50" : "#F44336",
+              shape: "arrowDown",
+              text: "Close @ " + msg.price.toFixed(2) + " (P&L: " + msg.profit.toFixed(2) + ")",
+            });
+            markerKeys.add(markerKey);
+
+            // Update markers using createSeriesMarkers
+            if (seriesMarkers) {
+              seriesMarkers.remove();
+            }
+            seriesMarkers = LightweightCharts.createSeriesMarkers(candleSeries, markers);
+            console.log("Close marker added:", msg);
           }
         } catch (e) {
           console.error("ws parse error", e);

@@ -413,7 +413,8 @@ class Position:
         'risk_max_intraday_loss_value', 'risk_max_intraday_loss_type', 'risk_max_intraday_loss_alert',
         'risk_max_position_size',
         'risk_cons_loss_days', 'risk_last_day_index', 'risk_last_day_equity',
-        'risk_intraday_filled_orders', 'risk_intraday_start_equity', 'risk_halt_trading'
+        'risk_intraday_filled_orders', 'risk_intraday_start_equity', 'risk_halt_trading',
+        'on_entry_callback', 'on_close_callback'
     )
 
     def __init__(self):
@@ -480,6 +481,10 @@ class Position:
         self.risk_intraday_filled_orders: int = 0
         self.risk_intraday_start_equity: float = 0.0
         self.risk_halt_trading: bool = False
+
+        # Event callbacks
+        self.on_entry_callback = None
+        self.on_close_callback = None
 
     @property
     def equity(self) -> float | NA[float]:
@@ -754,6 +759,14 @@ class Position:
 
             self.new_closed_trades.extend(new_closed_trades)
 
+            # Call close callback for each closed trade
+            if self.on_close_callback and new_closed_trades:
+                for closed_trade in new_closed_trades:
+                    try:
+                        self.on_close_callback(closed_trade)
+                    except Exception as e:
+                        print(f"Error in on_close_callback: {e}")
+
         # New trade
         elif order.order_type != _order_type_close:
             # Calculate commission
@@ -809,6 +822,13 @@ class Position:
 
             # Remove order
             self._remove_order(order)
+
+            # Call entry callback for the new trade
+            if self.on_entry_callback:
+                try:
+                    self.on_entry_callback(trade)
+                except Exception as e:
+                    print(f"Error in on_entry_callback: {e}")
 
         # If position has just closed
         if not self.open_trades:

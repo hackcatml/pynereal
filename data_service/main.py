@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -30,9 +31,34 @@ async def main() -> None:
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):
         await ws_manager.connect(ws)
+
+        # Send pending prerun event if exists (for runner_service that connects after history download)
+        async with state.lock:
+            if state.pending_prerun_event is not None:
+                try:
+                    await ws.send_json(state.pending_prerun_event)
+
+                    # Clear the pending event after sending
+                    state.pending_prerun_event = None
+                except Exception as e:
+                    print(f"[data_service] Failed to send pending event: {e}")
+
         try:
             while True:
-                await ws.receive_text()  # keepalive
+                msg_text = await ws.receive_text()
+
+                # Try to parse as JSON for trade events
+                try:
+                    msg = json.loads(msg_text)
+                    msg_type = msg.get("type")
+
+                    # Broadcast trade events to all clients
+                    if msg_type in ("trade_entry", "trade_close"):
+                        await ws_manager.broadcast_json(msg)
+                        # print(f"[data_service] Broadcasted {msg_type} event")
+                except json.JSONDecodeError:
+                    # Not JSON, likely a keepalive ping
+                    pass
         except WebSocketDisconnect:
             await ws_manager.disconnect(ws)
         except Exception:

@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tomllib
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional
@@ -19,6 +20,36 @@ from pynecore.core.syminfo import SymInfo
 from pynecore.types.ohlcv import OHLCV
 
 DATA_WS = "ws://127.0.0.1:9001/ws"
+
+# Event queue for trade events
+trade_event_queue = deque()
+
+
+def on_entry_event(trade):
+    """Callback for entry events"""
+    event = {
+        "type": "trade_entry",
+        "time": int(trade.entry_time / 1000),
+        "price": float(trade.entry_price),
+        "size": float(trade.size),
+        "id": trade.entry_id,
+        "comment": trade.entry_comment if trade.entry_comment else ""
+    }
+    trade_event_queue.append(event)
+
+
+def on_close_event(trade):
+    """Callback for close events"""
+    event = {
+        "type": "trade_close",
+        "time": int(trade.exit_time / 1000),
+        "price": float(trade.exit_price),
+        "size": float(trade.size),
+        "id": trade.entry_id,
+        "comment": trade.exit_comment if trade.exit_comment else "",
+        "profit": float(trade.profit)
+    }
+    trade_event_queue.append(event)
 
 
 def ready_scrip_runner(script_path: Path, data_path: Path, data_toml_path: Path) -> tuple[ScriptRunner,
@@ -76,6 +107,10 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
                                                 "macro_low": macro_low
                                           })
                     runner.init_step()
+
+                    # Register trade event callbacks
+                    runner.script.position.on_entry_callback = on_entry_event
+                    runner.script.position.on_close_callback = on_close_event
             finally:
                 # Remove lib directory from Python path
                 if lib_path_added:
@@ -122,7 +157,7 @@ async def ws_loop():
                 ka = asyncio.create_task(keepalive())
 
                 async for raw in ws:
-                    yield raw
+                    yield ws, raw
 
                 ka.cancel()
         except Exception:
@@ -167,7 +202,7 @@ async def main():
 
     ctx: Optional[RunnerCtx] = None
 
-    async for raw in ws_loop():
+    async for ws, raw in ws_loop():
         try:
             msg = json.loads(raw)
         except Exception:
@@ -178,7 +213,7 @@ async def main():
         # -----------------------------
         # 2) pre-run open fix timing -> prerun_ready
         # -----------------------------
-        if mtype == "prerun_ready":
+        if (mtype == "prerun_ready") or (mtype == "prerun_ready_after_history_download"):
             ohlcv_path = Path(msg.get("ohlcv_path", ""))
             toml_path = Path(msg.get("toml_path", ""))
             if not ohlcv_path.exists() or not toml_path.exists():
@@ -194,26 +229,45 @@ async def main():
 
             # print("=== Pre-run start (up to the last bar) ===")
             size = runner.last_bar_index + 1
+            prerun_range = size - 1
+            if mtype == "prerun_ready_after_history_download":
+                prerun_range = prerun_range + 1
             runner.script.pre_run = True
-            for _ in range(size - 1):
+            for _ in range(prerun_range):
                 step_res = runner.step()
                 if step_res is None:
                     break
             # print("=== Pre-run finished ===")
 
-            # confirmed_bar_and_new_bar가 있다면 new bar ts를 추적에 사용
-            confirmed_bar_and_new_bar = msg.get("confirmed_bar_and_new_bar")
-            last_new_ts_sec = 0
-            if isinstance(confirmed_bar_and_new_bar, list) and len(confirmed_bar_and_new_bar) == 2:
-                last_new_ts_sec = int(confirmed_bar_and_new_bar[1][0] / 1000)
-            else:
-                # fallback: Use end_timestamp from the file
-                with OHLCVReader(ohlcv_path) as r:
-                    last_new_ts_sec = int(r.end_timestamp)
-                    r.close()
+            # Send trade events to data_service
+            while trade_event_queue:
+                event = trade_event_queue.popleft()
+                try:
+                    await ws.send(json.dumps(event))
+                except Exception as e:
+                    print(f"[runner] Failed to send trade event: {e}")
 
-            ctx = RunnerCtx(runner=runner, stream=stream, reader=reader, last_new_bar_ts_sec=last_new_ts_sec)
-            print(f"[runner] prerun done. last_new_bar_ts_sec={ctx.last_new_bar_ts_sec}")
+            if mtype == "prerun_ready":
+                # confirmed_bar_and_new_bar가 있다면 new bar ts를 추적에 사용
+                confirmed_bar_and_new_bar = msg.get("confirmed_bar_and_new_bar")
+                print(f"[runner] pre_run confirmed_bar_and_new_bar: {confirmed_bar_and_new_bar}")
+                # print(f"[runner] stream last: {stream.q[-1]}")
+                last_new_ts_sec = 0
+                if isinstance(confirmed_bar_and_new_bar, list) and len(confirmed_bar_and_new_bar) == 2:
+                    last_new_ts_sec = int(confirmed_bar_and_new_bar[1][0] / 1000)
+                else:
+                    # fallback: Use end_timestamp from the file
+                    with OHLCVReader(ohlcv_path) as r:
+                        last_new_ts_sec = int(r.end_timestamp)
+                        r.close()
+
+                ctx = RunnerCtx(runner=runner, stream=stream, reader=reader, last_new_bar_ts_sec=last_new_ts_sec)
+                print(f"[runner] prerun done. last_new_bar_ts_sec={ctx.last_new_bar_ts_sec}")
+            elif mtype == "prerun_ready_after_history_download":
+                runner.destroy()
+                stream.finish()
+                stream = None
+                reader.close()
 
         # -----------------------------
         # 3) bars>=3 -> keep 2 and update file -> run_ready
@@ -224,6 +278,7 @@ async def main():
 
             ohlcv_path = msg.get("ohlcv_path", "")
             confirmed_bar_and_new_bar = msg.get("confirmed_bar_and_new_bar")
+            print(f"[runner] run_ready confirmed_bar_and_new_bar: {confirmed_bar_and_new_bar}")
             confirmed_bar = confirmed_bar_and_new_bar[0]
             new_bar = confirmed_bar_and_new_bar[1]
 
@@ -267,7 +322,16 @@ async def main():
                     if step_res is None:
                         break
 
-            # Remove the script_module using destroy() (required). If you don’t remove it,
+                # Send trade events to data_service
+                while trade_event_queue:
+                    event = trade_event_queue.popleft()
+                    try:
+                        await ws.send(json.dumps(event))
+                        # print(f"[runner] Sent trade event: {event['type']}")
+                    except Exception as e:
+                        print(f"[runner] Failed to send trade event: {e}")
+
+            # Remove the script_module using destroy() (required). If you don't remove it,
             # the ScriptRunner will reuse the previous candle data even when reloading the script.
             ctx.runner.destroy()
             ctx.stream = None

@@ -93,6 +93,16 @@ async def file_update_loop(
                     history_download_complete = True
                     first_fetch_after_download_done = False
 
+                    # Store pending event instead of emitting immediately
+                    # This will be sent when runner_service connects
+                    state.pending_prerun_event = {
+                        "type": "prerun_ready_after_history_download",
+                        "ohlcv_path": str(ohlcv_path),
+                        "toml_path": str(toml_path),
+                        "confirmed_bar_and_new_bar": None
+                    }
+                    # print("[file_update_loop] History download complete. Event will be sent when client connects.")
+
                 fixed_open_price = 0.0
                 open_fix_done = False
                 prerun_sent_for_bar_ts = None

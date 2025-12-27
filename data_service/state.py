@@ -15,3 +15,6 @@ class DataState:
 
     last_fix_bar_ts: Optional[int] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    # Pending event to send when client connects (for prerun after history download)
+    pending_prerun_event: Optional[Dict[str, Any]] = None
