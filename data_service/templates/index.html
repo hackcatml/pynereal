@@ -54,7 +54,7 @@
         const resp = await fetch("/api/trades");
         const trades = await resp.json();
 
-        {#console.log(`Loaded ${trades.length} trade events from server`);#}
+        // console.log(`Loaded ${trades.length} trade events from server`);
 
         trades.forEach(msg => {
           // Skip markers before first bar
@@ -92,7 +92,7 @@
         // Apply markers if any exist
         if (markers.length > 0) {
           seriesMarkers = LightweightCharts.createSeriesMarkers(candleSeries, markers);
-          {#console.log(`Restored ${markers.length} markers`);#}
+          // console.log(`Restored ${markers.length} markers`);
         }
       } catch (e) {
         console.error("Failed to load trade history:", e);
@@ -111,12 +111,12 @@
 
             // Store first bar time for marker filtering
             firstBarTime = data[0].time;
-            {#console.log(`First bar time: ${firstBarTime}`);#}
+            // console.log(`First bar time: ${firstBarTime}`);
 
             // Calculate timeframe interval from OHLCV data
             if (data.length >= 2) {
               timeframeInterval = data[1].time - data[0].time;
-              {#console.log(`Timeframe interval: ${timeframeInterval} seconds`);#}
+              // console.log(`Timeframe interval: ${timeframeInterval} seconds`);
             }
 
             // Set initial last price
@@ -182,7 +182,7 @@
               seriesMarkers.remove();
             }
             seriesMarkers = LightweightCharts.createSeriesMarkers(candleSeries, markers);
-            {#console.log("Entry marker added:", msg);#}
+            // console.log("Entry marker added:", msg);
           } else if (msg.type === "trade_close") {
             // Skip markers before first bar
             if (firstBarTime !== null && msg.time < firstBarTime) {
@@ -212,7 +212,7 @@
               seriesMarkers.remove();
             }
             seriesMarkers = LightweightCharts.createSeriesMarkers(candleSeries, markers);
-            {#console.log("Close marker added:", msg);#}
+            // console.log("Close marker added:", msg);
           }
         } catch (e) {
           console.error("ws parse error", e);
