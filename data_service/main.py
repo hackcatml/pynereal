@@ -24,9 +24,12 @@ async def main() -> None:
     state = DataState()
     ws_manager = WSManager()
 
+    # Store trade events in memory
+    trades_history = []
+
     app = FastAPI()
     app.include_router(build_ui_router())
-    app.include_router(build_api_router(ohlcv_path))
+    app.include_router(build_api_router(ohlcv_path, trades_history))
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):
@@ -37,9 +40,7 @@ async def main() -> None:
             if state.pending_prerun_event is not None:
                 try:
                     await ws.send_json(state.pending_prerun_event)
-
-                    # Clear the pending event after sending
-                    state.pending_prerun_event = None
+                    # print("[data_service] Sent pending prerun event, waiting for ACK")
                 except Exception as e:
                     print(f"[data_service] Failed to send pending event: {e}")
 
@@ -54,8 +55,16 @@ async def main() -> None:
 
                     # Broadcast trade events to all clients
                     if msg_type in ("trade_entry", "trade_close"):
+                        # Store trade event in history
+                        trades_history.append(msg)
+
                         await ws_manager.broadcast_json(msg)
                         # print(f"[data_service] Broadcasted {msg_type} event")
+                    elif msg_type == "ack_prerun_ready_after_history_download":
+                        # Clear pending event when ACK is received from runner_service
+                        async with state.lock:
+                            if state.pending_prerun_event is not None:
+                                state.pending_prerun_event = None
                 except json.JSONDecodeError:
                     # Not JSON, likely a keepalive ping
                     pass

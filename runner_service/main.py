@@ -214,6 +214,14 @@ async def main():
         # 2) pre-run open fix timing -> prerun_ready
         # -----------------------------
         if (mtype == "prerun_ready") or (mtype == "prerun_ready_after_history_download"):
+            # Send ACK immediately for prerun_ready_after_history_download
+            if mtype == "prerun_ready_after_history_download":
+                try:
+                    await ws.send(json.dumps({"type": "ack_prerun_ready_after_history_download"}))
+                    # print("[runner] Sent ACK for prerun_ready_after_history_download")
+                except Exception as e:
+                    print(f"[runner] Failed to send ACK: {e}")
+
             ohlcv_path = Path(msg.get("ohlcv_path", ""))
             toml_path = Path(msg.get("toml_path", ""))
             if not ohlcv_path.exists() or not toml_path.exists():

@@ -18,6 +18,9 @@
       layout: { background: { color: "#111111" }, textColor: "#d1d4dc" },
       grid: { vertLines: { color: "#2b2b43" }, horzLines: { color: "#2b2b43" } },
       timeScale: { timeVisible: true, secondsVisible: true },
+      crosshair: {
+        mode: LightweightCharts.CrosshairMode.Normal,
+      },
     });
 
     const candleSeries = chart.addSeries(
@@ -29,6 +32,8 @@
         borderDownColor: "#ef5350",
         wickUpColor: "#26a69a",
         wickDownColor: "#ef5350",
+        lastValueVisible: false, // Hide default price label
+        priceLineVisible: false, // Hide default price line
       }
     );
 
@@ -36,20 +41,91 @@
     const markers = [];
     const markerKeys = new Set(); // Track existing markers to prevent duplicates
     let seriesMarkers = null;
+    let firstBarTime = null; // Store first bar time to filter out markers before history
+    let timeframeInterval = 60; // Timeframe interval in seconds (will be calculated from OHLCV data)
 
     function sleep(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    // Load trade history from server
+    async function loadTradeHistory() {
+      try {
+        const resp = await fetch("/api/trades");
+        const trades = await resp.json();
+
+        {#console.log(`Loaded ${trades.length} trade events from server`);#}
+
+        trades.forEach(msg => {
+          // Skip markers before first bar
+          if (firstBarTime !== null && msg.time < firstBarTime) {
+            return;
+          }
+
+          if (msg.type === "trade_entry") {
+            const markerKey = `entry_${msg.time}_${msg.id}`;
+            if (!markerKeys.has(markerKey)) {
+              markers.push({
+                time: msg.time,
+                position: "belowBar",
+                color: "#2196F3",
+                shape: "arrowUp",
+                text: msg.comment || "",
+              });
+              markerKeys.add(markerKey);
+            }
+          } else if (msg.type === "trade_close") {
+            const markerKey = `close_${msg.time}_${msg.id}`;
+            if (!markerKeys.has(markerKey)) {
+              markers.push({
+                time: msg.time,
+                position: "aboveBar",
+                color: "#b421f3",
+                shape: "arrowDown",
+                text: msg.comment || "",
+              });
+              markerKeys.add(markerKey);
+            }
+          }
+        });
+
+        // Apply markers if any exist
+        if (markers.length > 0) {
+          seriesMarkers = LightweightCharts.createSeriesMarkers(candleSeries, markers);
+          {#console.log(`Restored ${markers.length} markers`);#}
+        }
+      } catch (e) {
+        console.error("Failed to load trade history:", e);
+      }
     }
 
     // 최초 로드에서만 히스토리 준비될 때까지 재시도
     async function loadInitialWithRetry() {
       for (let i = 0; i < 30; i++) { // 최대 30초
         try {
-          const resp = await fetch("/api/ohlcv?limit=2000");
+          const resp = await fetch("/api/ohlcv?limit=100000");
           const data = await resp.json();
           if (Array.isArray(data) && data.length > 0) {
             candleSeries.setData(data);
             chart.timeScale().fitContent();
+
+            // Store first bar time for marker filtering
+            firstBarTime = data[0].time;
+            {#console.log(`First bar time: ${firstBarTime}`);#}
+
+            // Calculate timeframe interval from OHLCV data
+            if (data.length >= 2) {
+              timeframeInterval = data[1].time - data[0].time;
+              {#console.log(`Timeframe interval: ${timeframeInterval} seconds`);#}
+            }
+
+            // Set initial last price
+            if (data.length > 0) {
+              lastPrice = data[data.length - 1].close;
+            }
+
+            // Load trade history after OHLCV data is loaded
+            await loadTradeHistory();
             return;
           }
         } catch (e) {
@@ -73,7 +149,16 @@
           const msg = JSON.parse(ev.data);
           if (msg.type === "bar") {
             candleSeries.update(msg.data);
+            // Update last price for the price line
+            if (msg.data && msg.data.close !== undefined) {
+              lastPrice = msg.data.close;
+            }
           } else if (msg.type === "trade_entry") {
+            // Skip markers before first bar
+            if (firstBarTime !== null && msg.time < firstBarTime) {
+              return;
+            }
+
             // Create unique key for this marker
             const markerKey = `entry_${msg.time}_${msg.id}`;
 
@@ -88,7 +173,7 @@
               position: "belowBar",
               color: "#2196F3",
               shape: "arrowUp",
-              text: "Entry @ " + msg.price.toFixed(2),
+              text: msg.comment || "",
             });
             markerKeys.add(markerKey);
 
@@ -97,8 +182,13 @@
               seriesMarkers.remove();
             }
             seriesMarkers = LightweightCharts.createSeriesMarkers(candleSeries, markers);
-            console.log("Entry marker added:", msg);
+            {#console.log("Entry marker added:", msg);#}
           } else if (msg.type === "trade_close") {
+            // Skip markers before first bar
+            if (firstBarTime !== null && msg.time < firstBarTime) {
+              return;
+            }
+
             // Create unique key for this marker
             const markerKey = `close_${msg.time}_${msg.id}`;
 
@@ -111,9 +201,9 @@
             markers.push({
               time: msg.time,
               position: "aboveBar",
-              color: msg.profit >= 0 ? "#4CAF50" : "#F44336",
+              color: "#b421f3",
               shape: "arrowDown",
-              text: "Close @ " + msg.price.toFixed(2) + " (P&L: " + msg.profit.toFixed(2) + ")",
+              text: msg.comment || "",
             });
             markerKeys.add(markerKey);
 
@@ -122,7 +212,7 @@
               seriesMarkers.remove();
             }
             seriesMarkers = LightweightCharts.createSeriesMarkers(candleSeries, markers);
-            console.log("Close marker added:", msg);
+            {#console.log("Close marker added:", msg);#}
           }
         } catch (e) {
           console.error("ws parse error", e);
@@ -139,6 +229,45 @@
     setInterval(() => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send("ping");
     }, 15000);
+
+    // Current price line with next candle timer
+    let currentPriceLine = null;
+    let lastPrice = 0;
+
+    function updatePriceLineWithTimer() {
+      if (timeframeInterval === 0 || lastPrice === 0) return;
+
+      const now = Date.now();
+      const currentTime = Math.floor(now / 1000);
+
+      // Calculate next candle start time
+      const nextCandleTime = Math.ceil(currentTime / timeframeInterval) * timeframeInterval;
+      const remainingSeconds = nextCandleTime - currentTime;
+
+      const minutes = Math.floor(remainingSeconds / 60);
+      const seconds = remainingSeconds % 60;
+      const timeText = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+
+      if (currentPriceLine) {
+        currentPriceLine.applyOptions({
+          price: lastPrice,
+          title: `${timeText}`,
+        });
+      } else {
+        currentPriceLine = candleSeries.createPriceLine({
+          price: lastPrice,
+          color: '#2196F3',
+          lineWidth: 0,
+          lineStyle: 2, // dashed
+          axisLabelVisible: true,
+          title: `${lastPrice.toFixed(2)} | ${timeText}`,
+        });
+      }
+    }
+
+    // Update price line every second
+    setInterval(updatePriceLineWithTimer, 1000);
+    updatePriceLineWithTimer(); // Initial call
   </script>
 </body>
 </html>

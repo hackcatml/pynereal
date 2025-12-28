@@ -8,8 +8,15 @@ from typing import Any, Dict, List
 from pynecore.core.ohlcv_file import OHLCVReader
 
 
-def build_api_router(ohlcv_path: Path) -> APIRouter:
+def build_api_router(ohlcv_path: Path, trades_history: List[Dict[str, Any]] = None) -> APIRouter:
     r = APIRouter()
+
+    @r.get("/api/trades")
+    def get_trades() -> JSONResponse:
+        """Get all stored trade events (entry and close)"""
+        if trades_history is None:
+            return JSONResponse([])
+        return JSONResponse(trades_history)
 
     @r.get("/api/ohlcv")
     def get_ohlcv(limit: int = 2000) -> JSONResponse:
