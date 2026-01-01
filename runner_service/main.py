@@ -23,6 +23,8 @@ DATA_WS = "ws://127.0.0.1:9001/ws"
 
 # Event queue for trade events
 trade_event_queue = deque()
+# Dictionary for plot options (title -> options mapping)
+plot_options = {}
 
 
 def on_entry_event(trade):
@@ -51,6 +53,23 @@ def on_close_event(trade):
     }
     trade_event_queue.append(event)
 
+
+def on_plot_event(plot_data):
+    """Callback for plot events - stores/updates plot options"""
+    title = plot_data['title']
+    new_options = {
+        "color": plot_data.get('color'),
+        "linewidth": plot_data.get('linewidth'),
+        "style": plot_data.get('style'),
+    }
+
+    # Check if title exists and options are the same
+    if title in plot_options:
+        if plot_options[title] == new_options:
+            return  # Skip if options are identical
+
+    # Store or update plot options
+    plot_options[title] = new_options
 
 def ready_scrip_runner(script_path: Path, data_path: Path, data_toml_path: Path) -> tuple[ScriptRunner,
 AppendableIterable[OHLCV], OHLCVReader] | None:
@@ -95,11 +114,12 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
 
                 # Create script runner (this is where the import happens)
                 config_dir = app_state.config_dir
+                plot_path = app_state.output_dir / f"{script_path.stem}.csv"
                 with open(config_dir / "realtime_trade.toml", "rb") as f:
                     realtime_config = tomllib.load(f)
                     runner = ScriptRunner(script_path, stream, syminfo,
                                           last_bar_index=size - 1,
-                                          plot_path=None, strat_path=None, trade_path=None,
+                                          plot_path=plot_path, strat_path=None, trade_path=None,
                                           realtime_config=realtime_config,
                                           custom_inputs={
                                                 "bb1d_lower": bb1d_lower,
@@ -111,6 +131,8 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
                     # Register trade event callbacks
                     runner.script.position.on_entry_callback = on_entry_event
                     runner.script.position.on_close_callback = on_close_event
+                    # Register plot event callback
+                    runner.script.on_plot_callback = on_plot_event
             finally:
                 # Remove lib directory from Python path
                 if lib_path_added:
@@ -177,7 +199,7 @@ def parse_timeframe_to_ms(tf: str) -> int:
 
 
 async def main():
-    # Load realtime config (기존 main.py와 동일)
+    # Load realtime config
     config_dir = app_state.config_dir
     with open(config_dir / "realtime_trade.toml", "rb") as f:
         realtime_config = tomllib.load(f)
@@ -211,7 +233,7 @@ async def main():
         mtype = msg.get("type")
 
         # -----------------------------
-        # 2) pre-run open fix timing -> prerun_ready
+        # Pre script run stage
         # -----------------------------
         if (mtype == "prerun_ready") or (mtype == "prerun_ready_after_history_download"):
             # Send ACK immediately for prerun_ready_after_history_download
@@ -238,27 +260,53 @@ async def main():
             # print("=== Pre-run start (up to the last bar) ===")
             size = runner.last_bar_index + 1
             prerun_range = size - 1
+            runner.script.pre_run = True
             if mtype == "prerun_ready_after_history_download":
                 prerun_range = prerun_range + 1
-            runner.script.pre_run = True
+                runner.script.pre_run = False
             for _ in range(prerun_range):
                 step_res = runner.step()
                 if step_res is None:
                     break
+            # Flush plot writer to ensure all data is written
+            if runner.plot_writer:
+                runner.plot_writer.flush()
             # print("=== Pre-run finished ===")
 
+            # Send last bar index to data_service to fix open price
+            try:
+                await ws.send(json.dumps({
+                    "type": "last_bar_open_fix",
+                    "last_bar_index": runner.last_bar_index,
+                }))
+            except Exception as e:
+                print(f"[runner] Failed to send bar confirmation: {e}")
+
             # Send trade events to data_service
-            while trade_event_queue:
-                event = trade_event_queue.popleft()
+            if trade_event_queue:
                 try:
-                    await ws.send(json.dumps(event))
+                    await ws.send(json.dumps(list(trade_event_queue)))
+                    trade_event_queue.clear()
                 except Exception as e:
-                    print(f"[runner] Failed to send trade event: {e}")
+                    print(f"[runner] Failed to send trade events: {e}")
+
+            # Send plot options to data_service
+            if plot_options:
+                try:
+                    plot_options_event = {
+                        "type": "plot_options",
+                        "data": plot_options,
+                        "confirmed_bar_index": runner.last_bar_index - 1,
+                    }
+                    await ws.send(json.dumps(plot_options_event))
+                    # print(f"[runner] Sent plot_options: {plot_options}")
+                except Exception as e:
+                    print(f"[runner] Failed to send plot options: {e}")
 
             if mtype == "prerun_ready":
                 # confirmed_bar_and_new_bar가 있다면 new bar ts를 추적에 사용
                 confirmed_bar_and_new_bar = msg.get("confirmed_bar_and_new_bar")
-                print(f"[runner] pre_run confirmed_bar_and_new_bar: {confirmed_bar_and_new_bar}")
+                # print(f"[runner] pre_run confirmed_bar_and_new_bar: {confirmed_bar_and_new_bar}")
                 # print(f"[runner] stream last: {stream.q[-1]}")
                 last_new_ts_sec = 0
                 if isinstance(confirmed_bar_and_new_bar, list) and len(confirmed_bar_and_new_bar) == 2:
@@ -270,7 +318,7 @@ async def main():
                         r.close()
 
                 ctx = RunnerCtx(runner=runner, stream=stream, reader=reader, last_new_bar_ts_sec=last_new_ts_sec)
-                print(f"[runner] prerun done. last_new_bar_ts_sec={ctx.last_new_bar_ts_sec}")
+                # print(f"[runner] prerun done. last_new_bar_ts_sec={ctx.last_new_bar_ts_sec}")
             elif mtype == "prerun_ready_after_history_download":
                 runner.destroy()
                 stream.finish()
@@ -278,7 +326,7 @@ async def main():
                 reader.close()
 
         # -----------------------------
-        # 3) bars>=3 -> keep 2 and update file -> run_ready
+        # Script run stage
         # -----------------------------
         elif mtype == "run_ready":
             if ctx is None:
@@ -286,7 +334,7 @@ async def main():
 
             ohlcv_path = msg.get("ohlcv_path", "")
             confirmed_bar_and_new_bar = msg.get("confirmed_bar_and_new_bar")
-            print(f"[runner] run_ready confirmed_bar_and_new_bar: {confirmed_bar_and_new_bar}")
+            # print(f"[runner] run_ready confirmed_bar_and_new_bar: {confirmed_bar_and_new_bar}")
             confirmed_bar = confirmed_bar_and_new_bar[0]
             new_bar = confirmed_bar_and_new_bar[1]
 
@@ -331,13 +379,25 @@ async def main():
                         break
 
                 # Send trade events to data_service
-                while trade_event_queue:
-                    event = trade_event_queue.popleft()
+                if trade_event_queue:
                     try:
-                        await ws.send(json.dumps(event))
-                        # print(f"[runner] Sent trade event: {event['type']}")
+                        await ws.send(json.dumps(list(trade_event_queue)))
+                        trade_event_queue.clear()
                     except Exception as e:
-                        print(f"[runner] Failed to send trade event: {e}")
+                        print(f"[runner] Failed to send trade events: {e}")
+
+                # Send plot options to data_service
+                if plot_options:
+                    try:
+                        plot_options_event = {
+                            "type": "plot_options",
+                            "data": plot_options,
+                            "confirmed_bar_index": ctx.runner.last_bar_index - 1,
+                        }
+                        await ws.send(json.dumps(plot_options_event))
+                        # print(f"[runner] Sent plot_options: {plot_options}")
+                    except Exception as e:
+                        print(f"[runner] Failed to send plot options: {e}")
 
             # Remove the script_module using destroy() (required). If you don't remove it,
             # the ScriptRunner will reuse the previous candle data even when reloading the script.

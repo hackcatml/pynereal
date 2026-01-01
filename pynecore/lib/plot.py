@@ -2,6 +2,7 @@ from typing import Any
 import sys
 
 from ..core.callable_module import CallableModule
+from ..types import NA
 from ..types.plot import PlotEnum, Plot
 
 
@@ -35,7 +36,7 @@ class PlotModule(CallableModule):
 #
 
 # noinspection PyProtectedMember
-def plot(series: Any, title: str | None = None, *_, **__):
+def plot(series: Any, title: str | None = None, color: Any = None, linewidth: int = 1, style: Any = None, *_, **__):
     """
     Plot series, by default a CSV is generated, but this can be extended
 
@@ -66,6 +67,39 @@ def plot(series: Any, title: str | None = None, *_, **__):
 
     # Store plot data
     lib._plot_data[title] = series
+
+    # Call plot callback only on the first bar to register plot options
+    if lib.bar_index == 0 and lib._script and lib._script.on_plot_callback:
+        # print(f"on_plot_callback: {title}, {color}, {linewidth}, {style}")
+        try:
+            # Convert color to hex string if it's a Color object
+            color_str = None
+            if color is not None:
+                if hasattr(color, '__str__'):
+                    color_str = str(color)
+                from ..types.color import Color
+                if isinstance(color, Color):
+                    # Convert Color object to hex string (without alpha)
+                    color_str = f'#{color.r:02X}{color.g:02X}{color.b:02X}'
+                else:
+                    color_str = str(color)
+
+            # Convert style to string if it's a PlotEnum
+            style_str = None
+            if style is not None:
+                if hasattr(style, 'value'):
+                    style_str = style.value
+                else:
+                    style_str = str(style)
+
+            lib._script.on_plot_callback({
+                'title': title,
+                'color': color_str,
+                'linewidth': linewidth,
+                'style': style_str
+            })
+        except Exception:
+            pass  # Ignore callback errors
 
     return Plot()
 

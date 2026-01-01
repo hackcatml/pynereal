@@ -2,7 +2,7 @@
 @pyne
 """
 from pynecore import Persistent
-from pynecore.lib import script, close, ta, strategy, time
+from pynecore.lib import script, close, ta, strategy, time, plot, color, na
 from pynecore.types import Series
 
 
@@ -21,11 +21,13 @@ def main():
     entered1: Persistent[bool] = False
     entered1Time: Persistent[int] = 0
     lastTpTime: Persistent[int] = 0
+    avgEntry: Persistent[float] = 0.0
 
     # Execute the strategy
-    if not entered1 and rsi < 70 and (time - lastTpTime) >= 1 * 60 * 1000:
+    if not entered1 and rsi < 70 and (time - lastTpTime) >= 1 * 60 * 1000 * 5:
         entered1 = True
         entered1Time = time
+        avgEntry = close
         # If the record option is true, it will write entry and close records to a file in the records directory.
         strategy.entry("Long 1", strategy.long, alert_message=f'{{"signal": "Long 1", "price": {close}}}',
                        comment=f"Long 1 at rsi: {rsi}", record=False)
@@ -35,3 +37,6 @@ def main():
         lastTpTime = time
         strategy.close("Long 1", alert_message=f'{{"signal": "Close 1"}}',
                         comment=f"Close 1 at price: {close}", record=False)
+
+    # Plot Example
+    plot(avgEntry if entered1 else na, title="avgEntry", color=color.yellow, linewidth=1, style=plot.style_cross)

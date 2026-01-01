@@ -16,6 +16,7 @@ WRITE_TUPLE = 0
 WRITE_DICT = 1
 WRITE_OHLCV = 2
 STOP = 3
+FLUSH = 4
 
 
 class DialectLF(csv.excel):
@@ -109,6 +110,16 @@ class CSVWriter:
 
                 if cmd == STOP:
                     break
+
+                if cmd == FLUSH:
+                    # Flush buffer immediately
+                    if buffer.tell() > 0:
+                        self._file.write(buffer.getvalue())
+                        self._file.flush()
+                        buffer.truncate(0)
+                        buffer.seek(0)
+                    self._queue.task_done()
+                    continue
 
                 # Write header if needed
                 if not self._headers:
@@ -264,6 +275,22 @@ class CSVWriter:
             return True
         except queue.Full:
             return False
+
+    def flush(self, timeout: Optional[float] = None):
+        """
+        Flush the buffer to disk immediately.
+
+        :param timeout: Optional timeout in seconds to wait for flush
+        """
+        if not self._is_open:
+            return
+
+        try:
+            self._queue.put((FLUSH, None), timeout=timeout)
+            # Wait for the flush to complete
+            self._queue.join()
+        except queue.Full:
+            pass  # Ignore if queue is full
 
     def close(self, timeout: Optional[float] = None):
         """
