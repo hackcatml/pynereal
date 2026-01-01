@@ -9,7 +9,7 @@ provider = "ccxt"               # Data provider
 exchange = "bitget"             # Exchange name
 symbol = "BTC/USDT:USDT"        # pyne data download ccxt --list-symbols --symbol BITGET
 timeframe = "1m"                # 1m, 5m, 1h, 1D, 1W, 1M
-history_since = "2025-09-01"    # "2025-09-01", Download history bar since when? If it's empty, 2 months history for 5m, 1 month for 1m timeframe will be downloaded
+history_since = ""    # "2025-09-01", Download history bar since when? If it's empty, 2 months history for 5m, 1 month for 1m timeframe will be downloaded
 script_name = "demo_1m.py"      # PyneCore strategy name
 
 [webhook]
