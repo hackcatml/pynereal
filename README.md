@@ -1,7 +1,9 @@
 # PyneReal
 Run your crypto trading strategy in real time without TradingView
 
-# Why you need this
+---
+
+## Why you need this
 If you’re an active system trader who relies on TradingView strategies, you’ve probably experienced this before:\
 moments when an alert didn’t arrive in time and you missed an entry, alerts firing at the wrong price levels,\
 or alerts arriving two or three minutes late, causing a significant mismatch with your strategy.
@@ -12,31 +14,54 @@ This project puts the entire strategy-running environment under your control wit
 so even when unexpected issues occur, you can quickly identify the root cause and fix it.\
 You can also apply Python’s unlimited extensibility directly to your strategy.
 
-# Prerequisites
-python >= 3.11\
-[PyneCore](https://github.com/PyneSys/pynecore) strategy (converted from your pinescript strategy)
+---
 
-# Quick Example
-Follow the steps below to see how it works.\
-The `demo_1m.py` script in the `workdir/scripts` directory runs on Bitget BTC/USDT Futures in real time on the 1-minute timeframe.\
-You will see webhook alert messages when `strategy.entry` or `strategy.close` is triggered.
+## Prerequisites
+- **Python** ≥ 3.11
+- **[PyneCore](https://github.com/PyneSys/pynecore)** strategy (converted from PineScript)
 
-1. Clone\
-`git clone https://github.com/hackcatml/pynereal` \
-`cd pynereal`
+---
 
-2. Setup\
-`chmod 755 setup.sh`\
-`source setup.sh`
+## Quick Example
+### Clone the Repository
 
-3. Run the webhook server\
-`python demo_webhook_server.py`
+```bash
+git clone https://github.com/hackcatml/pynereal
+cd pynereal
+```
 
-4. Run the program\
-`python main.py`
+### Setup Environment
 
+```bash
+chmod 755 setup.sh
+source setup.sh
+```
 
-# How to run your strategy?
+### Run Demo Strategy
+
+The `demo_1m.py` script runs on **Bitget BTC/USDT Futures** in real-time on the 1-minute timeframe.
+
+**Terminal 1** — Start webhook server:
+```bash
+python demo_webhook_server.py
+```
+
+**Terminal 2** — Start data & chart service:
+```bash
+python data_service/main.py
+```
+
+**Terminal 3** — Start strategy runner:
+```bash
+python runner_service/main.py
+```
+
+You'll see webhook alerts when `strategy.entry` or `strategy.close` triggers\
+Open http://127.0.0.1:9001/ in your browser to see the live chart
+
+---
+
+## How to run your strategy?
 1. Prepare your [PyneCore strategy](https://pynecore.org/docs/strategy/) file.
 2. Download OHLCV data for the trading pair.\
 e.g., `pyne data download ccxt --symbol "BITGET:BTC/USDT:USDT" --timeframe 5 --from "2025-09-01"`
@@ -45,15 +70,18 @@ When you backtest your strategy, set `enabled = false` under the `realtime` sect
 `pyne run <your strategy.py> <ohlcv file>`
 4. Fill the `realtime_trade.toml` in the `workdir/config` directory.
 5. Finally, start the program:\
-`python main.py`
+`python data_service/main.py` \
+`python runner_service/main.py`
 
 Notes:\
 Every time you start the program, it will download the OHLCV data file again from the same starting point if a data file already downloaded exists in the `workdir/data` directory.
 If not, it will download two months of data up to the current time.\
 If it's the 1m timeframe, it always downloads one month of data.
 
-# Features
-## Webhook signal
+---
+
+## Features
+### Webhook signal
 Enable the webhook feature by setting `enabled = true` in the `webhook` section of `realtime_trade.toml`.\
 Add your webhook url there.\
 When using `strategy.entry` or `strategy.close`, provide an `alert_message` in JSON format:
@@ -62,13 +90,13 @@ e.g., `strategy.entry("Long 1", strategy.long, alert_message=f'{{"signal": "Long
 Currently, webhook signals are triggered only on `strategy.entry` and `strategy.close` events. 
 
 
-## Send Telegram message
+### Send Telegram message
 If webhook signaling is enabled, you can automatically send Telegram notifications as well.\
 Enable it by setting `telegram_notification = true` in `realtime_trade.toml`.\
 You must also fill in your `.env` file with your Telegram bot token and chat ID.
 
 
-## Custom input
+### Custom input
 PyneCore does not yet support Pine Script’s `request.security` feature.\
 To use higher-timeframe (HTF) values, you must calculate them before running the script.\
 In the modules directory, you will find several examples:\
@@ -95,26 +123,29 @@ Uncomment the module calculations and the keys and values in the `custom_inputs`
 Yes, it's a little bit annoying to set up.\
 Conveniently injecting custom inputs into the script is on my TODO list for now.
 
-## Backtesting
+### Backtesting
 You can still use the standard pyne command for backtesting.\
 Make sure to set:\
 `no_report = false` under the `pyne` section\
 `enabled = false` under the `realtime` section in `realtime_trade.toml` in the `workdir/config` directory.\
 Then run: `pyne run <your strategy.py> <ohlcv file>`
 
+---
 
-# Risk Warning
+## Risk Warning
 This project is still in development.\
 Cannot guarantee it works properly.\
 Use it at your own risk.\
 Before you run your strategy with real funds, make sure the trading result matches your expectation.\
 I don't take any responsibility for your loss.
 
+---
 
-# License
+## License
 Apache License Version 2.0
 
+---
 
 # Acknowledgements
-- [PyneCore](https://github.com/PyneSys/pynecore)
-
+- **[PyneCore](https://github.com/PyneSys/pynecore)** — The powerful Pine Script compatible framework that makes this possible
+- **[lightweight-charts](https://tradingview.github.io/lightweight-charts/)** — Chart visualization

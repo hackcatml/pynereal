@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>OHLCV Chart (data_service)</title>
+  <style>
+    body { margin:0; padding:0; background:#111; color:#eee; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+    #chart { width:100vw; height:100vh; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.9/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <div id="chart"></div>
+  <script>
+    const container = document.getElementById("chart");
+
+    const chart = LightweightCharts.createChart(container, {
+      layout: { background: { color: "#ffffff" }, textColor: "#000000" },
+      // grid: { vertLines: { color: "#2b2b43" }, horzLines: { color: "#2b2b43" } },
+      timeScale: { timeVisible: true, secondsVisible: true },
+      crosshair: {
+        mode: LightweightCharts.CrosshairMode.Magnet,
+      },
+    });
+
+    const candleSeries = chart.addSeries(
+      LightweightCharts.CandlestickSeries,
+      {
+        upColor: "#26a69a",
+        downColor: "#ef5350",
+        borderUpColor: "#26a69a",
+        borderDownColor: "#ef5350",
+        wickUpColor: "#26a69a",
+        wickDownColor: "#ef5350",
+        lastValueVisible: false, // Hide default price label
+        priceLineVisible: false, // Hide default price line
+      }
+    );
+
+    // Line series for trade entry/close price markers (circles)
+    const entryMarkerSeries = chart.addSeries(
+      LightweightCharts.LineSeries,
+      {
+        color: "#0b33e8",
+        lineVisible: false,
+        pointMarkersVisible: true,
+        lastValueVisible: false,
+        priceLineVisible: false,
+        crosshairMarkerVisible: true,
+      }
+    );
+    const entryMarkerData = [];
+
+    const closeMarkerSeries = chart.addSeries(
+      LightweightCharts.LineSeries,
+      {
+        color: "#9d0bec",
+        lineVisible: false,
+        pointMarkersVisible: true,
+        lastValueVisible: false,
+        priceLineVisible: false,
+        crosshairMarkerVisible: true,
+      }
+    );
+    const closeMarkerData = [];
+
+    // Map to store plot series (title -> series)
+    const plotSeriesMap = new Map();
+
+    // Array to store markers
+    const markers = [];
+    const markerKeys = new Set(); // Track existing markers to prevent duplicates
+    let seriesMarkers = null;
+    let firstBarTime = null; // Store first bar time to filter out markers before history
+    let timeframeInterval = 60; // Timeframe interval in seconds (will be calculated from OHLCV data)
+    let lastBarTime = 0; // Track last bar time to handle out-of-order updates
+    let lastOpenPrice = { time: 0, value: 0 };
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    // Load trade history from server
+    async function loadTradeHistory() {
+      try {
+        const resp = await fetch("/api/trades");
+        const trades = await resp.json();
+
+        // console.log(`Loaded ${trades.length} trade events from server`);
+
+        trades.forEach(msg => {
+          // Skip markers before first bar
+          if (firstBarTime !== null && msg.time < firstBarTime) {
+            return;
+          }
+
+          if (msg.type === "trade_entry") {
+            const markerKey = `entry_${msg.time}_${msg.id}`;
+            if (!markerKeys.has(markerKey)) {
+              markers.push({
+                time: msg.time,
+                position: "belowBar",
+                color: "#0b33e8",
+                shape: "arrowUp",
+                text: msg.comment || "",
+                size: 0.5,
+              });
+              markerKeys.add(markerKey);
+
+              // Add price marker (circle at exact price level)
+              if (msg.price != null) {
+                entryMarkerData.push({ time: msg.time, value: msg.price });
+              }
+            }
+          } else if (msg.type === "trade_close") {
+            const markerKey = `close_${msg.time}_${msg.id}`;
+            if (!markerKeys.has(markerKey)) {
+              markers.push({
+                time: msg.time,
+                position: "aboveBar",
+                color: "#9d0bec",
+                shape: "arrowDown",
+                text: msg.comment || "",
+                size: 0.5,
+              });
+              markerKeys.add(markerKey);
+
+              // Add price marker (circle at exact price level)
+              if (msg.price != null) {
+                closeMarkerData.push({ time: msg.time, value: msg.price });
+              }
+            }
+          }
+        });
+
+        // Apply markers if any exist
+        if (markers.length > 0) {
+          seriesMarkers = LightweightCharts.createSeriesMarkers(candleSeries, markers);
+          // console.log(`Restored ${markers.length} markers`);
+        }
+
+        // Apply price markers (circles at exact price levels)
+        if (entryMarkerData.length > 0) {
+          entryMarkerSeries.setData(entryMarkerData);
+        }
+        if (closeMarkerData.length > 0) {
+          closeMarkerSeries.setData(closeMarkerData);
+        }
+      } catch (e) {
+        console.error("Failed to load trade history:", e);
+      }
+    }
+
+    // Load plot data from server with retry
+    async function loadPlotData() {
+      for (let i = 0; i < 30; i++) { // Retry up to 30 seconds
+        try {
+          const resp = await fetch("/api/plot?limit=100000");
+          const plots = await resp.json();
+
+          if (Array.isArray(plots) && plots.length > 0) {
+            plots.forEach(plot => {
+              // Convert null/undefined values to NaN
+              if (plot.data && Array.isArray(plot.data)) {
+                plot.data.forEach(point => {
+                  if (point.value == null) {
+                    point.value = NaN;
+                  }
+                });
+              }
+
+              const { title, color, linewidth, style, data } = plot;
+
+              // Plot style constants (from plot.py PlotEnum)
+              // style_area = 0, style_areabr = 1, style_circles = 2, style_columns = 3,
+              // style_cross = 4, style_histogram = 5, style_line = 6, style_linebr = 7,
+              // style_stepline = 8, style_stepline_diamond = 9
+              const STYLE_CIRCLES = 2;
+              const STYLE_CROSS = 4;
+
+              // Determine series options based on style
+              const isCrossStyle = (parseInt(style) === STYLE_CROSS || parseInt(style) === STYLE_CIRCLES);
+              const seriesOptions = {
+                color: color || "#2962FF",
+                lastValueVisible: false,
+                priceLineVisible: false,
+                crosshairMarkerVisible: true,
+              };
+
+              // For cross/circles style, show point markers and hide line (like entryMarkerSeries)
+              if (isCrossStyle) {
+                seriesOptions.lineVisible = false;
+                seriesOptions.pointMarkersVisible = true;
+                seriesOptions.pointMarkersRadius = 1;
+              } else {
+                // For line style, set line width
+                seriesOptions.lineWidth = linewidth || 2;
+              }
+
+              // Create line series for this plot
+              const series = chart.addSeries(LightweightCharts.LineSeries, seriesOptions);
+
+              // Set data
+              if (data && data.length > 0) {
+                series.setData(data);
+              }
+
+              // Store series in map
+              plotSeriesMap.set(title, series);
+            });
+
+            // console.log(`Loaded ${plots.length} plot series`);
+            return; // Success, exit retry loop
+          }
+        } catch (e) {
+          // Ignore and retry
+        }
+        await sleep(1000);
+      }
+      // console.log("Plot data not ready (timeout or no plots)");
+    }
+
+    // 최초 로드에서만 히스토리 준비될 때까지 재시도
+    async function loadInitialWithRetry() {
+      for (let i = 0; i < 30; i++) { // 최대 30초
+        try {
+          const resp = await fetch("/api/ohlcv?limit=100000");
+          const data = await resp.json();
+          if (Array.isArray(data) && data.length > 0) {
+            // Store data in array for later updates
+            candleSeries.setData(data);
+            chart.timeScale().fitContent();
+
+            // Store first bar time for marker filtering
+            firstBarTime = data[0].time;
+            // console.log(`First bar time: ${firstBarTime}`);
+
+            // Calculate timeframe interval from OHLCV data
+            if (data.length >= 2) {
+              timeframeInterval = data[1].time - data[0].time;
+              // console.log(`Timeframe interval: ${timeframeInterval} seconds`);
+            }
+
+            // Set initial last price
+            if (data.length > 0) {
+              lastPrice = data[data.length - 1].close;
+            }
+
+            // Load trade history and plot data after OHLCV data is loaded
+            await loadTradeHistory();
+            await loadPlotData();
+            return;
+          }
+        } catch (e) {
+          // ignore
+        }
+        await sleep(1000);
+      }
+      console.error("Initial OHLCV not ready (timeout).");
+    }
+
+    loadInitialWithRetry();
+
+    let ws = null;
+    function connectWS() {
+      ws = new WebSocket(`ws://${location.host}/ws`);
+
+      ws.onopen = () => console.log("ws connected");
+
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "bar") {
+            // Check if this is an out-of-order update (confirmed bar after new bar)
+            if (msg.data.time < lastBarTime) {
+              // console.log(`Skipping out-of-order bar update: ${msg.data.time} < ${lastBarTime}`);
+              return;
+            }
+
+            // Update open price if necessary
+            if (msg.data.time === lastOpenPrice.time && lastOpenPrice.value > 0 && msg.data.open != parseFloat(lastOpenPrice.value.toFixed(2))) {
+                // console.log(`Updating open price: ${msg.data.open} --> ${lastOpenPrice.value.toFixed(2)}`);
+                msg.data.open = lastOpenPrice.value;
+            }
+
+            candleSeries.update(msg.data);
+            lastBarTime = msg.data.time;
+
+            // Update last price for the price line
+            if (msg.data && msg.data.close !== undefined) {
+              lastPrice = msg.data.close;
+            }
+          } else if (msg.type === "last_bar_open_fix") {
+            lastOpenPrice.time = msg.data.time;
+            lastOpenPrice.value = msg.data.open;
+
+            // Fix entry marker if price differs from open
+            const entryIndex = entryMarkerData.findIndex(m => m.time === msg.data.time);
+            if (entryIndex !== -1) {
+              const priceDiff = Math.abs(entryMarkerData[entryIndex].value - msg.data.open);
+              if (priceDiff > 0.01) {
+                console.log(`Fix entry marker: ${entryMarkerData[entryIndex].value} --> ${msg.data.open}`);
+                entryMarkerData[entryIndex].value = msg.data.open;
+                entryMarkerSeries.setData(entryMarkerData);
+              }
+            }
+
+            // Fix close marker if price differs from open
+            const closeIndex = closeMarkerData.findIndex(m => m.time === msg.data.time);
+            if (closeIndex !== -1) {
+              const priceDiff = Math.abs(closeMarkerData[closeIndex].value - msg.data.open);
+              if (priceDiff > 0.01) {
+                console.log(`Fix close marker: ${closeMarkerData[closeIndex].value} --> ${msg.data.open}`);
+                closeMarkerData[closeIndex].value = msg.data.open;
+                closeMarkerSeries.setData(closeMarkerData);
+              }
+            }
+          } else if (msg.type === "trade_entry") {
+            // Skip markers before first bar
+            if (firstBarTime !== null && msg.time < firstBarTime) {
+              return;
+            }
+
+            // Create unique key for this marker
+            const markerKey = `entry_${msg.time}_${msg.id}`;
+
+            // Skip if marker already exists
+            if (markerKeys.has(markerKey)) {
+              return;
+            }
+
+            // Add entry marker
+            markers.push({
+              time: msg.time,
+              position: "belowBar",
+              color: "#0b33e8",
+              shape: "arrowUp",
+              text: msg.comment || "",
+              size: 0.5,
+            });
+            markerKeys.add(markerKey);
+
+            // Add price marker (circle at exact price level)
+            if (msg.price != null) {
+              // console.log("Adding price marker:", msg.price);
+              entryMarkerData.push({ time: msg.time, value: msg.price });
+              entryMarkerSeries.setData(entryMarkerData);
+            }
+
+            // Update markers using createSeriesMarkers
+            if (seriesMarkers) {
+              seriesMarkers.setMarkers([]);
+            }
+            seriesMarkers = LightweightCharts.createSeriesMarkers(candleSeries, markers);
+            // console.log("Entry marker added:", msg);
+          } else if (msg.type === "trade_close") {
+            // Skip markers before first bar
+            if (firstBarTime !== null && msg.time < firstBarTime) {
+              return;
+            }
+
+            // Create unique key for this marker
+            const markerKey = `close_${msg.time}_${msg.id}`;
+
+            // Skip if marker already exists
+            if (markerKeys.has(markerKey)) {
+              return;
+            }
+
+            // Add close marker
+            markers.push({
+              time: msg.time,
+              position: "aboveBar",
+              color: "#9d0bec",
+              shape: "arrowDown",
+              text: msg.comment || "",
+              size: 0.5,
+            });
+            markerKeys.add(markerKey);
+
+            // Add price marker (circle at exact price level)
+            if (msg.price != null) {
+              closeMarkerData.push({ time: msg.time, value: msg.price });
+              closeMarkerSeries.setData(closeMarkerData);
+            }
+
+            // Update markers using createSeriesMarkers
+            if (seriesMarkers) {
+             seriesMarkers.setMarkers([]);
+            }
+            seriesMarkers = LightweightCharts.createSeriesMarkers(candleSeries, markers);
+            // console.log("Close marker added:", msg);
+          } else if (msg.type === "plot_data") {
+            // Update plot series with new data point
+            const { title, time, value } = msg;
+
+            // Get or create series for this title
+            let series = plotSeriesMap.get(title);
+            if (series) {
+              // Convert null to NaN for chart gaps
+              const plotValue = (value == null || isNaN(value)) ? NaN : value;
+              // console.log(`Update plot ${title}:`, { time, value: plotValue });
+              series.update({ time, value: plotValue });
+            }
+          }
+        } catch (e) {
+          console.error("ws parse error", e);
+        }
+      };
+
+      ws.onclose = () => setTimeout(connectWS, 1000);
+      ws.onerror = () => { try { ws.close(); } catch {} };
+    }
+
+    connectWS();
+
+    // keepalive
+    setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send("ping");
+    }, 15000);
+
+    // Current price line with next candle timer
+    let currentPriceLine = null;
+    let lastPrice = 0;
+
+    function updatePriceLineWithTimer() {
+      if (timeframeInterval === 0 || lastPrice === 0) return;
+
+      const now = Date.now();
+      const currentTime = Math.floor(now / 1000);
+
+      // Calculate next candle start time
+      const nextCandleTime = Math.ceil(currentTime / timeframeInterval) * timeframeInterval;
+      const remainingSeconds = nextCandleTime - currentTime;
+
+      const minutes = Math.floor(remainingSeconds / 60);
+      const seconds = remainingSeconds % 60;
+      const timeText = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+
+      if (currentPriceLine) {
+        currentPriceLine.applyOptions({
+          price: lastPrice,
+          title: `${timeText}`,
+        });
+      } else {
+        currentPriceLine = candleSeries.createPriceLine({
+          price: lastPrice,
+          color: '#2196F3',
+          lineWidth: 0,
+          lineStyle: 2, // dashed
+          axisLabelVisible: true,
+          title: `${lastPrice.toFixed(2)} | ${timeText}`,
+        });
+      }
+    }
+
+    // Update price line every second
+    setInterval(updatePriceLineWithTimer, 1000);
+    updatePriceLineWithTimer(); // Initial call
+  </script>
+</body>
+</html>

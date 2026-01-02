@@ -248,7 +248,7 @@ class ScriptRunner:
 
         self.plot_writer = CSVWriter(
             plot_path, float_fmt=f".8g"
-        ) if plot_path and not self.script.realtime_trade else None
+        ) if plot_path else None
         self.strat_writer = CSVWriter(strat_path, headers=(
             "Metric",
             f"All {syminfo.currency}", "All %",
@@ -605,6 +605,16 @@ class ScriptRunner:
         self.last_price = None
         self.equity_curve = []
         self.tz = None
-        self.plot_writer = None
-        self.strat_writer = None
-        self.trades_writer = None
+        # Close writers to flush buffered data
+        try:
+            if getattr(self, "plot_writer", None) is not None:
+                self.plot_writer.close()
+                self.plot_writer = None
+            if getattr(self, "strat_writer", None) is not None:
+                self.strat_writer.close()
+                self.strat_writer = None
+            if getattr(self, "trades_writer", None) is not None:
+                self.trades_writer.close()
+                self.trades_writer = None
+        except Exception:
+            pass

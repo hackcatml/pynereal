@@ -103,3 +103,7 @@ class AppendableIterable(Generic[T]):
                 else:
                     return
             yield item
+
+    @property
+    def q(self):
+        return self._q
