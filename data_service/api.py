@@ -52,7 +52,7 @@ def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dic
                         # Always append data point (convert "" to None for JSON null)
                         series_data.append({
                             "time": int(candle.timestamp),
-                            "value": None if value == "" else float(value)
+                            "value": None if (value == "" or value is None) else float(value)
                         })
 
                     result.append({

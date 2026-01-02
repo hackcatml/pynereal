@@ -277,6 +277,7 @@
               return;
             }
 
+            // Update open price if necessary
             if (msg.data.time === lastOpenPrice.time && lastOpenPrice.value > 0 && msg.data.open != parseFloat(lastOpenPrice.value.toFixed(2))) {
                 // console.log(`Updating open price: ${msg.data.open} --> ${lastOpenPrice.value.toFixed(2)}`);
                 msg.data.open = lastOpenPrice.value;
@@ -292,6 +293,28 @@
           } else if (msg.type === "last_bar_open_fix") {
             lastOpenPrice.time = msg.data.time;
             lastOpenPrice.value = msg.data.open;
+
+            // Fix entry marker if price differs from open
+            const entryIndex = entryMarkerData.findIndex(m => m.time === msg.data.time);
+            if (entryIndex !== -1) {
+              const priceDiff = Math.abs(entryMarkerData[entryIndex].value - msg.data.open);
+              if (priceDiff > 0.01) {
+                console.log(`Fix entry marker: ${entryMarkerData[entryIndex].value} --> ${msg.data.open}`);
+                entryMarkerData[entryIndex].value = msg.data.open;
+                entryMarkerSeries.setData(entryMarkerData);
+              }
+            }
+
+            // Fix close marker if price differs from open
+            const closeIndex = closeMarkerData.findIndex(m => m.time === msg.data.time);
+            if (closeIndex !== -1) {
+              const priceDiff = Math.abs(closeMarkerData[closeIndex].value - msg.data.open);
+              if (priceDiff > 0.01) {
+                console.log(`Fix close marker: ${closeMarkerData[closeIndex].value} --> ${msg.data.open}`);
+                closeMarkerData[closeIndex].value = msg.data.open;
+                closeMarkerSeries.setData(closeMarkerData);
+              }
+            }
           } else if (msg.type === "trade_entry") {
             // Skip markers before first bar
             if (firstBarTime !== null && msg.time < firstBarTime) {

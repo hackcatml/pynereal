@@ -110,7 +110,7 @@ async def main() -> None:
                                                     "type": "plot_data",
                                                     "title": title,
                                                     "time": int(candle.timestamp),
-                                                    "value": None if value == "" else float(value)
+                                                    "value": None if (value == "" or value is None) else float(value)
                                                 }
                                                 await ws_manager.broadcast_json(plot_data_event)
                                             reader.close()
