@@ -15,6 +15,7 @@ class PlotModule(CallableModule):
     # Constants
     #
 
+    # Plot styles
     style_area = PlotEnum()
     style_areabr = PlotEnum()
     style_circles = PlotEnum()
@@ -25,6 +26,11 @@ class PlotModule(CallableModule):
     style_linebr = PlotEnum()
     style_stepline = PlotEnum()
     style_stepline_diamond = PlotEnum()
+
+    # Plotchar locations
+    location_belowbar = PlotEnum()
+    location_abovebar = PlotEnum()
+    location_absolute = PlotEnum()
 
     #
     # Functions
@@ -43,6 +49,9 @@ def plot(series: Any, title: str | None = None, color: Any = None, linewidth: in
     :param series: The value to plot in every bar
     :param title: The title of the plot, if multiple plots are created with the same title, a
                   number will be appended
+    :param color: The color of the plot, can be a string or a Color object
+    :param linewidth: The width of the plot line
+    :param style: The style of the plot, can be a PlotEnum value or a string
     :return: The a Plot object, can be used to reference the plot in other functions
     """
     from .. import lib

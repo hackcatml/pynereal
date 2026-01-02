@@ -10,7 +10,8 @@ from pynecore.core.csv_file import CSVReader
 
 
 def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dict[str, Any]] = None,
-                    plot_options: Dict[str, Dict[str, Any]] = None) -> APIRouter:
+                    plot_options: Dict[str, Dict[str, Any]] = None,
+                    plotchar_history: List[Dict[str, Any]] = None) -> APIRouter:
     r = APIRouter()
 
     @r.get("/api/trades")
@@ -19,6 +20,13 @@ def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dic
         if trades_history is None:
             return JSONResponse([])
         return JSONResponse(trades_history)
+
+    @r.get("/api/plotchar")
+    def get_plotchar() -> JSONResponse:
+        """Get all stored plotchar events"""
+        if plotchar_history is None:
+            return JSONResponse([])
+        return JSONResponse(plotchar_history)
 
     @r.get("/api/plot")
     def get_plot(limit: int = 2000) -> JSONResponse:

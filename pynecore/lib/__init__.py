@@ -242,8 +242,88 @@ def plotcandle(*_, **__):
     ...
 
 
-def plotchar(series: Any, title: str | None = None, *_, **__):
-    plot(series, title)
+def plotchar(series: Any, title: str | None = None, char: str = "•", text: str = "",
+             location: Any = None, color: Any = None, size: Any = None, *_, **__):
+    """
+    Plot character markers on the chart when condition is true
+
+    :param series: Boolean condition or series value - when True/non-zero, displays the marker
+    :param title: Optional title for the marker series
+    :param char: Character to display (e.g., "▴", "▾", "•")
+    :param text: Text label to display with the marker
+    :param location: Location relative to bar (location.belowbar, location.abovebar, location.absolute)
+    :param color: Marker color
+    :param size: Marker size (size.tiny, size.small, size.normal, size.large, size.huge)
+    """
+    # If series is False or 0, don't plot anything
+    if not series:
+        return
+
+    # Only allow calling from main function
+    if bar_index == 0:
+        if sys._getframe(1).f_code.co_name != 'main':
+            raise RuntimeError("The plotchar function can only be called from the main function!")
+
+    # Ensure unique title
+    if title is None:
+        title = 'PlotChar'
+
+    # No plotchar callback if the bar is progressing
+    if bar_index == _script.last_bar_index:
+        return
+
+    # Call plotchar callback if exists
+    if _script and hasattr(_script, 'on_plotchar_callback') and _script.on_plotchar_callback:
+        try:
+            from ..types.color import Color
+
+            # Convert color to hex string
+            color_str = None
+            if color is not None:
+                if isinstance(color, Color):
+                    color_str = f'#{color.r:02X}{color.g:02X}{color.b:02X}'
+                else:
+                    color_str = str(color)
+
+            # Convert location to string
+            location_str = 'belowBar'  # default
+            if location is not None:
+                # Check if it's a plot.location enum
+                if hasattr(location, '__class__') and 'PlotEnum' in str(location.__class__):
+                    # Map enum value to location string
+                    loc_val = int(location)
+                    if loc_val == 10:  # location_belowbar
+                        location_str = 'belowBar'
+                    elif loc_val == 11:  # location_abovebar
+                        location_str = 'aboveBar'
+                    elif loc_val == 12:  # location_absolute
+                        location_str = 'absolute'
+                else:
+                    location_str = str(location)
+
+            # Convert size to number
+            size_val = 1  # default (normal)
+            if size is not None:
+                if hasattr(size, '__class__') and 'SizeEnum' in str(size.__class__):
+                    size_val = int(size)
+                elif isinstance(size, (int, float)):
+                    size_val = size
+
+            # Get current timestamp
+            timestamp = _time
+
+            _script.on_plotchar_callback({
+                'title': title,
+                'time': int(timestamp / 1000),  # Convert to seconds
+                'char': char,
+                'text': text,
+                'location': location_str,
+                'color': color_str,
+                'size': size_val
+            })
+        except Exception:
+            # Silently ignore callback errors
+            pass
 
 
 def plotshape(*_, **__):

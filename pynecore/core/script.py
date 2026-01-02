@@ -106,6 +106,7 @@ class Script:
 
     position: _strategy.Position | None = None
     on_plot_callback: Callable[[dict], None] | None = None
+    on_plotchar_callback: Callable[[dict], None] | None = None
 
     _modified: set[str] = field(default_factory=set)
 
