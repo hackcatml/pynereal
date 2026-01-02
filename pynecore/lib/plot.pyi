@@ -6,6 +6,7 @@ from ..types.plot import PlotEnum
 
 
 class PlotModule(CallableModule):
+    # Plot styles
     style_area: PlotEnum
     style_areabr: PlotEnum
     style_circles: PlotEnum
@@ -16,6 +17,11 @@ class PlotModule(CallableModule):
     style_linebr: PlotEnum
     style_stepline: PlotEnum
     style_stepline_diamond: PlotEnum
+
+    # Plotchar locations
+    location_belowbar: PlotEnum
+    location_abovebar: PlotEnum
+    location_absolute: PlotEnum
 
     def __call__(self, series: Any, title: str | None = None, *args, **kwargs) -> Plot: ...
 

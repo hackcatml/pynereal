@@ -71,6 +71,12 @@
     const markers = [];
     const markerKeys = new Set(); // Track existing markers to prevent duplicates
     let seriesMarkers = null;
+
+    // Separate arrays for plotchar markers
+    const plotcharMarkers = [];
+    const plotcharMarkerKeys = new Set();
+    let plotcharSeriesMarkers = null;
+
     let firstBarTime = null; // Store first bar time to filter out markers before history
     let timeframeInterval = 60; // Timeframe interval in seconds (will be calculated from OHLCV data)
     let lastBarTime = 0; // Track last bar time to handle out-of-order updates
@@ -148,6 +154,50 @@
         }
       } catch (e) {
         console.error("Failed to load trade history:", e);
+      }
+    }
+
+    // Load plotchar history from server
+    async function loadPlotcharHistory() {
+      try {
+        const resp = await fetch("/api/plotchar");
+        const plotchars = await resp.json();
+
+        plotchars.forEach(msg => {
+          // Skip markers before first bar
+          if (firstBarTime !== null && msg.time < firstBarTime) {
+            return;
+          }
+
+          const markerKey = `plotchar_${msg.time}_${msg.title}`;
+          if (!plotcharMarkerKeys.has(markerKey)) {
+            // Map location string to position
+            let position = 'belowBar';
+            if (msg.location === 'aboveBar') {
+              position = 'aboveBar';
+            } else if (msg.location === 'absolute') {
+              position = 'inBar';
+            }
+
+            // Add marker to chart
+            plotcharMarkers.push({
+              time: msg.time,
+              position: position,
+              color: msg.color || '#2962FF',
+              shape: 'circle',
+              text: msg.text || msg.char,
+              size: msg.size || 1,
+            });
+            plotcharMarkerKeys.add(markerKey);
+          }
+        });
+
+        // Apply plotchar markers if any exist
+        if (plotcharMarkers.length > 0) {
+          plotcharSeriesMarkers = LightweightCharts.createSeriesMarkers(candleSeries, plotcharMarkers);
+        }
+      } catch (e) {
+        console.error("Failed to load plotchar history:", e);
       }
     }
 
@@ -246,8 +296,9 @@
               lastPrice = data[data.length - 1].close;
             }
 
-            // Load trade history and plot data after OHLCV data is loaded
+            // Load trade history, plotchar history, and plot data after OHLCV data is loaded
             await loadTradeHistory();
+            await loadPlotcharHistory();
             await loadPlotData();
             return;
           }
@@ -390,6 +441,44 @@
             }
             seriesMarkers = LightweightCharts.createSeriesMarkers(candleSeries, markers);
             // console.log("Close marker added:", msg);
+          } else if (msg.type === "plotchar") {
+            // Skip markers before first bar
+            if (firstBarTime !== null && msg.time < firstBarTime) {
+              return;
+            }
+
+            // Create unique key for this marker
+            const markerKey = `plotchar_${msg.time}_${msg.title}`;
+
+            // Skip if marker already exists
+            if (plotcharMarkerKeys.has(markerKey)) {
+              return;
+            }
+
+            // Map location string to position
+            let position = 'belowBar';
+            if (msg.location === 'aboveBar') {
+              position = 'aboveBar';
+            } else if (msg.location === 'absolute') {
+              position = 'inBar';
+            }
+
+            // Add plotchar marker
+            plotcharMarkers.push({
+              time: msg.time,
+              position: position,
+              color: msg.color || '#2962FF',
+              shape: 'circle',
+              text: msg.text || msg.char,
+              size: msg.size || 1,
+            });
+            plotcharMarkerKeys.add(markerKey);
+
+            // Update plotchar markers using createSeriesMarkers
+            if (plotcharSeriesMarkers) {
+              plotcharSeriesMarkers.setMarkers([]);
+            }
+            plotcharSeriesMarkers = LightweightCharts.createSeriesMarkers(candleSeries, plotcharMarkers);
           } else if (msg.type === "plot_data") {
             // Update plot series with new data point
             const { title, time, value } = msg;

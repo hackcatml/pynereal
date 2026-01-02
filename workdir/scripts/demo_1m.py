@@ -2,7 +2,7 @@
 @pyne
 """
 from pynecore import Persistent
-from pynecore.lib import script, close, ta, strategy, time, plot, color, na
+from pynecore.lib import script, close, ta, strategy, time, plot, color, na, plotchar
 from pynecore.types import Series
 
 
@@ -44,3 +44,6 @@ def main():
     plot(bbUpper, title="BB Upper", color=color.red, linewidth=1, style=plot.style_line)
     plot(bbBasis, title="BB Basis", color=color.blue, linewidth=1, style=plot.style_line)
     plot(bbLower, title="BB Lower", color=color.green, linewidth=1, style=plot.style_line)
+
+    # Plotchar Test
+    plotchar(rsi < 30, title="RSI Low", text="RSI Low", location=plot.location_belowbar, color=color.green)

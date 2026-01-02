@@ -29,10 +29,12 @@ async def main() -> None:
     trades_history = []
     # Store plot options (title -> options mapping)
     plot_options = {}
+    # Store plotchar events in memory
+    plotchar_history = []
 
     app = FastAPI()
     app.include_router(build_ui_router())
-    app.include_router(build_api_router(plot_path, ohlcv_path, trades_history, plot_options))
+    app.include_router(build_api_router(plot_path, ohlcv_path, trades_history, plot_options, plotchar_history))
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):
@@ -86,6 +88,11 @@ async def main() -> None:
                             # Store trade event in history
                             if event not in trades_history:
                                 trades_history.append(event)
+                            await ws_manager.broadcast_json(event)
+                        elif msg_type == "plotchar":
+                            # Store plotchar event in history
+                            if event not in plotchar_history:
+                                plotchar_history.append(event)
                             await ws_manager.broadcast_json(event)
                         elif msg_type == "plot_options":
                             # Store plot options from runner_service

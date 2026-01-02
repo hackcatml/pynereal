@@ -25,6 +25,8 @@ DATA_WS = "ws://127.0.0.1:9001/ws"
 trade_event_queue = deque()
 # Dictionary for plot options (title -> options mapping)
 plot_options = {}
+# Event queue for plotchar events
+plotchar_event_queue = deque()
 
 
 def on_entry_event(trade):
@@ -70,6 +72,21 @@ def on_plot_event(plot_data):
 
     # Store or update plot options
     plot_options[title] = new_options
+
+
+def on_plotchar_event(plotchar_data):
+    """Callback for plotchar events"""
+    event = {
+        "type": "plotchar",
+        "title": plotchar_data.get('title'),
+        "time": plotchar_data.get('time'),
+        "char": plotchar_data.get('char'),
+        "text": plotchar_data.get('text'),
+        "location": plotchar_data.get('location'),
+        "color": plotchar_data.get('color'),
+        "size": plotchar_data.get('size')
+    }
+    plotchar_event_queue.append(event)
 
 def ready_scrip_runner(script_path: Path, data_path: Path, data_toml_path: Path) -> tuple[ScriptRunner,
 AppendableIterable[OHLCV], OHLCVReader] | None:
@@ -133,6 +150,8 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
                     runner.script.position.on_close_callback = on_close_event
                     # Register plot event callback
                     runner.script.on_plot_callback = on_plot_event
+                    # Register plotchar event callback
+                    runner.script.on_plotchar_callback = on_plotchar_event
             finally:
                 # Remove lib directory from Python path
                 if lib_path_added:
@@ -290,6 +309,14 @@ async def main():
                 except Exception as e:
                     print(f"[runner] Failed to send trade events: {e}")
 
+            # Send plotchar events to data_service
+            if plotchar_event_queue:
+                try:
+                    await ws.send(json.dumps(list(plotchar_event_queue)))
+                    plotchar_event_queue.clear()
+                except Exception as e:
+                    print(f"[runner] Failed to send plotchar events: {e}")
+
             # Send plot options to data_service
             if plot_options:
                 try:
@@ -385,6 +412,14 @@ async def main():
                         trade_event_queue.clear()
                     except Exception as e:
                         print(f"[runner] Failed to send trade events: {e}")
+
+                # Send plotchar events to data_service
+                if plotchar_event_queue:
+                    try:
+                        await ws.send(json.dumps(list(plotchar_event_queue)))
+                        plotchar_event_queue.clear()
+                    except Exception as e:
+                        print(f"[runner] Failed to send plotchar events: {e}")
 
                 # Send plot options to data_service
                 if plot_options:
