@@ -22,6 +22,7 @@ def main():
     entered1Time: Persistent[int] = 0
     lastTpTime: Persistent[int] = 0
     avgEntry: Persistent[float] = 0.0
+    bbBasis, bbUpper, bbLower = ta.bb(close, 20, 2)
 
     # Execute the strategy
     if not entered1 and rsi < 70 and (time - lastTpTime) >= 1 * 60 * 1000 * 5:
@@ -39,4 +40,7 @@ def main():
                         comment=f"Close 1 at price: {close}", record=False)
 
     # Plot Example
-    plot(avgEntry if entered1 else na, title="avgEntry", color=color.yellow, linewidth=1, style=plot.style_cross)
+    # plot(avgEntry if entered1 else na, title="avgEntry", color=color.yellow, linewidth=1, style=plot.style_cross)
+    plot(bbUpper, title="BB Upper", color=color.red, linewidth=1, style=plot.style_line)
+    plot(bbBasis, title="BB Basis", color=color.blue, linewidth=1, style=plot.style_line)
+    plot(bbLower, title="BB Lower", color=color.green, linewidth=1, style=plot.style_line)
