@@ -58,7 +58,7 @@ python runner_service/main.py
 
 You'll see webhook alerts when `strategy.entry` or `strategy.close` triggers\
 Also, you can see the strategy running on the chart at http://127.0.0.1:9001/ in your browser in real time.
-<img src="https://github.com/user-attachments/assets/456a6f74-031f-4182-b464-dba794807587" width=80%>
+<img src="https://github.com/user-attachments/assets/456a6f74-031f-4182-b464-dba794807587">
 
 
 ---
