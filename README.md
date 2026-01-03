@@ -39,7 +39,7 @@ source setup.sh
 
 ### Run Demo Strategy
 
-The `demo_1m.py` script runs on **Bitget BTC/USDT Futures** in real-time on the 1-minute timeframe.
+The `workdir/scripts/demo_1m.py` script runs on **Bitget BTC/USDT Futures** in real-time on the 1-minute timeframe.
 
 **Terminal 1** — Start webhook server:
 ```bash
@@ -74,11 +74,6 @@ When you backtest your strategy, set `enabled = false` under the `realtime` sect
 5. Finally, start the program:\
 `python data_service/main.py` \
 `python runner_service/main.py`
-
-Notes:\
-Every time you start the program, it will download the OHLCV data file again from the same starting point if a data file already downloaded exists in the `workdir/data` directory.
-If not, it will download two months of data up to the current time.\
-If it's the 1m timeframe, it always downloads one month of data.
 
 ---
 
