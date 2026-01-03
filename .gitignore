@@ -15,3 +15,5 @@ workdir/data/ccxt*.toml
 workdir/scripts/*
 !workdir/scripts/demo.py
 !workdir/scripts/demo_1m.py
+!workdir/scripts/lib/
+!workdir/scripts/lib/**
