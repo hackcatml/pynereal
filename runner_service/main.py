@@ -96,69 +96,73 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
     # Get symbol info for the data
     syminfo = SymInfo.load_toml(data_toml_path)
 
-    # Open data file
-    with OHLCVReader(data_path) as reader:
-        time_from = reader.start_datetime
-        time_to = reader.end_datetime
+    # Open data file (don't use 'with' - we return the reader and close it later in main())
+    reader = OHLCVReader(data_path)
+    reader.open()
+    time_from = reader.start_datetime
+    time_to = reader.end_datetime
 
-        # Get the iterator
-        gaps = sum(1 for ohlcv in reader if ohlcv.volume < 0)
-        size = reader.get_size(int(time_from.timestamp()), int(time_to.timestamp()))
-        if gaps > 0:
-            size = size - gaps
-        ohlcv_iter: Iterator[OHLCV] = reader.read_from(int(time_from.timestamp()), int(time_to.timestamp()))
-        # Prepare a mutable iterator.
+    # Get the iterator
+    gaps = sum(1 for ohlcv in reader if ohlcv.volume < 0)
+    size = reader.get_size(int(time_from.timestamp()), int(time_to.timestamp()))
+    if gaps > 0:
+        size = size - gaps
+    ohlcv_iter: Iterator[OHLCV] = reader.read_from(int(time_from.timestamp()), int(time_to.timestamp()))
+    # Prepare a mutable iterator.
+    if ohlcv_iter is not None:
         stream: AppendableIterable[OHLCV] = AppendableIterable(ohlcv_iter, feed_in_background=True)
+    else:
+        return None
 
-        from pynecore.cli.app import app_state
-        # Add lib directory to Python path for library imports
-        lib_dir = app_state.scripts_dir / "lib"
-        lib_path_added = False
-        if lib_dir.exists() and lib_dir.is_dir():
-            sys.path.insert(0, str(lib_dir))
-            lib_path_added = True
+    from pynecore.cli.app import app_state
+    # Add lib directory to Python path for library imports
+    lib_dir = app_state.scripts_dir / "lib"
+    lib_path_added = False
+    if lib_dir.exists() and lib_dir.is_dir():
+        sys.path.insert(0, str(lib_dir))
+        lib_path_added = True
 
-            try:
-                #################################### Module calculation ####################################
-                # bb1d / weekly high, low calculation
-                from modules.bb1d_calc import get_bb1d_lower
-                from modules.weekly_hl_calc import get_weekly_high_low
-                bb1d_lower = get_bb1d_lower(str(data_path), period=20, mult=2.0,
-                                            lookahead_on=True)
-                macro_high, macro_low = get_weekly_high_low(str(data_path), ago=2, session_offset_hours=9,
-                                                            lookahead_on=True)
-                #################################### Module calculation ####################################
+        try:
+            #################################### Module calculation ####################################
+            # bb1d / weekly high, low calculation
+            from modules.bb1d_calc import get_bb1d_lower
+            from modules.weekly_hl_calc import get_weekly_high_low
+            bb1d_lower = get_bb1d_lower(str(data_path), period=20, mult=2.0,
+                                        lookahead_on=True)
+            macro_high, macro_low = get_weekly_high_low(str(data_path), ago=2, session_offset_hours=9,
+                                                        lookahead_on=True)
+            #################################### Module calculation ####################################
 
-                # Create script runner (this is where the import happens)
-                config_dir = app_state.config_dir
-                plot_path = app_state.output_dir / f"{script_path.stem}.csv"
-                with open(config_dir / "realtime_trade.toml", "rb") as f:
-                    realtime_config = tomllib.load(f)
-                    runner = ScriptRunner(script_path, stream, syminfo,
-                                          last_bar_index=size - 1,
-                                          plot_path=plot_path, strat_path=None, trade_path=None,
-                                          realtime_config=realtime_config,
-                                          custom_inputs={
-                                                "bb1d_lower": bb1d_lower,
-                                                "macro_high": macro_high,
-                                                "macro_low": macro_low
-                                          })
-                    runner.init_step()
+            # Create script runner (this is where the import happens)
+            config_dir = app_state.config_dir
+            plot_path = app_state.output_dir / f"{script_path.stem}.csv"
+            with open(config_dir / "realtime_trade.toml", "rb") as f:
+                realtime_config = tomllib.load(f)
+                runner = ScriptRunner(script_path, stream, syminfo,
+                                      last_bar_index=size - 1,
+                                      plot_path=plot_path, strat_path=None, trade_path=None,
+                                      realtime_config=realtime_config,
+                                      custom_inputs={
+                                            "bb1d_lower": bb1d_lower,
+                                            "macro_high": macro_high,
+                                            "macro_low": macro_low
+                                      })
+                runner.init_step()
 
-                    # Register trade event callbacks
-                    runner.script.position.on_entry_callback = on_entry_event
-                    runner.script.position.on_close_callback = on_close_event
-                    # Register plot event callback
-                    runner.script.on_plot_callback = on_plot_event
-                    # Register plotchar event callback
-                    runner.script.on_plotchar_callback = on_plotchar_event
-            finally:
-                # Remove lib directory from Python path
-                if lib_path_added:
-                    sys.path.remove(str(lib_dir))
+                # Register trade event callbacks
+                runner.script.position.on_entry_callback = on_entry_event
+                runner.script.position.on_close_callback = on_close_event
+                # Register plot event callback
+                runner.script.on_plot_callback = on_plot_event
+                # Register plotchar event callback
+                runner.script.on_plotchar_callback = on_plotchar_event
+        finally:
+            # Remove lib directory from Python path
+            if lib_path_added:
+                sys.path.remove(str(lib_dir))
 
-            # return reader too. So we can close it later
-            return runner, stream, reader
+        # return reader too. So we can close it later
+        return runner, stream, reader
 
 
 def bar_list_to_ohlcv(bar: list) -> OHLCV:
@@ -274,7 +278,14 @@ async def main():
                 continue
 
             # Ready runner + stream
-            runner, stream, reader = ready_scrip_runner(script_path, ohlcv_path, toml_path)
+            result = ready_scrip_runner(script_path, ohlcv_path, toml_path)
+            if result is None:
+                from datetime import datetime
+                print(f"[{datetime.now().strftime("%y-%m-%d %H:%M:%S")}] [runner] failed to prepare runner")
+                continue
+            else:
+                runner, stream, reader = result
+                result = None
 
             # print("=== Pre-run start (up to the last bar) ===")
             size = runner.last_bar_index + 1
