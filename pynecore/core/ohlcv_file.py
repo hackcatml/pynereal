@@ -11,6 +11,7 @@ The file is a binary file with the following 24 bytes structure:
 
 The .ohlcv format cannot have gaps in it. All gaps are filled with the previous close price and -1 volume.
 """
+import sys
 from typing import Iterator, cast
 
 import csv
@@ -1386,6 +1387,8 @@ class OHLCVReader:
         self.path = str(path)
         self._file = None
         self._mmap = None
+        # print(f"Called from: {sys._getframe(1).f_code.co_name}")
+        # print(f"[{datetime.now().strftime("%y-%m-%d %H:%M:%S")}] [OHLCVReader] __init__: mmap initialized to None for {path}")
         self._size = 0
         self._start_timestamp = None
         self._interval = None
@@ -1475,12 +1478,15 @@ class OHLCVReader:
                 pass
 
             self._mmap = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
+            # print(f"[{datetime.now().strftime("%y-%m-%d %H:%M:%S")}] [OHLCVReader] open: mmap created for {self.path}")
             self._size = os.path.getsize(self.path) // RECORD_SIZE
 
             if self._size >= 2:
                 self._start_timestamp = struct.unpack('I', cast(Buffer, self._mmap[0:4]))[0]
                 second_timestamp = struct.unpack('I', cast(Buffer, self._mmap[RECORD_SIZE:RECORD_SIZE + 4]))[0]
                 self._interval = second_timestamp - self._start_timestamp
+        else:
+            print(f"[{datetime.now().strftime("%y-%m-%d %H:%M:%S")}] [OHLCVReader] open: File is empty, mmap remains None for {self.path}")
 
         return self
 
@@ -1491,14 +1497,17 @@ class OHLCVReader:
         for pos in range(self._size):
             yield self.read(pos)
 
-    def read(self, position: int) -> OHLCV:
+    def read(self, position: int) -> OHLCV | None:
         """
         Read a single candle at given position
         """
         if position < 0 or position >= self._size:
             raise IndexError("Position out of range")
 
-        assert self._mmap is not None
+        # assert self._mmap is not None
+        if self._mmap is None:
+            # print(f"[{datetime.now().strftime("%y-%m-%d %H:%M:%S")}] [OHLCVReader] read: mmap is None for {self.path}")
+            return None
 
         offset = position * RECORD_SIZE
         data = struct.unpack(STRUCT_FORMAT, self._mmap[offset:offset + RECORD_SIZE])
@@ -1524,10 +1533,11 @@ class OHLCVReader:
         # Yield the calculated range
         for pos in range(start_pos, end_pos):
             ohlcv = self.read(pos)
-            # Skip gaps if needed
-            if skip_gaps and ohlcv.volume < 0:
-                continue
-            yield ohlcv
+            if ohlcv is not None:
+                # Skip gaps if needed
+                if skip_gaps and ohlcv.volume < 0:
+                    continue
+                yield ohlcv
 
     def close(self):
         """
@@ -1536,6 +1546,7 @@ class OHLCVReader:
         if self._mmap:
             self._mmap.close()
             self._mmap = None
+            # print(f"[{datetime.now().strftime("%y-%m-%d %H:%M:%S")}] [OHLCVReader] close: mmap closed and set to None for {self.path}")
         if self._file:
             self._file.close()
             self._file = None

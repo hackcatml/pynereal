@@ -48,11 +48,13 @@ def send_webhook_message(webhook_url: str, message: str):
         except Exception as e:
             print(f"Webhook error: {e}")
 
-    if telegram_notification():
-        url = f"https://api.telegram.org/bot{lib.script.telegram_token}/sendMessage"
+    tg_enabled, tg_token, tg_chat_id = telegram_notification()
+    if tg_enabled:
+        url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
+        script_title = get_script_title()
         payload = {
-            "chat_id": lib.script.telegram_chat_id,
-            "text": f"🚨 [{lib.script.title}] {json.dumps(json_alert_message).replace('\"', '')}",
+            "chat_id": tg_chat_id,
+            "text": f"🚨 [{script_title}] {json.dumps(json_alert_message).replace('\"', '')}",
             # "parse_mode": "Markdown"  # 굵게/이탤릭 등 쓰고 싶으면 선택
         }
         try:
@@ -2033,11 +2035,16 @@ def get_webhook_url() -> str | NA[str]:
 def get_custom_inputs() -> dict | NA[dict]:
     return lib._script.custom_inputs
 
+# noinspection PyProtectedMember
+@module_property
+def get_script_title() -> str | NA[str]:
+    return lib._script.title
+
 
 # noinspection PyProtectedMember
 @module_property
-def telegram_notification() -> bool | NA[bool]:
-    return lib._script.telegram_notification
+def telegram_notification() -> tuple[bool | NA[bool], str | NA[str], str | NA[str]]:
+    return lib._script.telegram_notification, lib._script.telegram_token, lib._script.telegram_chat_id
 
 
 # noinspection PyProtectedMember
