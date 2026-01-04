@@ -2,6 +2,7 @@ venv
 tests
 .idea
 __pycache__
+.claude
 test.py
 test2.py
 .env
