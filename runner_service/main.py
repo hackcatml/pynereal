@@ -19,7 +19,7 @@ from pynecore.core.script_runner import ScriptRunner
 from pynecore.core.syminfo import SymInfo
 from pynecore.types.ohlcv import OHLCV
 
-DATA_WS = "ws://127.0.0.1:9001/ws"
+DATA_WS = ""
 
 # Event queue for trade events
 trade_event_queue = deque()
@@ -244,6 +244,11 @@ async def main():
     script_path = app_state.scripts_dir / script_name
     if not script_path.exists():
         raise RuntimeError(f"script not found: {script_path}")
+
+    data_service_addr = realtime_section.get("data_service_addr", "")
+    data_service_port = int(data_service_addr.split(":")[1]) if data_service_addr else 9001
+    global DATA_WS
+    DATA_WS = f"ws://127.0.0.1:{data_service_port}/ws"
 
     ctx: Optional[RunnerCtx] = None
 
