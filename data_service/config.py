@@ -17,8 +17,8 @@ class DataServiceConfig:
     exchange: str
     symbol: str
     timeframe: str
-    host: str = "127.0.0.1"
-    port: int = 9001
+    host: str
+    port: int
 
 
 def load_config() -> DataServiceConfig:
@@ -37,11 +37,15 @@ def load_config() -> DataServiceConfig:
     exchange = realtime.get("exchange", "")
     symbol = realtime.get("symbol", "")
     timeframe = realtime.get("timeframe", "")
+    data_service_addr = realtime.get("data_service_addr", "")
+    data_service_host = data_service_addr.split(":")[0] if data_service_addr else "0.0.0.0"
+    data_service_port = int(data_service_addr.split(":")[1]) if data_service_addr else 9001
 
     if not provider or not exchange or not symbol or not timeframe:
         raise RuntimeError("Missing provider/exchange/symbol/timeframe in realtime_trade.toml")
 
     return DataServiceConfig(
         pyne_section=pyne, realtime_section=realtime, webhook_section=webhook,
-        provider=provider, exchange=exchange, symbol=symbol, timeframe=timeframe
+        provider=provider, exchange=exchange, symbol=symbol, timeframe=timeframe,
+        host=data_service_host, port=data_service_port
     )

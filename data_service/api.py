@@ -11,7 +11,8 @@ from pynecore.core.csv_file import CSVReader
 
 def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dict[str, Any]] = None,
                     plot_options: Dict[str, Dict[str, Any]] = None,
-                    plotchar_history: List[Dict[str, Any]] = None) -> APIRouter:
+                    plotchar_history: List[Dict[str, Any]] = None,
+                    chart_info: Dict[str, Any] | None = None) -> APIRouter:
     r = APIRouter()
 
     @r.get("/api/trades")
@@ -48,7 +49,7 @@ def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dic
 
                 # Limit the number of candles
                 start_idx = max(0, len(candles) - limit)
-                candles = candles[start_idx:]
+                candles = candles[start_idx:-1]
 
                 # Build plot data for each title
                 for title, options in plot_options.items():
@@ -99,5 +100,9 @@ def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dic
                     }
                 )
         return JSONResponse(out)
+
+    @r.get("/api/info")
+    def get_info() -> JSONResponse:
+        return JSONResponse(chart_info or {})
 
     return r
