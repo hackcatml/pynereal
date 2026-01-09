@@ -31,14 +31,27 @@ async def main() -> None:
     plot_options = {}
     # Store plotchar events in memory
     plotchar_history = []
+    client_roles = {}
+    runner_count = 0
 
     app = FastAPI()
     app.include_router(build_ui_router())
-    app.include_router(build_api_router(plot_path, ohlcv_path, trades_history, plot_options, plotchar_history))
+    chart_info = {
+        "exchange": cfg.exchange,
+        "symbol": cfg.symbol,
+        "timeframe": cfg.timeframe,
+        "provider": cfg.provider,
+    }
+    app.include_router(build_api_router(plot_path, ohlcv_path, trades_history, plot_options, plotchar_history, chart_info))
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):
+        nonlocal runner_count
         await ws_manager.connect(ws)
+        client_roles[ws] = None
+        # Inform new clients if a runner is already connected.
+        if runner_count > 0:
+            await ws.send_json({"type": "runner_connected"})
 
         # Send pending prerun event if exists (for runner_service that connects after history download)
         async with state.lock:
@@ -62,7 +75,13 @@ async def main() -> None:
 
                     for event in events:
                         msg_type = event.get("type")
-                        if msg_type == "last_bar_open_fix":
+                        if msg_type == "client_hello":
+                            role = event.get("role")
+                            client_roles[ws] = role
+                            if role == "runner":
+                                runner_count += 1
+                                await ws_manager.broadcast_json({"type": "runner_connected"})
+                        elif msg_type == "last_bar_open_fix":
                             last_bar_index = event.get("last_bar_index", -1)
                             if last_bar_index > 0:
                                 try:
@@ -136,6 +155,13 @@ async def main() -> None:
             await ws_manager.disconnect(ws)
         except Exception:
             await ws_manager.disconnect(ws)
+        finally:
+            role = client_roles.pop(ws, None)
+            if role == "runner":
+                runner_count -= 1
+                if runner_count <= 0:
+                    runner_count = 0
+                    await ws_manager.broadcast_json({"type": "runner_disconnected"})
 
     async def broadcast_bar(bar: list) -> None:
         payload = {

@@ -6,13 +6,28 @@
   <style>
     body { margin:0; padding:0; background:#111; color:#eee; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
     #chart { width:100vw; height:100vh; }
+    #chart-info {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      z-index: 10;
+      padding: 6px 10px;
+      background: rgba(255, 255, 255, 0.9);
+      color: #000000;
+      font-size: 12px;
+      border-radius: 6px;
+      letter-spacing: 0.2px;
+    }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.9/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
   <div id="chart"></div>
+  <div id="chart-info">Loading...</div>
   <script>
     const container = document.getElementById("chart");
+    const chartInfo = document.getElementById("chart-info");
+    let baseInfoText = "Loading...";
 
     const chart = LightweightCharts.createChart(container, {
       layout: { background: { color: "#ffffff" }, textColor: "#000000" },
@@ -36,6 +51,19 @@
         priceLineVisible: false, // Hide default price line
       }
     );
+
+    // Volume histogram under candles.
+    const volumeSeries = chart.addSeries(
+      LightweightCharts.HistogramSeries,
+      {
+        color: "#90caf9",
+        priceFormat: { type: "volume" },
+        priceScaleId: "",
+      }
+    );
+    volumeSeries.priceScale().applyOptions({
+      scaleMargins: { top: 0.8, bottom: 0 },
+    });
 
     // Line series for trade entry/close price markers (circles)
     const entryMarkerSeries = chart.addSeries(
@@ -66,6 +94,8 @@
 
     // Map to store plot series (title -> series)
     const plotSeriesMap = new Map();
+    // Track all plot series for cleanup even if titles collide.
+    const plotSeriesList = [];
 
     // Array to store markers
     const markers = [];
@@ -88,6 +118,7 @@
 
     // Load trade history from server
     async function loadTradeHistory() {
+      if (!runnerConnected) return;
       try {
         const resp = await fetch("/api/trades");
         const trades = await resp.json();
@@ -159,6 +190,7 @@
 
     // Load plotchar history from server
     async function loadPlotcharHistory() {
+      if (!runnerConnected) return;
       try {
         const resp = await fetch("/api/plotchar");
         const plotchars = await resp.json();
@@ -203,6 +235,7 @@
 
     // Load plot data from server with retry
     async function loadPlotData() {
+      if (!runnerConnected) return;
       for (let i = 0; i < 30; i++) { // Retry up to 30 seconds
         try {
           const resp = await fetch("/api/plot?limit=100000");
@@ -249,6 +282,7 @@
 
               // Create line series for this plot
               const series = chart.addSeries(LightweightCharts.LineSeries, seriesOptions);
+              plotSeriesList.push(series);
 
               // Set data
               if (data && data.length > 0) {
@@ -279,6 +313,12 @@
           if (Array.isArray(data) && data.length > 0) {
             // Store data in array for later updates
             candleSeries.setData(data);
+            // Volume bars share the same timestamps as candles.
+            volumeSeries.setData(data.map(d => ({
+              time: d.time,
+              value: d.volume,
+              color: d.close >= d.open ? "#26a69a" : "#ef5350",
+            })));
             chart.timeScale().fitContent();
 
             // Store first bar time for marker filtering
@@ -294,6 +334,7 @@
             // Set initial last price
             if (data.length > 0) {
               lastPrice = data[data.length - 1].close;
+              lastOhlcv = data[data.length - 1];
             }
 
             // Load trade history, plotchar history, and plot data after OHLCV data is loaded
@@ -313,6 +354,44 @@
     loadInitialWithRetry();
 
     let ws = null;
+    let runnerConnected = false;
+    function resetChartState(resetCandles = true) {
+      // Keep candles when only the runner disconnects.
+      if (resetCandles) {
+        candleSeries.setData([]);
+        volumeSeries.setData([]);
+      }
+      entryMarkerSeries.setData([]);
+      closeMarkerSeries.setData([]);
+      if (seriesMarkers) {
+        seriesMarkers.setMarkers([]);
+      }
+      if (plotcharSeriesMarkers) {
+        plotcharSeriesMarkers.setMarkers([]);
+      }
+      for (const series of plotSeriesList) {
+        chart.removeSeries(series);
+      }
+      plotSeriesList.length = 0;
+      plotSeriesMap.clear();
+      markers.length = 0;
+      markerKeys.clear();
+      plotcharMarkers.length = 0;
+      plotcharMarkerKeys.clear();
+      entryMarkerData.length = 0;
+      closeMarkerData.length = 0;
+      seriesMarkers = null;
+      plotcharSeriesMarkers = null;
+      firstBarTime = null;
+      timeframeInterval = 60;
+      lastBarTime = 0;
+      lastOpenPrice = { time: 0, value: 0 };
+      lastPrice = 0;
+      if (currentPriceLine && candleSeries.removePriceLine) {
+        candleSeries.removePriceLine(currentPriceLine);
+      }
+      currentPriceLine = null;
+    }
     function connectWS() {
       ws = new WebSocket(`ws://${location.host}/ws`);
 
@@ -321,7 +400,15 @@
       ws.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data);
-          if (msg.type === "bar") {
+          if (msg.type === "runner_disconnected") {
+            // Runner disconnect should not wipe candle history.
+            runnerConnected = false;
+            resetChartState(false);
+          } else if (msg.type === "runner_connected") {
+            // Runner connected; allow initial load.
+            runnerConnected = true;
+            loadInitialWithRetry();
+          } else if (msg.type === "bar") {
             // Check if this is an out-of-order update (confirmed bar after new bar)
             if (msg.data.time < lastBarTime) {
               // console.log(`Skipping out-of-order bar update: ${msg.data.time} < ${lastBarTime}`);
@@ -335,7 +422,13 @@
             }
 
             candleSeries.update(msg.data);
+            volumeSeries.update({
+              time: msg.data.time,
+              value: msg.data.volume,
+              color: msg.data.close >= msg.data.open ? "#26a69a" : "#ef5350",
+            });
             lastBarTime = msg.data.time;
+            lastOhlcv = msg.data;
 
             // Update last price for the price line
             if (msg.data && msg.data.close !== undefined) {
@@ -497,20 +590,91 @@
         }
       };
 
-      ws.onclose = () => setTimeout(connectWS, 1000);
-      ws.onerror = () => { try { ws.close(); } catch {} };
+      ws.onclose = () => {
+        // Socket close resets overlays but preserves candles.
+        resetChartState(false);
+        ws = null;
+        setTimeout(connectWS, 1000);
+      };
+      ws.onerror = () => {
+        // Socket errors reset overlays but keep candles intact.
+        resetChartState(false);
+        try { ws.close(); } catch {}
+      };
     }
 
     connectWS();
+
+    // Load chart meta info (symbol/timeframe/exchange).
+    fetch("/api/info")
+      .then(r => r.json())
+      .then(info => {
+        const exchange = (info.exchange || "Unknown").toUpperCase();
+        const symbol = info.symbol || "Unknown";
+        const timeframe = info.timeframe || "Unknown";
+        baseInfoText = `<strong>${symbol} | ${timeframe} | ${exchange}</strong>`;
+        chartInfo.innerHTML = baseInfoText;
+      })
+      .catch(() => {
+        baseInfoText = "<strong>Unknown | Unknown | Unknown</strong>";
+        chartInfo.innerHTML = baseInfoText;
+      });
+
+    function formatNumber(value, decimals) {
+      if (value == null || Number.isNaN(value)) return "-";
+      return Number(value).toLocaleString(undefined, {
+        minimumFractionDigits: decimals,
+        maximumFractionDigits: decimals,
+      });
+    }
+
+    // Show OHLCV on crosshair.
+    chart.subscribeCrosshairMove(param => {
+      if (!param || !param.time) {
+        if (!lastOhlcv) {
+          chartInfo.innerHTML = baseInfoText;
+          return;
+        }
+        const ohlcvText = `O <span style="color:#d32f2f">${formatNumber(lastOhlcv.open, 1)}</span>` +
+          ` H <span style="color:#d32f2f">${formatNumber(lastOhlcv.high, 1)}</span>` +
+          ` L <span style="color:#d32f2f">${formatNumber(lastOhlcv.low, 1)}</span>` +
+          ` C <span style="color:#d32f2f">${formatNumber(lastOhlcv.close, 1)}</span>` +
+          ` Vol <span style="color:#d32f2f">${formatNumber(lastOhlcv.volume, 2)}</span>`;
+        chartInfo.innerHTML = `${baseInfoText} | ${ohlcvText}`;
+        return;
+      }
+      const bar = param.seriesData.get(candleSeries);
+      const volBar = param.seriesData.get(volumeSeries);
+      if (!bar) {
+        chartInfo.innerHTML = baseInfoText;
+        return;
+      }
+      const volumeValue = volBar ? volBar.value : (lastOhlcv ? lastOhlcv.volume : null);
+      const ohlcvText = `O <span style="color:#d32f2f">${formatNumber(bar.open, 1)}</span>` +
+        ` H <span style="color:#d32f2f">${formatNumber(bar.high, 1)}</span>` +
+        ` L <span style="color:#d32f2f">${formatNumber(bar.low, 1)}</span>` +
+        ` C <span style="color:#d32f2f">${formatNumber(bar.close, 1)}</span>` +
+        ` Vol <span style="color:#d32f2f">${formatNumber(volumeValue, 2)}</span>`;
+      chartInfo.innerHTML = `${baseInfoText} | ${ohlcvText}`;
+    });
 
     // keepalive
     setInterval(() => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send("ping");
     }, 15000);
 
+    // Resize chart when the window size changes.
+    window.addEventListener("resize", () => {
+      chart.applyOptions({
+        width: container.clientWidth,
+        height: container.clientHeight,
+      });
+    });
+
     // Current price line with next candle timer
     let currentPriceLine = null;
     let lastPrice = 0;
+    let lastOhlcv = null;
 
     function updatePriceLineWithTimer() {
       if (timeframeInterval === 0 || lastPrice === 0) return;

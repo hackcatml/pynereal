@@ -190,6 +190,10 @@ async def ws_loop():
     while True:
         try:
             async with websockets.connect(DATA_WS, ping_interval=None) as ws:
+                try:
+                    await ws.send(json.dumps({"type": "client_hello", "role": "runner"}))
+                except Exception:
+                    pass
 
                 async def keepalive():
                     while True:
