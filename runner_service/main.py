@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tomllib
+from script_hash import compute_script_hashes, load_script_hashes, write_script_hashes
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,8 @@ from pynecore.core.syminfo import SymInfo
 from pynecore.types.ohlcv import OHLCV
 
 DATA_WS = ""
+SCRIPT_PATH: Path | None = None
+SCRIPT_HASH_PATH: Path | None = None  # CSV path for persisted script hashes.
 
 # Event queue for trade events
 trade_event_queue = deque()
@@ -27,6 +30,12 @@ trade_event_queue = deque()
 plot_options = {}
 # Event queue for plotchar events
 plotchar_event_queue = deque()
+
+
+def clear_local_state() -> None:
+    trade_event_queue.clear()
+    plotchar_event_queue.clear()
+    plot_options.clear()
 
 
 def on_entry_event(trade):
@@ -87,6 +96,7 @@ def on_plotchar_event(plotchar_data):
         "size": plotchar_data.get('size')
     }
     plotchar_event_queue.append(event)
+
 
 def ready_scrip_runner(script_path: Path, data_path: Path, data_toml_path: Path) -> tuple[ScriptRunner,
 AppendableIterable[OHLCV], OHLCVReader] | None:
@@ -194,6 +204,17 @@ async def ws_loop():
                     await ws.send(json.dumps({"type": "client_hello", "role": "runner"}))
                 except Exception:
                     pass
+                try:
+                    if SCRIPT_PATH and SCRIPT_PATH.exists():
+                        current_hashes = compute_script_hashes(SCRIPT_PATH)
+                        previous_hashes = load_script_hashes(SCRIPT_HASH_PATH)
+                        if current_hashes != previous_hashes:
+                            # Only reset when script contents changed.
+                            await ws.send(json.dumps({"type": "reset_history"}))
+                            clear_local_state()
+                            write_script_hashes(SCRIPT_HASH_PATH, current_hashes)
+                except Exception as e:
+                    print(f"[runner] Failed to send reset_history: {e}")
 
                 async def keepalive():
                     while True:
@@ -248,6 +269,10 @@ async def main():
     script_path = app_state.scripts_dir / script_name
     if not script_path.exists():
         raise RuntimeError(f"script not found: {script_path}")
+    global SCRIPT_PATH
+    SCRIPT_PATH = script_path
+    global SCRIPT_HASH_PATH
+    SCRIPT_HASH_PATH = SCRIPT_PATH.parent / ".script_hash.csv"
 
     data_service_addr = realtime_section.get("data_service_addr", "")
     data_service_port = int(data_service_addr.split(":")[1]) if data_service_addr else 9001
@@ -285,6 +310,16 @@ async def main():
             # Prevent the duplicate prerun_ready event
             if ctx is not None:
                 continue
+
+            try:
+                current_hashes = compute_script_hashes(SCRIPT_PATH)
+                previous_hashes = load_script_hashes(SCRIPT_HASH_PATH)
+                if current_hashes != previous_hashes:
+                    await ws.send(json.dumps({"type": "script_modified"}))
+                    clear_local_state()
+                    write_script_hashes(SCRIPT_HASH_PATH, current_hashes)
+            except Exception as e:
+                print(f"[runner] Failed to send script_modified (prerun): {e}")
 
             # Ready runner + stream
             result = ready_scrip_runner(script_path, ohlcv_path, toml_path)
