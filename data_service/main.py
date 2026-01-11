@@ -41,6 +41,7 @@ async def main() -> None:
         "symbol": cfg.symbol,
         "timeframe": cfg.timeframe,
         "provider": cfg.provider,
+        "script_title": None,
     }
     app.include_router(build_api_router(plot_path, ohlcv_path, trades_history, plot_options, plotchar_history, chart_info))
 
@@ -144,6 +145,13 @@ async def main() -> None:
                                             # print(f"[data_service] Broadcasted plot data")
                                 except Exception as e:
                                     print(f"[data_service] Failed to broadcast plot data: {e}")
+                        elif msg_type == "script_info":
+                            title = event.get("title") or "No title"
+                            chart_info["script_title"] = title
+                            await ws_manager.broadcast_json({
+                                "type": "script_info",
+                                "title": title,
+                            })
                         elif (msg_type == "reset_history") or (msg_type == "script_modified"):
                             # Clear stored history when runner resets or script changes.
                             trades_history.clear()

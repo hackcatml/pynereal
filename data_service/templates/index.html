@@ -3,31 +3,58 @@
 <head>
   <meta charset="UTF-8" />
   <title>OHLCV Chart (data_service)</title>
-  <style>
-    body { margin:0; padding:0; background:#111; color:#eee; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
-    #chart { width:100vw; height:100vh; }
-    #chart-info {
-      position: absolute;
-      top: 12px;
-      left: 12px;
-      z-index: 10;
-      padding: 6px 10px;
-      background: rgba(255, 255, 255, 0.9);
-      color: #000000;
-      font-size: 12px;
-      border-radius: 6px;
-      letter-spacing: 0.2px;
-    }
-  </style>
+  <link rel="stylesheet" href="/static/styles.css" />
   <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.9/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
   <div id="chart"></div>
-  <div id="chart-info">Loading...</div>
+  <div id="chart-info">
+    <div id="chart-info-line">Loading...</div>
+    <div id="chart-info-title-row" class="hidden">
+      <span id="chart-info-title"></span>
+      <div id="toolbar">
+        <button id="alerts-toggle" class="toolbar-btn">Alerts ▾</button>
+        <div id="alerts-menu" class="dropdown">
+          <div class="dropdown-row">
+            <span>Master</span>
+            <label class="toggle-pill">
+              <input type="checkbox" id="alert-master-toggle" checked />
+              <span>ON</span>
+            </label>
+          </div>
+          <div class="dropdown-row">
+            <span>Webhook</span>
+            <label class="toggle-pill">
+              <input type="checkbox" id="alert-webhook-toggle" checked />
+              <span>ON</span>
+            </label>
+          </div>
+          <div class="dropdown-row">
+            <span>Telegram</span>
+            <label class="toggle-pill">
+              <input type="checkbox" id="alert-telegram-toggle" checked />
+              <span>ON</span>
+            </label>
+          </div>
+          <div class="dropdown-footer">
+            <button class="ghost-btn" id="alert-test-send">Test send</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
   <script>
     const container = document.getElementById("chart");
     const chartInfo = document.getElementById("chart-info");
+    const chartInfoLine = document.getElementById("chart-info-line");
+    const chartInfoTitleRow = document.getElementById("chart-info-title-row");
+    const chartInfoTitle = document.getElementById("chart-info-title");
     let baseInfoText = "Loading...";
+    let baseInfoTop = "Loading...";
+    let scriptTitle = "No title";
+    let scriptTitleVisible = false;
+    const alertsToggle = document.getElementById("alerts-toggle");
+    const alertsMenu = document.getElementById("alerts-menu");
 
     const chart = LightweightCharts.createChart(container, {
       layout: { background: { color: "#ffffff" }, textColor: "#000000" },
@@ -119,6 +146,37 @@
     function sleep(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
     }
+
+    function setChartInfo(ohlcvText = null) {
+      const baseLine = ohlcvText
+        ? `${baseInfoTop} | <span class="info-ohlcv">${ohlcvText}</span>`
+        : baseInfoTop;
+      baseInfoText = baseLine;
+      chartInfoLine.innerHTML = baseLine;
+      if (scriptTitleVisible) {
+        chartInfoTitle.textContent = scriptTitle;
+        chartInfoTitleRow.classList.remove("hidden");
+      } else {
+        chartInfoTitle.textContent = "";
+        chartInfoTitleRow.classList.add("hidden");
+      }
+    }
+
+    function toggleAlertsMenu(forceOpen = null) {
+      const shouldOpen = forceOpen === null ? !alertsMenu.classList.contains("open") : forceOpen;
+      alertsMenu.classList.toggle("open", shouldOpen);
+    }
+
+    alertsToggle.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleAlertsMenu();
+    });
+
+    document.addEventListener("click", (e) => {
+      if (!alertsMenu.contains(e.target) && e.target !== alertsToggle) {
+        toggleAlertsMenu(false);
+      }
+    });
 
     // Load trade history from server
     async function loadTradeHistory() {
@@ -476,10 +534,17 @@
             // Runner disconnect should not wipe candle history.
             runnerConnected = false;
             resetChartState(false);
+            scriptTitle = "No title";
+            scriptTitleVisible = false;
+            setChartInfo();
           } else if (msg.type === "runner_connected") {
             // Runner connected; allow initial load.
             runnerConnected = true;
             loadInitialWithRetry();
+          } else if (msg.type === "script_info") {
+            scriptTitle = msg.title || "No title";
+            scriptTitleVisible = true;
+            setChartInfo();
           } else if (msg.type === "bar") {
             // Check if this is an out-of-order update (confirmed bar after new bar)
             if (msg.data.time < lastBarTime) {
@@ -694,12 +759,20 @@
         const exchange = (info.exchange || "Unknown").toUpperCase();
         const symbol = info.symbol || "Unknown";
         const timeframe = info.timeframe || "Unknown";
-        baseInfoText = `<strong>${symbol} | ${timeframe} | ${exchange}</strong>`;
-        chartInfo.innerHTML = baseInfoText;
+        if (info.script_title) {
+          scriptTitle = info.script_title || "No title";
+          scriptTitleVisible = true;
+        } else {
+          scriptTitleVisible = false;
+        }
+        baseInfoTop = `<span class="info-main">${symbol} | ${timeframe} | ${exchange}</span>`;
+        baseInfoText = baseInfoTop;
+        setChartInfo();
       })
       .catch(() => {
-        baseInfoText = "<strong>Unknown | Unknown | Unknown</strong>";
-        chartInfo.innerHTML = baseInfoText;
+        baseInfoTop = "<span class=\"info-main\">Unknown | Unknown | Unknown</span>";
+        baseInfoText = baseInfoTop;
+        setChartInfo();
       });
 
     function formatNumber(value, decimals) {
@@ -714,7 +787,7 @@
     chart.subscribeCrosshairMove(param => {
       if (!param || !param.time) {
         if (!lastOhlcv) {
-          chartInfo.innerHTML = baseInfoText;
+          setChartInfo();
           return;
         }
         const ohlcvText = `O <span style="color:#d32f2f">${formatNumber(lastOhlcv.open, 1)}</span>` +
@@ -722,13 +795,13 @@
           ` L <span style="color:#d32f2f">${formatNumber(lastOhlcv.low, 1)}</span>` +
           ` C <span style="color:#d32f2f">${formatNumber(lastOhlcv.close, 1)}</span>` +
           ` Vol <span style="color:#d32f2f">${formatNumber(lastOhlcv.volume, 2)}</span>`;
-        chartInfo.innerHTML = `${baseInfoText} | ${ohlcvText}`;
+        setChartInfo(ohlcvText);
         return;
       }
       const bar = param.seriesData.get(candleSeries);
       const volBar = param.seriesData.get(volumeSeries);
       if (!bar) {
-        chartInfo.innerHTML = baseInfoText;
+        setChartInfo();
         return;
       }
       const volumeValue = volBar ? volBar.value : (lastOhlcv ? lastOhlcv.volume : null);
@@ -737,7 +810,7 @@
         ` L <span style="color:#d32f2f">${formatNumber(bar.low, 1)}</span>` +
         ` C <span style="color:#d32f2f">${formatNumber(bar.close, 1)}</span>` +
         ` Vol <span style="color:#d32f2f">${formatNumber(volumeValue, 2)}</span>`;
-      chartInfo.innerHTML = `${baseInfoText} | ${ohlcvText}`;
+      setChartInfo(ohlcvText);
     });
 
     // keepalive

@@ -5,8 +5,10 @@ import json
 import os
 import sys
 import tomllib
+import ast
 from script_hash import compute_script_hashes, load_script_hashes, write_script_hashes
 from collections import deque
+from functools import partial
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional
@@ -30,6 +32,66 @@ trade_event_queue = deque()
 plot_options = {}
 # Event queue for plotchar events
 plotchar_event_queue = deque()
+
+
+def extract_script_title(script_path: Path) -> str:
+    try:
+        source = script_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(script_path))
+    except Exception:
+        return "No title"
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            if func.value.id != "script":
+                continue
+            if func.attr not in {"strategy", "indicator", "library"}:
+                continue
+            for kw in node.keywords:
+                if kw.arg == "title" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                    return kw.value.value or "No title"
+            if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                return node.args[0].value or "No title"
+    return "No title"
+
+
+def send_webhook_message(webhook_url: str, message: str, *, script_title: str | None,
+                         telegram_notification: bool, telegram_token: str | None,
+                         telegram_chat_id: str | None) -> None:
+    import json
+    import re
+    import requests
+
+    # Wrap unquoted message fields so JSON parsing succeeds.
+    s = re.sub(r'"message"\s*:\s*(?![{["0-9])([A-Za-z][A-Za-z0-9 ]*)',
+               r'"message": "\1"',
+               message)
+    json_alert_message = json.loads(s).get('message', '')
+    if json_alert_message != '':
+        payload = json_alert_message
+        try:
+            response = requests.post(webhook_url, json=payload, timeout=(5, 10))
+            response.raise_for_status()
+            print("Webhook response:", response.json())
+        except Exception as e:
+            print(f"Webhook error: {e}")
+
+    if telegram_notification and telegram_token and telegram_chat_id:
+        url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
+        payload = {
+            "chat_id": telegram_chat_id,
+            "text": f"🚨 [{script_title}] {json.dumps(json_alert_message).replace('\"', '')}",
+            # "parse_mode": "Markdown"  # 굵게/이탤릭 등 쓰고 싶으면 선택
+        }
+        try:
+            response = requests.get(url, params=payload, timeout=(5, 10))
+            response.raise_for_status()
+            print("Telegram response:", response.json())
+        except Exception as e:
+            print(f"Telegram notification error: {e}")
 
 
 def clear_local_state() -> None:
@@ -98,6 +160,22 @@ def on_plotchar_event(plotchar_data):
     plotchar_event_queue.append(event)
 
 
+def on_alert_event(message: str, runner: ScriptRunner):
+    """Callback for alert events - webhook/telegram notifications"""
+    script = runner.script
+    if not script.webhook_url and not script.telegram_notification:
+        return
+    if script.webhook_url:
+        send_webhook_message(
+            webhook_url=script.webhook_url,
+            message=message,
+            script_title=script.title,
+            telegram_notification=script.telegram_notification,
+            telegram_token=script.telegram_token,
+            telegram_chat_id=script.telegram_chat_id,
+        )
+
+
 def ready_scrip_runner(script_path: Path, data_path: Path, data_toml_path: Path) -> tuple[ScriptRunner,
 AppendableIterable[OHLCV], OHLCVReader] | None:
     """
@@ -162,6 +240,7 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
                 # Register trade event callbacks
                 runner.script.position.on_entry_callback = on_entry_event
                 runner.script.position.on_close_callback = on_close_event
+                runner.script.position.on_alert_callback = partial(on_alert_event, runner=runner)
                 # Register plot event callback
                 runner.script.on_plot_callback = on_plot_event
                 # Register plotchar event callback
@@ -204,6 +283,15 @@ async def ws_loop():
                     await ws.send(json.dumps({"type": "client_hello", "role": "runner"}))
                 except Exception:
                     pass
+                try:
+                    if SCRIPT_PATH and SCRIPT_PATH.exists():
+                        title = extract_script_title(SCRIPT_PATH)
+                        await ws.send(json.dumps({
+                            "type": "script_info",
+                            "title": title,
+                        }))
+                except Exception as e:
+                    print(f"[runner] Failed to send script_info (connect): {e}")
                 try:
                     if SCRIPT_PATH and SCRIPT_PATH.exists():
                         current_hashes = compute_script_hashes(SCRIPT_PATH)
@@ -346,6 +434,15 @@ async def main():
             if runner.plot_writer:
                 runner.plot_writer.flush()
             # print("=== Pre-run finished ===")
+
+            try:
+                title = runner.script.title or "No title"
+                await ws.send(json.dumps({
+                    "type": "script_info",
+                    "title": title,
+                }))
+            except Exception as e:
+                print(f"[runner] Failed to send script_info: {e}")
 
             # Send last bar index to data_service to fix open price
             try:

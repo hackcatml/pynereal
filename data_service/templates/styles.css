@@ -1,0 +1,105 @@
+body { margin:0; padding:0; background:#111; color:#eee; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+#chart { width:100vw; height:100vh; }
+#chart-info {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 10;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #000000;
+  font-size: 14px;
+  border-radius: 6px;
+  letter-spacing: 0.2px;
+}
+#chart-info-line {
+  display: block;
+}
+#chart-info-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+#chart-info-title-row.hidden {
+  display: none;
+}
+#chart-info .info-main {
+  font-size: 16px;
+  font-weight: 700;
+}
+#chart-info .info-ohlcv {
+  font-size: 14px;
+}
+#toolbar {
+  z-index: 12;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  position: relative;
+}
+.toolbar-btn {
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  background: #ffffff;
+  color: #111;
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  letter-spacing: 0.2px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+.toolbar-btn:active {
+  transform: translateY(1px);
+}
+.dropdown {
+  position: absolute;
+  top: 36px;
+  left: 0;
+  min-width: 180px;
+  background: #ffffff;
+  color: #111;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
+  padding: 8px 10px;
+  display: none;
+}
+.dropdown.open {
+  display: block;
+}
+.dropdown-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 12px;
+}
+.dropdown-row + .dropdown-row {
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+}
+.toggle-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+.toggle-pill input {
+  accent-color: #0b33e8;
+}
+.dropdown-footer {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(0, 0, 0, 0.08);
+}
+.ghost-btn {
+  width: 100%;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: #f7f7f7;
+  color: #111;
+  font-size: 11px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
