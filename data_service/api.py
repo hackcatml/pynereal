@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from config import DataServiceConfig
+from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
 from pathlib import Path
 from typing import Any, Dict, List
+from tomlkit import parse, dumps
+
+from pynecore.cli.app import app_state
 
 from pynecore.core.ohlcv_file import OHLCVReader
 from pynecore.core.csv_file import CSVReader
@@ -12,8 +16,33 @@ from pynecore.core.csv_file import CSVReader
 def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dict[str, Any]] = None,
                     plot_options: Dict[str, Dict[str, Any]] = None,
                     plotchar_history: List[Dict[str, Any]] = None,
-                    chart_info: Dict[str, Any] | None = None) -> APIRouter:
+                    chart_info: Dict[str, Any] | None = None,
+                    cfg: DataServiceConfig = None) -> APIRouter:
     r = APIRouter()
+    config_path = app_state.config_dir / "realtime_trade.toml"
+
+    def _load_webhook_config() -> dict:
+        webhook_section = cfg.webhook_section or {}
+        return {
+            "enabled": bool(webhook_section.get("enabled", False)),
+            "telegram_notification": bool(webhook_section.get("telegram_notification", False)),
+        }
+
+    def _update_webhook_config(enabled: bool | None = None,
+                               telegram_notification: bool | None = None) -> dict:
+        config = parse(config_path.read_text(encoding="utf-8"))
+        webhook = config["webhook"]
+        if enabled is not None:
+            webhook["enabled"] = enabled
+            cfg.webhook_section["enabled"] = enabled
+        if telegram_notification is not None:
+            webhook["telegram_notification"] = telegram_notification
+            cfg.webhook_section["telegram_notification"] = telegram_notification
+        config_path.write_text(dumps(config), encoding="utf-8")
+        return {
+            "enabled": bool(webhook.get("enabled", False)),
+            "telegram_notification": bool(webhook.get("telegram_notification", False)),
+        }
 
     @r.get("/api/trades")
     def get_trades() -> JSONResponse:
@@ -71,6 +100,8 @@ def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dic
                         "style": options.get("style"),
                         "data": series_data
                     })
+                # Close CSV reader
+                reader.close()
 
         except Exception as e:
             print(f"[api] Failed to read plot CSV: {e}")
@@ -99,10 +130,26 @@ def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dic
                         "volume": float(c.volume),
                     }
                 )
+            reader.close()
         return JSONResponse(out)
 
     @r.get("/api/info")
     def get_info() -> JSONResponse:
         return JSONResponse(chart_info or {})
+
+    @r.get("/api/webhook-config")
+    def get_webhook_config() -> JSONResponse:
+        return JSONResponse(_load_webhook_config())
+
+    @r.post("/api/webhook-config")
+    def update_webhook_config(payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        enabled = payload.get("enabled")
+        telegram_notification = payload.get("telegram_notification")
+        if enabled is not None and not isinstance(enabled, bool):
+            return JSONResponse({"error": "enabled must be boolean"}, status_code=400)
+        if telegram_notification is not None and not isinstance(telegram_notification, bool):
+            return JSONResponse({"error": "telegram_notification must be boolean"}, status_code=400)
+        updated = _update_webhook_config(enabled=enabled, telegram_notification=telegram_notification)
+        return JSONResponse(updated)
 
     return r

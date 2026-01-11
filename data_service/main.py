@@ -43,7 +43,8 @@ async def main() -> None:
         "provider": cfg.provider,
         "script_title": None,
     }
-    app.include_router(build_api_router(plot_path, ohlcv_path, trades_history, plot_options, plotchar_history, chart_info))
+    app.include_router(build_api_router(plot_path, ohlcv_path,
+                                        trades_history, plot_options, plotchar_history, chart_info, cfg))
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):

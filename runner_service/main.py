@@ -165,12 +165,23 @@ def on_alert_event(message: str, runner: ScriptRunner):
     script = runner.script
     if not script.webhook_url and not script.telegram_notification:
         return
-    if script.webhook_url:
+
+    # Last check if webhook/telegram notification is enabled in config
+    config_dir = app_state.config_dir
+    webhook_enabled = False
+    telegram_notification_enabled = False
+    with open(config_dir / "realtime_trade.toml", "rb") as f:
+        config = tomllib.load(f)
+        webhook_section = config.get("webhook", {})
+        webhook_enabled = webhook_section.get("enabled", False)
+        telegram_notification_enabled = webhook_section.get("telegram_notification", False)
+
+    if webhook_enabled and script.webhook_url:
         send_webhook_message(
             webhook_url=script.webhook_url,
             message=message,
             script_title=script.title,
-            telegram_notification=script.telegram_notification,
+            telegram_notification=telegram_notification_enabled,
             telegram_token=script.telegram_token,
             telegram_chat_id=script.telegram_chat_id,
         )

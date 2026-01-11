@@ -5,4 +5,4 @@ python -m ensurepip --upgrade
 python -m pip install --upgrade setuptools
 
 python -m pip install -e ".[all]"
-python -m pip install python-dateutil dotenv flask pandas numpy 'uvicorn[standard]' fastapi
+python -m pip install python-dateutil dotenv flask pandas numpy 'uvicorn[standard]' fastapi tomlkit

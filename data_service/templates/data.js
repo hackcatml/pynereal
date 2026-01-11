@@ -284,5 +284,40 @@ App.data = {
       state.baseInfoText = state.baseInfoTop;
       App.ui.setChartInfo();
     }
+  },
+  async loadWebhookConfig() {
+    const state = App.state;
+    const ui = App.ui;
+    try {
+      const resp = await fetch("/api/webhook-config");
+      if (!resp.ok) return;
+      const cfg = await resp.json();
+      state.webhookEnabled = Boolean(cfg.enabled);
+      state.telegramEnabled = Boolean(cfg.telegram_notification);
+      ui.elements.webhookToggle.checked = state.webhookEnabled;
+      ui.elements.telegramToggle.checked = state.telegramEnabled;
+    } catch (e) {
+      // ignore
+    }
+  },
+  async updateWebhookConfig(payload) {
+    try {
+      const resp = await fetch("/api/webhook-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      if (!resp.ok) {
+        return false;
+      }
+      const cfg = await resp.json();
+      App.state.webhookEnabled = Boolean(cfg.enabled);
+      App.state.telegramEnabled = Boolean(cfg.telegram_notification);
+      App.ui.elements.webhookToggle.checked = App.state.webhookEnabled;
+      App.ui.elements.telegramToggle.checked = App.state.telegramEnabled;
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
 };

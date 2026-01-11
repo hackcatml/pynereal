@@ -174,7 +174,18 @@ App.chart = {
   },
   startJankMonitor() {
     const state = App.state;
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        state.jankFrames = [];
+        state.lastFrameTs = null;
+      }
+    });
     const monitorJank = (ts) => {
+      if (document.visibilityState === "hidden") {
+        state.lastFrameTs = ts;
+        requestAnimationFrame(monitorJank);
+        return;
+      }
       if (state.lastFrameTs != null) {
         const delta = ts - state.lastFrameTs;
         state.jankFrames.push(delta);

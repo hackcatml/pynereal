@@ -17,7 +17,9 @@ window.App.state = {
   baseInfoText: "Loading...",
   jankFrames: [],
   jankReloaded: false,
-  lastFrameTs: null
+  lastFrameTs: null,
+  webhookEnabled: false,
+  telegramEnabled: false
 };
 
 window.App.collections = {

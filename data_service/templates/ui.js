@@ -7,7 +7,9 @@ App.ui = {
     chartInfoTitleRow: document.getElementById("chart-info-title-row"),
     chartInfoTitle: document.getElementById("chart-info-title"),
     alertsToggle: document.getElementById("alerts-toggle"),
-    alertsMenu: document.getElementById("alerts-menu")
+    alertsMenu: document.getElementById("alerts-menu"),
+    webhookToggle: document.getElementById("alert-webhook-toggle"),
+    telegramToggle: document.getElementById("alert-telegram-toggle")
   },
   setChartInfo(ohlcvText = null) {
     const state = App.state;
@@ -28,6 +30,9 @@ App.ui = {
     const menu = this.elements.alertsMenu;
     const shouldOpen = forceOpen === null ? !menu.classList.contains("open") : forceOpen;
     menu.classList.toggle("open", shouldOpen);
+    if (shouldOpen) {
+      App.data.loadWebhookConfig();
+    }
   },
   formatNumber(value, decimals) {
     if (value == null || Number.isNaN(value)) return "-";
@@ -37,7 +42,7 @@ App.ui = {
     });
   },
   init() {
-    const { alertsToggle, alertsMenu } = this.elements;
+    const { alertsToggle, alertsMenu, webhookToggle, telegramToggle } = this.elements;
     alertsToggle.addEventListener("click", (e) => {
       e.stopPropagation();
       this.toggleAlertsMenu();
@@ -46,6 +51,22 @@ App.ui = {
     document.addEventListener("click", (e) => {
       if (!alertsMenu.contains(e.target) && e.target !== alertsToggle) {
         this.toggleAlertsMenu(false);
+      }
+    });
+
+    webhookToggle.addEventListener("change", async () => {
+      const enabled = webhookToggle.checked;
+      const res = await App.data.updateWebhookConfig({ enabled });
+      if (!res) {
+        webhookToggle.checked = !enabled;
+      }
+    });
+
+    telegramToggle.addEventListener("change", async () => {
+      const enabled = telegramToggle.checked;
+      const res = await App.data.updateWebhookConfig({ telegram_notification: enabled });
+      if (!res) {
+        telegramToggle.checked = !enabled;
       }
     });
   }
