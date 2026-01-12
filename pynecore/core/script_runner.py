@@ -274,6 +274,7 @@ class ScriptRunner:
         """
         from .. import lib
         from ..lib import _parse_timezone, barstate, string
+        from ..lib.request import SecurityContext
         from pynecore.core import function_isolation
         from . import script
 
@@ -286,6 +287,7 @@ class ScriptRunner:
 
         # Set script data
         lib._script = self.script  # Store script object in lib
+        lib._security_ctx = SecurityContext(self.script_module, lib)
 
         # Update syminfo lib properties if needed
         if not self.update_syminfo_every_run:
@@ -323,6 +325,8 @@ class ScriptRunner:
 
                 # Update lib properties
                 _set_lib_properties(candle, self.bar_index, self.tz, lib)
+                if lib._security_ctx:
+                    lib._security_ctx.update_base_bar(candle, self.bar_index)
 
                 # Store first price for buy & hold calculation
                 if self.first_price is None:
@@ -512,6 +516,7 @@ class ScriptRunner:
 
             # Reset library variables
             _reset_lib_vars(lib)
+            lib._security_ctx = None
             # Reset function isolation
             function_isolation.reset()
 

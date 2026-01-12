@@ -425,8 +425,15 @@ class FunctionIsolationTransformer(ast.NodeTransformer):
     def visit_Call(self, node: ast.Call) -> ast.Call:
         """Transform function calls to use isolate_function wrapper"""
         # First visit all arguments and keywords to handle nested calls
-        node.args = [self.visit(cast(ast.AST, arg)) for arg in node.args]
-        node.keywords = [self.visit(cast(ast.AST, kw)) for kw in node.keywords]
+        if self._is_request_security_call(node):
+            new_args = []
+            for idx, arg in enumerate(node.args):
+                new_args.append(arg if idx == 2 else self.visit(cast(ast.AST, arg)))
+            node.args = new_args
+            node.keywords = [self.visit(cast(ast.AST, kw)) for kw in node.keywords]
+        else:
+            node.args = [self.visit(cast(ast.AST, arg)) for arg in node.args]
+            node.keywords = [self.visit(cast(ast.AST, kw)) for kw in node.keywords]
 
         # Skip if already processed or not a relevant call
         if (getattr(node, '_call_processed', False) or
@@ -491,3 +498,19 @@ class FunctionIsolationTransformer(ast.NodeTransformer):
         )
         setattr(wrapped, '_call_processed', True)
         return wrapped
+
+    def visit_Lambda(self, node: ast.Lambda) -> ast.AST:
+        if getattr(node, "_skip_function_isolation", False):
+            return node
+        return self.generic_visit(node)
+
+    @staticmethod
+    def _is_request_security_call(node: ast.Call) -> bool:
+        if not isinstance(node.func, ast.Attribute) or node.func.attr != "security":
+            return False
+        value = node.func.value
+        if isinstance(value, ast.Name) and value.id == "request":
+            return True
+        if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name):
+            return value.value.id == "lib" and value.attr == "request"
+        return False
