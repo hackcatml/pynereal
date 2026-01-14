@@ -2,7 +2,8 @@
 @pyne
 """
 from pynecore import Persistent
-from pynecore.lib import script, close, ta, strategy, time, plot, color, na, plotchar
+from pynecore.lib import script, close, ta, strategy, time, plot, color, na, plotchar, request, syminfo, low, barmerge, \
+    log, bar_index
 from pynecore.types import Series
 
 
@@ -23,6 +24,9 @@ def main():
     lastTpTime: Persistent[int] = 0
     avgEntry: Persistent[float] = 0.0
     bbBasis, bbUpper, bbLower = ta.bb(close, 20, 2)
+
+    # request.security example
+    macro_low = request.security(syminfo.tickerid, '1D', low[2], lookahead=barmerge.lookahead_on)
 
     # Execute the strategy
     if not entered1 and rsi < 70 and (time - lastTpTime) >= 1 * 60 * 1000 * 5:
