@@ -206,7 +206,9 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
     size = reader.get_size(int(time_from.timestamp()), int(time_to.timestamp()))
     if gaps > 0:
         size = size - gaps
-    ohlcv_iter: Iterator[OHLCV] = reader.read_from(int(time_from.timestamp()), int(time_to.timestamp()))
+    # preload_list is used for request.security calculation
+    preload_list = list(reader.read_from(int(time_from.timestamp()), int(time_to.timestamp())))
+    ohlcv_iter: Iterator[OHLCV] = iter(preload_list)
     # Prepare a mutable iterator.
     if ohlcv_iter is not None:
         stream: AppendableIterable[OHLCV] = AppendableIterable(ohlcv_iter, feed_in_background=True)
@@ -245,7 +247,8 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
                                             "bb1d_lower": bb1d_lower,
                                             "macro_high": macro_high,
                                             "macro_low": macro_low
-                                      })
+                                      },
+                                      preload_ohlcv=preload_list)
                 runner.init_step()
 
                 # Register trade event callbacks
@@ -535,6 +538,10 @@ async def main():
             ctx.stream.replace_last(confirmed_ohlcv)
             ctx.stream.append(new_ohlcv)
             ctx.stream.finish()
+
+            ctx.runner.all_ohlcv.pop()
+            ctx.runner.all_ohlcv.append(confirmed_ohlcv)
+            ctx.runner.all_ohlcv.append(new_ohlcv)
 
             # Check the interval is the same as the timeframe. If so, the incremented candle size is 1.
             timeframe_ms = parse_timeframe_to_ms(tf)

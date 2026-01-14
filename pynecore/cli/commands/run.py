@@ -298,7 +298,9 @@ def run(
         size = reader.get_size(time_from_ts, time_to_ts)
         if gaps > 0:
             size = size - gaps
-        ohlcv_iter = reader.read_from(time_from_ts, time_to_ts)
+        # preload_list is used for request.security calculation
+        preload_list = list(reader.read_from(time_from_ts, time_to_ts))
+        ohlcv_iter = iter(preload_list)
 
         # Add lib directory to Python path for library imports
         lib_dir = app_state.scripts_dir / "lib"
@@ -338,7 +340,8 @@ def run(
                                               # "bb1d_lower": bb1d_lower,
                                               # "macro_high": macro_high,
                                               # "macro_low": macro_low
-                                          })
+                                          },
+                                          preload_ohlcv=preload_list)
             finally:
                 # Remove lib directory from Python path
                 if lib_path_added:

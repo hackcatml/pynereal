@@ -4,11 +4,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from typing import Any, Callable
 import sys
+import os
 
 from ..core.resampler import Resampler
 from ..core.series import SeriesImpl
 from ..types.na import NA
 from . import barmerge
+from . import timeframe as timeframe_module
 
 
 @dataclass
@@ -62,6 +64,12 @@ class SecurityContext:
             if keys:
                 modules.append(_PersistentModule(module=module, keys=keys))
         self._persistent_modules = modules
+
+    def prefill_base_bars(self, bars: list[Any]) -> None:
+        # Preload base bars for backtests without consuming a live iterator.
+        if not bars:
+            return
+        self._base_bars = bars
 
     def _snapshot_persistents(self) -> dict[Any, dict[str, Any]]:
         snapshot: dict[Any, dict[str, Any]] = {}
@@ -176,33 +184,155 @@ class SecurityContext:
         self._lib.last_bar_index = old_last_bar_index
         cache.last_synced_index = max(cache.last_synced_index, high_index)
 
+    def _build_series_snapshot(self, cache: _TimeframeCache, high_index: int) -> dict[str, SeriesImpl]:
+        # Create an isolated series buffer up to high_index to avoid leaking newer HTF bars.
+        temp_series_map: dict[str, SeriesImpl] = {
+            name: SeriesImpl() for name in cache.series_map.keys()
+        }
+        if high_index < 0:
+            return temp_series_map
+
+        old_bar_index = self._lib.bar_index
+        old_last_bar_index = self._lib.last_bar_index
+        try:
+            for i in range(high_index + 1):
+                bar = cache.bars[i]
+                values = self._bar_values(bar)
+                self._lib.bar_index = i
+                self._lib.last_bar_index = i
+                for series_name, series_obj in temp_series_map.items():
+                    field = cache.series_fields[series_name]
+                    series_obj.add(values[field])
+        finally:
+            self._lib.bar_index = old_bar_index
+            self._lib.last_bar_index = old_last_bar_index
+
+        return temp_series_map
+
     def evaluate(self, timeframe: str, expr: Callable[[], Any], lookahead) -> Any:
+        debug_enabled = os.environ.get("PYNE_DEBUG_REQUEST_SECURITY") == "1"
         if not self._base_bars or self._base_bar_index < 0:
             return NA()
         cache = self._get_cache(timeframe)
         if self._base_bar_index >= len(cache.base_to_high):
             return NA()
         high_index = cache.base_to_high[self._base_bar_index]
+        base_tf_ms = None
+        requested_tf_ms = None
+        force_snapshot = False
         if lookahead != barmerge.lookahead_on:
-            if not cache.is_closed[self._base_bar_index]:
+            # For HTF lookahead_off, move to the last confirmed HTF bar.
+            if self._base_bar_index > 0:
+                base_time_ms = int(self._base_bars[self._base_bar_index].timestamp * 1000)
+                prev_time_ms = int(self._base_bars[self._base_bar_index - 1].timestamp * 1000)
+                delta_ms = base_time_ms - prev_time_ms
+                if delta_ms > 0:
+                    base_tf_ms = delta_ms
+
+            if base_tf_ms is None:
+                try:
+                    base_tf_ms = timeframe_module.in_seconds(self._lib.syminfo.period) * 1000
+                except Exception:  # noqa: BLE001
+                    base_tf_ms = None
+
+            try:
+                requested_tf_ms = timeframe_module.in_seconds(timeframe) * 1000
+            except Exception:  # noqa: BLE001
+                requested_tf_ms = None
+
+            if requested_tf_ms is None or base_tf_ms is None:
                 high_index -= 1
+            elif requested_tf_ms > base_tf_ms:
+                # Avoid mixing partially built HTF bars into series buffers.
+                high_index -= 1
+                force_snapshot = True
+
+            if debug_enabled:
+                log_mod = getattr(self._lib, "log", None)
+                msg = (
+                    f"[request.security] tf={timeframe} lookahead={lookahead} "
+                    f"base_idx={self._base_bar_index} high_idx={high_index} "
+                    f"base_time_ms={base_time_ms if 'base_time_ms' in locals() else None} "
+                    f"prev_time_ms={prev_time_ms if 'prev_time_ms' in locals() else None} "
+                    f"base_tf_ms={base_tf_ms} requested_tf_ms={requested_tf_ms}"
+                )
+                if log_mod and hasattr(log_mod, "info"):
+                    log_mod.info(msg)
+                else:
+                    print(msg)
+        elif debug_enabled:
+            log_mod = getattr(self._lib, "log", None)
+            msg = (
+                f"[request.security] tf={timeframe} lookahead={lookahead} "
+                f"base_idx={self._base_bar_index} high_idx={high_index}"
+            )
+            if log_mod and hasattr(log_mod, "info"):
+                log_mod.info(msg)
+            else:
+                print(msg)
         if high_index < 0:
             return NA()
-        self._sync_series(cache, high_index)
+        # Cache by expression code so lookahead_on can reuse committed values.
         expr_key = (timeframe, expr.__code__)
         expr_cache = self._expr_cache.get(expr_key)
         if expr_cache is None:
             expr_cache = _ExprCache()
             self._expr_cache[expr_key] = expr_cache
+        should_commit = (high_index != expr_cache.last_committed_index)
+        # Reuse the last committed value within the same HTF bar for lookahead_on.
+        if lookahead == barmerge.lookahead_on and not should_commit:
+            return expr_cache.last_value
+
+        # Use a snapshot when we would otherwise reuse a longer series buffer.
+        use_snapshot_series = force_snapshot or high_index < cache.last_synced_index
+        if not use_snapshot_series:
+            self._sync_series(cache, high_index)
+            series_map = cache.series_map
+        else:
+            series_map = self._build_series_snapshot(cache, high_index)
 
         bar = cache.bars[high_index]
         values = self._bar_values(bar)
+        if debug_enabled:
+            log_mod = getattr(self._lib, "log", None)
+            bar_time = datetime.fromtimestamp(bar["time"], UTC).isoformat()
+            prev_time = None
+            if high_index > 0:
+                prev_time = datetime.fromtimestamp(cache.bars[high_index - 1]["time"], UTC).isoformat()
+            prev_close = None
+            if high_index > 0:
+                prev_close = cache.bars[high_index - 1]["close"]
+            msg = (
+                f"[request.security] tf={timeframe} high_idx_time={bar_time} "
+                f"prev_high_idx_time={prev_time} bars_len={len(cache.bars)} "
+                f"close={bar['close']} prev_close={prev_close} "
+                f"last_synced={cache.last_synced_index} use_snapshot={use_snapshot_series} "
+                f"force_snapshot={force_snapshot} base_tf_ms={base_tf_ms} requested_tf_ms={requested_tf_ms}"
+            )
+            if log_mod and hasattr(log_mod, "info"):
+                log_mod.info(msg)
+            else:
+                print(msg)
 
         original_series = {}
-        for name, series_obj in cache.series_map.items():
+        for name, series_obj in series_map.items():
             if hasattr(self._script_module, name):
                 original_series[name] = getattr(self._script_module, name)
             setattr(self._script_module, name, series_obj)
+            if debug_enabled and "__lib·close__" in name:
+                log_mod = getattr(self._lib, "log", None)
+                try:
+                    sample = [series_obj[i] for i in range(4)]
+                except Exception:  # noqa: BLE001
+                    sample = []
+                msg = (
+                    f"[request.security] tf={timeframe} series={name} "
+                    f"len={len(series_obj)} sample0-3={sample}"
+                )
+                if log_mod and hasattr(log_mod, "info"):
+                    log_mod.info(msg)
+                else:
+                    print(msg)
 
         original_values = {
             "open": self._lib.open,
@@ -221,10 +351,11 @@ class SecurityContext:
             "_datetime": self._lib._datetime,
         }
 
-        should_commit = (high_index != expr_cache.last_committed_index)
+        # For lookahead_off, re-use the last confirmed HTF value within the same HTF bar.
         if lookahead != barmerge.lookahead_on and not should_commit:
             return expr_cache.last_value
         snapshot = None
+        # Protect persistent state when re-evaluating within the same HTF bar.
         if lookahead == barmerge.lookahead_on and not should_commit:
             snapshot = self._snapshot_persistents()
         try:
@@ -250,6 +381,7 @@ class SecurityContext:
             return result
         finally:
             if snapshot is not None:
+                # Restore persistent state to avoid side effects in lookahead_on.
                 self._restore_persistents(snapshot)
             for name, original in original_series.items():
                 setattr(self._script_module, name, original)

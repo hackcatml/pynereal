@@ -169,13 +169,14 @@ class ScriptRunner:
 
     __slots__ = ('script_module', 'script', 'ohlcv_iter', 'syminfo', 'update_syminfo_every_run',
                  'bar_index', 'tz', 'plot_writer', 'strat_writer', 'trades_writer', 'last_bar_index',
-                 'equity_curve', 'first_price', 'last_price', '_step_iter')
+                 'equity_curve', 'first_price', 'last_price', '_step_iter', '_all_ohlcv')
 
     def __init__(self, script_path: Path, ohlcv_iter: Iterable[OHLCV], syminfo: SymInfo, *,
                  plot_path: Path | None = None, strat_path: Path | None = None,
                  trade_path: Path | None = None,
                  update_syminfo_every_run: bool = False, last_bar_index=0,
-                 realtime_config: dict = None, custom_inputs: dict[str, Any] = None):
+                 realtime_config: dict = None, custom_inputs: dict[str, Any] = None,
+                 preload_ohlcv: list[OHLCV] | None = None):
         """
         Initialize the script runner
 
@@ -211,6 +212,9 @@ class ScriptRunner:
         # noinspection PyProtectedMember
         from ..lib import _parse_timezone
 
+        realtime_config = realtime_config or {}
+        # _all_ohlcv list is used for request.security calculation
+        self._all_ohlcv: list[OHLCV] | None = preload_ohlcv
         self.ohlcv_iter = ohlcv_iter
         self.syminfo = syminfo
         self.update_syminfo_every_run = update_syminfo_every_run
@@ -288,6 +292,8 @@ class ScriptRunner:
         # Set script data
         lib._script = self.script  # Store script object in lib
         lib._security_ctx = SecurityContext(self.script_module, lib)
+        if self._all_ohlcv:
+            lib._security_ctx.prefill_base_bars(self._all_ohlcv)
 
         # Update syminfo lib properties if needed
         if not self.update_syminfo_every_run:
@@ -595,6 +601,7 @@ class ScriptRunner:
         # 나머지 필드들도 최대한 정리
         try:
             self.ohlcv_iter = None
+            self._all_ohlcv = None
         except Exception:
             pass
 
@@ -623,3 +630,7 @@ class ScriptRunner:
                 self.trades_writer = None
         except Exception:
             pass
+
+    @property
+    def all_ohlcv(self):
+        return self._all_ohlcv
