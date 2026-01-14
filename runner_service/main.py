@@ -224,15 +224,15 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
         lib_path_added = True
 
         try:
-            #################################### Module calculation ####################################
-            # bb1d / weekly high, low calculation
-            from modules.bb1d_calc import get_bb1d_lower
-            from modules.weekly_hl_calc import get_weekly_high_low
-            bb1d_lower = get_bb1d_lower(str(data_path), period=20, mult=2.0,
-                                        lookahead_on=True)
-            macro_high, macro_low = get_weekly_high_low(str(data_path), ago=2, session_offset_hours=9,
-                                                        lookahead_on=True)
-            #################################### Module calculation ####################################
+            # #################################### Module calculation ####################################
+            # # bb1d / weekly high, low calculation
+            # from modules.bb1d_calc import get_bb1d_lower
+            # from modules.weekly_hl_calc import get_weekly_high_low
+            # bb1d_lower = get_bb1d_lower(str(data_path), period=20, mult=2.0,
+            #                             lookahead_on=True)
+            # macro_high, macro_low = get_weekly_high_low(str(data_path), ago=2, session_offset_hours=9,
+            #                                             lookahead_on=True)
+            # #################################### Module calculation ####################################
 
             # Create script runner (this is where the import happens)
             config_dir = app_state.config_dir
@@ -244,9 +244,9 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
                                       plot_path=plot_path, strat_path=None, trade_path=None,
                                       realtime_config=realtime_config,
                                       custom_inputs={
-                                            "bb1d_lower": bb1d_lower,
-                                            "macro_high": macro_high,
-                                            "macro_low": macro_low
+                                            # "bb1d_lower": bb1d_lower,
+                                            # "macro_high": macro_high,
+                                            # "macro_low": macro_low
                                       },
                                       preload_ohlcv=preload_list)
                 runner.init_step()
@@ -549,20 +549,20 @@ async def main():
             incremented_size = 1 if interval_ms == timeframe_ms else 0
 
             if incremented_size > 0:
-                #################################### Module calculation ####################################
-                # bb1d / weekly high, low calculation
-                from modules.bb1d_calc import get_bb1d_lower
-                from modules.weekly_hl_calc import get_weekly_high_low
-                bb1d_lower = get_bb1d_lower(ohlcv_path, period=20, mult=2.0, lookahead_on=True)
-                macro_high, macro_low = get_weekly_high_low(ohlcv_path, ago=2, session_offset_hours=9,
-                                                            lookahead_on=True)
-                #################################### Module calculation ####################################
+                # #################################### Module calculation ####################################
+                # # bb1d / weekly high, low calculation
+                # from modules.bb1d_calc import get_bb1d_lower
+                # from modules.weekly_hl_calc import get_weekly_high_low
+                # bb1d_lower = get_bb1d_lower(ohlcv_path, period=20, mult=2.0, lookahead_on=True)
+                # macro_high, macro_low = get_weekly_high_low(ohlcv_path, ago=2, session_offset_hours=9,
+                #                                             lookahead_on=True)
+                # #################################### Module calculation ####################################
 
                 # custom input update
                 ctx.runner.script.custom_inputs = {
-                    "bb1d_lower": bb1d_lower,
-                    "macro_high": macro_high,
-                    "macro_low": macro_low
+                    # "bb1d_lower": bb1d_lower,
+                    # "macro_high": macro_high,
+                    # "macro_low": macro_low
                 }
 
                 ctx.runner.last_bar_index += incremented_size
