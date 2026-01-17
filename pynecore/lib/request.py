@@ -5,6 +5,7 @@ from datetime import datetime, UTC
 from typing import Any, Callable
 import sys
 import os
+import copy
 
 from ..core.resampler import Resampler
 from ..core.series import SeriesImpl
@@ -23,12 +24,19 @@ class _TimeframeCache:
     series_fields: dict[str, str] = field(default_factory=dict)
     last_synced_index: int = -1
     last_bar_time: int | None = None
+    last_refreshed_base_index: int | None = None
 
 
 @dataclass
 class _ExprCache:
     last_committed_index: int = -1
     last_value: Any = NA()
+    last_htf_ohlcv: tuple | None = None  # (open, high, low, close) for lookahead_on change detection
+    pre_eval_snapshot: dict[Any, dict[str, Any]] | None = None
+    persistent_snapshot: dict[Any, dict[str, Any]] | None = None
+    scope_id: str | None = None
+    function_cache: dict[Any, Any] = field(default_factory=dict)
+    pre_eval_function_snapshot: dict[Any, dict[str, Any]] | None = None
 
 
 @dataclass
@@ -43,6 +51,7 @@ class SecurityContext:
         self._lib = lib_module
         self._base_bars: list[Any] = []
         self._base_bar_index: int = -1
+        self._last_updated_base_index: int | None = None
         self._cache: dict[str, _TimeframeCache] = {}
         self._expr_cache: dict[tuple[str, Any], _ExprCache] = {}
         self._persistent_modules: list[_PersistentModule] = []
@@ -54,6 +63,7 @@ class SecurityContext:
         elif bar_index == len(self._base_bars) - 1:
             self._base_bars[bar_index] = candle
         self._base_bar_index = bar_index
+        self._last_updated_base_index = bar_index
 
     def _collect_persistent_modules(self) -> None:
         modules = []
@@ -69,6 +79,7 @@ class SecurityContext:
         # Preload base bars for backtests without consuming a live iterator.
         if not bars:
             return
+        # print(f"prefill base bars len: {len(bars)}, last bar: {bars[-1]}, last bar -1: {bars[-2]}")
         self._base_bars = bars
 
     def _snapshot_persistents(self) -> dict[Any, dict[str, Any]]:
@@ -85,6 +96,47 @@ class SecurityContext:
         for module, values in snapshot.items():
             for key, value in values.items():
                 setattr(module, key, value)
+
+    @staticmethod
+    def _snapshot_function_cache(func_cache: dict[Any, Any]) -> dict[Any, dict[str, Any]]:
+        snapshot: dict[Any, dict[str, Any]] = {}
+        for key, func in list(func_cache.items()):
+            try:
+                globals_dict = func.__globals__
+            except Exception:
+                continue
+            state: dict[str, Any] = {}
+            for name, value in list(globals_dict.items()):
+                if not (name.startswith("__persistent_") or name.startswith("__series_")):
+                    continue
+                if name in ("__persistent_function_vars__", "__series_function_vars__"):
+                    continue
+                if name.endswith("_vars__"):
+                    continue
+                try:
+                    state[name] = copy.deepcopy(value)
+                except Exception:
+                    # Fallback to shallow copy when deepcopy fails.
+                    try:
+                        state[name] = copy.copy(value)
+                    except Exception:
+                        state[name] = value
+            if state:
+                snapshot[key] = state
+        return snapshot
+
+    @staticmethod
+    def _restore_function_cache(func_cache: dict[Any, Any], snapshot: dict[Any, dict[str, Any]]) -> None:
+        for key, state in snapshot.items():
+            func = func_cache.get(key)
+            if func is None:
+                continue
+            try:
+                globals_dict = func.__globals__
+            except Exception:
+                continue
+            for name, value in state.items():
+                globals_dict[name] = value
 
     def _create_cache(self, timeframe: str) -> _TimeframeCache:
         cache = _TimeframeCache(resampler=Resampler.get_resampler(timeframe))
@@ -104,7 +156,56 @@ class SecurityContext:
 
         return cache
 
+    def _refresh_last_htf_bar(self, cache: _TimeframeCache) -> None:
+        """Refresh the last HTF bar's OHLCV from all LTF candles that belong to it."""
+        if not cache.bars or not cache.base_to_high:
+            return
+        last_htf_idx = len(cache.bars) - 1
+        # Find all base bar indices that map to the last HTF bar
+        first_base_idx = None
+        for i in range(len(cache.base_to_high) - 1, -1, -1):
+            if cache.base_to_high[i] == last_htf_idx:
+                first_base_idx = i
+            else:
+                break
+        if first_base_idx is None:
+            return
+        # Recalculate OHLCV from all LTF candles in this HTF bar
+        bar = cache.bars[last_htf_idx]
+        first_candle = self._base_bars[first_base_idx]
+        bar["open"] = float(first_candle.open)
+        bar["high"] = float(first_candle.high)
+        bar["low"] = float(first_candle.low)
+        bar["close"] = float(first_candle.close)
+        bar["volume"] = float(first_candle.volume)
+        for i in range(first_base_idx + 1, len(self._base_bars)):
+            if i >= len(cache.base_to_high) or cache.base_to_high[i] != last_htf_idx:
+                break
+            candle = self._base_bars[i]
+            bar["high"] = max(bar["high"], float(candle.high))
+            bar["low"] = min(bar["low"], float(candle.low))
+            bar["close"] = float(candle.close)
+            bar["volume"] += float(candle.volume)
+
+    def _should_refresh_last_htf_bar(self, cache: _TimeframeCache) -> bool:
+        idx = self._last_updated_base_index
+        if idx is None:
+            return False
+        if cache.last_refreshed_base_index == idx:
+            return False
+        if not cache.bars or not cache.base_to_high:
+            return False
+        if idx < 0 or idx >= len(cache.base_to_high):
+            return False
+        return cache.base_to_high[idx] == (len(cache.bars) - 1)
+
     def _update_cache(self, cache: _TimeframeCache) -> None:
+        # Always refresh the last HTF bar's OHLCV first
+        # because existing candles may have been updated (e.g., in realtime)
+        if self._should_refresh_last_htf_bar(cache):
+            self._refresh_last_htf_bar(cache)
+            cache.last_refreshed_base_index = self._last_updated_base_index
+
         if len(cache.base_to_high) >= len(self._base_bars):
             return
         for idx in range(len(cache.base_to_high), len(self._base_bars)):
@@ -279,9 +380,16 @@ class SecurityContext:
             expr_cache = _ExprCache()
             self._expr_cache[expr_key] = expr_cache
         should_commit = (high_index != expr_cache.last_committed_index)
-        # Reuse the last committed value within the same HTF bar for lookahead_on.
+        # For lookahead_on, check if HTF bar's OHLCV has changed within the same HTF bar
+        bar_changed = False
         if lookahead == barmerge.lookahead_on and not should_commit:
-            return expr_cache.last_value
+            bar = cache.bars[high_index]
+            current_ohlcv = (bar["open"], bar["high"], bar["low"], bar["close"])
+            if expr_cache.last_htf_ohlcv == current_ohlcv:
+                # HTF bar unchanged, return cached value
+                return expr_cache.last_value
+            # HTF bar changed, need to recalculate (will update cache below)
+            bar_changed = True
 
         # Use a snapshot when we would otherwise reuse a longer series buffer.
         use_snapshot_series = force_snapshot or high_index < cache.last_synced_index
@@ -354,10 +462,33 @@ class SecurityContext:
         # For lookahead_off, re-use the last confirmed HTF value within the same HTF bar.
         if lookahead != barmerge.lookahead_on and not should_commit:
             return expr_cache.last_value
-        snapshot = None
-        # Protect persistent state when re-evaluating within the same HTF bar.
-        if lookahead == barmerge.lookahead_on and not should_commit:
-            snapshot = self._snapshot_persistents()
+        global_snapshot = None
+        restore_snapshot = None
+        original_scope_id = getattr(self._script_module, "__scope_id__", None)
+        if original_scope_id is not None and expr_cache.scope_id is None:
+            expr_cache.scope_id = f"{original_scope_id}__sec_{timeframe}_{id(expr.__code__)}"
+
+        from ..core import function_isolation as _function_isolation
+        original_func_cache = _function_isolation._function_cache
+        _function_isolation._function_cache = expr_cache.function_cache
+
+        if expr_cache.scope_id is not None:
+            self._script_module.__scope_id__ = expr_cache.scope_id
+        if lookahead == barmerge.lookahead_on:
+            # Isolate persistent state per request.security expression.
+            global_snapshot = self._snapshot_persistents()
+            if should_commit:
+                # Capture state before the first evaluation of this HTF bar.
+                expr_cache.pre_eval_snapshot = global_snapshot
+                expr_cache.pre_eval_function_snapshot = self._snapshot_function_cache(expr_cache.function_cache)
+            if bar_changed:
+                restore_snapshot = expr_cache.pre_eval_snapshot
+            else:
+                restore_snapshot = expr_cache.persistent_snapshot or expr_cache.pre_eval_snapshot
+            if restore_snapshot is not None:
+                self._restore_persistents(restore_snapshot)
+            if bar_changed and expr_cache.pre_eval_function_snapshot is not None:
+                self._restore_function_cache(expr_cache.function_cache, expr_cache.pre_eval_function_snapshot)
         try:
             self._lib.open = values["open"]
             self._lib.high = values["high"]
@@ -378,11 +509,17 @@ class SecurityContext:
             if should_commit:
                 expr_cache.last_committed_index = high_index
             expr_cache.last_value = result
+            expr_cache.last_htf_ohlcv = (bar["open"], bar["high"], bar["low"], bar["close"])
+            if lookahead == barmerge.lookahead_on:
+                expr_cache.persistent_snapshot = self._snapshot_persistents()
             return result
         finally:
-            if snapshot is not None:
-                # Restore persistent state to avoid side effects in lookahead_on.
-                self._restore_persistents(snapshot)
+            if original_scope_id is not None:
+                self._script_module.__scope_id__ = original_scope_id
+            _function_isolation._function_cache = original_func_cache
+            if global_snapshot is not None:
+                # Restore global persistent state to avoid cross-series contamination.
+                self._restore_persistents(global_snapshot)
             for name, original in original_series.items():
                 setattr(self._script_module, name, original)
             for key, value in original_values.items():
@@ -398,3 +535,15 @@ def security(symbol: str, timeframe: str, expression: Callable[[], Any] | Any,
     if not callable(expression):
         return expression
     return ctx.evaluate(timeframe, expression, lookahead)
+
+
+def get_security_ctx() -> SecurityContext | None:
+    """Public accessor for the security context."""
+    from .. import lib
+    return getattr(lib, "_security_ctx", None)
+
+
+def set_security_ctx(ctx: SecurityContext | None) -> None:
+    """Public setter for the security context."""
+    from .. import lib
+    lib._security_ctx = ctx
