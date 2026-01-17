@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional
 
+import numpy as np
 import websockets
 
 from appendable_iter import AppendableIterable
@@ -272,11 +273,12 @@ def bar_list_to_ohlcv(bar: list) -> OHLCV:
     # bar: [ts_ms, o, h, l, c, v]
     return OHLCV(
         timestamp=int(bar[0] / 1000),
-        open=float(bar[1]),
-        high=float(bar[2]),
-        low=float(bar[3]),
-        close=float(bar[4]),
-        volume=float(bar[5]),
+        # Align realtime bars with file precision (float32) to avoid BB rounding drift.
+        open=float(np.float32(bar[1])),
+        high=float(np.float32(bar[2])),
+        low=float(np.float32(bar[3])),
+        close=float(np.float32(bar[4])),
+        volume=float(np.float32(bar[5])),
         extra_fields={},
     )
 
@@ -539,10 +541,6 @@ async def main():
             ctx.stream.append(new_ohlcv)
             ctx.stream.finish()
 
-            ctx.runner.all_ohlcv.pop()
-            ctx.runner.all_ohlcv.append(confirmed_ohlcv)
-            ctx.runner.all_ohlcv.append(new_ohlcv)
-
             # Check the interval is the same as the timeframe. If so, the incremented candle size is 1.
             timeframe_ms = parse_timeframe_to_ms(tf)
             interval_ms = (int(new_ohlcv.timestamp) - int(ctx.last_new_bar_ts_sec)) * 1000
@@ -567,6 +565,13 @@ async def main():
 
                 ctx.runner.last_bar_index += incremented_size
                 ctx.runner.script.last_bar_index += incremented_size
+
+                # Ensure request.security can see the new bar during confirmed-bar evaluation.
+                from pynecore.lib.request import get_security_ctx
+                security_ctx = get_security_ctx()
+                if security_ctx is not None:
+                    security_ctx.update_base_bar(confirmed_ohlcv, ctx.runner.last_bar_index - 1)
+                    security_ctx.update_base_bar(new_ohlcv, ctx.runner.last_bar_index)
 
                 # Calculate the last confirmed bar
                 ctx.runner.script.pre_run = False
