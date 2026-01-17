@@ -55,6 +55,9 @@ def import_script(script_path: Path) -> ModuleType:
     # Add script's directory to Python path temporarily
     sys.path.insert(0, str(script_path.parent))
     try:
+        # Force a fresh import so the Pyne AST transform always runs.
+        if script_path.stem in sys.modules:
+            del sys.modules[script_path.stem]
         # This will use the import system, including our hook
         module = import_module(script_path.stem)
     finally:
@@ -169,13 +172,14 @@ class ScriptRunner:
 
     __slots__ = ('script_module', 'script', 'ohlcv_iter', 'syminfo', 'update_syminfo_every_run',
                  'bar_index', 'tz', 'plot_writer', 'strat_writer', 'trades_writer', 'last_bar_index',
-                 'equity_curve', 'first_price', 'last_price', '_step_iter')
+                 'equity_curve', 'first_price', 'last_price', '_step_iter', '_all_ohlcv')
 
     def __init__(self, script_path: Path, ohlcv_iter: Iterable[OHLCV], syminfo: SymInfo, *,
                  plot_path: Path | None = None, strat_path: Path | None = None,
                  trade_path: Path | None = None,
                  update_syminfo_every_run: bool = False, last_bar_index=0,
-                 realtime_config: dict = None, custom_inputs: dict[str, Any] = None):
+                 realtime_config: dict = None, custom_inputs: dict[str, Any] = None,
+                 preload_ohlcv: list[OHLCV] | None = None):
         """
         Initialize the script runner
 
@@ -206,11 +210,14 @@ class ScriptRunner:
             raise ImportError(f"The 'main' function must be decorated with "
                               f"@script.[indicator|strategy|library] to run!")
 
-        self.script: script = self.script_module.main.script
+        self.script: script | None = self.script_module.main.script
 
         # noinspection PyProtectedMember
         from ..lib import _parse_timezone
 
+        realtime_config = realtime_config or {}
+        # _all_ohlcv list is used for request.security calculation
+        self._all_ohlcv: list[OHLCV] | None = preload_ohlcv
         self.ohlcv_iter = ohlcv_iter
         self.syminfo = syminfo
         self.update_syminfo_every_run = update_syminfo_every_run
@@ -220,20 +227,20 @@ class ScriptRunner:
         realtime_section: dict = realtime_config.get('realtime', {})
         if realtime_section:
             realtime_trade = realtime_section.get('enabled', False)
-            self.script.realtime_trade = realtime_trade
+            self.script.realtime_trade = realtime_trade # noqa
             if self.script.realtime_trade:
-                self.script.last_bar_index = self.last_bar_index
+                self.script.last_bar_index = self.last_bar_index    # noqa
                 # Check webhook is enabled
                 webhook_section: dict = realtime_config.get('webhook', {})
                 is_webhook_enabled = webhook_section.get('enabled', False)
                 if is_webhook_enabled:
-                    self.script.webhook_url = webhook_section.get('url', None)
-                    self.script.telegram_notification = webhook_section.get('telegram_notification', False)
+                    self.script.webhook_url = webhook_section.get('url', None)  # noqa
+                    self.script.telegram_notification = webhook_section.get('telegram_notification', False) # noqa
                     if self.script.telegram_notification:
                         load_dotenv()
-                        self.script.telegram_token = os.getenv('BOT_TOKEN')
-                        self.script.telegram_chat_id = os.getenv('CHAT_ID')
-        self.script.custom_inputs = custom_inputs
+                        self.script.telegram_token = os.getenv('BOT_TOKEN') # noqa
+                        self.script.telegram_chat_id = os.getenv('CHAT_ID') # noqa
+        self.script.custom_inputs = custom_inputs   # noqa
         # step 실행용 내부 제너레이터
         self._step_iter: Iterator[Any] | None = None
 
@@ -274,6 +281,7 @@ class ScriptRunner:
         """
         from .. import lib
         from ..lib import _parse_timezone, barstate, string
+        from ..lib.request import SecurityContext, get_security_ctx, set_security_ctx
         from pynecore.core import function_isolation
         from . import script
 
@@ -286,6 +294,10 @@ class ScriptRunner:
 
         # Set script data
         lib._script = self.script  # Store script object in lib
+        security_ctx = SecurityContext(self.script_module, lib)
+        set_security_ctx(security_ctx)
+        if self._all_ohlcv:
+            security_ctx.prefill_base_bars(self._all_ohlcv)
 
         # Update syminfo lib properties if needed
         if not self.update_syminfo_every_run:
@@ -323,6 +335,9 @@ class ScriptRunner:
 
                 # Update lib properties
                 _set_lib_properties(candle, self.bar_index, self.tz, lib)
+                sec_ctx = get_security_ctx()
+                if sec_ctx:
+                    sec_ctx.update_base_bar(candle, self.bar_index)
 
                 # Store first price for buy & hold calculation
                 if self.first_price is None:
@@ -590,6 +605,7 @@ class ScriptRunner:
         # 나머지 필드들도 최대한 정리
         try:
             self.ohlcv_iter = None
+            self._all_ohlcv = None
         except Exception:
             pass
 
@@ -605,6 +621,12 @@ class ScriptRunner:
         self.last_price = None
         self.equity_curve = []
         self.tz = None
+        # Reset request.security context only when the runner is fully destroyed.
+        try:
+            from ..lib.request import set_security_ctx
+            set_security_ctx(None)
+        except Exception:
+            pass
         # Close writers to flush buffered data
         try:
             if getattr(self, "plot_writer", None) is not None:
@@ -618,3 +640,7 @@ class ScriptRunner:
                 self.trades_writer = None
         except Exception:
             pass
+
+    @property
+    def all_ohlcv(self):
+        return self._all_ohlcv
