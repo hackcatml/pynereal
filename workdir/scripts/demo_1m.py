@@ -3,7 +3,7 @@
 """
 from pynecore import Persistent
 from pynecore.lib import script, close, ta, strategy, time, plot, color, na, plotchar, request, syminfo, low, barmerge, \
-    log, bar_index
+    log, bar_index, is_na
 from pynecore.types import Series
 
 
@@ -27,6 +27,7 @@ def main():
 
     # request.security example
     macro_low = request.security(syminfo.tickerid, '1D', low[2], lookahead=barmerge.lookahead_on)
+    _, _, bb_5_lower = request.security(syminfo.tickerid, '5', ta.bb(close, 20, 2), lookahead=barmerge.lookahead_on)
 
     # Execute the strategy
     if not entered1 and rsi < 70 and (time - lastTpTime) >= 1 * 60 * 1000 * 5:
@@ -49,5 +50,5 @@ def main():
     plot(bbBasis, title="BB Basis", color=color.blue, linewidth=1, style=plot.style_line)
     plot(bbLower, title="BB Lower", color=color.green, linewidth=1, style=plot.style_line)
 
-    # Plotchar Test
+    # Plotchar Example
     plotchar(rsi < 30, title="RSI Low", text="RSI Low", location=plot.location_belowbar, color=color.green)
