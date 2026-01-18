@@ -93,6 +93,7 @@ Enable webhook alerts for instant trade notifications:
 enabled = true
 url = "http://your-webhook-url.com"
 ```
+You can on/off in your browser too.
 
 **Usage in Strategy:**
 ```python
@@ -114,6 +115,7 @@ Get trade alerts directly in Telegram:
    ```toml
    telegram_notification = true
    ```
+   Also, you can on/off in your browser
 2. Add credentials to `.env`:
    ```env
    TELEGRAM_BOT_TOKEN=your_bot_token
