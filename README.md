@@ -80,19 +80,44 @@ When you backtest your strategy, set `enabled = false` under the `realtime` sect
 ---
 
 ## Features
-### Webhook signal
-Enable the webhook feature by setting `enabled = true` in the `webhook` section of `realtime_trade.toml`.\
-Add your webhook url there.\
-When using `strategy.entry` or `strategy.close`, provide an `alert_message` in JSON format:
-e.g., `strategy.entry("Long 1", strategy.long, alert_message=f'{{"signal": "Long 1", "price": {close}}}',
-                       comment=f"Long 1 at rsi: {rsi}", record=True)`\
-Currently, webhook signals are triggered only on `strategy.entry` and `strategy.close` events. 
+### Webhook Signals
+
+Enable webhook alerts for instant trade notifications:
+
+**Configuration:**
+```toml
+# realtime_trade.toml
+
+[webhook]
+enabled = true
+url = "http://your-webhook-url.com"
+```
+
+**Usage in Strategy:**
+```python
+strategy.entry(
+    "Long 1",
+    strategy.long,
+    alert_message=f'{{"signal": "Long 1", "price": {close}}}',
+    comment="test"
+)
+``` 
 
 
-### Send Telegram message
-If webhook signaling is enabled, you can automatically send Telegram notifications as well.\
-Enable it by setting `telegram_notification = true` in `realtime_trade.toml`.\
-You must also fill in your `.env` file with your Telegram bot token and chat ID.
+### Telegram Notifications
+
+Get trade alerts directly in Telegram:
+
+**Setup:**
+1. Enable in `realtime_trade.toml`:
+   ```toml
+   telegram_notification = true
+   ```
+2. Add credentials to `.env`:
+   ```env
+   TELEGRAM_BOT_TOKEN=your_bot_token
+   TELEGRAM_CHAT_ID=your_chat_id
+   ```
 
 
 ### Custom input
@@ -124,10 +149,20 @@ Conveniently injecting custom inputs into the script is on my TODO list for now.
 
 ### Backtesting
 You can still use the standard pyne command for backtesting.\
-Make sure to set:\
-`no_report = false` under the `pyne` section\
-`enabled = false` under the `realtime` section in `realtime_trade.toml` in the `workdir/config` directory.\
-Then run: `pyne run <your strategy.py> <ohlcv file>`
+**Configuration:**
+```toml
+# realtime_trade.toml
+
+[pyne]
+no_report = false
+
+[realtime]
+enabled = false
+```
+**Run:** 
+```bash
+pyne run <your strategy.py> <ohlcv file>
+```
 
 ---
 
