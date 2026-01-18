@@ -3,17 +3,19 @@ Run your crypto trading strategy in real time without TradingView
 
 ---
 
-## Why you need this
-If you’re an active system trader who relies on TradingView strategies, you’ve probably experienced this before:\
-moments when an alert didn’t arrive in time and you missed an entry, alerts firing at the wrong price levels,\
-or alerts arriving two or three minutes late, causing a significant mismatch with your strategy.
+## Why PyneReal?
+If you're an active system trader who relies on TradingView strategies, you've probably experienced:
 
-System errors like these can happen at any time, but what really drives you crazy is not being able to find the cause.
+- **Missed Entries** — Alerts that didn't arrive in time
+- **Wrong Price Levels** — Alerts firing at incorrect prices
+- **Delayed Alerts** — Notifications arriving 2-3 minutes late
+- **Mystery Bugs** — System errors with no way to debug
 
-This project puts the entire strategy-running environment under your control with rich python enviornment, \
-so even when unexpected issues occur, you can quickly identify the root cause and fix it.\
-You can also apply Python’s unlimited extensibility directly to your strategy.
+**PyneReal puts you back in control.**
 
+Run your entire strategy in a **Python environment** under your complete control
+<br>**Debug easily** when unexpected issues occur
+<br>Leverage **Python's unlimited extensibility** for your trading logic
 ---
 
 ## Prerequisites
