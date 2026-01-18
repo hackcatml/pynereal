@@ -32,7 +32,7 @@ async def main() -> None:
     # Store plotchar events in memory
     plotchar_history = []
     client_roles = {}
-    runner_count = 0
+    runner_count = 0  # Track active runner connections.
 
     app = FastAPI()
     app.include_router(build_ui_router())
@@ -41,8 +41,10 @@ async def main() -> None:
         "symbol": cfg.symbol,
         "timeframe": cfg.timeframe,
         "provider": cfg.provider,
+        "script_title": None,
     }
-    app.include_router(build_api_router(plot_path, ohlcv_path, trades_history, plot_options, plotchar_history, chart_info))
+    app.include_router(build_api_router(plot_path, ohlcv_path,
+                                        trades_history, plot_options, plotchar_history, chart_info, cfg))
 
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):
@@ -80,6 +82,7 @@ async def main() -> None:
                             client_roles[ws] = role
                             if role == "runner":
                                 runner_count += 1
+                                # Broadcast runner availability to all clients.
                                 await ws_manager.broadcast_json({"type": "runner_connected"})
                         elif msg_type == "last_bar_open_fix":
                             last_bar_index = event.get("last_bar_index", -1)
@@ -143,6 +146,21 @@ async def main() -> None:
                                             # print(f"[data_service] Broadcasted plot data")
                                 except Exception as e:
                                     print(f"[data_service] Failed to broadcast plot data: {e}")
+                        elif msg_type == "script_info":
+                            title = event.get("title") or "No title"
+                            chart_info["script_title"] = title
+                            await ws_manager.broadcast_json({
+                                "type": "script_info",
+                                "title": title,
+                            })
+                        elif (msg_type == "reset_history") or (msg_type == "script_modified"):
+                            # Clear stored history when runner resets or script changes.
+                            trades_history.clear()
+                            plot_options.clear()
+                            plotchar_history.clear()
+                            if msg_type == "script_modified":
+                                # Notify UI to reload chart state.
+                                await ws_manager.broadcast_json({"type": "script_modified"})
                         elif msg_type == "ack_prerun_ready_after_history_download":
                             # Clear pending event when ACK is received from runner_service
                             async with state.lock:
@@ -161,6 +179,7 @@ async def main() -> None:
                 runner_count -= 1
                 if runner_count <= 0:
                     runner_count = 0
+                    # Notify clients when the last runner disconnects.
                     await ws_manager.broadcast_json({"type": "runner_disconnected"})
 
     async def broadcast_bar(bar: list) -> None:

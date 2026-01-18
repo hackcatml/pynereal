@@ -88,7 +88,7 @@ def timeframe_to_rule(tf: str) -> str:
 
     # 나머지는 모두 분 단위로 처리 ("5" -> 5분)
     n = int(tf)
-    return f"{n}T"
+    return f"{n}min"
 
 
 def resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:

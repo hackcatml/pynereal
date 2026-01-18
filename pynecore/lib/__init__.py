@@ -20,7 +20,7 @@ from ..core.script import script, input
 from ..types.series import Series
 from ..types.na import NA
 from . import syminfo  # This should be imported before core.datetime to avoid circular import!
-from . import barstate, string, log, math, plot, hline, linefill, alert
+from . import barstate, string, log, math, plot, hline, linefill, alert, request
 from . import timeframe as timeframe_module
 from . import session as session_module
 
@@ -30,7 +30,7 @@ from ..core.resampler import Resampler
 
 __all__ = [
     # Other modules
-    'syminfo', 'barstate', 'string', 'log', 'math', 'plot',
+    'syminfo', 'barstate', 'string', 'log', 'math', 'plot', 'request',
 
     # Variables
     'bar_index', 'last_bar_index', 'last_bar_time',
@@ -97,6 +97,7 @@ _plot_data: dict[str, Any] = {}
 
 # Lib semaphore - to prevent lib`s main function to do things it must not (plot, strategy things, etc.)
 _lib_semaphore = False
+_security_ctx = None
 
 #
 # Callable modules

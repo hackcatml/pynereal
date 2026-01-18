@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import Dict, ClassVar
 from functools import lru_cache
 
@@ -55,7 +55,9 @@ class Resampler:
         """
         # Convert to seconds for calculations
         current_time_sec = current_time_ms // 1000
-        current_dt = datetime.fromtimestamp(current_time_sec)
+        current_dt_utc = datetime.fromtimestamp(current_time_sec, tz=UTC)
+        local_tz = parse_timezone(None)
+        current_dt = current_dt_utc.astimezone(local_tz)
         
         # Get timeframe in seconds
         tf_seconds = tf_module.in_seconds(self.timeframe)
@@ -78,12 +80,12 @@ class Resampler:
             # For multi-day timeframes, align to the start of the period
             if multiplier > 1:
                 # Calculate days since epoch and round down to timeframe boundary
-                epoch = datetime(1970, 1, 1)
+                epoch = datetime(1970, 1, 1, tzinfo=local_tz)
                 days_since_epoch = (bar_start_dt - epoch).days
                 aligned_days = (days_since_epoch // multiplier) * multiplier
                 bar_start_dt = epoch + timedelta(days=aligned_days)
                 
-            bar_start_sec = int(bar_start_dt.timestamp())
+            bar_start_sec = int(bar_start_dt.astimezone(UTC).timestamp())
             
         elif modifier == 'W':  # Weekly
             # Weekly bars start on Monday
@@ -94,12 +96,12 @@ class Resampler:
             # For multi-week timeframes, align to the start of the period
             if multiplier > 1:
                 # Calculate weeks since epoch and round down to timeframe boundary
-                epoch_monday = datetime(1970, 1, 5)  # First Monday after epoch
+                epoch_monday = datetime(1970, 1, 5, tzinfo=local_tz)  # First Monday after epoch
                 weeks_since_epoch = (bar_start_dt - epoch_monday).days // 7
                 aligned_weeks = (weeks_since_epoch // multiplier) * multiplier
                 bar_start_dt = epoch_monday + timedelta(weeks=aligned_weeks)
                 
-            bar_start_sec = int(bar_start_dt.timestamp())
+            bar_start_sec = int(bar_start_dt.astimezone(UTC).timestamp())
             
         elif modifier == 'M':  # Monthly
             # Monthly bars start at the beginning of the month
@@ -114,7 +116,7 @@ class Resampler:
                 target_month = (aligned_months % 12) + 1
                 bar_start_dt = bar_start_dt.replace(year=target_year, month=target_month)
                 
-            bar_start_sec = int(bar_start_dt.timestamp())
+            bar_start_sec = int(bar_start_dt.astimezone(UTC).timestamp())
             
         else:
             raise ValueError(f"Unsupported timeframe modifier: {modifier}")

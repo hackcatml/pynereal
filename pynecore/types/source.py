@@ -19,6 +19,12 @@ class Source(Series[float]):
 
     This allows `input(defval=close)` to work with proper types while being fast
     and compatible with both Source objects and string literals in input.source().
+
+    FALLBACK OPERATORS:
+    ===================
+    Comparison and arithmetic operators are implemented as fallbacks for cases where
+    AST transformation is missed (e.g., nested functions, closures). When called,
+    they resolve the actual value from lib module dynamically.
     """
 
     def __new__(cls, name: str) -> Source:
@@ -31,3 +37,85 @@ class Source(Series[float]):
 
     def __str__(self) -> str:
         return getattr(self, 'name')
+
+    def _get_value(self):
+        """Get actual value from lib module"""
+        from pynecore import lib
+        return getattr(lib, getattr(self, 'name'), self)
+
+    def _resolve(self, other):
+        """Resolve self and other to actual values"""
+        self_val = self._get_value()
+        other_val = other._get_value() if isinstance(other, Source) else other
+        return self_val, other_val
+
+    # Comparison operators
+    def __gt__(self, other):
+        a, b = self._resolve(other)
+        return a > b
+
+    def __lt__(self, other):
+        a, b = self._resolve(other)
+        return a < b
+
+    def __ge__(self, other):
+        a, b = self._resolve(other)
+        return a >= b
+
+    def __le__(self, other):
+        a, b = self._resolve(other)
+        return a <= b
+
+    def __eq__(self, other):
+        a, b = self._resolve(other)
+        return a == b
+
+    def __ne__(self, other):
+        a, b = self._resolve(other)
+        return a != b
+
+    # Arithmetic operators
+    def __add__(self, other):
+        a, b = self._resolve(other)
+        return a + b
+
+    def __radd__(self, other):
+        a, b = self._resolve(other)
+        return b + a
+
+    def __sub__(self, other):
+        a, b = self._resolve(other)
+        return a - b
+
+    def __rsub__(self, other):
+        a, b = self._resolve(other)
+        return b - a
+
+    def __mul__(self, other):
+        a, b = self._resolve(other)
+        return a * b
+
+    def __rmul__(self, other):
+        a, b = self._resolve(other)
+        return b * a
+
+    def __truediv__(self, other):
+        a, b = self._resolve(other)
+        return a / b
+
+    def __rtruediv__(self, other):
+        a, b = self._resolve(other)
+        return b / a
+
+    def __neg__(self):
+        return -self._get_value()
+
+    def __abs__(self):
+        return abs(self._get_value())
+
+    # Type conversion
+    def __float__(self):
+        return float(self._get_value())
+
+    def __int__(self):
+        return int(self._get_value())

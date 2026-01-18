@@ -3,16 +3,19 @@ Run your crypto trading strategy in real time without TradingView
 
 ---
 
-## Why you need this
-If you’re an active system trader who relies on TradingView strategies, you’ve probably experienced this before:\
-moments when an alert didn’t arrive in time and you missed an entry, alerts firing at the wrong price levels,\
-or alerts arriving two or three minutes late, causing a significant mismatch with your strategy.
+## Why PyneReal?
+If you're an active system trader who relies on TradingView strategies, you've probably experienced:
 
-System errors like these can happen at any time, but what really drives you crazy is not being able to find the cause.
+- **Missed Entries** — Alerts that didn't arrive in time
+- **Wrong Price Levels** — Alerts firing at incorrect prices
+- **Delayed Alerts** — Notifications arriving 2-3 minutes late
+- **Mystery Bugs** — System errors with no way to debug
 
-This project puts the entire strategy-running environment under your control with rich python enviornment, \
-so even when unexpected issues occur, you can quickly identify the root cause and fix it.\
-You can also apply Python’s unlimited extensibility directly to your strategy.
+**PyneReal puts you back in control.**
+
+Run your entire strategy in a **Python environment** under your complete control
+<br>**Debug easily** when unexpected issues occur
+<br>Leverage **Python's unlimited extensibility** for your trading logic
 
 ---
 
@@ -78,19 +81,46 @@ When you backtest your strategy, set `enabled = false` under the `realtime` sect
 ---
 
 ## Features
-### Webhook signal
-Enable the webhook feature by setting `enabled = true` in the `webhook` section of `realtime_trade.toml`.\
-Add your webhook url there.\
-When using `strategy.entry` or `strategy.close`, provide an `alert_message` in JSON format:
-e.g., `strategy.entry("Long 1", strategy.long, alert_message=f'{{"signal": "Long 1", "price": {close}}}',
-                       comment=f"Long 1 at rsi: {rsi}", record=True)`\
-Currently, webhook signals are triggered only on `strategy.entry` and `strategy.close` events. 
+### Webhook Signals
+
+Enable webhook alerts for instant trade notifications:
+
+**Configuration:**
+```toml
+# realtime_trade.toml
+
+[webhook]
+enabled = true
+url = "http://your-webhook-url.com"
+```
+You can on/off in your browser too.
+
+**Usage in Strategy:**
+```python
+strategy.entry(
+    "Long 1",
+    strategy.long,
+    alert_message=f'{{"signal": "Long 1", "price": {close}}}',
+    comment="test"
+)
+``` 
 
 
-### Send Telegram message
-If webhook signaling is enabled, you can automatically send Telegram notifications as well.\
-Enable it by setting `telegram_notification = true` in `realtime_trade.toml`.\
-You must also fill in your `.env` file with your Telegram bot token and chat ID.
+### Telegram Notifications
+
+Get trade alerts directly in Telegram:
+
+**Setup:**
+1. Enable in `realtime_trade.toml`:
+   ```toml
+   telegram_notification = true
+   ```
+   Also, you can on/off in your browser
+2. Add credentials to `.env`:
+   ```env
+   TELEGRAM_BOT_TOKEN=your_bot_token
+   TELEGRAM_CHAT_ID=your_chat_id
+   ```
 
 
 ### Custom input
@@ -122,10 +152,20 @@ Conveniently injecting custom inputs into the script is on my TODO list for now.
 
 ### Backtesting
 You can still use the standard pyne command for backtesting.\
-Make sure to set:\
-`no_report = false` under the `pyne` section\
-`enabled = false` under the `realtime` section in `realtime_trade.toml` in the `workdir/config` directory.\
-Then run: `pyne run <your strategy.py> <ohlcv file>`
+**Configuration:**
+```toml
+# realtime_trade.toml
+
+[pyne]
+no_report = false
+
+[realtime]
+enabled = false
+```
+**Run:** 
+```bash
+pyne run <your strategy.py> <ohlcv file>
+```
 
 ---
 

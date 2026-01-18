@@ -5,11 +5,15 @@ import json
 import os
 import sys
 import tomllib
+import ast
+from script_hash import compute_script_hashes, load_script_hashes, write_script_hashes
 from collections import deque
+from functools import partial
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional
 
+import numpy as np
 import websockets
 
 from appendable_iter import AppendableIterable
@@ -20,6 +24,8 @@ from pynecore.core.syminfo import SymInfo
 from pynecore.types.ohlcv import OHLCV
 
 DATA_WS = ""
+SCRIPT_PATH: Path | None = None
+SCRIPT_HASH_PATH: Path | None = None  # CSV path for persisted script hashes.
 
 # Event queue for trade events
 trade_event_queue = deque()
@@ -27,6 +33,72 @@ trade_event_queue = deque()
 plot_options = {}
 # Event queue for plotchar events
 plotchar_event_queue = deque()
+
+
+def extract_script_title(script_path: Path) -> str:
+    try:
+        source = script_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(script_path))
+    except Exception:
+        return "No title"
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            if func.value.id != "script":
+                continue
+            if func.attr not in {"strategy", "indicator", "library"}:
+                continue
+            for kw in node.keywords:
+                if kw.arg == "title" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                    return kw.value.value or "No title"
+            if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                return node.args[0].value or "No title"
+    return "No title"
+
+
+def send_webhook_message(webhook_url: str, message: str, *, script_title: str | None,
+                         telegram_notification: bool, telegram_token: str | None,
+                         telegram_chat_id: str | None) -> None:
+    import json
+    import re
+    import requests
+
+    # Wrap unquoted message fields so JSON parsing succeeds.
+    s = re.sub(r'"message"\s*:\s*(?![{["0-9])([A-Za-z][A-Za-z0-9 ]*)',
+               r'"message": "\1"',
+               message)
+    json_alert_message = json.loads(s).get('message', '')
+    if json_alert_message != '':
+        payload = json_alert_message
+        try:
+            response = requests.post(webhook_url, json=payload, timeout=(5, 10))
+            response.raise_for_status()
+            print("Webhook response:", response.json())
+        except Exception as e:
+            print(f"Webhook error: {e}")
+
+    if telegram_notification and telegram_token and telegram_chat_id:
+        url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
+        payload = {
+            "chat_id": telegram_chat_id,
+            "text": f"🚨 [{script_title}] {json.dumps(json_alert_message).replace('\"', '')}",
+            # "parse_mode": "Markdown"  # 굵게/이탤릭 등 쓰고 싶으면 선택
+        }
+        try:
+            response = requests.get(url, params=payload, timeout=(5, 10))
+            response.raise_for_status()
+            print("Telegram response:", response.json())
+        except Exception as e:
+            print(f"Telegram notification error: {e}")
+
+
+def clear_local_state() -> None:
+    trade_event_queue.clear()
+    plotchar_event_queue.clear()
+    plot_options.clear()
 
 
 def on_entry_event(trade):
@@ -88,6 +160,34 @@ def on_plotchar_event(plotchar_data):
     }
     plotchar_event_queue.append(event)
 
+
+def on_alert_event(message: str, runner: ScriptRunner):
+    """Callback for alert events - webhook/telegram notifications"""
+    script = runner.script
+    if not script.webhook_url and not script.telegram_notification:
+        return
+
+    # Last check if webhook/telegram notification is enabled in config
+    config_dir = app_state.config_dir
+    webhook_enabled = False
+    telegram_notification_enabled = False
+    with open(config_dir / "realtime_trade.toml", "rb") as f:
+        config = tomllib.load(f)
+        webhook_section = config.get("webhook", {})
+        webhook_enabled = webhook_section.get("enabled", False)
+        telegram_notification_enabled = webhook_section.get("telegram_notification", False)
+
+    if webhook_enabled and script.webhook_url:
+        send_webhook_message(
+            webhook_url=script.webhook_url,
+            message=message,
+            script_title=script.title,
+            telegram_notification=telegram_notification_enabled,
+            telegram_token=script.telegram_token,
+            telegram_chat_id=script.telegram_chat_id,
+        )
+
+
 def ready_scrip_runner(script_path: Path, data_path: Path, data_toml_path: Path) -> tuple[ScriptRunner,
 AppendableIterable[OHLCV], OHLCVReader] | None:
     """
@@ -107,7 +207,9 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
     size = reader.get_size(int(time_from.timestamp()), int(time_to.timestamp()))
     if gaps > 0:
         size = size - gaps
-    ohlcv_iter: Iterator[OHLCV] = reader.read_from(int(time_from.timestamp()), int(time_to.timestamp()))
+    # preload_list is used for request.security calculation
+    preload_list = list(reader.read_from(int(time_from.timestamp()), int(time_to.timestamp())))
+    ohlcv_iter: Iterator[OHLCV] = iter(preload_list)
     # Prepare a mutable iterator.
     if ohlcv_iter is not None:
         stream: AppendableIterable[OHLCV] = AppendableIterable(ohlcv_iter, feed_in_background=True)
@@ -123,15 +225,15 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
         lib_path_added = True
 
         try:
-            #################################### Module calculation ####################################
-            # bb1d / weekly high, low calculation
-            from modules.bb1d_calc import get_bb1d_lower
-            from modules.weekly_hl_calc import get_weekly_high_low
-            bb1d_lower = get_bb1d_lower(str(data_path), period=20, mult=2.0,
-                                        lookahead_on=True)
-            macro_high, macro_low = get_weekly_high_low(str(data_path), ago=2, session_offset_hours=9,
-                                                        lookahead_on=True)
-            #################################### Module calculation ####################################
+            # #################################### Module calculation ####################################
+            # # bb1d / weekly high, low calculation
+            # from modules.bb1d_calc import get_bb1d_lower
+            # from modules.weekly_hl_calc import get_weekly_high_low
+            # bb1d_lower = get_bb1d_lower(str(data_path), period=20, mult=2.0,
+            #                             lookahead_on=True)
+            # macro_high, macro_low = get_weekly_high_low(str(data_path), ago=2, session_offset_hours=9,
+            #                                             lookahead_on=True)
+            # #################################### Module calculation ####################################
 
             # Create script runner (this is where the import happens)
             config_dir = app_state.config_dir
@@ -143,15 +245,17 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
                                       plot_path=plot_path, strat_path=None, trade_path=None,
                                       realtime_config=realtime_config,
                                       custom_inputs={
-                                            "bb1d_lower": bb1d_lower,
-                                            "macro_high": macro_high,
-                                            "macro_low": macro_low
-                                      })
+                                            # "bb1d_lower": bb1d_lower,
+                                            # "macro_high": macro_high,
+                                            # "macro_low": macro_low
+                                      },
+                                      preload_ohlcv=preload_list)
                 runner.init_step()
 
                 # Register trade event callbacks
                 runner.script.position.on_entry_callback = on_entry_event
                 runner.script.position.on_close_callback = on_close_event
+                runner.script.position.on_alert_callback = partial(on_alert_event, runner=runner)
                 # Register plot event callback
                 runner.script.on_plot_callback = on_plot_event
                 # Register plotchar event callback
@@ -169,11 +273,12 @@ def bar_list_to_ohlcv(bar: list) -> OHLCV:
     # bar: [ts_ms, o, h, l, c, v]
     return OHLCV(
         timestamp=int(bar[0] / 1000),
-        open=float(bar[1]),
-        high=float(bar[2]),
-        low=float(bar[3]),
-        close=float(bar[4]),
-        volume=float(bar[5]),
+        # Align realtime bars with file precision (float32) to avoid BB rounding drift.
+        open=float(np.float32(bar[1])),
+        high=float(np.float32(bar[2])),
+        low=float(np.float32(bar[3])),
+        close=float(np.float32(bar[4])),
+        volume=float(np.float32(bar[5])),
         extra_fields={},
     )
 
@@ -194,6 +299,26 @@ async def ws_loop():
                     await ws.send(json.dumps({"type": "client_hello", "role": "runner"}))
                 except Exception:
                     pass
+                try:
+                    if SCRIPT_PATH and SCRIPT_PATH.exists():
+                        title = extract_script_title(SCRIPT_PATH)
+                        await ws.send(json.dumps({
+                            "type": "script_info",
+                            "title": title,
+                        }))
+                except Exception as e:
+                    print(f"[runner] Failed to send script_info (connect): {e}")
+                try:
+                    if SCRIPT_PATH and SCRIPT_PATH.exists():
+                        current_hashes = compute_script_hashes(SCRIPT_PATH)
+                        previous_hashes = load_script_hashes(SCRIPT_HASH_PATH)
+                        if current_hashes != previous_hashes:
+                            # Only reset when script contents changed.
+                            await ws.send(json.dumps({"type": "reset_history"}))
+                            clear_local_state()
+                            write_script_hashes(SCRIPT_HASH_PATH, current_hashes)
+                except Exception as e:
+                    print(f"[runner] Failed to send reset_history: {e}")
 
                 async def keepalive():
                     while True:
@@ -248,6 +373,10 @@ async def main():
     script_path = app_state.scripts_dir / script_name
     if not script_path.exists():
         raise RuntimeError(f"script not found: {script_path}")
+    global SCRIPT_PATH
+    SCRIPT_PATH = script_path
+    global SCRIPT_HASH_PATH
+    SCRIPT_HASH_PATH = SCRIPT_PATH.parent / ".script_hash.csv"
 
     data_service_addr = realtime_section.get("data_service_addr", "")
     data_service_port = int(data_service_addr.split(":")[1]) if data_service_addr else 9001
@@ -286,6 +415,16 @@ async def main():
             if ctx is not None:
                 continue
 
+            try:
+                current_hashes = compute_script_hashes(SCRIPT_PATH)
+                previous_hashes = load_script_hashes(SCRIPT_HASH_PATH)
+                if current_hashes != previous_hashes:
+                    await ws.send(json.dumps({"type": "script_modified"}))
+                    clear_local_state()
+                    write_script_hashes(SCRIPT_HASH_PATH, current_hashes)
+            except Exception as e:
+                print(f"[runner] Failed to send script_modified (prerun): {e}")
+
             # Ready runner + stream
             result = ready_scrip_runner(script_path, ohlcv_path, toml_path)
             if result is None:
@@ -311,6 +450,15 @@ async def main():
             if runner.plot_writer:
                 runner.plot_writer.flush()
             # print("=== Pre-run finished ===")
+
+            try:
+                title = runner.script.title or "No title"
+                await ws.send(json.dumps({
+                    "type": "script_info",
+                    "title": title,
+                }))
+            except Exception as e:
+                print(f"[runner] Failed to send script_info: {e}")
 
             # Send last bar index to data_service to fix open price
             try:
@@ -399,24 +547,31 @@ async def main():
             incremented_size = 1 if interval_ms == timeframe_ms else 0
 
             if incremented_size > 0:
-                #################################### Module calculation ####################################
-                # bb1d / weekly high, low calculation
-                from modules.bb1d_calc import get_bb1d_lower
-                from modules.weekly_hl_calc import get_weekly_high_low
-                bb1d_lower = get_bb1d_lower(ohlcv_path, period=20, mult=2.0, lookahead_on=True)
-                macro_high, macro_low = get_weekly_high_low(ohlcv_path, ago=2, session_offset_hours=9,
-                                                            lookahead_on=True)
-                #################################### Module calculation ####################################
+                # #################################### Module calculation ####################################
+                # # bb1d / weekly high, low calculation
+                # from modules.bb1d_calc import get_bb1d_lower
+                # from modules.weekly_hl_calc import get_weekly_high_low
+                # bb1d_lower = get_bb1d_lower(ohlcv_path, period=20, mult=2.0, lookahead_on=True)
+                # macro_high, macro_low = get_weekly_high_low(ohlcv_path, ago=2, session_offset_hours=9,
+                #                                             lookahead_on=True)
+                # #################################### Module calculation ####################################
 
                 # custom input update
                 ctx.runner.script.custom_inputs = {
-                    "bb1d_lower": bb1d_lower,
-                    "macro_high": macro_high,
-                    "macro_low": macro_low
+                    # "bb1d_lower": bb1d_lower,
+                    # "macro_high": macro_high,
+                    # "macro_low": macro_low
                 }
 
                 ctx.runner.last_bar_index += incremented_size
                 ctx.runner.script.last_bar_index += incremented_size
+
+                # Ensure request.security can see the new bar during confirmed-bar evaluation.
+                from pynecore.lib.request import get_security_ctx
+                security_ctx = get_security_ctx()
+                if security_ctx is not None:
+                    security_ctx.update_base_bar(confirmed_ohlcv, ctx.runner.last_bar_index - 1)
+                    security_ctx.update_base_bar(new_ohlcv, ctx.runner.last_bar_index)
 
                 # Calculate the last confirmed bar
                 ctx.runner.script.pre_run = False

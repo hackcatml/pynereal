@@ -29,41 +29,6 @@ __all__ = [
     "closedtrades", "opentrades",
 ]
 
-def send_webhook_message(webhook_url: str, message: str):
-    import requests
-    import json
-    import re
-    # 쌍따옴표로 감싸지지 않은 문자열이 전달된 경우 쌍따옴표로 감싸기
-    s = re.sub(r'"message"\s*:\s*(?![{["0-9])([A-Za-z][A-Za-z0-9 ]*)',
-               r'"message": "\1"',
-               message)
-    json_alert_message = json.loads(s).get('message', '')
-    if json_alert_message != '':
-        payload = json_alert_message
-        try:
-            # timeout=(connect_timeout, read_timeout)
-            response = requests.post(webhook_url, json=payload, timeout=(5, 10))
-            response.raise_for_status()
-            print("Webhook response:", response.json())
-        except Exception as e:
-            print(f"Webhook error: {e}")
-
-    tg_enabled, tg_token, tg_chat_id = telegram_notification()
-    if tg_enabled:
-        url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
-        script_title = get_script_title()
-        payload = {
-            "chat_id": tg_chat_id,
-            "text": f"🚨 [{script_title}] {json.dumps(json_alert_message).replace('\"', '')}",
-            # "parse_mode": "Markdown"  # 굵게/이탤릭 등 쓰고 싶으면 선택
-        }
-        try:
-            response = requests.get(url, params=payload, timeout=(5, 10))
-            response.raise_for_status()
-            print("Telegram response:", response.json())
-        except Exception as e:
-            print(f"Telegram notification error: {e}")
-
 #
 # Callable modules
 #
@@ -416,7 +381,7 @@ class Position:
         'risk_max_position_size',
         'risk_cons_loss_days', 'risk_last_day_index', 'risk_last_day_equity',
         'risk_intraday_filled_orders', 'risk_intraday_start_equity', 'risk_halt_trading',
-        'on_entry_callback', 'on_close_callback'
+        'on_entry_callback', 'on_close_callback', 'on_alert_callback'
     )
 
     def __init__(self):
@@ -487,6 +452,7 @@ class Position:
         # Event callbacks
         self.on_entry_callback = None
         self.on_close_callback = None
+        self.on_alert_callback = None
 
     @property
     def equity(self) -> float | NA[float]:
@@ -867,9 +833,11 @@ class Position:
             # Real time trade 에서는 최종 봉이 확정되고 새로운 봉이 생길때에만 alert 이 울리도록 함
             if order.bar_index == last_bar_index() - 1:
                 alert(order.alert_message)
-                # Send a webhook message and telegram notification
-                if (webhook_url := get_webhook_url()) is not None:
-                    send_webhook_message(webhook_url=webhook_url, message=order.alert_message)
+                if self.on_alert_callback:
+                    try:
+                        self.on_alert_callback(order.alert_message)
+                    except Exception as e:
+                        print(f"Error in on_alert_callback: {e}")
 
     def fill_order(self, order: Order, price: float, h: float, l: float) -> bool:
         """
