@@ -53,18 +53,21 @@ def alert(
                    r'"message": "\1"',
                    message)
         data = json.loads(s)
-        timestamp = int(data.get('timestamp', None) / 1000)
+        timestamp = int(int(data.get('timestamp', 0)) / 1000)
         bar_time = datetime.datetime.fromtimestamp(timestamp) if timestamp else None
+        bar_time_str = f"[{bar_time}]" if bar_time else ""
 
         message = data.get('message', '')
 
-        typer.secho(f"[{current_time}] [{bar_time}] 🚨  {message}",
+        typer.secho(f"[{current_time}] {bar_time_str} 🚨  {message}",
                     fg=typer.colors.BRIGHT_YELLOW, bold=True)
     except ImportError:
         # Fallback to simple print
         print(f"🚨 {message}")
+    except (JSONDecodeError, KeyError):
+        print(f"🚨 {message}")
     except Exception as e:
-        print(f"🚨 message should be json format. {message}")
+        print(f"🚨 {e}")
 
 #
 # Module initialization
