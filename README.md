@@ -16,6 +16,7 @@ If you're an active system trader who relies on TradingView strategies, you've p
 Run your entire strategy in a **Python environment** under your complete control
 <br>**Debug easily** when unexpected issues occur
 <br>Leverage **Python's unlimited extensibility** for your trading logic
+
 ---
 
 ## Prerequisites
