@@ -294,10 +294,13 @@ class ScriptRunner:
 
         # Set script data
         lib._script = self.script  # Store script object in lib
-        security_ctx = SecurityContext(self.script_module, lib)
-        set_security_ctx(security_ctx)
-        if self._all_ohlcv:
-            security_ctx.prefill_base_bars(self._all_ohlcv)
+        if getattr(self.script_module, "__has_request_security__", False):
+            security_ctx = SecurityContext(self.script_module, lib)
+            set_security_ctx(security_ctx)
+            if self._all_ohlcv:
+                security_ctx.prefill_base_bars(self._all_ohlcv)
+        else:
+            set_security_ctx(None)
 
         # Update syminfo lib properties if needed
         if not self.update_syminfo_every_run:
