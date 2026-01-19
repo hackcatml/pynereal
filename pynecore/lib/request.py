@@ -25,6 +25,7 @@ class _TimeframeCache:
     last_synced_index: int = -1
     last_bar_time: int | None = None
     last_refreshed_base_index: int | None = None
+    series_snapshots: dict[int, dict[str, "SeriesImpl"]] = field(default_factory=dict)
 
 
 @dataclass
@@ -43,6 +44,38 @@ class _ExprCache:
 class _PersistentModule:
     module: Any
     keys: list[str]
+
+
+@dataclass
+class _SeriesSnapshot:
+    buffer: list[Any]
+    max_bars_back: int
+    max_bars_back_set: int
+    capacity: int
+    write_pos: int
+    size: int
+    last_bar_index: int
+
+    @classmethod
+    def from_series(cls, series: SeriesImpl) -> "_SeriesSnapshot":
+        return cls(
+            buffer=list(series._buffer),
+            max_bars_back=series._max_bars_back,
+            max_bars_back_set=series._max_bars_back_set,
+            capacity=series._capacity,
+            write_pos=series._write_pos,
+            size=series._size,
+            last_bar_index=series._last_bar_index,
+        )
+
+    def restore(self, series: SeriesImpl) -> None:
+        series._buffer = list(self.buffer)
+        series._max_bars_back = self.max_bars_back
+        series._max_bars_back_set = self.max_bars_back_set
+        series._capacity = self.capacity
+        series._write_pos = self.write_pos
+        series._size = self.size
+        series._last_bar_index = self.last_bar_index
 
 
 class SecurityContext:
@@ -105,13 +138,25 @@ class SecurityContext:
                 globals_dict = func.__globals__
             except Exception:
                 continue
+            names = getattr(func, "__pyne_persist_names__", None)
+            if names is None:
+                names = []
+                for name in list(globals_dict.keys()):
+                    if not (name.startswith("__persistent_") or name.startswith("__series_")):
+                        continue
+                    if name in ("__persistent_function_vars__", "__series_function_vars__"):
+                        continue
+                    if name.endswith("_vars__"):
+                        continue
+                    names.append(name)
+                setattr(func, "__pyne_persist_names__", names)
+            if not names:
+                continue
             state: dict[str, Any] = {}
-            for name, value in list(globals_dict.items()):
-                if not (name.startswith("__persistent_") or name.startswith("__series_")):
-                    continue
-                if name in ("__persistent_function_vars__", "__series_function_vars__"):
-                    continue
-                if name.endswith("_vars__"):
+            for name in names:
+                value = globals_dict.get(name)
+                if isinstance(value, SeriesImpl):
+                    state[name] = _SeriesSnapshot.from_series(value)
                     continue
                 try:
                     state[name] = copy.deepcopy(value)
@@ -136,7 +181,16 @@ class SecurityContext:
             except Exception:
                 continue
             for name, value in state.items():
-                globals_dict[name] = value
+                if isinstance(value, _SeriesSnapshot):
+                    existing = globals_dict.get(name)
+                    if isinstance(existing, SeriesImpl):
+                        value.restore(existing)
+                    else:
+                        restored = SeriesImpl(max_bars_back=value.max_bars_back)
+                        value.restore(restored)
+                        globals_dict[name] = restored
+                else:
+                    globals_dict[name] = value
 
     def _create_cache(self, timeframe: str) -> _TimeframeCache:
         cache = _TimeframeCache(resampler=Resampler.get_resampler(timeframe))
@@ -287,11 +341,40 @@ class SecurityContext:
 
     def _build_series_snapshot(self, cache: _TimeframeCache, high_index: int) -> dict[str, SeriesImpl]:
         # Create an isolated series buffer up to high_index to avoid leaking newer HTF bars.
+        if high_index < 0:
+            return {name: SeriesImpl() for name in cache.series_map.keys()}
+
+        # Return cached snapshot if available
+        if high_index in cache.series_snapshots:
+            return cache.series_snapshots[high_index]
+
+        prev_snapshot = cache.series_snapshots.get(high_index - 1)
+        if prev_snapshot is not None:
+            temp_series_map: dict[str, SeriesImpl] = {}
+            for name, series_obj in prev_snapshot.items():
+                snap = _SeriesSnapshot.from_series(series_obj)
+                cloned = SeriesImpl(max_bars_back=snap.max_bars_back)
+                snap.restore(cloned)
+                temp_series_map[name] = cloned
+            bar = cache.bars[high_index]
+            values = self._bar_values(bar)
+            old_bar_index = self._lib.bar_index
+            old_last_bar_index = self._lib.last_bar_index
+            try:
+                self._lib.bar_index = high_index
+                self._lib.last_bar_index = high_index
+                for series_name, series_obj in temp_series_map.items():
+                    field = cache.series_fields[series_name]
+                    series_obj.add(values[field])
+            finally:
+                self._lib.bar_index = old_bar_index
+                self._lib.last_bar_index = old_last_bar_index
+            cache.series_snapshots[high_index] = temp_series_map
+            return temp_series_map
+
         temp_series_map: dict[str, SeriesImpl] = {
             name: SeriesImpl() for name in cache.series_map.keys()
         }
-        if high_index < 0:
-            return temp_series_map
 
         old_bar_index = self._lib.bar_index
         old_last_bar_index = self._lib.last_bar_index
@@ -308,6 +391,8 @@ class SecurityContext:
             self._lib.bar_index = old_bar_index
             self._lib.last_bar_index = old_last_bar_index
 
+        # Cache the snapshot for reuse
+        cache.series_snapshots[high_index] = temp_series_map
         return temp_series_map
 
     def evaluate(self, timeframe: str, expr: Callable[[], Any], lookahead) -> Any:
@@ -458,10 +543,6 @@ class SecurityContext:
             "last_bar_time": self._lib.last_bar_time,
             "_datetime": self._lib._datetime,
         }
-
-        # For lookahead_off, re-use the last confirmed HTF value within the same HTF bar.
-        if lookahead != barmerge.lookahead_on and not should_commit:
-            return expr_cache.last_value
         global_snapshot = None
         restore_snapshot = None
         original_scope_id = getattr(self._script_module, "__scope_id__", None)
