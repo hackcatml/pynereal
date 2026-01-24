@@ -8,8 +8,8 @@ test2.py
 .env
 workdir/scripts/*.toml
 
-# Ignore OHLCV Cache file
-!workdir/data/cache/*
+# Ignore SQLite cache files but keep the directory
+workdir/data/cache/*.sqlite
 
 # Ignore OHLCV and TOML files in workdir/data/
 workdir/data/ccxt*.ohlcv
