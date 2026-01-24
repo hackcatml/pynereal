@@ -1,21 +1,37 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Optional
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from dateutil.relativedelta import relativedelta
 from pynecore.core.ohlcv_file import OHLCVReader, OHLCVWriter
 from pynecore.types.ohlcv import OHLCV
+from ohlcv_cache import import_from_ohlcv
+from pynecore.cli.app import app_state
 
 
-def parse_timeframe_to_ms(tf: str) -> int:
-    unit = tf[-1]
-    value = int(tf[:-1])
+def convert_timeframe(timeframe: str, to_ms: bool = False) -> int | str:
+    """
+    timeframe을 분 단위 또는 밀리초로 변환
+
+    Args:
+        timeframe: 시간 단위 문자열 (예: "5m", "1h", "1d")
+        to_ms: True면 밀리초로, False면 분 단위 문자열로 반환
+    """
+    unit = timeframe[-1]
+    value = int(timeframe[:-1])
+
+    # 먼저 분 단위로 변환
     if unit == "m":
-        return value * 60 * 1000
-    if unit == "h":
-        return value * 60 * 60 * 1000
-    return value * 24 * 60 * 60 * 1000
+        minutes = value
+    elif unit == "h":
+        minutes = value * 60
+    else:  # "d"
+        minutes = value * 24 * 60
+
+    return minutes * 60 * 1000 if to_ms else str(minutes)
 
 
 def download_history(provider: str, exchange: str, symbol: str, timeframe: str, since: Optional[str]) -> bool:
@@ -55,6 +71,45 @@ def download_history(provider: str, exchange: str, symbol: str, timeframe: str, 
     except Exception as e:
         print(f"[data_service] download failed: {e}")
         return False
+
+
+def download_history_range_into_cache(
+    *,
+    cache_path: Path,
+    provider: str,
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    time_from: datetime,
+    time_to: datetime,
+) -> bool:
+    ok = False
+    with TemporaryDirectory() as tmp_dir:
+        ohlv_dir = Path(tmp_dir)
+        try:
+            provider_module = __import__(f"pynecore.providers.{provider}", fromlist=[""])
+            provider_class = getattr(
+                provider_module,
+                [p for p in dir(provider_module) if p.endswith("Provider")][0],
+            )
+            provider_instance = provider_class(
+                symbol=f"{exchange}:{symbol}".upper(),
+                timeframe=convert_timeframe(timeframe),
+                ohlv_dir=ohlv_dir,
+                config_dir=app_state.config_dir,
+            )
+            with provider_instance:
+                provider_instance.download_ohlcv(
+                    time_from=time_from.replace(tzinfo=UTC),
+                    time_to=time_to.replace(tzinfo=UTC),
+                    on_progress=None,
+                )
+            assert provider_instance.ohlcv_path is not None
+            import_from_ohlcv(cache_path, provider, exchange, symbol, timeframe, provider_instance.ohlcv_path)
+            ok = True
+        except Exception as e:
+            print(f"[data_service] download_range failed: {e}")
+    return ok
 
 
 def fix_last_open_if_needed(ohlcv_path: str) -> float:
@@ -134,7 +189,7 @@ def fetch_and_update_ohlcv_data(
     symbol: str,
     timeframe: str,
     ohlcv_path: str,
-) -> None:
+) -> list | None:
     """
     Fetch and update candles using fetch_ohlcv.
     Only used at the first pre_run after history download.
@@ -171,6 +226,7 @@ def fetch_and_update_ohlcv_data(
             return None
 
         update_ohlcv_data(ohlcv_path, res)
+        return res
 
     except Exception as e:
         print(f"[fetch_and_update_ohlcv_data] Error fetching OHLCV: {e}")

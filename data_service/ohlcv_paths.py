@@ -27,3 +27,7 @@ def make_plot_path(cfg: DataServiceConfig) -> Path:
     script_stem = Path(script_name).stem
     plot_path = app_state.output_dir / f"{script_stem}.csv"
     return plot_path
+
+
+def make_cache_path() -> Path:
+    return app_state.data_dir / "cache" / "ohlcv_cache.sqlite"
