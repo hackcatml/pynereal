@@ -189,12 +189,12 @@ App.chart = {
       if (state.lastFrameTs != null) {
         const delta = ts - state.lastFrameTs;
         state.jankFrames.push(delta);
-        if (state.jankFrames.length > 60) {
+        if (state.jankFrames.length > 120) {
           state.jankFrames.shift();
         }
-        if (!state.jankReloaded && state.jankFrames.length === 60) {
+        if (!state.jankReloaded && state.jankFrames.length === 120) {
           const avg = state.jankFrames.reduce((a, b) => a + b, 0) / state.jankFrames.length;
-          if (avg >= 60) {
+          if (avg >= 80) {
             state.jankReloaded = true;
             try {
               const range = this.chart.timeScale().getVisibleRange();

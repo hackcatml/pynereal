@@ -7,7 +7,7 @@ from typing import Callable, Optional, Awaitable
 import ccxt.pro as ccxt
 
 from state import DataState
-from ohlcv_io import parse_timeframe_to_ms
+from ohlcv_io import convert_timeframe
 
 
 async def watch_trades_loop(
@@ -68,7 +68,7 @@ async def fix_missing_bars_loop(
     state: DataState,
     check_interval_sec: float = 0.1,
 ) -> None:
-    tf_ms = parse_timeframe_to_ms(timeframe)
+    tf_ms = convert_timeframe(timeframe, to_ms=True)
     grace_ms = 0.2 * 1000
     ex = getattr(ccxt, exchange_name)(config={})
 
