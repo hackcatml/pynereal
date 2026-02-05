@@ -6,7 +6,8 @@ App.ws = {
     const chart = App.chart;
     const collections = App.collections;
 
-    state.ws = new WebSocket(`ws://${location.host}/ws`);
+    const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+    state.ws = new WebSocket(`${wsProtocol}//${location.host}/ws`);
 
     state.ws.onopen = () => {
       console.log("ws connected");
