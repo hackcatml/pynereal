@@ -283,6 +283,16 @@ def bar_list_to_ohlcv(bar: list) -> OHLCV:
     )
 
 
+def run_prerun_steps(runner: ScriptRunner, prerun_range: int) -> None:
+    for _ in range(prerun_range):
+        step_res = runner.step()
+        if step_res is None:
+            break
+    # Flush plot writer to ensure all data is written
+    if runner.plot_writer:
+        runner.plot_writer.flush()
+
+
 @dataclass
 class RunnerCtx:
     runner: ScriptRunner
@@ -442,13 +452,7 @@ async def main():
             if mtype == "prerun_ready_after_history_download":
                 prerun_range = prerun_range + 1
                 runner.script.pre_run = False
-            for _ in range(prerun_range):
-                step_res = runner.step()
-                if step_res is None:
-                    break
-            # Flush plot writer to ensure all data is written
-            if runner.plot_writer:
-                runner.plot_writer.flush()
+            await asyncio.to_thread(run_prerun_steps, runner, prerun_range)
             # print("=== Pre-run finished ===")
 
             try:

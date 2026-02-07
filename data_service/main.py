@@ -221,7 +221,8 @@ async def main() -> None:
     )
 
     server = uvicorn.Server(
-        uvicorn.Config(app, host=cfg.host, port=cfg.port, loop="asyncio", lifespan="off")
+        uvicorn.Config(app, host=cfg.host, port=cfg.port, loop="asyncio", lifespan="off",
+                       ws_ping_interval=None, ws_ping_timeout=None)
     )
     t4 = asyncio.create_task(server.serve())
 
