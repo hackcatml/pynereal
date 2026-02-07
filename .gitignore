@@ -3,8 +3,7 @@ tests
 .idea
 __pycache__
 .claude
-test.py
-test2.py
+test*.py
 .env
 workdir/scripts/*.toml
 
