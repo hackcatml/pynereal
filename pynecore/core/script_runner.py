@@ -70,6 +70,7 @@ def import_script(script_path: Path) -> ModuleType:
     return module
 
 
+# noinspection PyUnusedLocal
 def _round_price(price: float, lib: ModuleType):
     """
     Round price to the nearest tick
@@ -81,7 +82,7 @@ def _round_price(price: float, lib: ModuleType):
     return scaled / syminfo.pricescale
 
 
-# noinspection PyShadowingNames
+# noinspection PyShadowingNames,PyUnusedLocal
 def _set_lib_properties(ohlcv: OHLCV, bar_index: int, tz: 'ZoneInfo', lib: ModuleType):
     """
     Set lib properties from OHLCV
@@ -107,6 +108,7 @@ def _set_lib_properties(ohlcv: OHLCV, bar_index: int, tz: 'ZoneInfo', lib: Modul
     lib._time = lib.last_bar_time = int(dt.timestamp() * 1000)  # PineScript representation of time
 
 
+# noinspection PyUnusedLocal
 def _set_lib_syminfo_properties(syminfo: SymInfo, lib: ModuleType):
     """
     Set syminfo library properties from this object
@@ -136,6 +138,7 @@ def _set_lib_syminfo_properties(syminfo: SymInfo, lib: ModuleType):
         lib.syminfo._size_round_factor = 1
 
 
+# noinspection PyUnusedLocal
 def _reset_lib_vars(lib: ModuleType):
     """
     Reset lib variables to be able to run other scripts
