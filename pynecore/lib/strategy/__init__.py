@@ -93,6 +93,7 @@ class Order:
         "cancelled",  # Flag to mark order as cancelled by OCA
         "bar_index",  # Bar index when the order was placed
         "filled_by_type",  # Type of execution: 'profit', 'loss', 'trailing', or None
+        "from_entry_na",  # True if exit was created without explicit from_entry (applies to any position)
     )
 
     def __init__(
@@ -155,6 +156,7 @@ class Order:
         self.cancelled = False
         self.bar_index = -1  # Will be set when order is added to position
         self.filled_by_type: Literal['profit', 'loss', 'trailing'] | None = None  # Will be set when order fills
+        self.from_entry_na = False
 
     def __repr__(self):
         return f"Order(order_id={self.order_id}; exit_id={self.exit_id}; size={self.size}; type: {self.order_type}; " \
@@ -577,6 +579,10 @@ class Position:
         :param h: The high price
         :param l: The low price
         """
+        # Close orders cannot fill when no position exists
+        if order.order_type == _order_type_close and self.size == 0.0:
+            return
+
         # Save the original order size before any modifications
         filled_size = abs(order.size)
 
@@ -1156,19 +1162,25 @@ class Position:
         return False
 
     def _check_margin_call(self, check_price: float, *, for_short: bool,
-                           at_open: bool = False) -> bool:
+                           at_open: bool = False,
+                           can_defer: bool = True) -> bool:
         """
         Check and execute margin call using TradingView's 10-step algorithm.
 
         TradingView's 3-branch margin call logic:
         1. AF@O < 0: fire immediately at open price (at_open=True)
         2. mc_size > 1: fire immediately at worst-case price (H for shorts, L for longs)
-        3. mc_size == 1 AND AF@C < 0: defer MC to post-script, fire at close price
-        4. mc_size == 1 AND AF@C >= 0: fire immediately at worst-case price
+        3. mc_size == 1 AND can_defer AND AF@C < 0: defer MC to post-script at close price
+        4. mc_size == 1 AND (not can_defer OR AF@C >= 0): fire immediately at worst-case
+
+        Deferral is only allowed at the first OHLC extremum (where recovery is still
+        possible at the opposite extremum). At the second extremum only close remains,
+        so TV fires immediately.
 
         :param check_price: The price to check margin at
         :param for_short: If True, check short positions. If False, check long positions.
         :param at_open: If True, this is an open check — always fire immediately, never defer.
+        :param can_defer: If False, MC fires immediately even when mc_size==1 and AF@C<0.
         :return: True if MC was deferred (caller should stop OHLC processing)
         """
         if not self.open_trades:
@@ -1209,8 +1221,8 @@ class Position:
         if margin_call_size > quantity:
             margin_call_size = quantity
 
-        # Deferral check: mc_size==1 at H/L, check if AF@C<0 → defer to post-script
-        if not at_open and margin_call_size == 1:
+        # Deferral check: mc_size==1 at first OHLC extremum, check if AF@C<0
+        if not at_open and can_defer and margin_call_size == 1:
             c_mvs = quantity * self.c
             c_open_profit = c_mvs - money_spent
             if self.sign < 0:
@@ -1300,7 +1312,18 @@ class Position:
         if not self.open_trades:
             # Remove all exit orders when position is flat
             for order in exit_orders:
-                self._remove_order(order)
+                if not order.is_market_order:
+                    # Check if there is an open market order with this ID
+                    try:
+                        entry_order = self.entry_orders[order.order_id]
+                        if entry_order.is_market_order:
+                            continue
+                    except KeyError:
+                        pass
+                    # Keep from_entry_na exits — they persist until filled or replaced
+                    if order.from_entry_na:
+                        continue
+                    self._remove_order(order)
             exit_orders = []
 
         # For exit orders, calculate limit/stop from entry price if ticks are specified
@@ -1343,10 +1366,14 @@ class Position:
                         t.entry_id == order.order_id for t in self.open_trades
                     )
                     if not has_open_trade:
-                        # No open position for this exit — cancel exit and associated entry
                         associated_entry = self.entry_orders.get(order.order_id)
                         if associated_entry is not None:
-                            self._remove_order(associated_entry)
+                            # Pending entry exists — defer exit, will fill after entry
+                            continue
+                        # Keep from_entry_na exits — they persist until filled or replaced
+                        if order.from_entry_na:
+                            continue
+                        # Orphan exit with no pending entry — cancel
                         self._remove_order(order)
                         continue
 
@@ -1379,12 +1406,140 @@ class Position:
                 slippage_amount = syminfo.mintick * script.slippage * order.sign
                 fill_price = self.o + slippage_amount
 
+            # Pre-fill margin check for entry orders (TradingView behavior)
+            # TV rejects entry orders BEFORE filling if the position would exceed margin
+            if order.order_type == _order_type_entry:
+                margin_percent = (script.margin_short if order.sign < 0
+                                  else script.margin_long)
+                if margin_percent > 0:
+                    margin_ratio = margin_percent / 100.0
+                    if self.size == 0.0:
+                        equity = script.initial_capital + self.netprofit
+                        margin_needed = abs(order.size) * fill_price * margin_ratio
+                        if margin_needed > equity:
+                            self._remove_order(order)
+                            continue
+                    elif self.sign == order.sign:
+                        new_qty = abs(self.size) + abs(order.size)
+                        money_spent = (abs(self.size) * self.avg_price
+                                       + abs(order.size) * fill_price)
+                        mvs = new_qty * fill_price
+                        open_profit = ((mvs - money_spent) if self.sign > 0
+                                       else (money_spent - mvs))
+                        equity = script.initial_capital + self.netprofit + open_profit
+                        margin_needed = mvs * margin_ratio
+                        if margin_needed > equity:
+                            self._remove_order(order)
+                            continue
+
             # open → high → low → close
             if ohlc:
                 self.fill_order(order, fill_price, self.o, self.l)
             # open → low → high → close
             else:
                 self.fill_order(order, fill_price, self.l, self.o)
+
+        # Adapt orphaned exits from rejected entries to new position (TradingView behavior)
+        # When strategy.exit() is called without from_entry, TV keeps the exit even after
+        # its entry is rejected by margin. The exit adapts to close any new position that opens.
+        if self.open_trades:
+            for order in list(self.exit_orders.values()):
+                if order.is_market_order:
+                    continue
+                # Skip exits that match an open trade (they belong to the current position)
+                if any(t.entry_id == order.order_id for t in self.open_trades):
+                    continue
+                # Skip exits whose entry is still pending
+                if order.order_id in self.entry_orders:
+                    continue
+                # Orphan exit: entry was rejected but a new position exists.
+                # Flip direction to close the current position.
+                new_sign = -self.sign
+                self._remove_order(order)
+                adapted = Order(
+                    None, -self.size, exit_id=order.exit_id,
+                    order_type=_order_type_close,
+                    limit=order.limit, stop=order.stop,
+                    comment=order.comment,
+                    comment_profit=order.comment_profit,
+                    comment_loss=order.comment_loss,
+                    comment_trailing=order.comment_trailing,
+                    alert_message=order.alert_message,
+                    alert_profit=order.alert_profit,
+                    alert_loss=order.alert_loss,
+                    alert_trailing=order.alert_trailing,
+                )
+                adapted.bar_index = order.bar_index
+                # Check gap-through with the flipped direction
+                stop_gap = (adapted.stop is not None
+                            and ((new_sign > 0 and self.o >= adapted.stop)
+                                 or (new_sign < 0 and self.o <= adapted.stop)))
+                limit_gap = (adapted.limit is not None
+                             and ((new_sign > 0 and self.o <= adapted.limit)
+                                  or (new_sign < 0 and self.o >= adapted.limit)))
+                filled = False
+                if stop_gap:
+                    fill_price = self.o
+                    if script.slippage > 0:
+                        fill_price += syminfo.mintick * script.slippage * new_sign
+                    adapted.filled_by_type = 'loss'
+                    if ohlc:
+                        self.fill_order(adapted, fill_price, fill_price, self.l)
+                    else:
+                        self.fill_order(adapted, fill_price, self.l, fill_price)
+                    filled = True
+                elif limit_gap:
+                    adapted.filled_by_type = 'profit'
+                    if ohlc:
+                        self.fill_order(adapted, self.o, self.o, self.l)
+                    else:
+                        self.fill_order(adapted, self.o, self.l, self.o)
+                    filled = True
+                else:
+                    self._add_order(adapted)
+                # If the adapted exit closed the position, clean up remaining orphan exits
+                if filled and not self.open_trades:
+                    for remaining in list(self.exit_orders.values()):
+                        if not remaining.is_market_order:
+                            has_entry = remaining.order_id in self.entry_orders
+                            if not has_entry:
+                                self._remove_order(remaining)
+                    break
+
+        # Fill gap-through exits whose entries just filled
+        for order in list(self.exit_orders.values()):
+            if order.is_market_order:
+                continue
+            has_open_trade = any(
+                t.entry_id == order.order_id for t in self.open_trades
+            )
+            if not has_open_trade:
+                continue
+            # Check limit gap-through
+            if order.limit is not None:
+                limit_gap = ((order.size > 0 and self.o <= order.limit)
+                             or (order.size < 0 and self.o >= order.limit))
+                if limit_gap:
+                    order.filled_by_type = 'profit'
+                    if ohlc:
+                        self.fill_order(order, self.o, self.o, self.l)
+                    else:
+                        self.fill_order(order, self.o, self.l, self.o)
+                    continue
+            # Check stop gap-through
+            if order.stop is not None:
+                stop_gap = ((order.size > 0 and self.o >= order.stop)
+                            or (order.size < 0 and self.o <= order.stop))
+                if stop_gap:
+                    fill_price = self.o
+                    if script.slippage > 0:
+                        fill_price += syminfo.mintick * script.slippage * order.sign
+                    order.filled_by_type = 'loss'
+                    if ohlc:
+                        self.fill_order(order, fill_price, fill_price, self.l)
+                    else:
+                        self.fill_order(order, fill_price, self.l, fill_price)
+                    continue
 
         # Margin call check at OPEN
         self._check_margin_call(self.o, for_short=True, at_open=True)
@@ -1415,7 +1570,7 @@ class Position:
                     if order.trail_triggered and order.stop is not None:
                         self._check_close(order, ohlc)
 
-                self._check_margin_call(self.l, for_short=False)
+                self._check_margin_call(self.l, for_short=False, can_defer=False)
 
         # Process orders: open → low → high → close
         else:
@@ -1442,7 +1597,7 @@ class Position:
                     if order.trail_triggered and order.stop is not None:
                         self._check_close(order, ohlc)
 
-                self._check_margin_call(self.h, for_short=True)
+                self._check_margin_call(self.h, for_short=True, can_defer=False)
 
         # Calculate average entry price, unrealized P&L, drawdown and runup...
         if self.open_trades:
@@ -1770,6 +1925,20 @@ def entry(id: str, direction: direction.Direction, qty: int | float | NA[float] 
     elif stop is not None:
         stop = _price_round(stop, direction_sign)
 
+    # Creation-time margin check for market entry orders (TradingView behavior)
+    # TV checks _size_round(qty) × (close + slippage) > equity at strategy.entry() call time
+    if limit is None and stop is None:
+        margin_percent = (script.margin_short if direction_sign < 0
+                          else script.margin_long)
+        if margin_percent > 0:
+            margin_ratio = margin_percent / 100.0
+            slippage_amount = script.slippage * syminfo.mintick
+            expected_price = position.c + slippage_amount * direction_sign
+            equity = script.initial_capital + position.netprofit + position.openprofit
+            margin_needed = abs(size) * expected_price * margin_ratio
+            if margin_needed > equity:
+                return
+
     # If it is not a market order, we should check pyramiding and flip conditions here
     # Market orders are checked at the order processing time
     if limit is not None or stop is not None:
@@ -1942,7 +2111,13 @@ def exit(id: str, from_entry: str = "",
                 direction = order.sign
                 size = order.size
                 from_entry = order.order_id
+                # Only mark as from_entry_na on first creation (not replacement)
+                had_existing_exit = from_entry in position.exit_orders
                 _exit()
+                if not had_existing_exit:
+                    exit_order = position.exit_orders.get(from_entry)
+                    if exit_order is not None:
+                        exit_order.from_entry_na = True
 
             if not direction:
                 for trade in position.open_trades:
