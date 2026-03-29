@@ -1,5 +1,6 @@
-from typing import cast, TYPE_CHECKING
+from typing import cast, TYPE_CHECKING, Literal
 
+import math
 from datetime import datetime, UTC
 from collections import deque, defaultdict
 from copy import copy
@@ -83,12 +84,15 @@ class Order:
     __slots__ = (
         "order_id", "size", "sign", "order_type", "limit", "stop", "exit_id", "oca_name", "oca_type",
         "comment", "alert_message",
+        "comment_profit", "comment_loss", "comment_trailing",
+        "alert_profit", "alert_loss", "alert_trailing",
         "trail_price", "trail_offset",
         "trail_triggered",
         "profit_ticks", "loss_ticks", "trail_points_ticks",  # Store tick values for later calculation
         "is_market_order",  # Flag to check if this is a market order
         "cancelled",  # Flag to mark order as cancelled by OCA
         "bar_index",  # Bar index when the order was placed
+        "filled_by_type",  # Type of execution: 'profit', 'loss', 'trailing', or None
     )
 
     def __init__(
@@ -104,6 +108,12 @@ class Order:
             oca_type: _oca.Oca = _oca.none,
             comment: str | None = None,
             alert_message: str | None = None,
+            comment_profit: str | None = None,
+            comment_loss: str | None = None,
+            comment_trailing: str | None = None,
+            alert_profit: str | None = None,
+            alert_loss: str | None = None,
+            alert_trailing: str | None = None,
             trail_price: float | None = None,
             trail_offset: float | None = None,
             profit_ticks: float | None = None,
@@ -124,6 +134,12 @@ class Order:
 
         self.comment = comment
         self.alert_message = alert_message
+        self.comment_profit = comment_profit
+        self.comment_loss = comment_loss
+        self.comment_trailing = comment_trailing
+        self.alert_profit = alert_profit
+        self.alert_loss = alert_loss
+        self.alert_trailing = alert_trailing
 
         self.trail_price = trail_price
         self.trail_offset = trail_offset or 0  # in ticks
@@ -138,6 +154,7 @@ class Order:
 
         self.cancelled = False
         self.bar_index = -1  # Will be set when order is added to position
+        self.filled_by_type: Literal['profit', 'loss', 'trailing'] | None = None  # Will be set when order fills
 
     def __repr__(self):
         return f"Order(order_id={self.order_id}; exit_id={self.exit_id}; size={self.size}; type: {self.order_type}; " \
@@ -214,7 +231,7 @@ class Trade:
         return v
 
 
-# noinspection PyShadowingNames
+# noinspection PyShadowingNames,DuplicatedCode
 class PriceOrderBook:
     """
     Price-based sorted order storage.
@@ -356,7 +373,7 @@ class PriceOrderBook:
         self.order_prices.clear()
 
 
-# noinspection PyProtectedMember,PyShadowingNames
+# noinspection PyProtectedMember,PyShadowingNames,DuplicatedCode
 class Position:
     """
     This holds data about positions and trades
@@ -381,6 +398,7 @@ class Position:
         'risk_max_position_size',
         'risk_cons_loss_days', 'risk_last_day_index', 'risk_last_day_equity',
         'risk_intraday_filled_orders', 'risk_intraday_start_equity', 'risk_halt_trading',
+        '_deferred_margin_call',
         'on_entry_callback', 'on_close_callback', 'on_alert_callback'
     )
 
@@ -398,9 +416,9 @@ class Position:
         self.grossloss: float | NA[float] = 0.0
 
         # Order books
-        self.market_orders = {}  # Market orders from strategy.market()
-        self.entry_orders = {}  # Entry orders from strategy.entry()
-        self.exit_orders = {}  # Exit orders from strategy.exit(), strategy.close(), etc.
+        self.market_orders: dict[tuple[_OrderType, str], Order] = {}  # Market orders from strategy.market()
+        self.entry_orders: dict[str, Order] = {}  # Entry orders from strategy.entry()
+        self.exit_orders: dict[str, Order] = {}  # Exit orders from strategy.exit(), strategy.close(), etc.
         self.orderbook = PriceOrderBook()
 
         # Trades
@@ -449,6 +467,9 @@ class Position:
         self.risk_intraday_start_equity: float = 0.0
         self.risk_halt_trading: bool = False
 
+        # Deferred margin call (mc_size==1 and AF@C<0: fire after script runs)
+        self._deferred_margin_call: tuple[float, bool] | None = None
+
         # Event callbacks
         self.on_entry_callback = None
         self.on_close_callback = None
@@ -466,7 +487,7 @@ class Position:
 
         # Add market order to market orders dict
         if order.is_market_order:
-            self.market_orders[order.order_id] = order
+            self.market_orders[(order.order_type, order.order_id)] = order
 
         # Check if an order with this ID already exists and remove it first
         if order.order_type == _order_type_close:
@@ -494,7 +515,7 @@ class Position:
             self.entry_orders.pop(order.order_id, None)
         # Remove market order from market orders dict
         if order.is_market_order:
-            self.market_orders.pop(order.order_id, None)
+            self.market_orders.pop((order.order_type, order.order_id), None)
         # Remove order from order book
         self.orderbook.remove_order(order)
 
@@ -619,8 +640,14 @@ class Position:
                     self.closed_trades.append(closed_trade)
                     self.closed_trades_count += 1
 
-                    if order.comment:
-                        # TODO: implement comment_profit, comment_loss, comment_trailing...
+                    # Select appropriate comment based on filled_by_type
+                    if order.filled_by_type == 'profit' and order.comment_profit:
+                        closed_trade.exit_comment = order.comment_profit
+                    elif order.filled_by_type == 'loss' and order.comment_loss:
+                        closed_trade.exit_comment = order.comment_loss
+                    elif order.filled_by_type == 'trailing' and order.comment_trailing:
+                        closed_trade.exit_comment = order.comment_trailing
+                    elif order.comment:
                         closed_trade.exit_comment = order.comment
 
                     # Commission summ
@@ -727,6 +754,29 @@ class Position:
 
             self.new_closed_trades.extend(new_closed_trades)
 
+            # close_all overshoot: when deferred MC reduced position, close_all
+            # captures original size and overshoots → create opposite position
+            if (order.order_id is None and order.size != 0.0 and
+                    order.order_type == _order_type_close):
+                entry_id = order.exit_id
+                overshoot_trade = Trade(
+                    size=order.size,
+                    entry_id=entry_id, entry_bar_index=cast(int, lib.bar_index),
+                    entry_time=lib._time, entry_price=price,
+                    commission=0.0, entry_comment=order.comment,
+                    entry_equity=self.equity
+                )
+                self.open_trades.append(overshoot_trade)
+                self.size += overshoot_trade.size
+                self.sign = 1.0 if self.size > 0.0 else -1.0 if self.size < 0.0 else 0.0
+                self.entry_summ = price * abs(overshoot_trade.size)
+                self.avg_price = price
+                self.openprofit = self.size * (self.c - self.avg_price)
+                if not new_closed_trades:
+                    self.entry_equity = self.equity
+                    self.max_equity = max(self.max_equity, self.equity)
+                    self.min_equity = min(self.min_equity, self.equity)
+
             # Call close callback for each closed trade
             if self.on_close_callback and new_closed_trades:
                 for closed_trade in new_closed_trades:
@@ -763,11 +813,12 @@ class Position:
                 # Entry equity
                 self.entry_equity = entry_equity
 
-            assert order.order_id is not None
+            # For close_all overshoot, use exit_id as entry_id
+            entry_id = order.order_id if order.order_id is not None else order.exit_id
 
             trade = Trade(
                 size=order.size,
-                entry_id=order.order_id, entry_bar_index=cast(int, lib.bar_index),
+                entry_id=entry_id, entry_bar_index=cast(int, lib.bar_index),
                 entry_time=lib._time, entry_price=price,
                 commission=commission, entry_comment=order.comment,  # type: ignore
                 entry_equity=before_equity
@@ -904,7 +955,7 @@ class Position:
         if self.size != 0.0 and new_sign != self.sign and new_size != 0.0:
             # Exit orders should never reverse position direction
             # Only entry orders can open new positions or reverse direction
-            if order.order_type == _order_type_close or close_only:
+            if (order.order_type == _order_type_close or close_only) and order.order_id is not None:
                 # Limit the exit order size to just close the position.
                 # Partial close 가 안되어서 수정. (original: order.size = -self.size)
                 order.size += self.size
@@ -935,6 +986,9 @@ class Position:
 
             # Modify the original order to open a position in the new direction
             order.size = new_size
+            # close_all overshoot: change type to allow opening new trade
+            if order.order_type == _order_type_close:
+                order.order_type = _order_type_normal
             # Fill the entry order
             self._fill_order(order, price, h, l)
             return True
@@ -1003,9 +1057,13 @@ class Position:
         """ Check high stop and trailing trigger """
         if order.stop is None:
             return False
-        # Long stop order (size > 0) triggers when price rises to stop level
+        # Stop order (size > 0) triggers when price rises to stop level
         if order.size > 0 and order.stop <= self.h:
             p = max(order.stop, self.o)
+            slippage = lib._script.slippage
+            if slippage > 0:
+                p += syminfo.mintick * slippage
+            order.filled_by_type = 'loss'
             self.fill_order(order, p, p, self.l)
             return True
         return False
@@ -1040,9 +1098,13 @@ class Position:
         """ Check low stop """
         if order.stop is None:
             return False
-        # Short stop order (size < 0) triggers when price falls to stop level
+        # Stop order (size < 0) triggers when price falls to stop level
         if order.size < 0 and order.stop >= self.l:
             p = min(self.o, order.stop)
+            slippage = lib._script.slippage
+            if slippage > 0:
+                p -= syminfo.mintick * slippage
+            order.filled_by_type = 'loss'
             self.fill_order(order, p, self.h, p)
             return True
         return False
@@ -1077,15 +1139,133 @@ class Position:
         """ Check close price if trailing stop is triggered """
         if order.stop is None:
             return False
+        p = order.stop
+        slippage = lib._script.slippage
+        if slippage > 0:
+            p += syminfo.mintick * slippage * order.sign
         # open → high → low → close
         if ohlc and order.stop <= self.c:
-            self.fill_order(order, order.stop, order.stop, self.l)
+            order.filled_by_type = 'trailing'
+            self.fill_order(order, p, p, self.l)
             return True
         # open → low → high → close
         elif order.stop >= self.c:
-            self.fill_order(order, order.stop, self.h, order.stop)
+            order.filled_by_type = 'trailing'
+            self.fill_order(order, p, self.h, p)
             return True
         return False
+
+    def _check_margin_call(self, check_price: float, *, for_short: bool,
+                           at_open: bool = False) -> bool:
+        """
+        Check and execute margin call using TradingView's 10-step algorithm.
+
+        TradingView's 3-branch margin call logic:
+        1. AF@O < 0: fire immediately at open price (at_open=True)
+        2. mc_size > 1: fire immediately at worst-case price (H for shorts, L for longs)
+        3. mc_size == 1 AND AF@C < 0: defer MC to post-script, fire at close price
+        4. mc_size == 1 AND AF@C >= 0: fire immediately at worst-case price
+
+        :param check_price: The price to check margin at
+        :param for_short: If True, check short positions. If False, check long positions.
+        :param at_open: If True, this is an open check — always fire immediately, never defer.
+        :return: True if MC was deferred (caller should stop OHLC processing)
+        """
+        if not self.open_trades:
+            return False
+
+        if for_short and self.sign >= 0:
+            return False
+        if not for_short and self.sign <= 0:
+            return False
+
+        script = lib._script
+        margin_percent = script.margin_short if for_short else script.margin_long
+
+        if margin_percent <= 0:
+            return False
+
+        quantity = abs(self.size)
+
+        money_spent = quantity * self.avg_price
+        mvs = quantity * check_price
+
+        open_profit = mvs - money_spent
+        if self.sign < 0:
+            open_profit = -open_profit
+
+        equity = script.initial_capital + self.netprofit + open_profit
+        margin_ratio = margin_percent / 100.0
+        margin = mvs * margin_ratio
+        available_funds = equity - margin
+
+        if available_funds >= 0:
+            return False
+
+        loss = available_funds / margin_ratio
+        cover_amount = int(loss / check_price)
+        margin_call_size = max(1, abs(cover_amount) * 4)
+
+        if margin_call_size > quantity:
+            margin_call_size = quantity
+
+        # Deferral check: mc_size==1 at H/L, check if AF@C<0 → defer to post-script
+        if not at_open and margin_call_size == 1:
+            c_mvs = quantity * self.c
+            c_open_profit = c_mvs - money_spent
+            if self.sign < 0:
+                c_open_profit = -c_open_profit
+            c_equity = script.initial_capital + self.netprofit + c_open_profit
+            c_margin = c_mvs * margin_ratio
+            c_af = c_equity - c_margin
+            if c_af < 0:
+                self._deferred_margin_call = (self.c, for_short)
+                return True
+
+        fill_price = check_price
+        if script.slippage > 0:
+            slippage_amount = syminfo.mintick * script.slippage
+            if for_short:
+                fill_price = check_price + slippage_amount
+            else:
+                fill_price = check_price - slippage_amount
+
+        margin_call_order = Order(
+            None,
+            -self.sign * margin_call_size,
+            order_type=_order_type_close,
+            comment='Margin call'
+        )
+        margin_call_order.is_market_order = False
+        margin_call_order.bar_index = int(lib.bar_index)
+
+        self._fill_order(margin_call_order, fill_price, fill_price, fill_price)
+        return False
+
+    def process_deferred_margin_call(self):
+        """
+        Execute a deferred margin call (after the user script has run).
+        Called from script_runner after the user script's main() completes.
+        """
+        if self._deferred_margin_call is None:
+            return
+
+        check_price, for_short = self._deferred_margin_call
+        self._deferred_margin_call = None
+
+        prev_count = len(self.new_closed_trades)
+        self._check_margin_call(check_price, for_short=for_short, at_open=True)
+
+        initial_capital = lib._script.initial_capital
+        for closed_trade in self.new_closed_trades[prev_count:]:
+            self.cum_profit += closed_trade.profit
+            closed_trade.cum_profit = self.cum_profit
+            try:
+                closed_trade.cum_profit_percent = (
+                    closed_trade.cum_profit / initial_capital) * 100.0
+            except ZeroDivisionError:
+                closed_trade.cum_profit_percent = 0.0
+            self.entry_equity += closed_trade.profit
 
     def process_orders(self):
         """ Process orders """
@@ -1157,10 +1337,23 @@ class Position:
         for order in self.orderbook.iter_orders():
             # Check if the order would be filled immediately (e.g. due to a gap)
             if self._check_already_filled(order):
+                if order.exit_id is not None:
+                    # Exit order gaps through — check if it's for an open position
+                    has_open_trade = any(
+                        t.entry_id == order.order_id for t in self.open_trades
+                    )
+                    if not has_open_trade:
+                        # No open position for this exit — cancel exit and associated entry
+                        associated_entry = self.entry_orders.get(order.order_id)
+                        if associated_entry is not None:
+                            self._remove_order(associated_entry)
+                        self._remove_order(order)
+                        continue
+
                 # Convert to market order
                 order.is_market_order = True
                 # Add to market orders dict
-                self.market_orders[order.order_id] = order
+                self.market_orders[(order.order_type, order.order_id)] = order
 
         # Process Market orders
         for order in list(self.market_orders.values()):
@@ -1193,6 +1386,10 @@ class Position:
             else:
                 self.fill_order(order, fill_price, self.l, self.o)
 
+        # Margin call check at OPEN
+        self._check_margin_call(self.o, for_short=True, at_open=True)
+        self._check_margin_call(self.o, for_short=False, at_open=True)
+
         # Process orders: open → high → low → close
         if ohlc:
             # open -> high
@@ -1206,16 +1403,19 @@ class Position:
                 if order.trail_triggered and order.stop is not None:
                     self._check_close(order, ohlc)
 
-            # open -> low
-            for order in self.orderbook.iter_orders(max_price=self.o, min_price=self.l):
-                if self._check_low_stop(order):
-                    continue
-                if self._check_low(order):
-                    continue
-                if self._check_low_trailing(order):
-                    continue
-                if order.trail_triggered and order.stop is not None:
-                    self._check_close(order, ohlc)
+            if not self._check_margin_call(self.h, for_short=True):
+                # open -> low
+                for order in self.orderbook.iter_orders(max_price=self.o, min_price=self.l):
+                    if self._check_low_stop(order):
+                        continue
+                    if self._check_low(order):
+                        continue
+                    if self._check_low_trailing(order):
+                        continue
+                    if order.trail_triggered and order.stop is not None:
+                        self._check_close(order, ohlc)
+
+                self._check_margin_call(self.l, for_short=False)
 
         # Process orders: open → low → high → close
         else:
@@ -1230,16 +1430,19 @@ class Position:
                 if order.trail_triggered and order.stop is not None:
                     self._check_close(order, ohlc)
 
-            # open -> high
-            for order in self.orderbook.iter_orders(min_price=self.o, max_price=self.h):
-                if self._check_high_stop(order):
-                    continue
-                if self._check_high(order):
-                    continue
-                if self._check_high_trailing(order):
-                    continue
-                if order.trail_triggered and order.stop is not None:
-                    self._check_close(order, ohlc)
+            if not self._check_margin_call(self.l, for_short=False):
+                # open -> high
+                for order in self.orderbook.iter_orders(min_price=self.o, max_price=self.h):
+                    if self._check_high_stop(order):
+                        continue
+                    if self._check_high(order):
+                        continue
+                    if self._check_high_trailing(order):
+                        continue
+                    if order.trail_triggered and order.stop is not None:
+                        self._check_close(order, ohlc)
+
+                self._check_margin_call(self.h, for_short=True)
 
         # Calculate average entry price, unrealized P&L, drawdown and runup...
         if self.open_trades:
