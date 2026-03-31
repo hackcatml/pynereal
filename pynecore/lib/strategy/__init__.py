@@ -1,4 +1,4 @@
-from typing import cast, TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal
 
 import math
 from datetime import datetime, UTC
@@ -771,7 +771,7 @@ class Position:
                 entry_id = order.exit_id
                 overshoot_trade = Trade(
                     size=order.size,
-                    entry_id=entry_id, entry_bar_index=cast(int, lib.bar_index),
+                    entry_id=entry_id, entry_bar_index=lib.bar_index,
                     entry_time=lib._time, entry_price=price,
                     commission=0.0, entry_comment=order.comment,
                     entry_equity=self.equity
@@ -828,7 +828,7 @@ class Position:
 
             trade = Trade(
                 size=order.size,
-                entry_id=entry_id, entry_bar_index=cast(int, lib.bar_index),
+                entry_id=entry_id, entry_bar_index=lib.bar_index,
                 entry_time=lib._time, entry_price=price,
                 commission=commission, entry_comment=order.comment,  # type: ignore
                 entry_equity=before_equity
@@ -1734,20 +1734,10 @@ def _price_round(price: float | NA[float], direction: int | float) -> float | NA
     if isinstance(price, NA):
         return na_float
     pricescale = syminfo.pricescale
-    pmp = round(cast(float, price * pricescale), 7)
-    pmp_int = int(pmp)
-
+    pmp = round(price * pricescale, 7)
     if direction < 0:
-        # Round down
-        return pmp_int / pricescale
-    else:
-        # Round up only if pmp is not already an integer
-        if pmp == pmp_int:
-            # Already an integer, no rounding needed
-            return pmp_int / pricescale
-        else:
-            # Not an integer, round up
-            return (pmp_int + 1) / pricescale
+        return int(pmp) / pricescale
+    return math.ceil(pmp) / pricescale
 
 
 # noinspection PyShadowingBuiltins,PyProtectedMember
@@ -1805,12 +1795,13 @@ def close(id: str, comment: str | NA[str] = na_str, qty: float | NA[float] = na_
         return
 
     if isinstance(qty, NA):
-        size = -position.size * (qty_percent * 0.01) if not isinstance(qty_percent, NA) \
-            else -position.size
+        if not isinstance(qty_percent, NA):
+            size = _size_round(-position.size * (qty_percent * 0.01))
+        else:
+            size = -position.size
     else:
-        size = -position.sign * qty
+        size = _size_round(-position.sign * qty)
 
-    size = _size_round(size)
     if size == 0.0:
         return
 
