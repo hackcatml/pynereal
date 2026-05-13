@@ -32,6 +32,7 @@ known_limits = {
     'bitmex': 500,
     'bybit': 200,
     'coinbase': 300,
+    'hyperliquid': 5000,
     'kraken': 720,
     'kucoin': 1500,
     'okex': 200,
