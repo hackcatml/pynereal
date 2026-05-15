@@ -63,7 +63,7 @@ def download_history(provider: str, exchange: str, symbol: str, timeframe: str, 
             timeframe=data_timeframe,
             time_from=time_from,
             time_to=time_to,
-            chunk_size=100,
+            chunk_size=None if exchange.lower() == "hyperliquid" else 100,
             list_symbols=False,
             show_info=False,
         )
