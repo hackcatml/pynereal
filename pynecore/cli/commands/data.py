@@ -126,10 +126,7 @@ def download(
     """
     # Import provider module from
     provider_module = __import__(f"pynecore.providers.{provider.value}", fromlist=[''])
-    # Find the provider class (exclude base Provider class)
-    provider_class = getattr(provider_module, [
-        p for p in dir(provider_module) if p.endswith('Provider') and p != 'Provider'
-    ][0])
+    provider_class = getattr(provider_module, [p for p in dir(provider_module) if p.endswith('Provider')][0])
 
     try:
         # If list_symbols is True, we show the available symbols then exit

@@ -70,25 +70,18 @@ def import_script(script_path: Path) -> ModuleType:
     return module
 
 
-def _round_price(price: float):
+def _round_price(price: float, lib: ModuleType):
     """
-    Round price to 6 significant digits to clean float32 storage artifacts
-    without destroying sub-mintick precision.
-
-    TradingView does NOT round OHLC data to syminfo.mintick — scripts see
-    the raw data (e.g. close=4.125 even when mintick=0.01). The float32
-    OHLCV format introduces small errors (e.g. 4.12 → 4.1199998856) that
-    this function cleans by rounding to 6 significant digits (float32 has ~7).
+    Round price to the nearest tick
     """
-    if price == 0.0:
-        return 0.0
-    from math import log10, floor
-    magnitude = floor(log10(abs(price)))
-    precision = 5 - magnitude  # 6 significant digits
-    return round(price, precision)
+    if TYPE_CHECKING:  # This is needed for the type checker to work
+        from .. import lib
+    syminfo = lib.syminfo
+    scaled = round(price * syminfo.pricescale)
+    return scaled / syminfo.pricescale
 
 
-# noinspection PyShadowingNames,PyUnusedLocal
+# noinspection PyShadowingNames
 def _set_lib_properties(ohlcv: OHLCV, bar_index: int, tz: 'ZoneInfo', lib: ModuleType):
     """
     Set lib properties from OHLCV
@@ -98,10 +91,10 @@ def _set_lib_properties(ohlcv: OHLCV, bar_index: int, tz: 'ZoneInfo', lib: Modul
 
     lib.bar_index = lib.last_bar_index = bar_index
 
-    lib.open = _round_price(ohlcv.open)
-    lib.high = _round_price(ohlcv.high)
-    lib.low = _round_price(ohlcv.low)
-    lib.close = _round_price(ohlcv.close)
+    lib.open = _round_price(ohlcv.open, lib)
+    lib.high = _round_price(ohlcv.high, lib)
+    lib.low = _round_price(ohlcv.low, lib)
+    lib.close = _round_price(ohlcv.close, lib)
 
     lib.volume = ohlcv.volume
 
@@ -114,7 +107,6 @@ def _set_lib_properties(ohlcv: OHLCV, bar_index: int, tz: 'ZoneInfo', lib: Modul
     lib._time = lib.last_bar_time = int(dt.timestamp() * 1000)  # PineScript representation of time
 
 
-# noinspection PyUnusedLocal
 def _set_lib_syminfo_properties(syminfo: SymInfo, lib: ModuleType):
     """
     Set syminfo library properties from this object
@@ -144,7 +136,6 @@ def _set_lib_syminfo_properties(syminfo: SymInfo, lib: ModuleType):
         lib.syminfo._size_round_factor = 1
 
 
-# noinspection PyUnusedLocal
 def _reset_lib_vars(lib: ModuleType):
     """
     Reset lib variables to be able to run other scripts
@@ -187,7 +178,6 @@ class ScriptRunner:
                  plot_path: Path | None = None, strat_path: Path | None = None,
                  trade_path: Path | None = None,
                  update_syminfo_every_run: bool = False, last_bar_index=0,
-                 inputs: dict[str, Any] | None = None,
                  realtime_config: dict = None, custom_inputs: dict[str, Any] = None,
                  preload_ohlcv: list[OHLCV] | None = None):
         """
@@ -202,8 +192,6 @@ class ScriptRunner:
         :param update_syminfo_every_run: If it is needed to update the syminfo lib in every run,
                                          needed for parallel script executions
         :param last_bar_index: Last bar index, the index of the last bar of the historical data
-        :param inputs: Optional dictionary of input values to pass to the script,
-                       overrides values from .toml files
         :raises ImportError: If the script does not have a 'main' function
         :raises ImportError: If the 'main' function is not decorated with @script.[indicator|strategy|library]
         :raises OSError: If the plot file could not be opened
@@ -214,11 +202,6 @@ class ScriptRunner:
         # Set syminfo properties BEFORE importing the script
         # This ensures that timestamp() calls in default parameters use the correct timezone
         _set_lib_syminfo_properties(syminfo, lib)
-
-        # Set programmatic inputs before script import so they override .toml values
-        if inputs:
-            from .script import _programmatic_inputs
-            _programmatic_inputs.update(inputs)
 
         # Now import the script (default parameters will use correct timezone)
         self.script_module = import_script(script_path)
@@ -378,10 +361,6 @@ class ScriptRunner:
 
                 # Run the script
                 res = self.script_module.main()
-
-                # Process deferred margin calls (after script runs, before results)
-                if is_strat and position:
-                    position.process_deferred_margin_call()
 
                 # Update plot data with the results
                 if res is not None:

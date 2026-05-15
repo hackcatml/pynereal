@@ -429,16 +429,14 @@ def from_seconds(seconds: int) -> str:
     return f"{seconds}S"
 
 
-def in_seconds(timeframe: str | None = None) -> int:
+def in_seconds(timeframe: str) -> int:
     """
     Convert the timeframe to seconds
 
-    :param timeframe: The timeframe to convert. If not provided, uses the current chart timeframe.
+    :param timeframe: The timeframe to convert
     :return: The timeframe in seconds
     :raises ValueError: If the timeframe is invalid
     """
-    if timeframe is None:
-        timeframe = str(_syminfo.period)
     _modifier, _multiplier = _process_tf(timeframe)
     if _modifier == 'S':
         return _multiplier

@@ -2,10 +2,10 @@ from dataclasses import dataclass
 from typing import Optional
 
 from ..lib import color as _color, xloc as _xloc, yloc as _yloc, size as _size, text as _text, font as _font
-from .base import StrLiteral
+from .base import IntEnum
 
 
-class LabelStyleEnum(StrLiteral):
+class LabelStyleEnum(IntEnum):
     ...
 
 

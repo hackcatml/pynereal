@@ -1,11 +1,11 @@
 from dataclasses import dataclass
 from typing import Optional, Union
 
-from .base import StrLiteral
+from .base import IntEnum
 from ..lib import color as _color, display as _display
 
 
-class HLineEnum(StrLiteral):
+class HLineEnum(IntEnum):
     ...
 
 
