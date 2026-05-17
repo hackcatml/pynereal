@@ -231,3 +231,74 @@ def fetch_and_update_ohlcv_data(
     except Exception as e:
         print(f"[fetch_and_update_ohlcv_data] Error fetching OHLCV: {e}")
         return None
+
+
+def fetch_and_update_recent_ohlcv_data(
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    ohlcv_path: str,
+    current_bar_ts_ms: int,
+    bar_count: int = 10,
+) -> list | None:
+    """
+    Fetch and update recently closed candles before the current live candle.
+    The current candle is preserved from the local OHLCV file and is not updated from REST.
+    """
+    import ccxt
+
+    current_ts_sec = int(current_bar_ts_ms / 1000)
+
+    with OHLCVReader(ohlcv_path) as reader:
+        interval = reader.interval
+        last_bar = reader.read(reader.size - 1)
+        reader.close()
+
+    if interval is None:
+        return None
+
+    if last_bar.timestamp != current_ts_sec:
+        print(
+            "[fetch_and_update_recent_closed_ohlcv_data] "
+            f"current bar mismatch: file={last_bar.timestamp}, live={current_ts_sec}"
+        )
+        return None
+
+    current_bar = [
+        last_bar.timestamp * 1000,
+        last_bar.open,
+        last_bar.high,
+        last_bar.low,
+        last_bar.close,
+        last_bar.volume,
+    ]
+
+    client = getattr(ccxt, exchange)(config={})
+    since_ms = (current_ts_sec - interval * bar_count) * 1000
+
+    try:
+        res = client.fetch_ohlcv(
+            symbol=symbol,
+            timeframe=timeframe,
+            since=since_ms,
+            limit=bar_count + 1,
+        )
+
+        if not res:
+            return None
+
+        closed_bars = [
+            bar for bar in res
+            if int(bar[0] / 1000) < current_ts_sec
+        ][-bar_count:]
+
+        if not closed_bars:
+            return None
+
+        update_ohlcv_data(ohlcv_path, closed_bars + [current_bar])
+        # print(f"[fetch_and_update_recent_closed_ohlcv_data] Updated bars:\n{closed_bars}")
+        return closed_bars
+
+    except Exception as e:
+        print(f"[fetch_and_update_recent_closed_ohlcv_data] Error fetching OHLCV: {e}")
+        return None

@@ -117,20 +117,37 @@ async def main() -> None:
                                 plotchar_history.append(event)
                             await ws_manager.broadcast_json(event)
                         elif msg_type == "plot_options":
+                            '''
+                            1. runner_service 가 보낸 confirmed_bar_time을 읽고
+                            2. plot_path CSV에서 그 timestamp의 row만 찾고
+                            3. plot_options.keys()에 있는 각 plot title별 값을 꺼내서
+                            4. 차트 UI 로 plot_data 이벤트를 브로드캐스트함
+                            '''
                             # Store plot options from runner_service
                             plot_options.update(event.get("data", {}))
                             confirmed_bar_index = event.get("confirmed_bar_index", -1)
+                            confirmed_bar_time = event.get("confirmed_bar_time")
                             # print(f"[data_service] Received plot_options: {plot_options}, confirmed_bar_index: {confirmed_bar_index}")
 
                             # Read and broadcast plot data after confirmed_bar_index
-                            if plot_options and confirmed_bar_index >= 0:
+                            if plot_options and (confirmed_bar_time is not None or confirmed_bar_index >= 0):
                                 try:
                                     if plot_path.exists():
                                         from pynecore.core.csv_file import CSVReader
 
                                         with CSVReader(plot_path) as reader:
-                                            # Read a candle at the confirmed_bar_index
-                                            candle = reader.read(confirmed_bar_index)
+                                            candle = None
+                                            if confirmed_bar_time is not None:
+                                                for row in reader.read_from(int(confirmed_bar_time),
+                                                                            int(confirmed_bar_time)):
+                                                    candle = row
+                                                    break
+                                            else:
+                                                # Fallback for older runner_service events.
+                                                candle = reader.read(confirmed_bar_index)
+
+                                            if candle is None:
+                                                continue
 
                                             # Broadcast plot data for each title
                                             for title in plot_options.keys():

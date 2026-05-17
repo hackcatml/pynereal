@@ -492,10 +492,16 @@ async def main():
             # Send plot options to data_service
             if plot_options:
                 try:
+                    confirmed_bar_time = None
+                    with OHLCVReader(ohlcv_path) as reader:
+                        confirmed_bar = reader.read(runner.last_bar_index - 1)
+                        confirmed_bar_time = int(confirmed_bar.timestamp)
+                        reader.close()
                     plot_options_event = {
                         "type": "plot_options",
                         "data": plot_options,
                         "confirmed_bar_index": runner.last_bar_index - 1,
+                        "confirmed_bar_time": confirmed_bar_time,
                     }
                     await ws.send(json.dumps(plot_options_event))
                     # print(f"[runner] Sent plot_options: {plot_options}")
@@ -607,6 +613,7 @@ async def main():
                             "type": "plot_options",
                             "data": plot_options,
                             "confirmed_bar_index": ctx.runner.last_bar_index - 1,
+                            "confirmed_bar_time": int(confirmed_ohlcv.timestamp),
                         }
                         await ws.send(json.dumps(plot_options_event))
                         # print(f"[runner] Sent plot_options: {plot_options}")

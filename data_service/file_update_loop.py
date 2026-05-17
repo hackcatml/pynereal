@@ -16,6 +16,7 @@ from ohlcv_io import (
     download_history,
     fix_last_open_if_needed,
     fetch_and_update_ohlcv_data,
+    fetch_and_update_recent_ohlcv_data,
     download_history_range_into_cache,
     update_ohlcv_data,
 )
@@ -269,6 +270,22 @@ async def file_update_loop(
                         # print(f"[data_service] sqlite cache updated from pre_run fetch (last_ts={last_ts})")
                     first_fetch_after_download_done = True
                 else:
+                    # 현재 진행중인 봉 제외 N 개봉 fetch and update 하여 거래소 데이터와 싱크 맞춤
+                    res = fetch_and_update_recent_ohlcv_data(
+                        exchange,
+                        symbol,
+                        timeframe,
+                        str(ohlcv_path),
+                        current_bar_ts_ms=int(bars[1][0]),
+                        bar_count=10,
+                    )
+                    if res:
+                        cache_rows = [
+                            [int(bar[0] / 1000), bar[1], bar[2], bar[3], bar[4], bar[5]]
+                            for bar in res
+                        ]
+                        upsert_bars(cache_path, provider, exchange, symbol, timeframe, cache_rows)
+                    # Current candle open price fix if needed
                     fixed_open_price = fix_last_open_if_needed(str(ohlcv_path))
                     if fixed_open_price > 0.0:
                         # Fix the last bar stored in the ohlcv cache
