@@ -115,8 +115,12 @@ def benchmark(
             with OHLCVReader(data) as reader:
                 # Get only the requested number of candles
                 ohlcv_list = []
+                # Match realtime/CLI run behavior for exchange-specific hidden bars.
+                skip_zero_volume = syminfo.prefix.upper() == "OKX"
                 # Use read_from to get all data from the beginning
-                for idx, ohlcv in enumerate(reader.read_from(reader.start_timestamp, reader.end_timestamp)):
+                for idx, ohlcv in enumerate(
+                    reader.read_from(reader.start_timestamp, reader.end_timestamp, skip_zero_volume=skip_zero_volume)
+                ):
                     if idx >= candles:
                         break
                     ohlcv_list.append(ohlcv)

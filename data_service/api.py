@@ -114,12 +114,21 @@ def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dic
         if not ohlcv_path.exists():
             return JSONResponse([])
 
+        # The chart must receive the same visible candle set as the runner.
+        # OKX hides zero-volume bars like TradingView; BITGET keeps them visible.
+        skip_zero_volume = cfg is not None and cfg.exchange.upper() == "OKX"
         out: List[Dict[str, Any]] = []
         with OHLCVReader(ohlcv_path) as reader:
-            size = reader.size
-            start = max(0, size - limit)
-            for i in range(start, size):
-                c = reader.read(i)
+            if reader.start_timestamp is None:
+                return JSONResponse([])
+            candles = list(
+                reader.read_from(
+                    reader.start_timestamp,
+                    reader.end_timestamp,
+                    skip_zero_volume=skip_zero_volume,
+                )
+            )
+            for c in candles[-limit:]:
                 out.append(
                     {
                         "time": int(c.timestamp),

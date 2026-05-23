@@ -86,7 +86,15 @@ async def main() -> None:
                                 await ws_manager.broadcast_json({"type": "runner_connected"})
                         elif msg_type == "last_bar_open_fix":
                             last_bar_index = event.get("last_bar_index", -1)
-                            if last_bar_index > 0:
+                            event_data = event.get("data")
+                            if isinstance(event_data, dict):
+                                # New runner sends the visible candle directly because visible indexes
+                                # can differ from raw file indexes when OKX hidden bars exist.
+                                await ws_manager.broadcast_json({
+                                    "type": "last_bar_open_fix",
+                                    "data": event_data,
+                                })
+                            elif last_bar_index > 0:
                                 try:
                                     from pynecore.core.ohlcv_file import OHLCVReader
                                     with OHLCVReader(ohlcv_path) as reader:
