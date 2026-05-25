@@ -156,7 +156,7 @@ App.chart = {
     if (this.currentPriceLine) {
       this.currentPriceLine.applyOptions({
         price: state.lastPrice,
-        title: `${state.lastPrice.toFixed(2)} | ${timeText}`
+        title: `${timeText}`
       });
     } else {
       this.currentPriceLine = this.candleSeries.createPriceLine({
