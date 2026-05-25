@@ -609,20 +609,25 @@ async def main():
             # OKX fake/no-trade bars can stay in the raw file with volume 0, but they must not
             # enter the runner stream. BITGET leaves hide_zero_volume=False, so its 0-volume
             # bars still take this visible path.
+            confirmed_appended = False
             if confirmed_visible:
                 try:
                     ctx.stream.replace_last(confirmed_ohlcv)
                 except IndexError:
                     ctx.stream.append(confirmed_ohlcv)
+                    confirmed_appended = True
                 if new_visible:
                     ctx.stream.append(new_ohlcv)
             ctx.stream.finish()
 
-            # Check the interval is the same as the timeframe. If so, the incremented candle size is 1.
+            # Count only visible bars added to the runner's index space.
             timeframe_ms = parse_timeframe_to_ms(tf)
             interval_ms = (int(new_ohlcv.timestamp) - int(ctx.last_new_bar_ts_sec)) * 1000
-            # last_bar_index tracks visible bars. If the new bar is hidden, do not advance it.
-            incremented_size = 1 if interval_ms == timeframe_ms and new_visible else 0
+            # last_bar_index tracks visible bars. If pre_run skipped a hidden fake open bar,
+            # the confirmed bar may be appended as a new visible bar here.
+            confirmed_increment = 1 if confirmed_appended else 0
+            new_increment = 1 if interval_ms == timeframe_ms and new_visible else 0
+            incremented_size = confirmed_increment + new_increment
 
             if confirmed_visible:
                 # #################################### Module calculation ####################################
@@ -647,7 +652,12 @@ async def main():
 
                 # The confirmed bar index is the visible index just evaluated. When a visible
                 # new bar was appended, last_bar_index already points to that new open bar.
-                confirmed_bar_index = ctx.runner.last_bar_index - incremented_size
+                confirmed_bar_index = ctx.runner.last_bar_index - new_increment
+                # Strategy code uses strategy.last_bar_index() - 1 as the "last confirmed bar"
+                # check in realtime mode. If the next OKX open bar is hidden, it is not appended
+                # to the stream, but the confirmed bar should still satisfy that check.
+                if not new_visible:
+                    ctx.runner.script.last_bar_index = confirmed_bar_index + 1
 
                 # Ensure request.security can see the new bar during confirmed-bar evaluation.
                 from pynecore.lib.request import get_security_ctx

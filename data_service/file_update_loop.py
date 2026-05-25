@@ -66,6 +66,10 @@ async def file_update_loop(
             desired_dt = parse_date_or_days(history_since)
             if desired_dt.tzinfo is None:
                 desired_dt = desired_dt.replace(tzinfo=UTC)
+            # Keep cache export stable across restarts. If this is set only
+            # when the existing .ohlcv start differs, export alternates between
+            # clipped history_since data and full cache data.
+            export_start_ts = int(desired_dt.timestamp())
         except Exception:
             desired_dt = None
     else:
@@ -79,7 +83,6 @@ async def file_update_loop(
             start_ts = reader.start_timestamp
             reader.close()
         if start_ts is not None and int(start_ts) != int(desired_dt.timestamp()):
-            export_start_ts = int(desired_dt.timestamp())
             print("[data_service] history_since changed; ohlcv will be regenerated from cache")
 
     if cache_ready:
