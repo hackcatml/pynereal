@@ -294,7 +294,7 @@ def run(
         total_seconds = int((time_to - time_from).total_seconds())
 
         # Use the same exchange-specific hidden-bar policy as realtime runner.
-        # OKX zero-volume bars are hidden; BITGET zero-volume bars are visible.
+        # OKX zero-volume bars are hidden; BITGET/Hyperliquid zero-volume bars are visible.
         skip_zero_volume = syminfo.prefix.upper() == "OKX"
         preload_list = list(reader.read_from(time_from_ts, time_to_ts, skip_zero_volume=skip_zero_volume))
         size = len(preload_list)

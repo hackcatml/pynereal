@@ -191,7 +191,7 @@ def on_alert_event(message: str, runner: ScriptRunner):
 def hide_zero_volume_bars(exchange: str | None) -> bool:
     # TradingView policy differs by exchange:
     # - OKX: zero-volume candles are hidden and excluded from calculations.
-    # - BITGET: zero-volume candles remain visible and are included.
+    # - BITGET/Hyperliquid: zero-volume candles remain visible and are included.
     return (exchange or "").upper() == "OKX"
 
 
@@ -607,8 +607,8 @@ async def main():
             new_visible = is_visible_ohlcv(new_ohlcv, hide_zero_volume=hide_zero_volume)
 
             # OKX fake/no-trade bars can stay in the raw file with volume 0, but they must not
-            # enter the runner stream. BITGET leaves hide_zero_volume=False, so its 0-volume
-            # bars still take this visible path.
+            # enter the runner stream. BITGET/Hyperliquid leave hide_zero_volume=False, so their
+            # 0-volume bars still take this visible path.
             confirmed_appended = False
             if confirmed_visible:
                 try:

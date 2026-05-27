@@ -158,7 +158,7 @@ def fix_last_open_if_needed(
         prev_close_price = prev.close
         reader.close()
 
-    if exchange.upper() == "OKX":
+    if exchange.upper() in ("OKX", "HYPERLIQUID"):
         try:
             res = fetch_ohlcv_data(
                 exchange=exchange,

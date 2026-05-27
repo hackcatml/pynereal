@@ -1539,7 +1539,7 @@ class OHLCVReader:
             if ohlcv is not None:
                 # volume < 0: Pyne가 gap 보정용으로 만든 봉이므로 항상 제외.
                 # volume == 0: OKX처럼 TradingView가 hidden 처리하는 거래소에서만 제외.
-                # BITGET은 0-volume 봉도 TV 차트/계산에 포함되므로 skip_zero_volume=False로 읽어야 한다.
+                # BITGET/Hyperliquid는 0-volume 봉도 TV 차트/계산에 포함되므로 skip_zero_volume=False로 읽어야 한다.
                 if skip_gaps and (ohlcv.volume < 0 or (skip_zero_volume and ohlcv.volume == 0)):
                     continue
                 yield ohlcv

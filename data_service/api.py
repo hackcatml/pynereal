@@ -136,7 +136,7 @@ def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dic
             return JSONResponse([])
 
         # The chart must receive the same visible candle set as the runner.
-        # OKX hides zero-volume bars like TradingView; BITGET keeps them visible.
+        # OKX hides zero-volume bars like TradingView; BITGET/Hyperliquid keep them visible.
         skip_zero_volume = cfg is not None and cfg.exchange.upper() == "OKX"
         out: List[Dict[str, Any]] = []
         with OHLCVReader(ohlcv_path) as reader:
