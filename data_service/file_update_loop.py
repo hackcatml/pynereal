@@ -289,7 +289,12 @@ async def file_update_loop(
                         ]
                         upsert_bars(cache_path, provider, exchange, symbol, timeframe, cache_rows)
                     # Current candle open price fix if needed
-                    fixed_open_price = fix_last_open_if_needed(str(ohlcv_path))
+                    fixed_open_price = fix_last_open_if_needed(
+                        str(ohlcv_path),
+                        exchange=exchange,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                    )
                     if fixed_open_price > 0.0:
                         # Fix the last bar stored in the ohlcv cache
                         cache_rows = []
@@ -304,7 +309,7 @@ async def file_update_loop(
                 # Send pre-run ready signal (confirmed bar and new bar)
                 confirmed_bar_and_new_bar = [bars[0], bars[1]]
                 if fixed_open_price > 0.0:
-                    confirmed_bar_and_new_bar[0][1] = fixed_open_price
+                    confirmed_bar_and_new_bar[1][1] = fixed_open_price
 
                 bar_ts = int(confirmed_bar_and_new_bar[1][0])  # new bar timestamp in ms
                 if prerun_sent_for_bar_ts != bar_ts:
