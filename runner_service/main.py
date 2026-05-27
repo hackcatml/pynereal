@@ -188,6 +188,22 @@ def on_alert_event(message: str, runner: ScriptRunner):
         )
 
 
+def hide_zero_volume_bars(exchange: str | None) -> bool:
+    # TradingView policy differs by exchange:
+    # - OKX: zero-volume candles are hidden and excluded from calculations.
+    # - BITGET: zero-volume candles remain visible and are included.
+    return (exchange or "").upper() == "OKX"
+
+
+def is_visible_ohlcv(ohlcv: OHLCV, *, hide_zero_volume: bool) -> bool:
+    # "visible" means the candle should advance bar_index and run strategy logic.
+    if ohlcv.volume < 0:
+        return False
+    if hide_zero_volume and ohlcv.volume == 0:
+        return False
+    return True
+
+
 def ready_scrip_runner(script_path: Path, data_path: Path, data_toml_path: Path) -> tuple[ScriptRunner,
 AppendableIterable[OHLCV], OHLCVReader] | None:
     """
@@ -202,13 +218,19 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
     time_from = reader.start_datetime
     time_to = reader.end_datetime
 
-    # Get the iterator
-    gaps = sum(1 for ohlcv in reader if ohlcv.volume < 0)
-    size = reader.get_size(int(time_from.timestamp()), int(time_to.timestamp()))
-    if gaps > 0:
-        size = size - gaps
-    # preload_list is used for request.security calculation
-    preload_list = list(reader.read_from(int(time_from.timestamp()), int(time_to.timestamp())))
+    # Build the runner's candle list with the same hidden-bar policy used by TradingView.
+    # last_bar_index must be based on this visible list, not the raw file size.
+    preload_list = list(
+        reader.read_from(
+            int(time_from.timestamp()),
+            int(time_to.timestamp()),
+            skip_zero_volume=hide_zero_volume_bars(syminfo.prefix),
+        )
+    )
+    size = len(preload_list)
+    if size == 0:
+        reader.close()
+        return None
     ohlcv_iter: Iterator[OHLCV] = iter(preload_list)
     # Prepare a mutable iterator.
     if ohlcv_iter is not None:
@@ -267,6 +289,24 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
 
         # return reader too. So we can close it later
         return runner, stream, reader
+
+
+def ohlcv_event_data(ohlcv: OHLCV) -> dict:
+    return {
+        "time": int(ohlcv.timestamp),
+        "open": float(ohlcv.open),
+        "high": float(ohlcv.high),
+        "low": float(ohlcv.low),
+        "close": float(ohlcv.close),
+        "volume": float(ohlcv.volume),
+    }
+
+
+def get_runner_candle(runner: ScriptRunner, index: int) -> OHLCV | None:
+    candles = getattr(runner, "_all_ohlcv", None)
+    if not candles or index < 0 or index >= len(candles):
+        return None
+    return candles[index]
 
 
 def bar_list_to_ohlcv(bar: list) -> OHLCV:
@@ -447,10 +487,20 @@ async def main():
 
             # print("=== Pre-run start (up to the last bar) ===")
             size = runner.last_bar_index + 1
-            prerun_range = size - 1
+            last_visible_bar = get_runner_candle(runner, runner.last_bar_index)
+            # In normal realtime pre-run, the file may already contain the open current bar.
+            # If that bar is visible, keep it in the stream for the next run_ready and
+            # pre-run only up to the last confirmed bar. If the raw last bar is hidden
+            # (OKX zero-volume), the visible list already ends at a confirmed bar.
+            has_unconfirmed_visible_bar = (
+                last_visible_bar is not None
+                and reader.end_timestamp is not None
+                and int(last_visible_bar.timestamp) == int(reader.end_timestamp)
+            )
+            prerun_range = size - 1 if has_unconfirmed_visible_bar else size
             runner.script.pre_run = True
             if mtype == "prerun_ready_after_history_download":
-                prerun_range = prerun_range + 1
+                prerun_range = size
                 runner.script.pre_run = False
             await asyncio.to_thread(run_prerun_steps, runner, prerun_range)
             # print("=== Pre-run finished ===")
@@ -464,12 +514,17 @@ async def main():
             except Exception as e:
                 print(f"[runner] Failed to send script_info: {e}")
 
-            # Send last bar index to data_service to fix open price
+            # Send the visible last candle itself. A visible index can differ from the
+            # raw file index when OKX hidden zero-volume bars exist.
             try:
-                await ws.send(json.dumps({
+                last_bar = get_runner_candle(runner, runner.last_bar_index)
+                event = {
                     "type": "last_bar_open_fix",
                     "last_bar_index": runner.last_bar_index,
-                }))
+                }
+                if last_bar is not None:
+                    event["data"] = ohlcv_event_data(last_bar)
+                await ws.send(json.dumps(event))
             except Exception as e:
                 print(f"[runner] Failed to send bar confirmation: {e}")
 
@@ -492,15 +547,15 @@ async def main():
             # Send plot options to data_service
             if plot_options:
                 try:
-                    confirmed_bar_time = None
-                    with OHLCVReader(ohlcv_path) as reader:
-                        confirmed_bar = reader.read(runner.last_bar_index - 1)
-                        confirmed_bar_time = int(confirmed_bar.timestamp)
-                        reader.close()
+                    # Plot CSV rows are keyed by candle timestamp. Timestamp lookup avoids
+                    # using a raw file index that may include hidden OKX bars.
+                    confirmed_bar_index = runner.last_bar_index - 1
+                    confirmed_bar = get_runner_candle(runner, confirmed_bar_index)
+                    confirmed_bar_time = int(confirmed_bar.timestamp) if confirmed_bar is not None else None
                     plot_options_event = {
                         "type": "plot_options",
                         "data": plot_options,
-                        "confirmed_bar_index": runner.last_bar_index - 1,
+                        "confirmed_bar_index": confirmed_bar_index,
                         "confirmed_bar_time": confirmed_bar_time,
                     }
                     await ws.send(json.dumps(plot_options_event))
@@ -545,18 +600,36 @@ async def main():
 
             confirmed_ohlcv = bar_list_to_ohlcv(confirmed_bar)
             new_ohlcv = bar_list_to_ohlcv(new_bar)
+            hide_zero_volume = hide_zero_volume_bars(getattr(ctx.runner.syminfo, "prefix", None))
+            # confirmed_visible decides whether this just-closed candle should run one strategy step.
+            # new_visible decides whether the newly opened candle should be kept as the next open bar.
+            confirmed_visible = is_visible_ohlcv(confirmed_ohlcv, hide_zero_volume=hide_zero_volume)
+            new_visible = is_visible_ohlcv(new_ohlcv, hide_zero_volume=hide_zero_volume)
 
-            # Replace the last uncompleted bar with the confirmed bar and append the new bar.
-            ctx.stream.replace_last(confirmed_ohlcv)
-            ctx.stream.append(new_ohlcv)
+            # OKX fake/no-trade bars can stay in the raw file with volume 0, but they must not
+            # enter the runner stream. BITGET leaves hide_zero_volume=False, so its 0-volume
+            # bars still take this visible path.
+            confirmed_appended = False
+            if confirmed_visible:
+                try:
+                    ctx.stream.replace_last(confirmed_ohlcv)
+                except IndexError:
+                    ctx.stream.append(confirmed_ohlcv)
+                    confirmed_appended = True
+                if new_visible:
+                    ctx.stream.append(new_ohlcv)
             ctx.stream.finish()
 
-            # Check the interval is the same as the timeframe. If so, the incremented candle size is 1.
+            # Count only visible bars added to the runner's index space.
             timeframe_ms = parse_timeframe_to_ms(tf)
             interval_ms = (int(new_ohlcv.timestamp) - int(ctx.last_new_bar_ts_sec)) * 1000
-            incremented_size = 1 if interval_ms == timeframe_ms else 0
+            # last_bar_index tracks visible bars. If pre_run skipped a hidden fake open bar,
+            # the confirmed bar may be appended as a new visible bar here.
+            confirmed_increment = 1 if confirmed_appended else 0
+            new_increment = 1 if interval_ms == timeframe_ms and new_visible else 0
+            incremented_size = confirmed_increment + new_increment
 
-            if incremented_size > 0:
+            if confirmed_visible:
                 # #################################### Module calculation ####################################
                 # # bb1d / weekly high, low calculation
                 # from modules.bb1d_calc import get_bb1d_lower
@@ -573,15 +646,26 @@ async def main():
                     # "macro_low": macro_low
                 }
 
-                ctx.runner.last_bar_index += incremented_size
-                ctx.runner.script.last_bar_index += incremented_size
+                if incremented_size > 0:
+                    ctx.runner.last_bar_index += incremented_size
+                    ctx.runner.script.last_bar_index += incremented_size
+
+                # The confirmed bar index is the visible index just evaluated. When a visible
+                # new bar was appended, last_bar_index already points to that new open bar.
+                confirmed_bar_index = ctx.runner.last_bar_index - new_increment
+                # Strategy code uses strategy.last_bar_index() - 1 as the "last confirmed bar"
+                # check in realtime mode. If the next OKX open bar is hidden, it is not appended
+                # to the stream, but the confirmed bar should still satisfy that check.
+                if not new_visible:
+                    ctx.runner.script.last_bar_index = confirmed_bar_index + 1
 
                 # Ensure request.security can see the new bar during confirmed-bar evaluation.
                 from pynecore.lib.request import get_security_ctx
                 security_ctx = get_security_ctx()
                 if security_ctx is not None:
-                    security_ctx.update_base_bar(confirmed_ohlcv, ctx.runner.last_bar_index - 1)
-                    security_ctx.update_base_bar(new_ohlcv, ctx.runner.last_bar_index)
+                    security_ctx.update_base_bar(confirmed_ohlcv, confirmed_bar_index)
+                    if new_visible:
+                        security_ctx.update_base_bar(new_ohlcv, ctx.runner.last_bar_index)
 
                 # Calculate the last confirmed bar
                 ctx.runner.script.pre_run = False
@@ -612,7 +696,7 @@ async def main():
                         plot_options_event = {
                             "type": "plot_options",
                             "data": plot_options,
-                            "confirmed_bar_index": ctx.runner.last_bar_index - 1,
+                            "confirmed_bar_index": confirmed_bar_index,
                             "confirmed_bar_time": int(confirmed_ohlcv.timestamp),
                         }
                         await ws.send(json.dumps(plot_options_event))

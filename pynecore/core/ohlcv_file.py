@@ -1513,7 +1513,8 @@ class OHLCVReader:
         data = struct.unpack(STRUCT_FORMAT, self._mmap[offset:offset + RECORD_SIZE])
         return OHLCV(*data, extra_fields={})
 
-    def read_from(self, start_timestamp: int, end_timestamp: int | None = None, skip_gaps: bool = True) \
+    def read_from(self, start_timestamp: int, end_timestamp: int | None = None, skip_gaps: bool = True,
+                  skip_zero_volume: bool = False) \
             -> Iterator[OHLCV]:
         """
         Read bars starting from timestamp, using direct position calculation.
@@ -1522,6 +1523,8 @@ class OHLCVReader:
         :param end_timestamp: End timestamp, if None, read until the end
         :param skip_gaps: Skip gaps in data, the writer fill gaps with the last value with -1 volume,
                           this will skip them (default)
+        :param skip_zero_volume: Also skip confirmed no-trade candles with zero volume. Enable this only for
+                                 exchanges whose TradingView chart hides zero-volume bars.
         :raises ValueError: If start_timestamp is after the last bar
         """
         if not self._size or not self._interval:
@@ -1534,8 +1537,10 @@ class OHLCVReader:
         for pos in range(start_pos, end_pos):
             ohlcv = self.read(pos)
             if ohlcv is not None:
-                # Skip gaps if needed
-                if skip_gaps and ohlcv.volume < 0:
+                # volume < 0: Pyne가 gap 보정용으로 만든 봉이므로 항상 제외.
+                # volume == 0: OKX처럼 TradingView가 hidden 처리하는 거래소에서만 제외.
+                # BITGET은 0-volume 봉도 TV 차트/계산에 포함되므로 skip_zero_volume=False로 읽어야 한다.
+                if skip_gaps and (ohlcv.volume < 0 or (skip_zero_volume and ohlcv.volume == 0)):
                     continue
                 yield ohlcv
 

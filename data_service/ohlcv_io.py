@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, UTC
+import struct
 from typing import Optional
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -112,33 +113,84 @@ def download_history_range_into_cache(
     return ok
 
 
-def fix_last_open_if_needed(ohlcv_path: str) -> float:
+def _ohlcv_float(value: float) -> float:
+    return struct.unpack("f", struct.pack("f", value))[0]
+
+
+def fetch_ohlcv_data(
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    since: int,
+    limit: int | None = None,
+) -> list | None:
+    import ccxt
+
+    client = getattr(ccxt, exchange)(config={})
+    return client.fetch_ohlcv(
+        symbol=symbol,
+        timeframe=timeframe,
+        since=since,
+        limit=limit,
+    )
+
+
+def fix_last_open_if_needed(
+    ohlcv_path: str,
+    exchange: str = "",
+    symbol: str = "",
+    timeframe: str = "",
+) -> float:
     fixed_candle_open_price = 0.0
-    need_fix = False
     open_price, high_price, low_price, close_price, vol, prev_close_price = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    last_timestamp, interval = 0, 0
     with OHLCVReader(ohlcv_path) as reader:
         size = reader.size
         last = reader.read(size - 1)
         prev = reader.read(size - 2)
+        interval = reader.interval
+        last_timestamp = last.timestamp
         open_price = last.open
         high_price = last.high
         low_price = last.low
         close_price = last.close
         vol = last.volume
         prev_close_price = prev.close
-        if open_price != prev_close_price:
-            # print(f"Open price is different from previous close price. Fixing...\n"
-            #       f"prev close: {prev_close_price}, open: {open_price}")
-            need_fix = True
         reader.close()
 
-    if need_fix:
+    if exchange.upper() == "OKX":
+        try:
+            res = fetch_ohlcv_data(
+                exchange=exchange,
+                symbol=symbol,
+                timeframe=timeframe,
+                since=(last_timestamp - interval) * 1000,
+                limit=3,
+            )
+        except Exception as e:
+            print(f"[fix_last_open_if_needed] Error fetching current open: {e}")
+            return fixed_candle_open_price
+
+        target_open_price = None
+        for bar in res or []:
+            if int(bar[0] / 1000) == last_timestamp:
+                # fetch 로 받은 bar open 데이터를 float32 타입으로 변경하여 저장
+                target_open_price = _ohlcv_float(bar[1])
+                break
+        if target_open_price is None:
+            return fixed_candle_open_price
+    else:
+        # BITGET-style continuity: the live-built current candle can start from the
+        # first trade, while the chart expects the previous close as the next open.
+        target_open_price = prev_close_price
+
+    if open_price != target_open_price:
         with OHLCVWriter(ohlcv_path) as writer:
             writer.overwrite(timestamp=writer.end_timestamp,
-                             candle=OHLCV(timestamp=writer.end_timestamp, open=prev_close_price,
+                             candle=OHLCV(timestamp=writer.end_timestamp, open=target_open_price,
                                           high=high_price,
                                           low=low_price, close=close_price, volume=vol))
-            fixed_candle_open_price = prev_close_price
+            fixed_candle_open_price = target_open_price
             # print("Candle open price fixing done")
             writer.close()
 
@@ -200,10 +252,6 @@ def fetch_and_update_ohlcv_data(
     :param ohlcv_path: Path to OHLCV file
     :return: Updated open price of the last candle
     """
-    import ccxt
-    # Create ccxt client
-    client = getattr(ccxt, exchange)(config={})
-
     # Read current last candle timestamp
     with OHLCVReader(ohlcv_path) as reader:
         size = reader.size
@@ -214,7 +262,8 @@ def fetch_and_update_ohlcv_data(
 
     # Fetch candles from exchange and update the ohlcv file
     try:
-        res = client.fetch_ohlcv(
+        res = fetch_ohlcv_data(
+            exchange=exchange,
             symbol=symbol,
             timeframe=timeframe,
             since=last_timestamp_sec * 1000 - interval * 1000,  # Convert to milliseconds
@@ -245,8 +294,6 @@ def fetch_and_update_recent_ohlcv_data(
     Fetch and update recently closed candles before the current live candle.
     The current candle is preserved from the local OHLCV file and is not updated from REST.
     """
-    import ccxt
-
     current_ts_sec = int(current_bar_ts_ms / 1000)
 
     with OHLCVReader(ohlcv_path) as reader:
@@ -273,11 +320,11 @@ def fetch_and_update_recent_ohlcv_data(
         last_bar.volume,
     ]
 
-    client = getattr(ccxt, exchange)(config={})
     since_ms = (current_ts_sec - interval * bar_count) * 1000
 
     try:
-        res = client.fetch_ohlcv(
+        res = fetch_ohlcv_data(
+            exchange=exchange,
             symbol=symbol,
             timeframe=timeframe,
             since=since_ms,

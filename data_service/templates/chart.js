@@ -28,7 +28,8 @@ App.chart = {
         wickUpColor: "#26a69a",
         wickDownColor: "#ef5350",
         lastValueVisible: false,
-        priceLineVisible: false
+        priceLineVisible: false,
+        priceFormat: { type: "price", precision: 2, minMove: 0.01 }
       }
     );
 
@@ -75,10 +76,10 @@ App.chart = {
           App.ui.setChartInfo();
           return;
         }
-        const ohlcvText = `O <span style="color:#d32f2f">${App.ui.formatNumber(state.lastOhlcv.open, 1)}</span>` +
-          ` H <span style="color:#d32f2f">${App.ui.formatNumber(state.lastOhlcv.high, 1)}</span>` +
-          ` L <span style="color:#d32f2f">${App.ui.formatNumber(state.lastOhlcv.low, 1)}</span>` +
-          ` C <span style="color:#d32f2f">${App.ui.formatNumber(state.lastOhlcv.close, 1)}</span>` +
+        const ohlcvText = `O <span style="color:#d32f2f">${App.ui.formatNumber(state.lastOhlcv.open, 2)}</span>` +
+          ` H <span style="color:#d32f2f">${App.ui.formatNumber(state.lastOhlcv.high, 2)}</span>` +
+          ` L <span style="color:#d32f2f">${App.ui.formatNumber(state.lastOhlcv.low, 2)}</span>` +
+          ` C <span style="color:#d32f2f">${App.ui.formatNumber(state.lastOhlcv.close, 2)}</span>` +
           ` Vol <span style="color:#d32f2f">${App.ui.formatNumber(state.lastOhlcv.volume, 2)}</span>`;
         App.ui.setChartInfo(ohlcvText);
         return;
@@ -90,10 +91,10 @@ App.chart = {
         return;
       }
       const volumeValue = volBar ? volBar.value : (state.lastOhlcv ? state.lastOhlcv.volume : null);
-      const ohlcvText = `O <span style="color:#d32f2f">${App.ui.formatNumber(bar.open, 1)}</span>` +
-        ` H <span style="color:#d32f2f">${App.ui.formatNumber(bar.high, 1)}</span>` +
-        ` L <span style="color:#d32f2f">${App.ui.formatNumber(bar.low, 1)}</span>` +
-        ` C <span style="color:#d32f2f">${App.ui.formatNumber(bar.close, 1)}</span>` +
+      const ohlcvText = `O <span style="color:#d32f2f">${App.ui.formatNumber(bar.open, 2)}</span>` +
+        ` H <span style="color:#d32f2f">${App.ui.formatNumber(bar.high, 2)}</span>` +
+        ` L <span style="color:#d32f2f">${App.ui.formatNumber(bar.low, 2)}</span>` +
+        ` C <span style="color:#d32f2f">${App.ui.formatNumber(bar.close, 2)}</span>` +
         ` Vol <span style="color:#d32f2f">${App.ui.formatNumber(volumeValue, 2)}</span>`;
       App.ui.setChartInfo(ohlcvText);
     });

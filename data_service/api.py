@@ -3,6 +3,7 @@ from __future__ import annotations
 from config import DataServiceConfig
 from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any, Dict, List
 from tomlkit import parse, dumps
@@ -67,6 +68,24 @@ def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dic
         if not plot_path.exists():
             return JSONResponse([])
 
+        current_open_ts = None
+        if ohlcv_path.exists():
+            try:
+                with OHLCVReader(ohlcv_path) as ohlcv_reader:
+                    end_ts = ohlcv_reader.end_timestamp
+                    interval = ohlcv_reader.interval
+                    if end_ts is not None and interval is not None:
+                        now_ts = int(datetime.now(UTC).timestamp())
+                        # Exclude only the actual in-progress open bar. The plot CSV usually
+                        # ends at the latest confirmed bar, especially when OKX hides the
+                        # zero-volume current bar, so dropping the last CSV row unconditionally
+                        # hides one valid confirmed plot point on initial chart load.
+                        if int(end_ts) <= now_ts < int(end_ts) + int(interval):
+                            current_open_ts = int(end_ts)
+                    ohlcv_reader.close()
+            except Exception as e:
+                print(f"[api] Failed to read OHLCV end timestamp: {e}")
+
         # Read CSV file and build plot data
         result = []
         try:
@@ -74,11 +93,13 @@ def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dic
                 # Collect all candles
                 candles = []
                 for candle in reader:
+                    if current_open_ts is not None and int(candle.timestamp) >= current_open_ts:
+                        continue
                     candles.append(candle)
 
                 # Limit the number of candles
                 start_idx = max(0, len(candles) - limit)
-                candles = candles[start_idx:-1]
+                candles = candles[start_idx:]
 
                 # Build plot data for each title
                 for title, options in plot_options.items():
@@ -114,12 +135,21 @@ def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dic
         if not ohlcv_path.exists():
             return JSONResponse([])
 
+        # The chart must receive the same visible candle set as the runner.
+        # OKX hides zero-volume bars like TradingView; BITGET keeps them visible.
+        skip_zero_volume = cfg is not None and cfg.exchange.upper() == "OKX"
         out: List[Dict[str, Any]] = []
         with OHLCVReader(ohlcv_path) as reader:
-            size = reader.size
-            start = max(0, size - limit)
-            for i in range(start, size):
-                c = reader.read(i)
+            if reader.start_timestamp is None:
+                return JSONResponse([])
+            candles = list(
+                reader.read_from(
+                    reader.start_timestamp,
+                    reader.end_timestamp,
+                    skip_zero_volume=skip_zero_volume,
+                )
+            )
+            for c in candles[-limit:]:
                 out.append(
                     {
                         "time": int(c.timestamp),

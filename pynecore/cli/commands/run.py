@@ -293,13 +293,14 @@ def run(
 
         total_seconds = int((time_to - time_from).total_seconds())
 
-        # Get the iterator using the correct UTC timestamps
-        gaps = sum(1 for ohlcv in reader if ohlcv.volume < 0)
-        size = reader.get_size(time_from_ts, time_to_ts)
-        if gaps > 0:
-            size = size - gaps
-        # preload_list is used for request.security calculation
-        preload_list = list(reader.read_from(time_from_ts, time_to_ts))
+        # Use the same exchange-specific hidden-bar policy as realtime runner.
+        # OKX zero-volume bars are hidden; BITGET zero-volume bars are visible.
+        skip_zero_volume = syminfo.prefix.upper() == "OKX"
+        preload_list = list(reader.read_from(time_from_ts, time_to_ts, skip_zero_volume=skip_zero_volume))
+        size = len(preload_list)
+        if size == 0:
+            secho("No OHLCV candles found in the selected range after skipping gaps.", fg="red", err=True)
+            raise Exit(1)
         ohlcv_iter = iter(preload_list)
 
         # Add lib directory to Python path for library imports

@@ -104,6 +104,8 @@ async def fix_missing_bars_loop(
                 continue
 
             prev_close = bars[-1][4]
-            fake = [missing_ts, prev_close, prev_close, prev_close, prev_close, 0.01]
+            # No trades occurred in this interval. Store the placeholder as true 0-volume.
+            # OKX policy will hide it; BITGET policy will still treat it as a visible bar.
+            fake = [missing_ts, prev_close, prev_close, prev_close, prev_close, 0.0]
             bars.append(fake)
             state.last_fix_bar_ts = missing_ts
