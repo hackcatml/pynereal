@@ -103,3 +103,40 @@ body { margin:0; padding:0; background:#111; color:#eee; font-family: system-ui,
   border-radius: 6px;
   cursor: pointer;
 }
+.nav-btn {
+  position: absolute;
+  bottom: 34px;
+  z-index: 11;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  background: rgba(255, 255, 255, 0.92);
+  color: #111;
+  font-size: 18px;
+  line-height: 1;
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+.nav-btn.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+.nav-btn:hover {
+  background: #ffffff;
+}
+.nav-btn:active {
+  transform: translateY(1px);
+}
+.nav-btn-left {
+  left: 12px;
+}
+.nav-btn-right {
+  right: 12px;
+}
