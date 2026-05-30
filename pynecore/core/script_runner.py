@@ -94,10 +94,22 @@ def _set_lib_properties(ohlcv: OHLCV, bar_index: int, tz: 'ZoneInfo', lib: Modul
 
     lib.bar_index = lib.last_bar_index = bar_index
 
-    lib.open = _round_price(ohlcv.open, lib)
-    lib.high = _round_price(ohlcv.high, lib)
-    lib.low = _round_price(ohlcv.low, lib)
-    lib.close = _round_price(ohlcv.close, lib)
+    # Previous behavior kept for reference. It rounded all chart OHLC sources to
+    # syminfo.pricescale before indicator calculations, which can diverge from
+    # TradingView feed values for symbols whose metadata tick size is coarser than
+    # the actual chart data.
+    # lib.open = _round_price(ohlcv.open, lib)
+    # lib.high = _round_price(ohlcv.high, lib)
+    # lib.low = _round_price(ohlcv.low, lib)
+    # lib.close = _round_price(ohlcv.close, lib)
+
+    # TradingView indicator calculations use the chart feed OHLC values directly.
+    # Tick rounding belongs in explicit helpers such as math.round_to_mintick and
+    # in strategy order simulation, not in the global OHLC sources.
+    lib.open = ohlcv.open
+    lib.high = ohlcv.high
+    lib.low = ohlcv.low
+    lib.close = ohlcv.close
 
     lib.volume = ohlcv.volume
 
