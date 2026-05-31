@@ -73,15 +73,22 @@ def import_script(script_path: Path) -> ModuleType:
     return module
 
 
-def _round_price(price: float, lib: ModuleType):
+def _round_price(price: float):
     """
-    Round price to the nearest tick
+    Round price to 6 significant digits to clean float32 storage artifacts
+    without destroying sub-mintick precision.
+
+    TradingView does NOT round OHLC data to syminfo.mintick — scripts see
+    the raw data (e.g. close=4.125 even when mintick=0.01). The float32
+    OHLCV format introduces small errors (e.g. 4.12 → 4.1199998856) that
+    this function cleans by rounding to 6 significant digits (float32 has ~7).
     """
-    if TYPE_CHECKING:  # This is needed for the type checker to work
-        from .. import lib
-    syminfo = lib.syminfo
-    scaled = round(price * syminfo.pricescale)
-    return scaled / syminfo.pricescale
+    if price == 0.0:
+        return 0.0
+    from math import log10, floor
+    magnitude = floor(log10(abs(price)))
+    precision = 5 - magnitude  # 6 significant digits
+    return round(price, precision)
 
 
 # noinspection PyShadowingNames
@@ -94,10 +101,20 @@ def _set_lib_properties(ohlcv: OHLCV, bar_index: int, tz: 'ZoneInfo', lib: Modul
 
     lib.bar_index = lib.last_bar_index = bar_index
 
-    lib.open = _round_price(ohlcv.open, lib)
-    lib.high = _round_price(ohlcv.high, lib)
-    lib.low = _round_price(ohlcv.low, lib)
-    lib.close = _round_price(ohlcv.close, lib)
+    lib.open = _round_price(ohlcv.open)
+    lib.high = _round_price(ohlcv.high)
+    lib.low = _round_price(ohlcv.low)
+    lib.close = _round_price(ohlcv.close)
+
+    # If a symbol still shows TradingView calculation drift from the 6-significant
+    # digit cleanup above, consider bypassing _round_price and using the chart
+    # feed OHLC values directly. Tick rounding should stay in explicit helpers
+    # such as math.round_to_mintick and in strategy order simulation, not in the
+    # global OHLC sources.
+    # lib.open = ohlcv.open
+    # lib.high = ohlcv.high
+    # lib.low = ohlcv.low
+    # lib.close = ohlcv.close
 
     lib.volume = ohlcv.volume
 
