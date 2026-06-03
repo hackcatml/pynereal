@@ -11,7 +11,6 @@ from pynecore.types.ohlcv import OHLCV
 from pynecore.core.syminfo import SymInfo
 from pynecore.core.csv_file import CSVWriter
 from pynecore.core.strategy_stats import calculate_strategy_statistics, write_strategy_statistics_csv
-from pynecore.types.source import Source
 
 from pynecore.types import script_type
 
@@ -24,8 +23,6 @@ __all__ = [
     'import_script',
     'ScriptRunner',
 ]
-
-_LAST_LIB_RESET_CONTEXT: dict[str, Any] | None = None
 
 
 def import_script(script_path: Path) -> ModuleType:
@@ -165,15 +162,6 @@ def _reset_lib_vars(lib: ModuleType):
     if TYPE_CHECKING:  # This is needed for the type checker to work
         from .. import lib
     from ..types.source import Source
-    import threading
-    import traceback
-
-    global _LAST_LIB_RESET_CONTEXT
-    _LAST_LIB_RESET_CONTEXT = {
-        "time": datetime.now(UTC).isoformat(),
-        "thread": threading.current_thread().name,
-        "stack": "".join(traceback.format_stack(limit=8)),
-    }
 
     lib.open = Source("open")
     lib.high = Source("high")
@@ -387,47 +375,6 @@ class ScriptRunner:
                 for library_title, main_func in script._registered_libraries:
                     main_func()
                 lib._lib_semaphore = False
-
-                # In long-running step mode, another runner cleanup can reset global lib
-                # OHLC sources back to Source placeholders. Restore the current candle
-                # only when that corrupted state is observed.
-                source_fields = [
-                    name
-                    for name in ("open", "high", "low", "close", "volume")
-                    if isinstance(getattr(lib, name), Source)
-                ]
-                if source_fields:
-                    import threading
-                    import traceback
-
-                    last_reset_time = None
-                    last_reset_thread = None
-                    last_reset_stack = None
-                    if _LAST_LIB_RESET_CONTEXT is not None:
-                        last_reset_time = _LAST_LIB_RESET_CONTEXT.get("time")
-                        last_reset_thread = _LAST_LIB_RESET_CONTEXT.get("thread")
-                        last_reset_stack = _LAST_LIB_RESET_CONTEXT.get("stack")
-                    print(
-                        "[script_runner] Source placeholder detected before script main; "
-                        "restoring current candle. "
-                        f"fields={source_fields}, "
-                        f"script={getattr(self.script, 'title', None)}, "
-                        f"module={getattr(self.script_module, '__name__', None)}, "
-                        f"bar_index={self.bar_index}, "
-                        f"last_bar_index={self.last_bar_index}, "
-                        f"candle_ts={candle.timestamp}, "
-                        f"ohlcv=({candle.open}, {candle.high}, {candle.low}, {candle.close}, {candle.volume}), "
-                        f"thread={threading.current_thread().name}, "
-                        f"last_reset_time={last_reset_time}, "
-                        f"last_reset_thread={last_reset_thread}"
-                    )
-                    if last_reset_stack:
-                        print("[script_runner] Last _reset_lib_vars stack:\n" + last_reset_stack.rstrip())
-                    print(
-                        "[script_runner] Current detection stack:\n"
-                        + "".join(traceback.format_stack(limit=8)).rstrip()
-                    )
-                    _set_lib_properties(candle, self.bar_index, self.tz, lib)
 
                 # Run the script
                 res = self.script_module.main()
