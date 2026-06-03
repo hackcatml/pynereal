@@ -101,20 +101,20 @@ def _set_lib_properties(ohlcv: OHLCV, bar_index: int, tz: 'ZoneInfo', lib: Modul
 
     lib.bar_index = lib.last_bar_index = bar_index
 
-    lib.open = _round_price(ohlcv.open)
-    lib.high = _round_price(ohlcv.high)
-    lib.low = _round_price(ohlcv.low)
-    lib.close = _round_price(ohlcv.close)
+    # lib.open = _round_price(ohlcv.open)
+    # lib.high = _round_price(ohlcv.high)
+    # lib.low = _round_price(ohlcv.low)
+    # lib.close = _round_price(ohlcv.close)
 
     # If a symbol still shows TradingView calculation drift from the 6-significant
     # digit cleanup above, consider bypassing _round_price and using the chart
     # feed OHLC values directly. Tick rounding should stay in explicit helpers
     # such as math.round_to_mintick and in strategy order simulation, not in the
     # global OHLC sources.
-    # lib.open = ohlcv.open
-    # lib.high = ohlcv.high
-    # lib.low = ohlcv.low
-    # lib.close = ohlcv.close
+    lib.open = ohlcv.open
+    lib.high = ohlcv.high
+    lib.low = ohlcv.low
+    lib.close = ohlcv.close
 
     lib.volume = ohlcv.volume
 
