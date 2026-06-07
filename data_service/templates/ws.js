@@ -200,8 +200,10 @@ App.ws = {
           const { title, time, value } = msg;
           const series = collections.plotSeriesMap.get(title);
           if (series) {
-            const plotValue = (value == null || isNaN(value)) ? NaN : value;
-            series.update({ time, value: plotValue });
+            const linePoint = App.data.toLinePoint(time, value);
+            if (linePoint) {
+              series.update(linePoint);
+            }
           }
         }
       } catch (e) {

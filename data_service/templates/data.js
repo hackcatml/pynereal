@@ -1,6 +1,20 @@
 var App = window.App || (window.App = {});
 
 App.data = {
+  toLinePoint(time, value) {
+    const pointTime = Number(time);
+    if (!Number.isFinite(pointTime)) {
+      return null;
+    }
+    if (value == null) {
+      return { time: pointTime };
+    }
+    const pointValue = Number(value);
+    if (!Number.isFinite(pointValue)) {
+      return { time: pointTime };
+    }
+    return { time: pointTime, value: pointValue };
+  },
   async loadTradeHistory() {
     const state = App.state;
     const collections = App.collections;
@@ -142,15 +156,17 @@ App.data = {
         if (Array.isArray(plots) && plots.length > 0) {
           const pendingSeriesData = [];
           plots.forEach(plot => {
+            const seriesData = [];
             if (plot.data && Array.isArray(plot.data)) {
               plot.data.forEach(point => {
-                if (point.value == null) {
-                  point.value = NaN;
+                const linePoint = App.data.toLinePoint(point.time, point.value);
+                if (linePoint) {
+                  seriesData.push(linePoint);
                 }
               });
             }
 
-            const { title, color, linewidth, style, data } = plot;
+            const { title, color, linewidth, style } = plot;
             const STYLE_CIRCLES = 2;
             const STYLE_CROSS = 4;
             const isCrossStyle = (parseInt(style) === STYLE_CROSS || parseInt(style) === STYLE_CIRCLES);
@@ -172,7 +188,7 @@ App.data = {
             const series = chart.chart.addSeries(LightweightCharts.LineSeries, seriesOptions);
             collections.plotSeriesList.push(series);
             collections.plotSeriesMap.set(title, series);
-            pendingSeriesData.push([series, data]);
+            pendingSeriesData.push([series, seriesData]);
           });
 
           pendingSeriesData.forEach(([series, data]) => {
