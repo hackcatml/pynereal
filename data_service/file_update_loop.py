@@ -202,6 +202,24 @@ async def file_update_loop(
         async with state.lock:
             bars = state.live_bars
 
+            # 0) cold-start seed: 히스토리 준비 후에도 라이브 거래가 한 건도 없어
+            # live_bars 가 비어 있으면 파일 마지막 바로 1개 seed 한다. 그래야
+            # fix_missing_bars_loop 가 prev_close 를 얻어 no-trade 구간에도 fake bar
+            # 를 만들고 파일/전략 시계가 전진한다 (steady-state 와 동일 동작).
+            # seed 가 없으면 첫 거래 전까지 live_bars 가 [] 라 file_update 가 멈춘다.
+            if history_download_complete and ohlcv_path.exists() and len(bars) == 0:
+                try:
+                    with OHLCVReader(ohlcv_path) as reader:
+                        last = reader.read(reader.size - 1)
+                        reader.close()
+                    bars.append([
+                        int(last.timestamp) * 1000,
+                        float(last.open), float(last.high), float(last.low),
+                        float(last.close), float(last.volume),
+                    ])
+                except Exception as e:
+                    print(f"[data_service] cold-start live_bars seed skipped: {e}")
+
             # 1) file missing -> download history
             if not ohlcv_path.exists():
                 # Compute since date for history download.

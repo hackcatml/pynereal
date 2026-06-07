@@ -101,8 +101,18 @@ def clear_local_state() -> None:
     plot_options.clear()
 
 
-def on_entry_event(trade):
-    """Callback for entry events"""
+def on_entry_event(trade, runner=None):
+    """Callback for entry events.
+
+    pre_run-gated: the runner is destroyed and rebuilt every cycle, and prerun
+    replays the whole history re-filling every order. Emitting markers during that
+    replay would duplicate them (and, on OKX, a hidden-bar fill replays onto a
+    different visible bar than the real-time fake-bar fill, so dedup-by-time fails).
+    We emit only on real-time fills (run_ready, pre_run=False) and on the one-time
+    full-history pre-run after a history download (also pre_run=False).
+    """
+    if runner is not None and getattr(runner.script, "pre_run", False):
+        return
     event = {
         "type": "trade_entry",
         "time": int(trade.entry_time / 1000),
@@ -114,8 +124,10 @@ def on_entry_event(trade):
     trade_event_queue.append(event)
 
 
-def on_close_event(trade):
-    """Callback for close events"""
+def on_close_event(trade, runner=None):
+    """Callback for close events. pre_run-gated; see on_entry_event."""
+    if runner is not None and getattr(runner.script, "pre_run", False):
+        return
     event = {
         "type": "trade_close",
         "time": int(trade.exit_time / 1000),
@@ -275,8 +287,8 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
                 runner.init_step()
 
                 # Register trade event callbacks
-                runner.script.position.on_entry_callback = on_entry_event
-                runner.script.position.on_close_callback = on_close_event
+                runner.script.position.on_entry_callback = partial(on_entry_event, runner=runner)
+                runner.script.position.on_close_callback = partial(on_close_event, runner=runner)
                 runner.script.position.on_alert_callback = partial(on_alert_event, runner=runner)
                 # Register plot event callback
                 runner.script.on_plot_callback = on_plot_event
@@ -434,8 +446,19 @@ async def main():
     DATA_WS = f"ws://127.0.0.1:{data_service_port}/ws"
 
     ctx: Optional[RunnerCtx] = None
+    last_ws = None
+    # Re-emit all trade markers on the next prerun when the connection is fresh
+    # (runner restart/reconnect) or the script was edited mid-run. Trade-event
+    # callbacks are pre_run-gated, so a cleared trades_history (reset_history on
+    # reconnect, or script_modified on edit) would otherwise not be re-populated
+    # until a full restart. A redundant re-emit (reconnect without change) is
+    # harmless: data_service dedupes by exact event.
+    pending_full_reemit = False
 
     async for ws, raw in ws_loop():
+        if ws is not last_ws:
+            last_ws = ws
+            pending_full_reemit = True
         try:
             msg = json.loads(raw)
         except Exception:
@@ -469,6 +492,7 @@ async def main():
                 current_hashes = compute_script_hashes(SCRIPT_PATH)
                 previous_hashes = load_script_hashes(SCRIPT_HASH_PATH)
                 if current_hashes != previous_hashes:
+                    pending_full_reemit = True
                     await ws.send(json.dumps({"type": "script_modified"}))
                     clear_local_state()
                     write_script_hashes(SCRIPT_HASH_PATH, current_hashes)
@@ -502,7 +526,17 @@ async def main():
             if mtype == "prerun_ready_after_history_download":
                 prerun_range = size
                 runner.script.pre_run = False
+            elif pending_full_reemit:
+                # Fresh connection (runner restart/reconnect) or mid-run script edit:
+                # trades_history was (or may have been) cleared, and trade-event callbacks
+                # are pre_run-gated, so a normal (pre_run=True) prerun would NOT re-emit
+                # the historical markers, leaving the chart empty until a restart. Run this
+                # one prerun with pre_run=False so the gated callbacks re-emit all historical
+                # markers. prerun_range stays size-1: the last open bar is still left for
+                # run_ready, so no spurious last-bar alert fires (its fill bar isn't stepped).
+                runner.script.pre_run = False
             await asyncio.to_thread(run_prerun_steps, runner, prerun_range)
+            pending_full_reemit = False
             # print("=== Pre-run finished ===")
 
             try:
@@ -673,6 +707,28 @@ async def main():
                     step_res = ctx.runner.step()
                     if step_res is None:
                         break
+
+                # OKX hidden-bar fix:
+                # 새로 열린 봉이 volume 0 hidden bar 면 new_ohlcv 가 stream 에 append 되지
+                # 않아(line 619-620) confirmed bar 의 main() 에서 접수된 주문을 체결할
+                # process_orders() 패스가 없어 webhook alert 이 나가지 않는다. fake bar 의
+                # open(=직전 종가)으로 대기 주문만 체결시켜 alert 을 발생시킨다. main() 은
+                # 호출하지 않는다 (hidden bar 는 전략 로직/visible bar_index 에 들어가면 안 됨).
+                # script.last_bar_index 는 위에서 confirmed_bar_index + 1 로 맞춰져 있어
+                # realtime alert 게이트(order.bar_index == last_bar_index() - 1)가 성립한다.
+                # BITGET/Hyperliquid 는 new_visible=True 라 기존 new bar step 경로를 그대로 탄다.
+                if not new_visible and ctx.runner.script.position is not None:
+                    from pynecore import lib
+                    from pynecore.core.script_runner import _set_lib_properties
+                    _set_lib_properties(new_ohlcv, confirmed_bar_index + 1,
+                                        ctx.runner.tz, lib)
+                    # Fill the pending order on the fake bar so the webhook alert fires
+                    # AND the chart trade marker is emitted in real time (pre_run is False
+                    # here). The duplicate that prerun replay would otherwise create (it
+                    # re-fills on the next visible bar) is prevented by pre_run-gating the
+                    # trade-event callbacks (see on_entry_event/on_close_event): only this
+                    # real-time fill emits a marker, prerun replay does not re-emit.
+                    ctx.runner.script.position.process_orders()
 
                 # Send trade events to data_service
                 if trade_event_queue:
