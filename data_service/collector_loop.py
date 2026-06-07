@@ -89,7 +89,8 @@ async def fix_missing_bars_loop(
 
         async with state.lock:
             bars = state.live_bars
-            if len(bars) < 2:
+            # print(f"[collector_loop] bars: {bars}")
+            if len(bars) < 1:
                 continue
 
             last_open_ts = bars[-1][0]
@@ -108,4 +109,5 @@ async def fix_missing_bars_loop(
             # OKX policy will hide it; BITGET/Hyperliquid policy will still treat it as a visible bar.
             fake = [missing_ts, prev_close, prev_close, prev_close, prev_close, 0.0]
             bars.append(fake)
+            # print(f"[collector_loop] fake bars appended: {fake}")
             state.last_fix_bar_ts = missing_ts
