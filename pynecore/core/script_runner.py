@@ -597,6 +597,27 @@ class ScriptRunner:
         - script 모듈을 sys.modules에서 제거해서, 다음 ScriptRunner 생성 시 완전 재import 되도록
         - 내부 참조들(self.*) 끊기
         """
+        # Close the per-bar step generator deterministically on THIS thread.
+        # destroy() runs on the main loop thread. run_iter's finally calls
+        # _reset_lib_vars(lib), which blanks the CALLING thread's thread-local
+        # per-bar OHLC/time state (lib.open = Source("open"), ...). If the
+        # generator is instead left paused — e.g. an OKX run_ready that skips the
+        # step loop because confirmed_visible is False, or the
+        # prerun_ready_after_history_download path — and only finalized later by
+        # GC, that finally can fire on the background prerun's executor thread and
+        # blank ITS live bar state mid-run, surfacing as
+        # "lib.open is still a Source placeholder ... reset/corrupted mid-run".
+        # Closing here keeps the teardown on the main thread; closing an already
+        # exhausted generator is a no-op. Must run before self.script /
+        # writers are dropped, since the finally references them.
+        try:
+            step_iter = getattr(self, "_step_iter", None)
+            if step_iter is not None:
+                step_iter.close()
+        except Exception:
+            pass
+        self._step_iter = None
+
         # script 모듈 언로드해서 다음에 완전히 새로 import 되도록 만들기
         module_name = None
         try:
