@@ -122,11 +122,31 @@ Get trade alerts directly in Telegram:
    TELEGRAM_CHAT_ID=your_chat_id
    ```
 
+### Higher-Timeframe (HTF) Values — `request.security`
+PyneReal now supports `request.security`, so you can pull higher-timeframe (HTF)
+values directly inside your strategy — no pre-calculation step required.\
+It works the same way in both backtesting and real-time trading.
+
+**Usage in Strategy:**
+```python
+from pynecore.lib import request, syminfo, low, close, ta, barmerge
+
+# A single HTF series
+macro_low = request.security(syminfo.tickerid, '1D', low[2], lookahead=barmerge.lookahead_on)
+
+# A tuple-returning expression (e.g. Bollinger Bands) works too
+_, _, bb_5_lower = request.security(syminfo.tickerid, '5', ta.bb(close, 20, 2), lookahead=barmerge.lookahead_on)
+```
+`request.security(symbol, timeframe, expression, lookahead=...)` evaluates `expression` on the
+requested `timeframe` and aligns the result back to the chart’s timeframe.\
+See `workdir/scripts/demo_1m.py` for a runnable example.\
+If you'd rather compute a value **outside** the script and feed it in, see **Custom input** below.
 
 ### Custom input
-PyneCore does not yet support Pine Script’s `request.security` feature.\
-To use higher-timeframe (HTF) values, you must calculate them before running the script.\
-In the modules directory, you will find several examples:\
+You can also compute a value **outside** the script and inject it in through `custom_inputs`.\
+This is useful whenever you need data the script can't produce on its own — external calculations,
+alternative data sources, or anything you'd rather precompute before the run.\
+The `modules` directory ships a few HTF examples you can adapt:\
 `request_security.py` — mock implementation of Pine’s request.security\
 `weekly_hl_calc.py` — weekly high/low calculator\
 `bb1d_calc.py` — daily Bollinger Band calculator
@@ -137,7 +157,7 @@ How to apply?
 - There’s a bb1d and weekly high–low calculation example. Uncomment it.
 - Also uncomment the keys and values in the `custom_inputs` parameter a few lines below.
 - Go to the `demo_1m.py` strategy file and uncomment the Custom Inputs section.
-- The HTF calculation result will be used in backtesting.
+- The precomputed result will be used in backtesting.
 
 2. If it's for real-time trading
 - Go to `main.py` and search for the string `module calculation`.
@@ -145,10 +165,7 @@ How to apply?
 one in the `Ready Script Runner` region and another in the `Script Run Loop` region.\
 Uncomment the module calculations and the keys and values in the `custom_inputs` parameter.
 - Go to the `demo_1m.py` strategy file and uncomment the Custom Inputs section.
-- The HTF calculation result will be used in real-time trading.
-
-Yes, it's a little bit annoying to set up.\
-Conveniently injecting custom inputs into the script is on my TODO list for now.
+- The precomputed result will be used in real-time trading.
 
 ### Backtesting
 You can still use the standard pyne command for backtesting.\
