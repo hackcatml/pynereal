@@ -59,18 +59,38 @@ def extract_script_title(script_path: Path) -> str:
     return "No title"
 
 
+def format_timeframe(period: str | None) -> str:
+    """Convert a syminfo period (e.g. "1", "5", "60", "D") to a TradingView-style
+    timeframe label (e.g. "1m", "5m", "1h", "1D")."""
+    if not period:
+        return ""
+    period = str(period).strip()
+    if period.isdigit():
+        n = int(period)
+        if n >= 1440 and n % 1440 == 0:
+            return f"{n // 1440}D"
+        if n >= 60 and n % 60 == 0:
+            return f"{n // 60}h"
+        return f"{n}m"
+    mapping = {"D": "1D", "W": "1W", "M": "1M"}
+    return mapping.get(period.upper(), period)
+
+
 def send_webhook_message(webhook_url: str, message: str, *, script_title: str | None,
+                         timeframe: str | None, ticker: str | None,
                          telegram_notification: bool, telegram_token: str | None,
                          telegram_chat_id: str | None) -> None:
     import json
     import re
+    import datetime
     import requests
 
     # Wrap unquoted message fields so JSON parsing succeeds.
     s = re.sub(r'"message"\s*:\s*(?![{["0-9])([A-Za-z][A-Za-z0-9 ]*)',
                r'"message": "\1"',
                message)
-    json_alert_message = json.loads(s).get('message', '')
+    parsed = json.loads(s)
+    json_alert_message = parsed.get('message', '')
     if json_alert_message != '':
         payload = json_alert_message
         try:
@@ -81,10 +101,25 @@ def send_webhook_message(webhook_url: str, message: str, *, script_title: str | 
             print(f"Webhook error: {e}")
 
     if telegram_notification and telegram_token and telegram_chat_id:
+        # Wall-clock time at which the notification is sent.
+        time_str = datetime.datetime.now().strftime('%H:%M:%S')
+
+        # Signal original: keep the raw message body, rendering nested dicts readably.
+        if isinstance(json_alert_message, str):
+            signal_str = json_alert_message
+        else:
+            signal_str = json.dumps(json_alert_message, ensure_ascii=False).replace('"', '')
+
         url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
         payload = {
             "chat_id": telegram_chat_id,
-            "text": f"🚨 [{script_title}] {json.dumps(json_alert_message).replace('\"', '')}",
+            "text": (
+                f"🚨 [{script_title}]\n"
+                f"Time: {time_str}\n"
+                f"Timeframe: {timeframe or ''}\n"
+                f"Ticker: {ticker or ''}\n"
+                f"Signal: {signal_str}"
+            ),
             # "parse_mode": "Markdown"  # 굵게/이탤릭 등 쓰고 싶으면 선택
         }
         try:
@@ -190,10 +225,13 @@ def on_alert_event(message: str, runner: ScriptRunner):
         telegram_notification_enabled = webhook_section.get("telegram_notification", False)
 
     if webhook_enabled and script.webhook_url:
+        syminfo = getattr(runner, "syminfo", None)
         send_webhook_message(
             webhook_url=script.webhook_url,
             message=message,
             script_title=script.title,
+            timeframe=format_timeframe(getattr(syminfo, "period", None)),
+            ticker=getattr(syminfo, "ticker", None),
             telegram_notification=telegram_notification_enabled,
             telegram_token=script.telegram_token,
             telegram_chat_id=script.telegram_chat_id,
