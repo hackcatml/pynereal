@@ -212,7 +212,21 @@ class CCXTProvider(Provider):
                 exchange_config = self.config
 
         # Create the CCXT client
-        self._client: ccxt.Exchange = getattr(ccxt, exchange_name)({
+        exchange_class = getattr(ccxt, exchange_name)
+        if exchange_name == 'okx':
+            class SafeOKX(exchange_class):
+                def fetch_markets(self, params={}):
+                    # OKX may list preopen instruments with an empty instId, which
+                    # ccxt normalizes to id=None; those break keysort(markets_by_id)
+                    # in set_markets() (None vs str TypeError) and make load_markets()
+                    # fail. Unfixed upstream as of ccxt 4.5.57. Same workaround as
+                    # data_service/ohlcv_io.py:_filter_invalid_ccxt_markets().
+                    markets = super().fetch_markets(params)
+                    return [m for m in markets if m and m.get('id') and m.get('symbol')]
+
+            exchange_class = SafeOKX
+
+        self._client: ccxt.Exchange = exchange_class({
             'enableRateLimit': True,
             'adjustForTimeDifference': True,
             **exchange_config

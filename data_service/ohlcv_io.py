@@ -117,6 +117,59 @@ def _ohlcv_float(value: float) -> float:
     return struct.unpack("f", struct.pack("f", value))[0]
 
 
+def _filter_invalid_ccxt_markets(markets: list) -> list:
+    """Drop ccxt-normalized markets that have no id/symbol.
+
+    OKX sometimes lists preopen instruments with an empty instId, which ccxt's
+    safe_string() normalizes to None. Such markets make keysort(markets_by_id)
+    in set_markets() compare None with str and raise TypeError, so the whole
+    load_markets() fails (breaking both REST OHLCV fetch and watch_trades).
+    Unfixed upstream as of ccxt 4.5.57, so filter them out here.
+    """
+    return [
+        market for market in markets
+        if market and market.get("id") and market.get("symbol")
+    ]
+
+
+def make_ccxt_client(ccxt_module, exchange: str):
+    """Create a sync ccxt client.
+
+    For OKX, wrap the exchange class so fetch_markets() drops invalid markets
+    right before load_markets() passes them to set_markets(). Other exchanges
+    are created as-is.
+    """
+    exchange_class = getattr(ccxt_module, exchange)
+    if exchange.lower() != "okx":
+        return exchange_class(config={})
+
+    class SafeOKX(exchange_class):
+        def fetch_markets(self, params={}):
+            return _filter_invalid_ccxt_markets(super().fetch_markets(params))
+
+    return SafeOKX(config={})
+
+
+def make_ccxt_pro_client(ccxt_module, exchange: str):
+    """ccxt.pro (async) counterpart of make_ccxt_client().
+
+    Kept separate because fetch_markets() is a coroutine in ccxt.pro and needs
+    an async override: a sync override would hand a plain list to ccxt's
+    internal await, and using this helper on sync ccxt would return a
+    coroutine to sync callers.
+    """
+    exchange_class = getattr(ccxt_module, exchange)
+    if exchange.lower() != "okx":
+        return exchange_class(config={})
+
+    class SafeOKXPro(exchange_class):
+        async def fetch_markets(self, params={}):
+            markets = await super().fetch_markets(params)
+            return _filter_invalid_ccxt_markets(markets)
+
+    return SafeOKXPro(config={})
+
+
 def fetch_ohlcv_data(
     exchange: str,
     symbol: str,
@@ -126,7 +179,7 @@ def fetch_ohlcv_data(
 ) -> list | None:
     import ccxt
 
-    client = getattr(ccxt, exchange)(config={})
+    client = make_ccxt_client(ccxt, exchange)
     return client.fetch_ohlcv(
         symbol=symbol,
         timeframe=timeframe,

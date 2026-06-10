@@ -7,7 +7,7 @@ from typing import Callable, Optional, Awaitable
 import ccxt.pro as ccxt
 
 from state import DataState
-from ohlcv_io import convert_timeframe
+from ohlcv_io import convert_timeframe, make_ccxt_pro_client
 
 
 async def watch_trades_loop(
@@ -17,7 +17,7 @@ async def watch_trades_loop(
     state: DataState,
     on_bar: Callable[[list], Awaitable[None]],
 ) -> None:
-    ex = getattr(ccxt, exchange_name)(config={})
+    ex = make_ccxt_pro_client(ccxt, exchange_name)
 
     tf = timeframe
     tf_modifier = tf[-1]
@@ -59,7 +59,7 @@ async def watch_trades_loop(
                 await ex.close()
             except Exception:
                 pass
-            ex = getattr(ccxt, exchange_name)(config={})
+            ex = make_ccxt_pro_client(ccxt, exchange_name)
 
 
 async def fix_missing_bars_loop(
@@ -70,7 +70,7 @@ async def fix_missing_bars_loop(
 ) -> None:
     tf_ms = convert_timeframe(timeframe, to_ms=True)
     grace_ms = 0.2 * 1000
-    ex = getattr(ccxt, exchange_name)(config={})
+    ex = make_ccxt_pro_client(ccxt, exchange_name)
 
     while True:
         await asyncio.sleep(check_interval_sec)
@@ -82,7 +82,7 @@ async def fix_missing_bars_loop(
                 await ex.close()
             except Exception:
                 pass
-            ex = getattr(ccxt, exchange_name)(config={})
+            ex = make_ccxt_pro_client(ccxt, exchange_name)
             now_ms = int(datetime.now().timestamp() * 1000)
 
         missing_ts: Optional[int] = None
