@@ -255,7 +255,11 @@ App.data = {
           }
 
           state.firstBarTime = data[0].time;
-          if (data.length >= 2) {
+          if (state.configuredTimeframeSec) {
+            state.timeframeInterval = state.configuredTimeframeSec;
+          } else if (data.length >= 2) {
+            // Fallback only: on OKX zero-volume bars are hidden, so the gap
+            // between the first two visible bars may not be the timeframe.
             state.timeframeInterval = data[1].time - data[0].time;
           }
           if (data.length > 0) {
@@ -278,6 +282,12 @@ App.data = {
     console.error("Initial OHLCV not ready (timeout).");
     state.initialLoadInProgress = false;
   },
+  timeframeToSeconds(tf) {
+    const m = /^(\d+)([smhdw])$/i.exec((tf || "").trim());
+    if (!m) return null;
+    const unit = { s: 1, m: 60, h: 3600, d: 86400, w: 604800 }[m[2].toLowerCase()];
+    return parseInt(m[1], 10) * unit;
+  },
   async loadChartInfo() {
     const state = App.state;
     try {
@@ -286,6 +296,11 @@ App.data = {
       const exchange = (info.exchange || "Unknown").toUpperCase();
       const symbol = info.symbol || "Unknown";
       const timeframe = info.timeframe || "Unknown";
+      const tfSeconds = App.data.timeframeToSeconds(info.timeframe);
+      if (tfSeconds) {
+        state.configuredTimeframeSec = tfSeconds;
+        state.timeframeInterval = tfSeconds;
+      }
       if (info.script_title) {
         state.scriptTitle = info.script_title || "No title";
         state.scriptTitleVisible = true;

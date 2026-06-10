@@ -7,6 +7,9 @@ window.App.state = {
   initialLoadDone: false,
   firstBarTime: null,
   timeframeInterval: 60,
+  // Timeframe from /api/info (seconds). Source of truth for the countdown:
+  // bar spacing cannot be trusted because OKX charts hide zero-volume bars.
+  configuredTimeframeSec: null,
   lastBarTime: 0,
   lastOpenPrice: { time: 0, value: 0 },
   lastPrice: 0,
