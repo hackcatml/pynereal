@@ -15,8 +15,21 @@ from ui import build_ui_router
 from collector_loop import watch_trades_loop, fix_missing_bars_loop
 from file_update_loop import file_update_loop
 
+_BANNER = r"""
+    ____                   ____             __
+   / __ \__  ______  ___  / __ \___  ____ _/ /
+  / /_/ / / / / __ \/ _ \/ /_/ / _ \/ __ `/ /
+ / ____/ /_/ / / / /  __/ _, _/  __/ /_/ / /
+/_/    \__, /_/ /_/\___/_/ |_|\___/\__,_/_/
+      /____/
+"""
+
 
 async def main() -> None:
+    print(_BANNER)
+    # Required by PyneCore's NOTICE file (Apache-2.0, Section 4d)
+    print("Powered by PyneSys (https://pynesys.io)\n")
+
     cfg = load_config()
 
     ohlcv_path, toml_path = make_ohlcv_paths(cfg.provider, cfg.exchange, cfg.symbol, cfg.timeframe)
