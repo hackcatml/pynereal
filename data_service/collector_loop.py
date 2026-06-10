@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+import time
 from typing import Callable, Optional, Awaitable
 
 import ccxt.pro as ccxt
@@ -67,23 +67,39 @@ async def fix_missing_bars_loop(
     timeframe: str,
     state: DataState,
     check_interval_sec: float = 0.1,
+    time_sync_interval_sec: float = 30.0,
 ) -> None:
     tf_ms = convert_timeframe(timeframe, to_ms=True)
     grace_ms = 0.2 * 1000
     ex = make_ccxt_pro_client(ccxt, exchange_name)
 
+    # Exchange time is sampled every time_sync_interval_sec and applied as an
+    # offset to the local clock. Polling fetch_time() on every tick exceeds the
+    # exchange rate limit (OKX public time endpoint: 10 req per 2s per IP).
+    time_offset_ms = 0.0
+    next_sync = 0.0  # monotonic deadline for the next fetch_time sync
+
     while True:
         await asyncio.sleep(check_interval_sec)
 
-        try:
-            now_ms = await ex.fetch_time()
-        except Exception:
+        mono = time.monotonic()
+        if mono >= next_sync:
             try:
-                await ex.close()
-            except Exception:
-                pass
-            ex = make_ccxt_pro_client(ccxt, exchange_name)
-            now_ms = int(datetime.now().timestamp() * 1000)
+                server_ms = await ex.fetch_time()
+                time_offset_ms = server_ms - time.time() * 1000
+                next_sync = mono + time_sync_interval_sec
+            except Exception as e:
+                print(f"[fix_missing_bars_loop] fetch_time error: {type(e).__name__}: {e}; reconnecting")
+                try:
+                    await ex.close()
+                except Exception:
+                    pass
+                ex = make_ccxt_pro_client(ccxt, exchange_name)
+                next_sync = mono + 5.0
+
+        # Until the first successful sync this equals plain local time
+        # (offset 0), same as the previous fallback behavior.
+        now_ms = time.time() * 1000 + time_offset_ms
 
         missing_ts: Optional[int] = None
 
