@@ -70,15 +70,22 @@ def import_script(script_path: Path) -> ModuleType:
     return module
 
 
-def _round_price(price: float, lib: ModuleType):
+def _round_price(price: float):
     """
-    Round price to the nearest tick
+    Round price to 6 significant digits to clean float32 storage artifacts
+    without destroying sub-mintick precision.
+
+    TradingView does NOT round OHLC data to syminfo.mintick — scripts see
+    the raw data (e.g. close=4.125 even when mintick=0.01). The float32
+    OHLCV format introduces small errors (e.g. 4.12 → 4.1199998856) that
+    this function cleans by rounding to 6 significant digits (float32 has ~7).
     """
-    if TYPE_CHECKING:  # This is needed for the type checker to work
-        from .. import lib
-    syminfo = lib.syminfo
-    scaled = round(price * syminfo.pricescale)
-    return scaled / syminfo.pricescale
+    if price == 0.0:
+        return 0.0
+    from math import log10, floor
+    magnitude = floor(log10(abs(price)))
+    precision = 5 - magnitude  # 6 significant digits
+    return round(price, precision)
 
 
 # noinspection PyShadowingNames
@@ -91,10 +98,20 @@ def _set_lib_properties(ohlcv: OHLCV, bar_index: int, tz: 'ZoneInfo', lib: Modul
 
     lib.bar_index = lib.last_bar_index = bar_index
 
-    lib.open = _round_price(ohlcv.open, lib)
-    lib.high = _round_price(ohlcv.high, lib)
-    lib.low = _round_price(ohlcv.low, lib)
-    lib.close = _round_price(ohlcv.close, lib)
+    # lib.open = _round_price(ohlcv.open)
+    # lib.high = _round_price(ohlcv.high)
+    # lib.low = _round_price(ohlcv.low)
+    # lib.close = _round_price(ohlcv.close)
+
+    # If a symbol still shows TradingView calculation drift from the 6-significant
+    # digit cleanup above, consider bypassing _round_price and using the chart
+    # feed OHLC values directly. Tick rounding should stay in explicit helpers
+    # such as math.round_to_mintick and in strategy order simulation, not in the
+    # global OHLC sources.
+    lib.open = ohlcv.open
+    lib.high = ohlcv.high
+    lib.low = ohlcv.low
+    lib.close = ohlcv.close
 
     lib.volume = ohlcv.volume
 
@@ -580,6 +597,27 @@ class ScriptRunner:
         - script 모듈을 sys.modules에서 제거해서, 다음 ScriptRunner 생성 시 완전 재import 되도록
         - 내부 참조들(self.*) 끊기
         """
+        # Close the per-bar step generator deterministically on THIS thread.
+        # destroy() runs on the main loop thread. run_iter's finally calls
+        # _reset_lib_vars(lib), which blanks the CALLING thread's thread-local
+        # per-bar OHLC/time state (lib.open = Source("open"), ...). If the
+        # generator is instead left paused — e.g. an OKX run_ready that skips the
+        # step loop because confirmed_visible is False, or the
+        # prerun_ready_after_history_download path — and only finalized later by
+        # GC, that finally can fire on the background prerun's executor thread and
+        # blank ITS live bar state mid-run, surfacing as
+        # "lib.open is still a Source placeholder ... reset/corrupted mid-run".
+        # Closing here keeps the teardown on the main thread; closing an already
+        # exhausted generator is a no-op. Must run before self.script /
+        # writers are dropped, since the finally references them.
+        try:
+            step_iter = getattr(self, "_step_iter", None)
+            if step_iter is not None:
+                step_iter.close()
+        except Exception:
+            pass
+        self._step_iter = None
+
         # script 모듈 언로드해서 다음에 완전히 새로 import 되도록 만들기
         module_name = None
         try:

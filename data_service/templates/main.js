@@ -6,4 +6,5 @@ App.data.loadChartInfo();
 App.data.loadWebhookConfig();
 App.chart.startJankMonitor();
 App.chart.attachResizeHandler();
+App.chart.attachNavButtons();
 App.chart.startPriceLineTimer();

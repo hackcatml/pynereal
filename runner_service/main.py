@@ -59,18 +59,38 @@ def extract_script_title(script_path: Path) -> str:
     return "No title"
 
 
+def format_timeframe(period: str | None) -> str:
+    """Convert a syminfo period (e.g. "1", "5", "60", "D") to a TradingView-style
+    timeframe label (e.g. "1m", "5m", "1h", "1D")."""
+    if not period:
+        return ""
+    period = str(period).strip()
+    if period.isdigit():
+        n = int(period)
+        if n >= 1440 and n % 1440 == 0:
+            return f"{n // 1440}D"
+        if n >= 60 and n % 60 == 0:
+            return f"{n // 60}h"
+        return f"{n}m"
+    mapping = {"D": "1D", "W": "1W", "M": "1M"}
+    return mapping.get(period.upper(), period)
+
+
 def send_webhook_message(webhook_url: str, message: str, *, script_title: str | None,
+                         timeframe: str | None, ticker: str | None,
                          telegram_notification: bool, telegram_token: str | None,
                          telegram_chat_id: str | None) -> None:
     import json
     import re
+    import datetime
     import requests
 
     # Wrap unquoted message fields so JSON parsing succeeds.
     s = re.sub(r'"message"\s*:\s*(?![{["0-9])([A-Za-z][A-Za-z0-9 ]*)',
                r'"message": "\1"',
                message)
-    json_alert_message = json.loads(s).get('message', '')
+    parsed = json.loads(s)
+    json_alert_message = parsed.get('message', '')
     if json_alert_message != '':
         payload = json_alert_message
         try:
@@ -81,10 +101,25 @@ def send_webhook_message(webhook_url: str, message: str, *, script_title: str | 
             print(f"Webhook error: {e}")
 
     if telegram_notification and telegram_token and telegram_chat_id:
+        # Wall-clock time at which the notification is sent.
+        time_str = datetime.datetime.now().strftime('%H:%M:%S')
+
+        # Signal original: keep the raw message body, rendering nested dicts readably.
+        if isinstance(json_alert_message, str):
+            signal_str = json_alert_message
+        else:
+            signal_str = json.dumps(json_alert_message, ensure_ascii=False).replace('"', '')
+
         url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
         payload = {
             "chat_id": telegram_chat_id,
-            "text": f"🚨 [{script_title}] {json.dumps(json_alert_message).replace('\"', '')}",
+            "text": (
+                f"🚨 [{script_title}]\n"
+                f"Time: {time_str}\n"
+                f"Timeframe: {timeframe or ''}\n"
+                f"Ticker: {ticker or ''}\n"
+                f"Signal: {signal_str}"
+            ),
             # "parse_mode": "Markdown"  # 굵게/이탤릭 등 쓰고 싶으면 선택
         }
         try:
@@ -101,8 +136,18 @@ def clear_local_state() -> None:
     plot_options.clear()
 
 
-def on_entry_event(trade):
-    """Callback for entry events"""
+def on_entry_event(trade, runner=None):
+    """Callback for entry events.
+
+    pre_run-gated: the runner is destroyed and rebuilt every cycle, and prerun
+    replays the whole history re-filling every order. Emitting markers during that
+    replay would duplicate them (and, on OKX, a hidden-bar fill replays onto a
+    different visible bar than the real-time fake-bar fill, so dedup-by-time fails).
+    We emit only on real-time fills (run_ready, pre_run=False) and on the one-time
+    full-history pre-run after a history download (also pre_run=False).
+    """
+    if runner is not None and getattr(runner.script, "pre_run", False):
+        return
     event = {
         "type": "trade_entry",
         "time": int(trade.entry_time / 1000),
@@ -114,8 +159,10 @@ def on_entry_event(trade):
     trade_event_queue.append(event)
 
 
-def on_close_event(trade):
-    """Callback for close events"""
+def on_close_event(trade, runner=None):
+    """Callback for close events. pre_run-gated; see on_entry_event."""
+    if runner is not None and getattr(runner.script, "pre_run", False):
+        return
     event = {
         "type": "trade_close",
         "time": int(trade.exit_time / 1000),
@@ -178,14 +225,33 @@ def on_alert_event(message: str, runner: ScriptRunner):
         telegram_notification_enabled = webhook_section.get("telegram_notification", False)
 
     if webhook_enabled and script.webhook_url:
+        syminfo = getattr(runner, "syminfo", None)
         send_webhook_message(
             webhook_url=script.webhook_url,
             message=message,
             script_title=script.title,
+            timeframe=format_timeframe(getattr(syminfo, "period", None)),
+            ticker=getattr(syminfo, "ticker", None),
             telegram_notification=telegram_notification_enabled,
             telegram_token=script.telegram_token,
             telegram_chat_id=script.telegram_chat_id,
         )
+
+
+def hide_zero_volume_bars(exchange: str | None) -> bool:
+    # TradingView policy differs by exchange:
+    # - OKX: zero-volume candles are hidden and excluded from calculations.
+    # - BITGET/Hyperliquid: zero-volume candles remain visible and are included.
+    return (exchange or "").upper() == "OKX"
+
+
+def is_visible_ohlcv(ohlcv: OHLCV, *, hide_zero_volume: bool) -> bool:
+    # "visible" means the candle should advance bar_index and run strategy logic.
+    if ohlcv.volume < 0:
+        return False
+    if hide_zero_volume and ohlcv.volume == 0:
+        return False
+    return True
 
 
 def ready_scrip_runner(script_path: Path, data_path: Path, data_toml_path: Path) -> tuple[ScriptRunner,
@@ -202,13 +268,19 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
     time_from = reader.start_datetime
     time_to = reader.end_datetime
 
-    # Get the iterator
-    gaps = sum(1 for ohlcv in reader if ohlcv.volume < 0)
-    size = reader.get_size(int(time_from.timestamp()), int(time_to.timestamp()))
-    if gaps > 0:
-        size = size - gaps
-    # preload_list is used for request.security calculation
-    preload_list = list(reader.read_from(int(time_from.timestamp()), int(time_to.timestamp())))
+    # Build the runner's candle list with the same hidden-bar policy used by TradingView.
+    # last_bar_index must be based on this visible list, not the raw file size.
+    preload_list = list(
+        reader.read_from(
+            int(time_from.timestamp()),
+            int(time_to.timestamp()),
+            skip_zero_volume=hide_zero_volume_bars(syminfo.prefix),
+        )
+    )
+    size = len(preload_list)
+    if size == 0:
+        reader.close()
+        return None
     ohlcv_iter: Iterator[OHLCV] = iter(preload_list)
     # Prepare a mutable iterator.
     if ohlcv_iter is not None:
@@ -253,8 +325,8 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
                 runner.init_step()
 
                 # Register trade event callbacks
-                runner.script.position.on_entry_callback = on_entry_event
-                runner.script.position.on_close_callback = on_close_event
+                runner.script.position.on_entry_callback = partial(on_entry_event, runner=runner)
+                runner.script.position.on_close_callback = partial(on_close_event, runner=runner)
                 runner.script.position.on_alert_callback = partial(on_alert_event, runner=runner)
                 # Register plot event callback
                 runner.script.on_plot_callback = on_plot_event
@@ -267,6 +339,24 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
 
         # return reader too. So we can close it later
         return runner, stream, reader
+
+
+def ohlcv_event_data(ohlcv: OHLCV) -> dict:
+    return {
+        "time": int(ohlcv.timestamp),
+        "open": float(ohlcv.open),
+        "high": float(ohlcv.high),
+        "low": float(ohlcv.low),
+        "close": float(ohlcv.close),
+        "volume": float(ohlcv.volume),
+    }
+
+
+def get_runner_candle(runner: ScriptRunner, index: int) -> OHLCV | None:
+    candles = getattr(runner, "_all_ohlcv", None)
+    if not candles or index < 0 or index >= len(candles):
+        return None
+    return candles[index]
 
 
 def bar_list_to_ohlcv(bar: list) -> OHLCV:
@@ -394,8 +484,19 @@ async def main():
     DATA_WS = f"ws://127.0.0.1:{data_service_port}/ws"
 
     ctx: Optional[RunnerCtx] = None
+    last_ws = None
+    # Re-emit all trade markers on the next prerun when the connection is fresh
+    # (runner restart/reconnect) or the script was edited mid-run. Trade-event
+    # callbacks are pre_run-gated, so a cleared trades_history (reset_history on
+    # reconnect, or script_modified on edit) would otherwise not be re-populated
+    # until a full restart. A redundant re-emit (reconnect without change) is
+    # harmless: data_service dedupes by exact event.
+    pending_full_reemit = False
 
     async for ws, raw in ws_loop():
+        if ws is not last_ws:
+            last_ws = ws
+            pending_full_reemit = True
         try:
             msg = json.loads(raw)
         except Exception:
@@ -429,6 +530,7 @@ async def main():
                 current_hashes = compute_script_hashes(SCRIPT_PATH)
                 previous_hashes = load_script_hashes(SCRIPT_HASH_PATH)
                 if current_hashes != previous_hashes:
+                    pending_full_reemit = True
                     await ws.send(json.dumps({"type": "script_modified"}))
                     clear_local_state()
                     write_script_hashes(SCRIPT_HASH_PATH, current_hashes)
@@ -447,12 +549,32 @@ async def main():
 
             # print("=== Pre-run start (up to the last bar) ===")
             size = runner.last_bar_index + 1
-            prerun_range = size - 1
+            last_visible_bar = get_runner_candle(runner, runner.last_bar_index)
+            # In normal realtime pre-run, the file may already contain the open current bar.
+            # If that bar is visible, keep it in the stream for the next run_ready and
+            # pre-run only up to the last confirmed bar. If the raw last bar is hidden
+            # (OKX zero-volume), the visible list already ends at a confirmed bar.
+            has_unconfirmed_visible_bar = (
+                last_visible_bar is not None
+                and reader.end_timestamp is not None
+                and int(last_visible_bar.timestamp) == int(reader.end_timestamp)
+            )
+            prerun_range = size - 1 if has_unconfirmed_visible_bar else size
             runner.script.pre_run = True
             if mtype == "prerun_ready_after_history_download":
-                prerun_range = prerun_range + 1
+                prerun_range = size
+                runner.script.pre_run = False
+            elif pending_full_reemit:
+                # Fresh connection (runner restart/reconnect) or mid-run script edit:
+                # trades_history was (or may have been) cleared, and trade-event callbacks
+                # are pre_run-gated, so a normal (pre_run=True) prerun would NOT re-emit
+                # the historical markers, leaving the chart empty until a restart. Run this
+                # one prerun with pre_run=False so the gated callbacks re-emit all historical
+                # markers. prerun_range stays size-1: the last open bar is still left for
+                # run_ready, so no spurious last-bar alert fires (its fill bar isn't stepped).
                 runner.script.pre_run = False
             await asyncio.to_thread(run_prerun_steps, runner, prerun_range)
+            pending_full_reemit = False
             # print("=== Pre-run finished ===")
 
             try:
@@ -464,12 +586,17 @@ async def main():
             except Exception as e:
                 print(f"[runner] Failed to send script_info: {e}")
 
-            # Send last bar index to data_service to fix open price
+            # Send the visible last candle itself. A visible index can differ from the
+            # raw file index when OKX hidden zero-volume bars exist.
             try:
-                await ws.send(json.dumps({
+                last_bar = get_runner_candle(runner, runner.last_bar_index)
+                event = {
                     "type": "last_bar_open_fix",
                     "last_bar_index": runner.last_bar_index,
-                }))
+                }
+                if last_bar is not None:
+                    event["data"] = ohlcv_event_data(last_bar)
+                await ws.send(json.dumps(event))
             except Exception as e:
                 print(f"[runner] Failed to send bar confirmation: {e}")
 
@@ -492,10 +619,16 @@ async def main():
             # Send plot options to data_service
             if plot_options:
                 try:
+                    # Plot CSV rows are keyed by candle timestamp. Timestamp lookup avoids
+                    # using a raw file index that may include hidden OKX bars.
+                    confirmed_bar_index = runner.last_bar_index - 1
+                    confirmed_bar = get_runner_candle(runner, confirmed_bar_index)
+                    confirmed_bar_time = int(confirmed_bar.timestamp) if confirmed_bar is not None else None
                     plot_options_event = {
                         "type": "plot_options",
                         "data": plot_options,
-                        "confirmed_bar_index": runner.last_bar_index - 1,
+                        "confirmed_bar_index": confirmed_bar_index,
+                        "confirmed_bar_time": confirmed_bar_time,
                     }
                     await ws.send(json.dumps(plot_options_event))
                     # print(f"[runner] Sent plot_options: {plot_options}")
@@ -539,18 +672,36 @@ async def main():
 
             confirmed_ohlcv = bar_list_to_ohlcv(confirmed_bar)
             new_ohlcv = bar_list_to_ohlcv(new_bar)
+            hide_zero_volume = hide_zero_volume_bars(getattr(ctx.runner.syminfo, "prefix", None))
+            # confirmed_visible decides whether this just-closed candle should run one strategy step.
+            # new_visible decides whether the newly opened candle should be kept as the next open bar.
+            confirmed_visible = is_visible_ohlcv(confirmed_ohlcv, hide_zero_volume=hide_zero_volume)
+            new_visible = is_visible_ohlcv(new_ohlcv, hide_zero_volume=hide_zero_volume)
 
-            # Replace the last uncompleted bar with the confirmed bar and append the new bar.
-            ctx.stream.replace_last(confirmed_ohlcv)
-            ctx.stream.append(new_ohlcv)
+            # OKX fake/no-trade bars can stay in the raw file with volume 0, but they must not
+            # enter the runner stream. BITGET/Hyperliquid leave hide_zero_volume=False, so their
+            # 0-volume bars still take this visible path.
+            confirmed_appended = False
+            if confirmed_visible:
+                try:
+                    ctx.stream.replace_last(confirmed_ohlcv)
+                except IndexError:
+                    ctx.stream.append(confirmed_ohlcv)
+                    confirmed_appended = True
+                if new_visible:
+                    ctx.stream.append(new_ohlcv)
             ctx.stream.finish()
 
-            # Check the interval is the same as the timeframe. If so, the incremented candle size is 1.
+            # Count only visible bars added to the runner's index space.
             timeframe_ms = parse_timeframe_to_ms(tf)
             interval_ms = (int(new_ohlcv.timestamp) - int(ctx.last_new_bar_ts_sec)) * 1000
-            incremented_size = 1 if interval_ms == timeframe_ms else 0
+            # last_bar_index tracks visible bars. If pre_run skipped a hidden fake open bar,
+            # the confirmed bar may be appended as a new visible bar here.
+            confirmed_increment = 1 if confirmed_appended else 0
+            new_increment = 1 if interval_ms == timeframe_ms and new_visible else 0
+            incremented_size = confirmed_increment + new_increment
 
-            if incremented_size > 0:
+            if confirmed_visible:
                 # #################################### Module calculation ####################################
                 # # bb1d / weekly high, low calculation
                 # from modules.bb1d_calc import get_bb1d_lower
@@ -567,15 +718,26 @@ async def main():
                     # "macro_low": macro_low
                 }
 
-                ctx.runner.last_bar_index += incremented_size
-                ctx.runner.script.last_bar_index += incremented_size
+                if incremented_size > 0:
+                    ctx.runner.last_bar_index += incremented_size
+                    ctx.runner.script.last_bar_index += incremented_size
+
+                # The confirmed bar index is the visible index just evaluated. When a visible
+                # new bar was appended, last_bar_index already points to that new open bar.
+                confirmed_bar_index = ctx.runner.last_bar_index - new_increment
+                # Strategy code uses strategy.last_bar_index() - 1 as the "last confirmed bar"
+                # check in realtime mode. If the next OKX open bar is hidden, it is not appended
+                # to the stream, but the confirmed bar should still satisfy that check.
+                if not new_visible:
+                    ctx.runner.script.last_bar_index = confirmed_bar_index + 1
 
                 # Ensure request.security can see the new bar during confirmed-bar evaluation.
                 from pynecore.lib.request import get_security_ctx
                 security_ctx = get_security_ctx()
                 if security_ctx is not None:
-                    security_ctx.update_base_bar(confirmed_ohlcv, ctx.runner.last_bar_index - 1)
-                    security_ctx.update_base_bar(new_ohlcv, ctx.runner.last_bar_index)
+                    security_ctx.update_base_bar(confirmed_ohlcv, confirmed_bar_index)
+                    if new_visible:
+                        security_ctx.update_base_bar(new_ohlcv, ctx.runner.last_bar_index)
 
                 # Calculate the last confirmed bar
                 ctx.runner.script.pre_run = False
@@ -583,6 +745,28 @@ async def main():
                     step_res = ctx.runner.step()
                     if step_res is None:
                         break
+
+                # OKX hidden-bar fix:
+                # 새로 열린 봉이 volume 0 hidden bar 면 new_ohlcv 가 stream 에 append 되지
+                # 않아(line 619-620) confirmed bar 의 main() 에서 접수된 주문을 체결할
+                # process_orders() 패스가 없어 webhook alert 이 나가지 않는다. fake bar 의
+                # open(=직전 종가)으로 대기 주문만 체결시켜 alert 을 발생시킨다. main() 은
+                # 호출하지 않는다 (hidden bar 는 전략 로직/visible bar_index 에 들어가면 안 됨).
+                # script.last_bar_index 는 위에서 confirmed_bar_index + 1 로 맞춰져 있어
+                # realtime alert 게이트(order.bar_index == last_bar_index() - 1)가 성립한다.
+                # BITGET/Hyperliquid 는 new_visible=True 라 기존 new bar step 경로를 그대로 탄다.
+                if not new_visible and ctx.runner.script.position is not None:
+                    from pynecore import lib
+                    from pynecore.core.script_runner import _set_lib_properties
+                    _set_lib_properties(new_ohlcv, confirmed_bar_index + 1,
+                                        ctx.runner.tz, lib)
+                    # Fill the pending order on the fake bar so the webhook alert fires
+                    # AND the chart trade marker is emitted in real time (pre_run is False
+                    # here). The duplicate that prerun replay would otherwise create (it
+                    # re-fills on the next visible bar) is prevented by pre_run-gating the
+                    # trade-event callbacks (see on_entry_event/on_close_event): only this
+                    # real-time fill emits a marker, prerun replay does not re-emit.
+                    ctx.runner.script.position.process_orders()
 
                 # Send trade events to data_service
                 if trade_event_queue:
@@ -606,7 +790,8 @@ async def main():
                         plot_options_event = {
                             "type": "plot_options",
                             "data": plot_options,
-                            "confirmed_bar_index": ctx.runner.last_bar_index - 1,
+                            "confirmed_bar_index": confirmed_bar_index,
+                            "confirmed_bar_time": int(confirmed_ohlcv.timestamp),
                         }
                         await ws.send(json.dumps(plot_options_event))
                         # print(f"[runner] Sent plot_options: {plot_options}")

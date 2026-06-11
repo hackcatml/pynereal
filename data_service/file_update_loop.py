@@ -16,6 +16,7 @@ from ohlcv_io import (
     download_history,
     fix_last_open_if_needed,
     fetch_and_update_ohlcv_data,
+    fetch_and_update_recent_ohlcv_data,
     download_history_range_into_cache,
     update_ohlcv_data,
 )
@@ -65,6 +66,10 @@ async def file_update_loop(
             desired_dt = parse_date_or_days(history_since)
             if desired_dt.tzinfo is None:
                 desired_dt = desired_dt.replace(tzinfo=UTC)
+            # Keep cache export stable across restarts. If this is set only
+            # when the existing .ohlcv start differs, export alternates between
+            # clipped history_since data and full cache data.
+            export_start_ts = int(desired_dt.timestamp())
         except Exception:
             desired_dt = None
     else:
@@ -78,7 +83,6 @@ async def file_update_loop(
             start_ts = reader.start_timestamp
             reader.close()
         if start_ts is not None and int(start_ts) != int(desired_dt.timestamp()):
-            export_start_ts = int(desired_dt.timestamp())
             print("[data_service] history_since changed; ohlcv will be regenerated from cache")
 
     if cache_ready:
@@ -198,6 +202,24 @@ async def file_update_loop(
         async with state.lock:
             bars = state.live_bars
 
+            # 0) cold-start seed: 히스토리 준비 후에도 라이브 거래가 한 건도 없어
+            # live_bars 가 비어 있으면 파일 마지막 바로 1개 seed 한다. 그래야
+            # fix_missing_bars_loop 가 prev_close 를 얻어 no-trade 구간에도 fake bar
+            # 를 만들고 파일/전략 시계가 전진한다 (steady-state 와 동일 동작).
+            # seed 가 없으면 첫 거래 전까지 live_bars 가 [] 라 file_update 가 멈춘다.
+            if history_download_complete and ohlcv_path.exists() and len(bars) == 0:
+                try:
+                    with OHLCVReader(ohlcv_path) as reader:
+                        last = reader.read(reader.size - 1)
+                        reader.close()
+                    bars.append([
+                        int(last.timestamp) * 1000,
+                        float(last.open), float(last.high), float(last.low),
+                        float(last.close), float(last.volume),
+                    ])
+                except Exception as e:
+                    print(f"[data_service] cold-start live_bars seed skipped: {e}")
+
             # 1) file missing -> download history
             if not ohlcv_path.exists():
                 # Compute since date for history download.
@@ -269,7 +291,28 @@ async def file_update_loop(
                         # print(f"[data_service] sqlite cache updated from pre_run fetch (last_ts={last_ts})")
                     first_fetch_after_download_done = True
                 else:
-                    fixed_open_price = fix_last_open_if_needed(str(ohlcv_path))
+                    # 현재 진행중인 봉 제외 N 개봉 fetch and update 하여 거래소 데이터와 싱크 맞춤
+                    res = fetch_and_update_recent_ohlcv_data(
+                        exchange,
+                        symbol,
+                        timeframe,
+                        str(ohlcv_path),
+                        current_bar_ts_ms=int(bars[1][0]),
+                        bar_count=10,
+                    )
+                    if res:
+                        cache_rows = [
+                            [int(bar[0] / 1000), bar[1], bar[2], bar[3], bar[4], bar[5]]
+                            for bar in res
+                        ]
+                        upsert_bars(cache_path, provider, exchange, symbol, timeframe, cache_rows)
+                    # Current candle open price fix if needed
+                    fixed_open_price = fix_last_open_if_needed(
+                        str(ohlcv_path),
+                        exchange=exchange,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                    )
                     if fixed_open_price > 0.0:
                         # Fix the last bar stored in the ohlcv cache
                         cache_rows = []
@@ -284,7 +327,7 @@ async def file_update_loop(
                 # Send pre-run ready signal (confirmed bar and new bar)
                 confirmed_bar_and_new_bar = [bars[0], bars[1]]
                 if fixed_open_price > 0.0:
-                    confirmed_bar_and_new_bar[0][1] = fixed_open_price
+                    confirmed_bar_and_new_bar[1][1] = fixed_open_price
 
                 bar_ts = int(confirmed_bar_and_new_bar[1][0])  # new bar timestamp in ms
                 if prerun_sent_for_bar_ts != bar_ts:

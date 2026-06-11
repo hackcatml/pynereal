@@ -129,7 +129,7 @@ def max_bars_back(var: Any, num: int) -> None:
 # noinspection PyShadowingNames
 def _get_dt(time: int | None = None, timezone: str | None = None) -> datetime:
     """ Get datetime object from time and timezone """
-    dt = _datetime if time is None else datetime.fromtimestamp(time / 1000, UTC)
+    dt = _bar_state._datetime if time is None else datetime.fromtimestamp(time / 1000, UTC)
     assert dt is not None
     return dt.astimezone(_parse_timezone(timezone))
 
@@ -261,7 +261,7 @@ def plotchar(series: Any, title: str | None = None, char: str = "•", text: str
         return
 
     # Only allow calling from main function
-    if bar_index == 0:
+    if _bar_state.bar_index == 0:
         if sys._getframe(1).f_code.co_name != 'main':
             raise RuntimeError("The plotchar function can only be called from the main function!")
 
@@ -270,7 +270,7 @@ def plotchar(series: Any, title: str | None = None, char: str = "•", text: str
         title = 'PlotChar'
 
     # No plotchar callback if the bar is progressing
-    if bar_index == _script.last_bar_index:
+    if _bar_state.bar_index == _script.last_bar_index:
         return
 
     # Call plotchar callback if exists
@@ -311,7 +311,7 @@ def plotchar(series: Any, title: str | None = None, char: str = "•", text: str
                     size_val = size
 
             # Get current timestamp
-            timestamp = _time
+            timestamp = _bar_state._time
 
             _script.on_plotchar_callback({
                 'title': title,
@@ -637,7 +637,7 @@ def time(timeframe: str | None = None, session: str | None = None, timezone: str
     :return: UNIX time in milliseconds or NA if bar is outside session or invalid parameters
     """
     if timeframe is None:
-        return _time
+        return _bar_state._time
 
     # Get resampler for the requested timeframe
     try:
@@ -647,7 +647,7 @@ def time(timeframe: str | None = None, session: str | None = None, timezone: str
         return NA(int)
 
     # Get the current bar time for the requested timeframe
-    current_time_ms = _time
+    current_time_ms = _bar_state._time
     bar_time = resampler.get_bar_time(current_time_ms)
 
     if session is None:
@@ -704,7 +704,7 @@ def time_close(timeframe: str | None = None, session: str | None = None, timezon
     :return: UNIX time in milliseconds of bar close or NA if bar is outside session or invalid parameters
     """
     if timeframe is None:
-        return _time
+        return _bar_state._time
 
     # Get resampler for the requested timeframe
     try:
@@ -714,7 +714,7 @@ def time_close(timeframe: str | None = None, session: str | None = None, timezon
         return NA(int)
 
     # Get the current bar time for the requested timeframe
-    current_time_ms = _time
+    current_time_ms = _bar_state._time
     bar_start_time = resampler.get_bar_time(current_time_ms)
 
     # Calculate bar close time by adding timeframe duration
@@ -770,3 +770,85 @@ def year(time: int | None = None, timezone: str | None = None) -> int:
     :return: The year
     """
     return _get_dt(time, timezone).year
+
+
+#
+# Per-runner (thread-local) bar-state isolation
+# =============================================
+# OHLC and the per-bar time/index values are mutated every bar by the
+# ScriptRunner (see core.script_runner._set_lib_properties) and reset to Source
+# placeholders on teardown (_reset_lib_vars). Because `lib` is a process-global
+# singleton shared by every ScriptRunner, a runner finishing/teardown on one
+# thread used to blank these globals while another runner (e.g. a background
+# prerun running via asyncio.to_thread) was mid-bar — leaving `lib.open` etc. as
+# Source placeholders. Source arithmetic then recursed without bound
+# (Source.__sub__ -> _get_value -> still a Source -> __sub__ -> ...) and blew up
+# with RecursionError.
+#
+# We remove the shared mutable state by backing every per-bar field with a
+# thread-local store and exposing it through module-level property descriptors,
+# so each runner thread sees only its own bar state and another thread's
+# teardown can never corrupt an in-flight runner. request.security's same-thread
+# save/restore (lib/request.py) and the AST-injected `x = getattr(lib, "x", na)`
+# resolution keep working unchanged, since both run on the runner's own thread.
+#
+import threading as _threading
+from types import ModuleType as _ModuleType
+
+#: Names whose values change per bar and must be isolated per runner thread.
+_BAR_STATE_FIELDS = (
+    "open", "high", "low", "close", "volume",
+    "hl2", "hlc3", "ohlc4", "hlcc4",
+    "bar_index", "last_bar_index",
+    "_time", "last_bar_time", "_datetime",
+)
+
+
+class _BarState(_threading.local):
+    """Per-thread bar state.
+
+    ``threading.local.__init__`` runs once per thread on first access, so every
+    runner thread starts from the same placeholder defaults (matching the
+    module-level annotations above) before its first ``_set_lib_properties``.
+    """
+
+    def __init__(self):
+        self.open = Source("open")
+        self.high = Source("high")
+        self.low = Source("low")
+        self.close = Source("close")
+        self.volume = Source("volume")
+        self.hl2 = Source("hl2")
+        self.hlc3 = Source("hlc3")
+        self.ohlc4 = Source("ohlc4")
+        self.hlcc4 = Source("hlcc4")
+        self.bar_index = 0
+        self.last_bar_index = 0
+        self._time = 0
+        self.last_bar_time = 0
+        self._datetime = datetime.fromtimestamp(0, UTC)
+
+
+_bar_state = _BarState()
+
+
+class _LibModule(_ModuleType):
+    """Module type for ``pynecore.lib`` whose per-bar fields resolve to the
+    calling thread's :data:`_bar_state`. The ``property`` data descriptors
+    transparently intercept both ``lib.open`` reads and ``lib.open = ...``
+    writes (data descriptors take precedence over the module ``__dict__``)."""
+
+
+def _make_bar_property(_name):
+    return property(lambda _self: getattr(_bar_state, _name),
+                    lambda _self, _value: setattr(_bar_state, _name, _value))
+
+
+for _field in _BAR_STATE_FIELDS:
+    setattr(_LibModule, _field, _make_bar_property(_field))
+
+# Swap the live module object's type so the descriptors take effect. The plain
+# module-level assignments above (e.g. `open = Source("open")`) stay in the
+# module __dict__ as type-hint anchors but are shadowed by these descriptors for
+# every attribute access.
+sys.modules[__name__].__class__ = _LibModule

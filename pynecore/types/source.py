@@ -39,9 +39,29 @@ class Source(Series[float]):
         return getattr(self, 'name')
 
     def _get_value(self):
-        """Get actual value from lib module"""
+        """Get actual value from lib module.
+
+        During normal bar processing ``lib.<name>`` holds a concrete numeric
+        value (set per bar by the ScriptRunner). If it is still a ``Source``
+        placeholder here, the per-bar state was never populated for this
+        thread/run — fail loudly instead of returning the placeholder (which
+        previously recursed forever) or a fabricated ``na`` (which would let the
+        strategy keep computing on wrong values). A clear error surfaces the
+        real problem instead of producing silently incorrect trades.
+        """
         from pynecore import lib
-        return getattr(lib, getattr(self, 'name'), self)
+        name = getattr(self, 'name')
+        value = getattr(lib, name, None)
+        if value is None or isinstance(value, Source):
+            raise RuntimeError(
+                f"lib.{name} is still a Source placeholder when its value was "
+                f"needed. The per-bar OHLC/time state was not populated for the "
+                f"current run (it must be set via "
+                f"script_runner._set_lib_properties before the script main() "
+                f"runs). This usually means the bar state was reset/corrupted "
+                f"mid-run."
+            )
+        return value
 
     def _resolve(self, other):
         """Resolve self and other to actual values"""

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, UTC
+import struct
 from typing import Optional
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -63,7 +64,7 @@ def download_history(provider: str, exchange: str, symbol: str, timeframe: str, 
             timeframe=data_timeframe,
             time_from=time_from,
             time_to=time_to,
-            chunk_size=100,
+            chunk_size=None if exchange.lower() == "hyperliquid" else 100,
             list_symbols=False,
             show_info=False,
         )
@@ -112,33 +113,137 @@ def download_history_range_into_cache(
     return ok
 
 
-def fix_last_open_if_needed(ohlcv_path: str) -> float:
+def _ohlcv_float(value: float) -> float:
+    return struct.unpack("f", struct.pack("f", value))[0]
+
+
+def _filter_invalid_ccxt_markets(markets: list) -> list:
+    """Drop ccxt-normalized markets that have no id/symbol.
+
+    OKX sometimes lists preopen instruments with an empty instId, which ccxt's
+    safe_string() normalizes to None. Such markets make keysort(markets_by_id)
+    in set_markets() compare None with str and raise TypeError, so the whole
+    load_markets() fails (breaking both REST OHLCV fetch and watch_trades).
+    Unfixed upstream as of ccxt 4.5.57, so filter them out here.
+    """
+    return [
+        market for market in markets
+        if market and market.get("id") and market.get("symbol")
+    ]
+
+
+def make_ccxt_client(ccxt_module, exchange: str):
+    """Create a sync ccxt client.
+
+    For OKX, wrap the exchange class so fetch_markets() drops invalid markets
+    right before load_markets() passes them to set_markets(). Other exchanges
+    are created as-is.
+    """
+    exchange_class = getattr(ccxt_module, exchange)
+    if exchange.lower() != "okx":
+        return exchange_class(config={})
+
+    class SafeOKX(exchange_class):
+        def fetch_markets(self, params={}):
+            return _filter_invalid_ccxt_markets(super().fetch_markets(params))
+
+    return SafeOKX(config={})
+
+
+def make_ccxt_pro_client(ccxt_module, exchange: str):
+    """ccxt.pro (async) counterpart of make_ccxt_client().
+
+    Kept separate because fetch_markets() is a coroutine in ccxt.pro and needs
+    an async override: a sync override would hand a plain list to ccxt's
+    internal await, and using this helper on sync ccxt would return a
+    coroutine to sync callers.
+    """
+    exchange_class = getattr(ccxt_module, exchange)
+    if exchange.lower() != "okx":
+        return exchange_class(config={})
+
+    class SafeOKXPro(exchange_class):
+        async def fetch_markets(self, params={}):
+            markets = await super().fetch_markets(params)
+            return _filter_invalid_ccxt_markets(markets)
+
+    return SafeOKXPro(config={})
+
+
+def fetch_ohlcv_data(
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    since: int,
+    limit: int | None = None,
+) -> list | None:
+    import ccxt
+
+    client = make_ccxt_client(ccxt, exchange)
+    return client.fetch_ohlcv(
+        symbol=symbol,
+        timeframe=timeframe,
+        since=since,
+        limit=limit,
+    )
+
+
+def fix_last_open_if_needed(
+    ohlcv_path: str,
+    exchange: str = "",
+    symbol: str = "",
+    timeframe: str = "",
+) -> float:
     fixed_candle_open_price = 0.0
-    need_fix = False
     open_price, high_price, low_price, close_price, vol, prev_close_price = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    last_timestamp, interval = 0, 0
     with OHLCVReader(ohlcv_path) as reader:
         size = reader.size
         last = reader.read(size - 1)
         prev = reader.read(size - 2)
+        interval = reader.interval
+        last_timestamp = last.timestamp
         open_price = last.open
         high_price = last.high
         low_price = last.low
         close_price = last.close
         vol = last.volume
         prev_close_price = prev.close
-        if open_price != prev_close_price:
-            # print(f"Open price is different from previous close price. Fixing...\n"
-            #       f"prev close: {prev_close_price}, open: {open_price}")
-            need_fix = True
         reader.close()
 
-    if need_fix:
+    if exchange.upper() in ("OKX", "HYPERLIQUID"):
+        try:
+            res = fetch_ohlcv_data(
+                exchange=exchange,
+                symbol=symbol,
+                timeframe=timeframe,
+                since=(last_timestamp - interval) * 1000,
+                limit=3,
+            )
+        except Exception as e:
+            print(f"[fix_last_open_if_needed] Error fetching current open: {e}")
+            return fixed_candle_open_price
+
+        target_open_price = None
+        for bar in res or []:
+            if int(bar[0] / 1000) == last_timestamp:
+                # fetch 로 받은 bar open 데이터를 float32 타입으로 변경하여 저장
+                target_open_price = _ohlcv_float(bar[1])
+                break
+        if target_open_price is None:
+            return fixed_candle_open_price
+    else:
+        # BITGET-style continuity: the live-built current candle can start from the
+        # first trade, while the chart expects the previous close as the next open.
+        target_open_price = prev_close_price
+
+    if open_price != target_open_price:
         with OHLCVWriter(ohlcv_path) as writer:
             writer.overwrite(timestamp=writer.end_timestamp,
-                             candle=OHLCV(timestamp=writer.end_timestamp, open=prev_close_price,
+                             candle=OHLCV(timestamp=writer.end_timestamp, open=target_open_price,
                                           high=high_price,
                                           low=low_price, close=close_price, volume=vol))
-            fixed_candle_open_price = prev_close_price
+            fixed_candle_open_price = target_open_price
             # print("Candle open price fixing done")
             writer.close()
 
@@ -200,10 +305,6 @@ def fetch_and_update_ohlcv_data(
     :param ohlcv_path: Path to OHLCV file
     :return: Updated open price of the last candle
     """
-    import ccxt
-    # Create ccxt client
-    client = getattr(ccxt, exchange)(config={})
-
     # Read current last candle timestamp
     with OHLCVReader(ohlcv_path) as reader:
         size = reader.size
@@ -214,7 +315,8 @@ def fetch_and_update_ohlcv_data(
 
     # Fetch candles from exchange and update the ohlcv file
     try:
-        res = client.fetch_ohlcv(
+        res = fetch_ohlcv_data(
+            exchange=exchange,
             symbol=symbol,
             timeframe=timeframe,
             since=last_timestamp_sec * 1000 - interval * 1000,  # Convert to milliseconds
@@ -230,4 +332,73 @@ def fetch_and_update_ohlcv_data(
 
     except Exception as e:
         print(f"[fetch_and_update_ohlcv_data] Error fetching OHLCV: {e}")
+        return None
+
+
+def fetch_and_update_recent_ohlcv_data(
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    ohlcv_path: str,
+    current_bar_ts_ms: int,
+    bar_count: int = 10,
+) -> list | None:
+    """
+    Fetch and update recently closed candles before the current live candle.
+    The current candle is preserved from the local OHLCV file and is not updated from REST.
+    """
+    current_ts_sec = int(current_bar_ts_ms / 1000)
+
+    with OHLCVReader(ohlcv_path) as reader:
+        interval = reader.interval
+        last_bar = reader.read(reader.size - 1)
+        reader.close()
+
+    if interval is None:
+        return None
+
+    if last_bar.timestamp != current_ts_sec:
+        print(
+            "[fetch_and_update_recent_closed_ohlcv_data] "
+            f"current bar mismatch: file={last_bar.timestamp}, live={current_ts_sec}"
+        )
+        return None
+
+    current_bar = [
+        last_bar.timestamp * 1000,
+        last_bar.open,
+        last_bar.high,
+        last_bar.low,
+        last_bar.close,
+        last_bar.volume,
+    ]
+
+    since_ms = (current_ts_sec - interval * bar_count) * 1000
+
+    try:
+        res = fetch_ohlcv_data(
+            exchange=exchange,
+            symbol=symbol,
+            timeframe=timeframe,
+            since=since_ms,
+            limit=bar_count + 1,
+        )
+
+        if not res:
+            return None
+
+        closed_bars = [
+            bar for bar in res
+            if int(bar[0] / 1000) < current_ts_sec
+        ][-bar_count:]
+
+        if not closed_bars:
+            return None
+
+        update_ohlcv_data(ohlcv_path, closed_bars + [current_bar])
+        # print(f"[fetch_and_update_recent_closed_ohlcv_data] Updated bars:\n{closed_bars}")
+        return closed_bars
+
+    except Exception as e:
+        print(f"[fetch_and_update_recent_closed_ohlcv_data] Error fetching OHLCV: {e}")
         return None

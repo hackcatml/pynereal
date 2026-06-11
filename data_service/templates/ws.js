@@ -59,6 +59,18 @@ App.ws = {
           state.lastOpenPrice.time = msg.data.time;
           state.lastOpenPrice.value = msg.data.open;
 
+          chart.candleSeries.update(msg.data);
+          chart.volumeSeries.update({
+            time: msg.data.time,
+            value: msg.data.volume,
+            color: msg.data.close >= msg.data.open ? "#26a69a" : "#ef5350"
+          });
+          state.lastBarTime = Math.max(state.lastBarTime, msg.data.time);
+          state.lastOhlcv = msg.data;
+          if (msg.data && msg.data.close !== undefined) {
+            state.lastPrice = msg.data.close;
+          }
+
           const entryIndex = collections.entryMarkerData.findIndex(m => m.time === msg.data.time);
           if (entryIndex !== -1) {
             const priceDiff = Math.abs(collections.entryMarkerData[entryIndex].value - msg.data.open);
@@ -188,8 +200,10 @@ App.ws = {
           const { title, time, value } = msg;
           const series = collections.plotSeriesMap.get(title);
           if (series) {
-            const plotValue = (value == null || isNaN(value)) ? NaN : value;
-            series.update({ time, value: plotValue });
+            const linePoint = App.data.toLinePoint(time, value);
+            if (linePoint) {
+              series.update(linePoint);
+            }
           }
         }
       } catch (e) {

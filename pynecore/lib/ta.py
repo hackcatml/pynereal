@@ -1670,7 +1670,14 @@ def stdev(source: float, length: int, biased=True) -> float | NA[float]:
     :return: The standard deviation of the source series
     """
     try:
-        return math.sqrt(variance(source, length, biased))
+        var = variance(source, length, biased)
+        if isinstance(var, NA):
+            return NA(float)
+        # Floating-point cancellation can make a theoretically zero variance slightly negative.
+        # flat window 에서 분산이 부동소수점 오차로 살짝 음수가 되는 경우만 보정
+        if var < 0.0 and var > -1e-9:
+            var = 0.0
+        return math.sqrt(var)
     except TypeError:
         return NA(float)
 
