@@ -368,12 +368,15 @@ def is_na(source: Any = None) -> bool | NA:
     """
     Check if the source is NA
     """
+    # Most common case first: an NA instance
+    if isinstance(source, NA):
+        return True
     if source is None:
         return NA(None)
     # If the source is a type or GenericAlias (like list[float]), return NA of that type
-    if isinstance(source, (type, GenericAlias)) and source is not NA:
-        return NA(source)
-    return isinstance(source, NA) or source is NA
+    if isinstance(source, (type, GenericAlias)):
+        return True if source is NA else NA(source)
+    return False
 
 
 # In Pine Script, na is both a property and a function

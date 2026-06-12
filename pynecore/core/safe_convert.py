@@ -1,4 +1,5 @@
 from ..types import NA
+from ..types.na import na_float
 
 
 def safe_div(a: float | NA[float], b: float | NA[float]):
@@ -10,14 +11,14 @@ def safe_div(a: float | NA[float], b: float | NA[float]):
     @param b: The denominator.
     @return: The division result, or NA(float) if b is zero or NA.
     """
-    if b == 0 or b == 0.0:
-        return NA(float)
-    if a is NA() or b is NA():
-        return NA(float)
+    if b == 0:  # NA compares False, handled below
+        return na_float
+    if isinstance(a, NA) or isinstance(b, NA):
+        return na_float
     try:
         return a / b
     except (ZeroDivisionError, TypeError):
-        return NA(float)
+        return na_float
 
 
 def safe_float(value: float | NA[float]) -> float | NA[float]:
