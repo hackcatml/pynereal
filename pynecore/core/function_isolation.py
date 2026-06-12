@@ -36,21 +36,6 @@ def isolate_function(
     if call_id is None:
         return func  # type: ignore
 
-    # If it is a type object, return it as is
-    if isinstance(func, type):
-        return func  # type: ignore
-
-    # If it is a classmethod (bound method where __self__ is a class), return it as is
-    if hasattr(func, '__self__') and isinstance(func.__self__, type):
-        return func  # type: ignore
-
-    # Check if this is an Exported proxy and unwrap it
-    if isinstance(func, Exported):
-        unwrapped_func = func.__fn__
-        if unwrapped_func is None:
-            raise ValueError("Exported proxy has not been initialized with a function yet")
-        func = unwrapped_func
-
     # If it is an overloaded function, returned by the dispatcher
     is_overloaded = call_id == '__overloaded__?'
 
@@ -65,24 +50,51 @@ def isolate_function(
     if is_overloaded:
         del _function_cache[call_id_key]
 
-    try:
-        # If a function is cached we can just call it
-        isolated_function = _function_cache[call_id_key]
+    # Cache hit is the common case in the bar loop, so it is checked before any
+    # type/proxy inspection of func (those only matter when building a new entry)
+    isolated_function = _function_cache.get(call_id_key)
+    if isolated_function is not None:
+        if closure_argument_count != -1:
+            return isolated_function
 
-        if closure_argument_count == -1:  # If closures have been converted to  arguments, no closure is needed
-            # We need to create new instance in every run only if the function is inside the main function
-            # Create a new function with original closure and isolated globals
-            isolated_function = FunctionType(
-                func.__code__,
-                isolated_function.__globals__,
-                func.__name__,
-                func.__defaults__,
-                func.__closure__
-            )
+        if isinstance(func, Exported):
+            unwrapped_func = func.__fn__
+            if unwrapped_func is None:
+                raise ValueError("Exported proxy has not been initialized with a function yet")
+            func = unwrapped_func
 
-        return isolated_function
-    except KeyError:
-        pass
+        # Functions inside main are redefined every bar with fresh closure cells, so the
+        # cached instance must be rebound to the current closure. Module-level functions
+        # and overload dispatchers keep the same code/closure/defaults objects, so the
+        # cached instance can be returned as is - no FunctionType recreation needed.
+        if (isolated_function.__code__ is func.__code__
+                and isolated_function.__closure__ is func.__closure__
+                and isolated_function.__defaults__ is func.__defaults__):
+            return isolated_function
+
+        # Create a new function with original closure and isolated globals
+        return FunctionType(
+            func.__code__,
+            isolated_function.__globals__,
+            func.__name__,
+            func.__defaults__,
+            func.__closure__
+        )
+
+    # If it is a type object, return it as is
+    if isinstance(func, type):
+        return func  # type: ignore
+
+    # If it is a classmethod (bound method where __self__ is a class), return it as is
+    if hasattr(func, '__self__') and isinstance(func.__self__, type):
+        return func  # type: ignore
+
+    # Check if this is an Exported proxy and unwrap it
+    if isinstance(func, Exported):
+        unwrapped_func = func.__fn__
+        if unwrapped_func is None:
+            raise ValueError("Exported proxy has not been initialized with a function yet")
+        func = unwrapped_func
 
     # Builtin objects have no __globals__ attribute
     try:
