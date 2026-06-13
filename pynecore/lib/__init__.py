@@ -340,7 +340,7 @@ def alertcondition(*_, **__):
     In the future this could be used to define alert conditions
     that can be triggered based on boolean expressions.
     """
-    if bar_index == 0:  # Only check if it is the first bar for performance reasons
+    if _bar_state.bar_index == 0:  # Only check if it is the first bar for performance reasons
         # Check if it is called from the main function
         if sys._getframe(1).f_code.co_name != 'main':  # noqa
             raise RuntimeError("The alertcondition function can only be called from the main function!")
@@ -368,12 +368,15 @@ def is_na(source: Any = None) -> bool | NA:
     """
     Check if the source is NA
     """
+    # Most common case first: an NA instance
+    if isinstance(source, NA):
+        return True
     if source is None:
         return NA(None)
     # If the source is a type or GenericAlias (like list[float]), return NA of that type
-    if isinstance(source, (type, GenericAlias)) and source is not NA:
-        return NA(source)
-    return isinstance(source, NA) or source is NA
+    if isinstance(source, (type, GenericAlias)):
+        return True if source is NA else NA(source)
+    return False
 
 
 # In Pine Script, na is both a property and a function
@@ -847,8 +850,18 @@ def _make_bar_property(_name):
 for _field in _BAR_STATE_FIELDS:
     setattr(_LibModule, _field, _make_bar_property(_field))
 
-# Swap the live module object's type so the descriptors take effect. The plain
-# module-level assignments above (e.g. `open = Source("open")`) stay in the
-# module __dict__ as type-hint anchors but are shadowed by these descriptors for
-# every attribute access.
+# Swap the live module object's type so the descriptors take effect.
 sys.modules[__name__].__class__ = _LibModule
+
+# Drop the module-__dict__ anchors for the bar-state fields (e.g. the
+# `open = Source("open")` placeholder assignments above). CPython 3.14's
+# LOAD_ATTR specializes `lib.<name>` into a direct module-__dict__ read after
+# the first call, silently bypassing the property descriptors on _LibModule —
+# the second `lib.close` read would return the stale Source anchor instead of
+# the thread-local bar value. With the anchors gone the names can't specialize
+# as module-dict loads, so every access stays on the descriptor path, while
+# non-bar-state attributes (lib.ta, lib.math, ...) keep the fast specialized
+# path. The placeholder semantics are preserved by _BarState.__init__, which
+# seeds the same Source defaults per thread.
+for _field in _BAR_STATE_FIELDS:
+    globals().pop(_field, None)

@@ -527,7 +527,7 @@ def ema(source: float, length: int, _alpha: float | None = None) -> float | NA[f
     # Use SMA at warming stage
     if isinstance(last_val, NA):
         last_val = sma(source, length)
-        return cast(float | NA[float], last_val)
+        return last_val
 
     # Warmed result
     last_val = alpha * source + (1 - alpha) * last_val
@@ -606,8 +606,8 @@ def highest(source: Series[float], length: int, _bars: bool = False, _tuple: boo
     if _bars:
         return -max_index
     if _tuple:
-        return cast(float | tuple[float | NA[float], float | NA[float]], (last_max, -max_index))
-    return cast(float | NA[float], last_max)
+        return last_max, -max_index
+    return last_max
 
 
 @overload
@@ -804,8 +804,8 @@ def lowest(source: Series[float], length: int,
     if _bars:
         return -min_index
     if _tuple:
-        return cast(float | tuple[float | NA[float], float | NA[float]], (last_min, -min_index))
-    return cast(float | NA[float], last_min)
+        return last_min, -min_index
+    return last_min
 
 
 @overload
@@ -871,7 +871,7 @@ def max(source: Series[float]) -> float | NA[float]:
     max_val: Persistent[float | NA] = NA(float)
     if max_val < source or isinstance(max_val, NA):
         max_val = source
-    return cast(float | NA[float], max_val)
+    return max_val  # type: ignore[return-value]
 
 
 def median(source: Series[TFI], length: int) -> TFI | NA[TFI] | Series[TFI]:
@@ -964,7 +964,7 @@ def min(source: Series[float]) -> float | NA:
     min_val: Persistent[float | NA] = NA(float)
     if min_val > source or isinstance(min_val, NA):
         min_val = source
-    return cast(float | NA[float], min_val)
+    return min_val  # type: ignore[return-value]
 
 
 def mode(source: Series[TFI], length: int) -> TFI | NA:
@@ -1645,7 +1645,7 @@ def sar(start: float = 0.02, inc: float = 0.02, max: float = 0.2) -> float | NA[
                 af = builtins.min(af + inc, max)
 
     sar_val = next_sar
-    return cast(float | NA[float], sar_val)
+    return sar_val  # type: ignore[return-value]
 
 
 def sma(source: Series[float], length: int) -> float | NA[float]:
