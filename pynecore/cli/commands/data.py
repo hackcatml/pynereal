@@ -16,6 +16,7 @@ from ...providers.provider import Provider
 from ...lib.timeframe import in_seconds
 from ...core.data_converter import DataConverter, SupportedFormats as InputFormats
 from ...core.ohlcv_file import OHLCVReader
+from ...types.ohlcv import OHLCV
 
 from ...utils.rich.date_column import DateColumn
 
@@ -166,6 +167,18 @@ def download(
             if show_info:
                 rprint(sym_info)
 
+        # When resuming, capture the current last bar before opening the writer so it
+        # can be re-downloaded and replaced (and restored if the refetch comes back
+        # empty). Reading it here, while no write handle is open on the file, reuses
+        # OHLCVReader and matches how the rest of the codebase reads single bars.
+        dropped_last_bar: OHLCV | None = None
+        if time_from == "continue" and not truncate \
+                and provider_instance.ohlcv_path and provider_instance.ohlcv_path.exists():
+            with OHLCVReader(str(provider_instance.ohlcv_path)) as resume_reader:
+                if resume_reader.size >= 2:
+                    dropped_last_bar = resume_reader.read(resume_reader.size - 1)
+                resume_reader.close()
+
         # Open the OHLCV file and start downloading
         with provider_instance as ohlcv_writer:
             # Truncate file if overwrite is True
@@ -176,9 +189,20 @@ def download(
             # If the start date is "continue" (default), we resume from the last download
             if time_from == "continue":
                 if ohlcv_writer.end_timestamp:  # Resume from last download
+                    # Re-download and replace the last stored bar instead of starting
+                    # one interval after it. The last bar may have been saved while
+                    # still in-progress (incomplete), and resuming `since` at it rather
+                    # than after it also prevents a -1.0 gap at the boundary: some
+                    # exchanges skip the `since` candle on a full batch (e.g. Bitget
+                    # returns since+timeframe), which would leave the bar right after
+                    # the old resume point (last + interval) gap-filled.
+                    if dropped_last_bar is not None and ohlcv_writer.size >= 2:
+                        # Drop the last bar so it is re-downloaded; end_timestamp then
+                        # points at the previous bar, so the dropped bar is the first
+                        # one fetched back and replaced.
+                        ohlcv_writer.seek(ohlcv_writer.size - 1)
+                        ohlcv_writer.truncate()
                     time_from = datetime.fromtimestamp(ohlcv_writer.end_timestamp, UTC)
-                    # We need to add one interval to the start date to avoid downloading the same data
-                    time_from += timedelta(seconds=ohlcv_writer.interval)
                 else:  # No data, download one year as default
                     time_from = datetime.now(UTC) - timedelta(days=365)
 
@@ -231,6 +255,14 @@ def download(
 
                 # Start downloading
                 provider_instance.download_ohlcv(time_from, time_to, on_progress=cb_progress, limit=chunk_size)
+
+            # Rollback guard: if we dropped the last bar to replace it but the refetch
+            # brought back nothing up to it (transient failure / no newer bars yet),
+            # restore the original bar so `continue` never loses existing data.
+            if dropped_last_bar is not None:
+                end_ts = ohlcv_writer.end_timestamp
+                if end_ts is None or end_ts < dropped_last_bar.timestamp:
+                    ohlcv_writer.write(dropped_last_bar)
 
     except (ImportError, ValueError) as e:
         secho(str(e), err=True, fg=colors.RED)
