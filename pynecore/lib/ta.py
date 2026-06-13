@@ -871,7 +871,7 @@ def max(source: Series[float]) -> float | NA[float]:
     max_val: Persistent[float | NA] = NA(float)
     if max_val < source or isinstance(max_val, NA):
         max_val = source
-    return cast(float | NA[float], max_val)
+    return max_val  # type: ignore[return-value]
 
 
 def median(source: Series[TFI], length: int) -> TFI | NA[TFI] | Series[TFI]:
@@ -964,7 +964,7 @@ def min(source: Series[float]) -> float | NA:
     min_val: Persistent[float | NA] = NA(float)
     if min_val > source or isinstance(min_val, NA):
         min_val = source
-    return cast(float | NA[float], min_val)
+    return min_val  # type: ignore[return-value]
 
 
 def mode(source: Series[TFI], length: int) -> TFI | NA:
@@ -1645,7 +1645,7 @@ def sar(start: float = 0.02, inc: float = 0.02, max: float = 0.2) -> float | NA[
                 af = builtins.min(af + inc, max)
 
     sar_val = next_sar
-    return cast(float | NA[float], sar_val)
+    return sar_val  # type: ignore[return-value]
 
 
 def sma(source: Series[float], length: int) -> float | NA[float]:
