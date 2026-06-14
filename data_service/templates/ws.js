@@ -198,13 +198,7 @@ App.ws = {
           );
         } else if (msg.type === "plot_data") {
           const { title, time, value } = msg;
-          const series = collections.plotSeriesMap.get(title);
-          if (series) {
-            const linePoint = App.data.toLinePoint(time, value);
-            if (linePoint) {
-              series.update(linePoint);
-            }
-          }
+          App.data.updatePlotSeries(chart, collections, title, time, value);
         }
       } catch (e) {
         console.error("ws parse error", e);

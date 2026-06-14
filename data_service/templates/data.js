@@ -1,6 +1,9 @@
 var App = window.App || (window.App = {});
 
 App.data = {
+  STYLE_CIRCLES: 2,
+  STYLE_CROSS: 4,
+  STYLE_LINEBR: 7,
   toLinePoint(time, value) {
     const pointTime = Number(time);
     if (!Number.isFinite(pointTime)) {
@@ -14,6 +17,115 @@ App.data = {
       return { time: pointTime };
     }
     return { time: pointTime, value: pointValue };
+  },
+  hasLineValue(point) {
+    return point && Object.prototype.hasOwnProperty.call(point, "value");
+  },
+  buildPlotSeriesOptions(color, linewidth, style) {
+    const styleCode = parseInt(style, 10);
+    const isCrossStyle = styleCode === this.STYLE_CROSS || styleCode === this.STYLE_CIRCLES;
+    const seriesOptions = {
+      color: color || "#2962FF",
+      lastValueVisible: false,
+      priceLineVisible: false,
+      crosshairMarkerVisible: true
+    };
+
+    if (isCrossStyle) {
+      seriesOptions.lineVisible = false;
+      seriesOptions.pointMarkersVisible = true;
+      seriesOptions.pointMarkersRadius = 1;
+    } else {
+      seriesOptions.lineWidth = linewidth || 2;
+    }
+
+    return {
+      options: seriesOptions,
+      styleCode,
+      isLineBreakStyle: styleCode === this.STYLE_LINEBR
+    };
+  },
+  addPlotLineSeries(chart, collections, seriesOptions, data) {
+    const series = chart.chart.addSeries(LightweightCharts.LineSeries, seriesOptions);
+    collections.plotSeriesList.push(series);
+    if (data && data.length > 0) {
+      series.setData(data);
+    }
+    return series;
+  },
+  createLineBreakPlot(chart, collections, seriesOptions, seriesData) {
+    const controller = {
+      type: "linebr",
+      options: seriesOptions,
+      activeSeries: null,
+      lastHadValue: false
+    };
+    let segment = [];
+
+    const flushSegment = (isActive) => {
+      if (segment.length === 0) {
+        return;
+      }
+      const series = this.addPlotLineSeries(chart, collections, seriesOptions, segment);
+      if (isActive) {
+        controller.activeSeries = series;
+      }
+      segment = [];
+    };
+
+    seriesData.forEach(point => {
+      if (this.hasLineValue(point)) {
+        segment.push(point);
+        controller.lastHadValue = true;
+      } else {
+        flushSegment(false);
+        controller.lastHadValue = false;
+        controller.activeSeries = null;
+      }
+    });
+    flushSegment(controller.lastHadValue);
+
+    return controller;
+  },
+  createPlotSeries(chart, collections, plot, seriesData) {
+    const { title, color, linewidth, style } = plot;
+    const { options, isLineBreakStyle } = this.buildPlotSeriesOptions(color, linewidth, style);
+    if (isLineBreakStyle) {
+      const controller = this.createLineBreakPlot(chart, collections, options, seriesData);
+      collections.plotSeriesMap.set(title, controller);
+      return;
+    }
+
+    const series = this.addPlotLineSeries(chart, collections, options, seriesData);
+    collections.plotSeriesMap.set(title, { type: "single", series });
+  },
+  updatePlotSeries(chart, collections, title, time, value) {
+    const controller = collections.plotSeriesMap.get(title);
+    if (!controller) {
+      return;
+    }
+
+    const linePoint = this.toLinePoint(time, value);
+    if (!linePoint) {
+      return;
+    }
+
+    if (controller.type !== "linebr") {
+      controller.series.update(linePoint);
+      return;
+    }
+
+    if (!this.hasLineValue(linePoint)) {
+      controller.lastHadValue = false;
+      controller.activeSeries = null;
+      return;
+    }
+
+    if (!controller.lastHadValue || !controller.activeSeries) {
+      controller.activeSeries = this.addPlotLineSeries(chart, collections, controller.options, []);
+    }
+    controller.activeSeries.update(linePoint);
+    controller.lastHadValue = true;
   },
   async loadTradeHistory() {
     const state = App.state;
@@ -166,35 +278,11 @@ App.data = {
               });
             }
 
-            const { title, color, linewidth, style } = plot;
-            const STYLE_CIRCLES = 2;
-            const STYLE_CROSS = 4;
-            const isCrossStyle = (parseInt(style) === STYLE_CROSS || parseInt(style) === STYLE_CIRCLES);
-            const seriesOptions = {
-              color: color || "#2962FF",
-              lastValueVisible: false,
-              priceLineVisible: false,
-              crosshairMarkerVisible: true
-            };
-
-            if (isCrossStyle) {
-              seriesOptions.lineVisible = false;
-              seriesOptions.pointMarkersVisible = true;
-              seriesOptions.pointMarkersRadius = 1;
-            } else {
-              seriesOptions.lineWidth = linewidth || 2;
-            }
-
-            const series = chart.chart.addSeries(LightweightCharts.LineSeries, seriesOptions);
-            collections.plotSeriesList.push(series);
-            collections.plotSeriesMap.set(title, series);
-            pendingSeriesData.push([series, seriesData]);
+            pendingSeriesData.push([plot, seriesData]);
           });
 
-          pendingSeriesData.forEach(([series, data]) => {
-            if (data && data.length > 0) {
-              series.setData(data);
-            }
+          pendingSeriesData.forEach(([plot, data]) => {
+            this.createPlotSeries(chart, collections, plot, data);
           });
           return;
         }
