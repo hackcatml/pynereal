@@ -421,6 +421,8 @@ App.data = {
       App.state.scriptSourceName = data.name || "";
       App.state.scriptSource = data.source || "";
       App.state.scriptSourceLoaded = true;
+      App.state.sourceDirty = false;
+      App.state.sourceSaveStatus = "";
       if (data.title) {
         App.state.scriptTitle = data.title;
         App.state.scriptTitleVisible = true;
@@ -429,6 +431,32 @@ App.data = {
       return true;
     } catch (e) {
       return false;
+    }
+  },
+  async saveScriptSource(source) {
+    try {
+      const resp = await fetch("/api/script-source", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        return { ok: false, error: data.error || `Save failed (${resp.status})` };
+      }
+      App.state.scriptSourceName = data.name || App.state.scriptSourceName || "";
+      App.state.scriptSource = data.source || "";
+      App.state.scriptSourceLoaded = true;
+      App.state.sourceDirty = false;
+      App.state.sourceSaveStatus = "";
+      if (data.title) {
+        App.state.scriptTitle = data.title;
+        App.state.scriptTitleVisible = true;
+      }
+      App.ui.setChartInfo();
+      return { ok: true, data };
+    } catch (e) {
+      return { ok: false, error: "Save failed" };
     }
   },
   async loadWebhookConfig() {

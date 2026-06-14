@@ -45,9 +45,16 @@
         <div class="source-panel-title">Source</div>
         <div id="source-panel-name" class="source-panel-name"></div>
       </div>
-      <button id="source-close" class="source-close" title="Close" aria-label="Close source panel">&times;</button>
+      <div class="source-panel-actions">
+        <span id="source-status" class="source-status"></span>
+        <button id="source-save" class="source-action source-save" title="Save script" aria-label="Save script" disabled>💾</button>
+        <button id="source-close" class="source-action source-close" title="Close" aria-label="Close source panel">&times;</button>
+      </div>
     </div>
-    <pre id="source-code" class="source-code">No source loaded.</pre>
+    <div class="source-editor-wrap">
+      <pre id="source-highlight" class="source-code source-highlight" aria-hidden="true">No source loaded.</pre>
+      <textarea id="source-code" class="source-editor" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="soft">No source loaded.</textarea>
+    </div>
   </aside>
   <script src="/static/state.js"></script>
   <script src="/static/ui.js"></script>

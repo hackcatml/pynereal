@@ -263,6 +263,10 @@ body.source-open .source-panel {
   background: #161a21;
 }
 
+.source-panel-header > div:first-child {
+  min-width: 0;
+}
+
 .source-panel-title {
   font-size: 14px;
   font-weight: 700;
@@ -275,7 +279,23 @@ body.source-open .source-panel {
   word-break: break-all;
 }
 
-.source-close {
+.source-panel-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.source-status {
+  max-width: 180px;
+  overflow: hidden;
+  color: #9da7b3;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-action {
   flex: 0 0 auto;
   width: 32px;
   height: 32px;
@@ -288,22 +308,75 @@ body.source-open .source-panel {
   cursor: pointer;
 }
 
-.source-close:active {
+.source-action:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.source-action:active:not(:disabled) {
   transform: translateY(1px);
 }
 
-.source-code {
+.source-save {
+  font-size: 16px;
+}
+
+.source-save.dirty:not(:disabled) {
+  border-color: rgba(78, 201, 176, 0.55);
+  background: rgba(78, 201, 176, 0.14);
+}
+
+.source-close {
+  font-size: 22px;
+}
+
+.source-editor-wrap {
   flex: 1 1 auto;
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  background: #0b0f14;
+}
+
+.source-code,
+.source-editor {
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
   margin: 0;
   padding: 14px 16px 24px;
   overflow: auto;
+  /* 두 레이어가 항상 동일한 스크롤바 거터를 예약해 content width(=줄바꿈 폭)를 일치시킨다 */
+  scrollbar-gutter: stable;
   white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  color: #d4d4d4;
-  background: #0b0f14;
+  /* anywhere/word-break는 pre와 textarea의 break 위치가 어긋날 수 있어 break-word로 통일 */
+  overflow-wrap: break-word;
   font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   tab-size: 4;
+}
+
+.source-code {
+  pointer-events: none;
+  color: #d4d4d4;
+}
+
+.source-editor {
+  z-index: 1;
+  border: 0;
+  outline: 0;
+  resize: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.01);
+  caret-color: #e6edf3;
+  -webkit-text-fill-color: rgba(255, 255, 255, 0.01);
+}
+
+.source-editor::selection {
+  background: rgba(86, 156, 214, 0.32);
+}
+
+.source-editor:focus {
+  outline: none;
 }
 
 .source-code .py-comment {
@@ -320,7 +393,6 @@ body.source-open .source-panel {
 
 .source-code .py-keyword {
   color: #569cd6;
-  font-weight: 700;
 }
 
 .source-code .py-builtin {
@@ -351,6 +423,7 @@ body.source-open .source-panel {
     right: max(8px, env(safe-area-inset-right));
     bottom: max(8px, env(safe-area-inset-bottom));
     width: auto;
+    height: min(68dvh, 620px);
     max-height: min(68dvh, 620px);
     border-left: 0;
     border-radius: 12px;
@@ -375,6 +448,16 @@ body.source-open .source-panel {
     padding: 12px 14px 18px;
     font-size: 11px;
     line-height: 1.5;
+  }
+
+  .source-editor {
+    padding: 12px 14px 18px;
+    font-size: 11px;
+    line-height: 1.5;
+  }
+
+  .source-status {
+    max-width: 112px;
   }
 
   #chart-info {

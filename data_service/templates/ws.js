@@ -18,11 +18,9 @@ App.ws = {
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === "script_modified") {
-          state.scriptSourceName = "";
-          state.scriptSource = "";
-          state.scriptSourceLoaded = false;
+          state.sourceSaveStatus = "";
           if (state.sourcePanelOpen) {
-            App.ui.renderSourcePanel();
+            App.ui.updateSourceSaveState();
           }
           chart.resetChartState(false);
           App.data.loadInitialWithRetry();
