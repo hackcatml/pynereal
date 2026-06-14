@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>OHLCV Chart (data_service)</title>
   <link rel="stylesheet" href="/static/styles.css" />
   <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.9/dist/lightweight-charts.standalone.production.js"></script>
@@ -16,6 +17,7 @@
       <span id="chart-info-title"></span>
       <div id="toolbar">
         <button id="alerts-toggle" class="toolbar-btn">Alert ▼</button>
+        <button id="source-toggle" class="toolbar-btn source-btn" title="Source code" aria-controls="source-panel" aria-expanded="false">&lt;/&gt;</button>
         <div id="alerts-menu" class="dropdown">
           <div class="dropdown-row">
             <span>Webhook</span>
@@ -35,6 +37,25 @@
       </div>
     </div>
   </div>
+  <div id="source-backdrop" class="source-backdrop"></div>
+  <aside id="source-panel" class="source-panel" aria-hidden="true" aria-label="Script source">
+    <div id="source-resize-handle" class="source-resize-handle" role="separator" aria-orientation="vertical" title="Resize source pane"></div>
+    <div class="source-panel-header">
+      <div>
+        <div class="source-panel-title">Source</div>
+        <div id="source-panel-name" class="source-panel-name"></div>
+      </div>
+      <div class="source-panel-actions">
+        <span id="source-status" class="source-status"></span>
+        <button id="source-save" class="source-action source-save" title="Save script" aria-label="Save script" disabled>💾</button>
+        <button id="source-close" class="source-action source-close" title="Close" aria-label="Close source panel">&times;</button>
+      </div>
+    </div>
+    <div class="source-editor-wrap">
+      <pre id="source-highlight" class="source-code source-highlight" aria-hidden="true">No source loaded.</pre>
+      <textarea id="source-code" class="source-editor" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="soft">No source loaded.</textarea>
+    </div>
+  </aside>
   <script src="/static/state.js"></script>
   <script src="/static/ui.js"></script>
   <script src="/static/chart.js"></script>

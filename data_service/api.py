@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from config import DataServiceConfig
 from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
@@ -21,6 +22,45 @@ def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dic
                     cfg: DataServiceConfig = None) -> APIRouter:
     r = APIRouter()
     config_path = app_state.config_dir / "realtime_trade.toml"
+
+    def _extract_script_title_from_source(source: str) -> str | None:
+        try:
+            tree = ast.parse(source)
+        except Exception:
+            return None
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                if func.value.id != "script":
+                    continue
+                if func.attr not in {"strategy", "indicator", "library"}:
+                    continue
+                for kw in node.keywords:
+                    if kw.arg == "title" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                        return kw.value.value or "No title"
+                if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                    return node.args[0].value or "No title"
+        return None
+
+    def _resolve_script_path() -> Path:
+        if cfg is None:
+            raise ValueError("config unavailable")
+        script_name = (cfg.realtime_section or {}).get("script_name") or ""
+        if not isinstance(script_name, str) or not script_name:
+            raise ValueError("script_name is empty in realtime_trade.toml")
+
+        scripts_dir = app_state.scripts_dir.resolve()
+        script_path = (scripts_dir / script_name).resolve()
+        try:
+            script_path.relative_to(scripts_dir)
+        except ValueError:
+            raise ValueError("script path must be inside scripts directory")
+        if script_path.suffix != ".py":
+            raise ValueError("script must be a .py file")
+        return script_path
 
     def _load_webhook_config() -> dict:
         webhook_section = cfg.webhook_section or {}
@@ -165,7 +205,69 @@ def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dic
 
     @r.get("/api/info")
     def get_info() -> JSONResponse:
-        return JSONResponse(chart_info or {})
+        info = chart_info or {}
+        return JSONResponse({
+            "exchange": info.get("exchange"),
+            "symbol": info.get("symbol"),
+            "timeframe": info.get("timeframe"),
+            "provider": info.get("provider"),
+            "script_title": info.get("script_title"),
+            "script_source_name": info.get("script_source_name"),
+            "has_script_source": bool(info.get("script_source")),
+        })
+
+    @r.get("/api/script-source")
+    def get_script_source() -> JSONResponse:
+        info = chart_info or {}
+        title = info.get("script_title") or "No title"
+        name = info.get("script_source_name") or ""
+        source = info.get("script_source") or ""
+        # 디스크 파일이 최신 저장본이므로 우선 읽는다. 다른 기기에서 저장한 내용이
+        # pre_run 전에도 즉시 반영되도록(메모리 chart_info는 fallback).
+        try:
+            script_path = _resolve_script_path()
+            if script_path.exists():
+                source = script_path.read_text(encoding="utf-8")
+                name = script_path.name
+                title = _extract_script_title_from_source(source) or title
+        except Exception:
+            pass
+        return JSONResponse({
+            "title": title,
+            "name": name,
+            "source": source,
+        })
+
+    @r.post("/api/script-source")
+    def save_script_source(payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        source = payload.get("source")
+        if not isinstance(source, str):
+            return JSONResponse({"error": "source must be string"}, status_code=400)
+
+        try:
+            script_path = _resolve_script_path()
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+        if not script_path.exists():
+            return JSONResponse({"error": f"script not found: {script_path.name}"}, status_code=404)
+
+        try:
+            script_path.write_text(source, encoding="utf-8")
+        except Exception as e:
+            return JSONResponse({"error": f"failed to save script: {e}"}, status_code=500)
+
+        info = chart_info or {}
+        title = _extract_script_title_from_source(source) or info.get("script_title") or "No title"
+        info["script_title"] = title
+        info["script_source_name"] = script_path.name
+        info["script_source"] = source
+        return JSONResponse({
+            "ok": True,
+            "title": title,
+            "name": script_path.name,
+            "source": source,
+        })
 
     @r.get("/api/webhook-config")
     def get_webhook_config() -> JSONResponse:

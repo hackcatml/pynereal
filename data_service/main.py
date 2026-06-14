@@ -55,6 +55,8 @@ async def main() -> None:
         "timeframe": cfg.timeframe,
         "provider": cfg.provider,
         "script_title": None,
+        "script_source_name": None,
+        "script_source": "",
     }
     app.include_router(build_api_router(plot_path, ohlcv_path,
                                         trades_history, plot_options, plotchar_history, chart_info, cfg))
@@ -187,9 +189,14 @@ async def main() -> None:
                         elif msg_type == "script_info":
                             title = event.get("title") or "No title"
                             chart_info["script_title"] = title
+                            chart_info["script_source_name"] = event.get("source_name") or chart_info.get("script_source_name")
+                            if "source" in event:
+                                chart_info["script_source"] = event.get("source") or ""
                             await ws_manager.broadcast_json({
                                 "type": "script_info",
                                 "title": title,
+                                "source_name": chart_info.get("script_source_name"),
+                                "source": chart_info.get("script_source") or "",
                             })
                         elif (msg_type == "reset_history") or (msg_type == "script_modified"):
                             # Clear stored history when runner resets or script changes.
@@ -197,6 +204,9 @@ async def main() -> None:
                             plot_options.clear()
                             plotchar_history.clear()
                             if msg_type == "script_modified":
+                                chart_info["script_title"] = None
+                                chart_info["script_source_name"] = None
+                                chart_info["script_source"] = ""
                                 # Notify UI to reload chart state.
                                 await ws_manager.broadcast_json({"type": "script_modified"})
                         elif msg_type == "ack_prerun_ready_after_history_download":
