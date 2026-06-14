@@ -59,6 +59,21 @@ def extract_script_title(script_path: Path) -> str:
     return "No title"
 
 
+def build_script_info_payload(script_path: Path, title: str | None = None) -> dict:
+    source = ""
+    try:
+        source = script_path.read_text(encoding="utf-8")
+    except Exception:
+        source = ""
+
+    return {
+        "type": "script_info",
+        "title": title or extract_script_title(script_path),
+        "source_name": script_path.name,
+        "source": source,
+    }
+
+
 def format_timeframe(period: str | None) -> str:
     """Convert a syminfo period (e.g. "1", "5", "60", "D") to a TradingView-style
     timeframe label (e.g. "1m", "5m", "1h", "1D")."""
@@ -401,11 +416,7 @@ async def ws_loop():
                     pass
                 try:
                     if SCRIPT_PATH and SCRIPT_PATH.exists():
-                        title = extract_script_title(SCRIPT_PATH)
-                        await ws.send(json.dumps({
-                            "type": "script_info",
-                            "title": title,
-                        }))
+                        await ws.send(json.dumps(build_script_info_payload(SCRIPT_PATH)))
                 except Exception as e:
                     print(f"[runner] Failed to send script_info (connect): {e}")
                 try:
@@ -541,7 +552,7 @@ async def main():
             result = ready_scrip_runner(script_path, ohlcv_path, toml_path)
             if result is None:
                 from datetime import datetime
-                print(f"[{datetime.now().strftime("%y-%m-%d %H:%M:%S")}] [runner] failed to prepare runner")
+                print(f"[{datetime.now().strftime('%y-%m-%d %H:%M:%S')}] [runner] failed to prepare runner")
                 continue
             else:
                 runner, stream, reader = result
@@ -579,10 +590,7 @@ async def main():
 
             try:
                 title = runner.script.title or "No title"
-                await ws.send(json.dumps({
-                    "type": "script_info",
-                    "title": title,
-                }))
+                await ws.send(json.dumps(build_script_info_payload(script_path, title)))
             except Exception as e:
                 print(f"[runner] Failed to send script_info: {e}")
 

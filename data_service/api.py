@@ -165,7 +165,25 @@ def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dic
 
     @r.get("/api/info")
     def get_info() -> JSONResponse:
-        return JSONResponse(chart_info or {})
+        info = chart_info or {}
+        return JSONResponse({
+            "exchange": info.get("exchange"),
+            "symbol": info.get("symbol"),
+            "timeframe": info.get("timeframe"),
+            "provider": info.get("provider"),
+            "script_title": info.get("script_title"),
+            "script_source_name": info.get("script_source_name"),
+            "has_script_source": bool(info.get("script_source")),
+        })
+
+    @r.get("/api/script-source")
+    def get_script_source() -> JSONResponse:
+        info = chart_info or {}
+        return JSONResponse({
+            "title": info.get("script_title") or "No title",
+            "name": info.get("script_source_name") or "",
+            "source": info.get("script_source") or "",
+        })
 
     @r.get("/api/webhook-config")
     def get_webhook_config() -> JSONResponse:

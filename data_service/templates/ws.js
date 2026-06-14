@@ -18,6 +18,12 @@ App.ws = {
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === "script_modified") {
+          state.scriptSourceName = "";
+          state.scriptSource = "";
+          state.scriptSourceLoaded = false;
+          if (state.sourcePanelOpen) {
+            App.ui.renderSourcePanel();
+          }
           chart.resetChartState(false);
           App.data.loadInitialWithRetry();
         } else if (msg.type === "runner_disconnected") {
@@ -25,6 +31,12 @@ App.ws = {
           chart.resetChartState(false);
           state.scriptTitle = "No title";
           state.scriptTitleVisible = false;
+          state.scriptSourceName = "";
+          state.scriptSource = "";
+          state.scriptSourceLoaded = false;
+          if (state.sourcePanelOpen) {
+            App.ui.renderSourcePanel();
+          }
           App.ui.setChartInfo();
         } else if (msg.type === "runner_connected") {
           state.runnerConnected = true;
@@ -32,6 +44,14 @@ App.ws = {
         } else if (msg.type === "script_info") {
           state.scriptTitle = msg.title || "No title";
           state.scriptTitleVisible = true;
+          state.scriptSourceName = msg.source_name || state.scriptSourceName || "";
+          if (msg.source != null) {
+            state.scriptSource = msg.source || "";
+            state.scriptSourceLoaded = true;
+          }
+          if (state.sourcePanelOpen) {
+            App.ui.renderSourcePanel();
+          }
           App.ui.setChartInfo();
         } else if (msg.type === "bar") {
           if (msg.data.time < state.lastBarTime) {

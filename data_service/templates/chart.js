@@ -8,11 +8,68 @@ App.chart = {
   entryMarkerSeries: null,
   closeMarkerSeries: null,
   currentPriceLine: null,
+  resizeObserver: null,
+  touchGuardsAttached: false,
+  isMobileViewport() {
+    return window.matchMedia("(max-width: 640px), (hover: none) and (pointer: coarse)").matches;
+  },
+  isPageZoomed() {
+    return Boolean(window.visualViewport && window.visualViewport.scale && window.visualViewport.scale > 1.01);
+  },
+  isChartGestureTarget(target) {
+    if (!(target instanceof Element)) return false;
+    if (target.closest("#source-panel")) return false;
+    return Boolean(target.closest("#chart, #chart-info, .nav-btn"));
+  },
+  clearPersistedChartView() {
+    try {
+      sessionStorage.removeItem("chartVisibleRange");
+      sessionStorage.removeItem("chartVisibleLogicalRange");
+      sessionStorage.removeItem("chartScaleOptions");
+    } catch {}
+  },
+  getContainerSize() {
+    const rect = this.container.getBoundingClientRect();
+    return {
+      width: Math.max(1, Math.round(rect.width || this.container.clientWidth || window.innerWidth || 1)),
+      height: Math.max(1, Math.round(rect.height || this.container.clientHeight || window.innerHeight || 1))
+    };
+  },
+  resizeToContainer() {
+    if (!this.chart || !this.container) return;
+    const size = this.getContainerSize();
+    this.chart.applyOptions(size);
+    this.positionNavButtons();
+  },
+  applyInitialVisibleRange(dataLength) {
+    const ts = this.chart.timeScale();
+    if (!this.isMobileViewport() || dataLength <= 0) {
+      ts.fitContent();
+      return;
+    }
+    const width = Math.max(1, this.container.clientWidth || window.innerWidth || 1);
+    const visibleBars = Math.min(dataLength, Math.max(140, Math.round(width / 2)));
+    const rightPadding = Math.max(4, Math.round(visibleBars * 0.04));
+    ts.setVisibleLogicalRange({
+      from: Math.max(0, dataLength - visibleBars),
+      to: dataLength - 1 + rightPadding
+    });
+  },
   init() {
+    const size = this.getContainerSize();
     this.chart = LightweightCharts.createChart(this.container, {
+      width: size.width,
+      height: size.height,
       layout: { background: { color: "#ffffff" }, textColor: "#000000" },
       // grid: { vertLines: { color: "#2b2b43" }, horzLines: { color: "#2b2b43" } },
-      timeScale: { timeVisible: true, secondsVisible: true },
+      timeScale: {
+        timeVisible: true,
+        secondsVisible: true,
+        rightOffset: this.isMobileViewport() ? 4 : 10,
+        barSpacing: this.isMobileViewport() ? 5 : 6,
+        minBarSpacing: 0.5,
+        rightBarStaysOnScroll: true
+      },
       crosshair: {
         mode: LightweightCharts.CrosshairMode.Magnet
       }
@@ -42,7 +99,7 @@ App.chart = {
       }
     );
     this.volumeSeries.priceScale().applyOptions({
-      scaleMargins: { top: 0.8, bottom: 0 }
+      scaleMargins: { top: 0.78, bottom: 0.02 }
     });
 
     this.entryMarkerSeries = this.chart.addSeries(
@@ -98,6 +155,7 @@ App.chart = {
         ` Vol <span style="color:#d32f2f">${App.ui.formatNumber(volumeValue, 2)}</span>`;
       App.ui.setChartInfo(ohlcvText);
     });
+    this.attachTouchGuards();
   },
   resetChartState(resetCandles = true) {
     const state = App.state;
@@ -213,20 +271,24 @@ App.chart = {
                 state.jankReloaded = true;
                 try {
                   sessionStorage.setItem("chartJankReloadCount", String(reloadCount + 1));
-                  const range = this.chart.timeScale().getVisibleRange();
-                  if (range) {
-                    sessionStorage.setItem("chartVisibleRange", JSON.stringify(range));
+                  if (this.isPageZoomed()) {
+                    this.clearPersistedChartView();
+                  } else {
+                    const range = this.chart.timeScale().getVisibleRange();
+                    if (range) {
+                      sessionStorage.setItem("chartVisibleRange", JSON.stringify(range));
+                    }
+                    const logicalRange = this.chart.timeScale().getVisibleLogicalRange();
+                    if (logicalRange) {
+                      sessionStorage.setItem("chartVisibleLogicalRange", JSON.stringify(logicalRange));
+                    }
+                    const scaleOptions = this.chart.timeScale().options();
+                    sessionStorage.setItem("chartScaleOptions", JSON.stringify({
+                      rightOffset: scaleOptions.rightOffset,
+                      barSpacing: scaleOptions.barSpacing,
+                      rightBarStaysOnScroll: scaleOptions.rightBarStaysOnScroll
+                    }));
                   }
-                  const logicalRange = this.chart.timeScale().getVisibleLogicalRange();
-                  if (logicalRange) {
-                    sessionStorage.setItem("chartVisibleLogicalRange", JSON.stringify(logicalRange));
-                  }
-                  const scaleOptions = this.chart.timeScale().options();
-                  sessionStorage.setItem("chartScaleOptions", JSON.stringify({
-                    rightOffset: scaleOptions.rightOffset,
-                    barSpacing: scaleOptions.barSpacing,
-                    rightBarStaysOnScroll: scaleOptions.rightBarStaysOnScroll
-                  }));
                 } catch {}
                 location.reload();
                 return;
@@ -247,12 +309,47 @@ App.chart = {
     requestAnimationFrame(monitorJank);
   },
   attachResizeHandler() {
-    window.addEventListener("resize", () => {
-      this.chart.applyOptions({
-        width: this.container.clientWidth,
-        height: this.container.clientHeight
+    let resizeFrame = null;
+    const scheduleResize = () => {
+      if (resizeFrame !== null) return;
+      resizeFrame = requestAnimationFrame(() => {
+        resizeFrame = null;
+        if (this.isPageZoomed()) return;
+        this.resizeToContainer();
       });
-    });
+    };
+
+    window.addEventListener("resize", scheduleResize);
+    window.addEventListener("orientationchange", scheduleResize);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", scheduleResize);
+      window.visualViewport.addEventListener("scroll", scheduleResize);
+    }
+    if (window.ResizeObserver) {
+      this.resizeObserver = new ResizeObserver(scheduleResize);
+      this.resizeObserver.observe(this.container);
+    }
+    scheduleResize();
+  },
+  attachTouchGuards() {
+    if (this.touchGuardsAttached) return;
+    this.touchGuardsAttached = true;
+
+    const preventBrowserPinch = (event) => {
+      if (!this.isChartGestureTarget(event.target)) return;
+      if (event.touches && event.touches.length < 2) return;
+      event.preventDefault();
+    };
+    const preventGestureEvent = (event) => {
+      if (!this.isChartGestureTarget(event.target)) return;
+      event.preventDefault();
+    };
+    const options = { passive: false, capture: true };
+
+    document.addEventListener("touchmove", preventBrowserPinch, options);
+    document.addEventListener("gesturestart", preventGestureEvent, options);
+    document.addEventListener("gesturechange", preventGestureEvent, options);
+    document.addEventListener("gestureend", preventGestureEvent, options);
   },
   goToStart() {
     const ts = this.chart.timeScale();
@@ -275,6 +372,7 @@ App.chart = {
     const startBtn = document.getElementById("nav-to-start");
     const endBtn = document.getElementById("nav-to-end");
     if (!startBtn || !endBtn) return;
+    if (this.isMobileViewport()) return;
     const container = this.container;
 
     // 우측 버튼(»): 가격 축 너비만큼 왼쪽으로 이동시켜 축과 겹치지 않게 한다.
@@ -301,6 +399,13 @@ App.chart = {
     const startBtn = document.getElementById("nav-to-start");
     const endBtn = document.getElementById("nav-to-end");
     if (!startBtn || !endBtn) return;
+    if (this.isMobileViewport()) {
+      startBtn.classList.add("visible");
+      endBtn.classList.add("visible");
+      startBtn.addEventListener("click", () => this.goToStart());
+      endBtn.addEventListener("click", () => this.goToEnd());
+      return;
+    }
     const container = this.container;
     const CORNER_W = 160;
     const CORNER_H = 110;

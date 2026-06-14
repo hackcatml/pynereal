@@ -317,10 +317,14 @@ App.data = {
             value: d.volume,
             color: d.close >= d.open ? "#26a69a" : "#ef5350"
           })));
-          chart.chart.timeScale().fitContent();
           const savedRange = sessionStorage.getItem("chartVisibleRange");
           const savedLogicalRange = sessionStorage.getItem("chartVisibleLogicalRange");
           const savedScale = sessionStorage.getItem("chartScaleOptions");
+          if (savedRange || savedLogicalRange) {
+            chart.chart.timeScale().fitContent();
+          } else {
+            chart.applyInitialVisibleRange(cleanData.length);
+          }
           if (savedScale) {
             try {
               const opts = JSON.parse(savedScale);
@@ -395,6 +399,9 @@ App.data = {
       } else {
         state.scriptTitleVisible = false;
       }
+      if (info.script_source_name != null) {
+        state.scriptSourceName = info.script_source_name || "";
+      }
       state.baseInfoTop = `<span class="info-main">${symbol} | ${timeframe} | ${exchange}</span>`;
       state.baseInfoText = state.baseInfoTop;
       App.ui.setChartInfo();
@@ -402,6 +409,26 @@ App.data = {
       state.baseInfoTop = "<span class=\"info-main\">Unknown | Unknown | Unknown</span>";
       state.baseInfoText = state.baseInfoTop;
       App.ui.setChartInfo();
+    }
+  },
+  async loadScriptSource() {
+    try {
+      const resp = await fetch("/api/script-source");
+      if (!resp.ok) {
+        return false;
+      }
+      const data = await resp.json();
+      App.state.scriptSourceName = data.name || "";
+      App.state.scriptSource = data.source || "";
+      App.state.scriptSourceLoaded = true;
+      if (data.title) {
+        App.state.scriptTitle = data.title;
+        App.state.scriptTitleVisible = true;
+      }
+      App.ui.renderSourcePanel();
+      return true;
+    } catch (e) {
+      return false;
     }
   },
   async loadWebhookConfig() {
