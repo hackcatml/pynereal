@@ -7,6 +7,10 @@ test*.py
 .env
 workdir/scripts/*.toml
 
+# Ignore runtime session state and per-session output (hub)
+workdir/config/sessions.json
+workdir/output/realtime/
+
 # Ignore SQLite cache files but keep the directory
 workdir/data/cache/*.sqlite
 
