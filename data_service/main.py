@@ -1,19 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-import json
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from config import load_config
-from state import DataState
-from ws_manager import WSManager
-from ohlcv_paths import make_ohlcv_paths, make_plot_path
-from api import build_api_router
+from config import load_hub_config, load_initial_sessions
+from registry import SessionRegistry
+from api import build_session_api_router, build_control_router, build_validation_router
 from ui import build_ui_router
-from collector_loop import watch_trades_loop, fix_missing_bars_loop
-from file_update_loop import file_update_loop
 
 _BANNER = r"""
     ____                   ____             __
@@ -25,256 +20,96 @@ _BANNER = r"""
 """
 
 
+def build_app(registry: SessionRegistry) -> FastAPI:
+    app = FastAPI()
+    app.include_router(build_ui_router())
+    app.include_router(build_control_router(registry))
+    app.include_router(build_validation_router())
+    app.include_router(build_session_api_router(registry))
+
+    @app.websocket("/ws/hub")
+    async def hub_ws(ws: WebSocket):
+        await registry.hub_ws.connect(ws)
+        try:
+            await ws.send_json({"type": "sessions", "sessions": registry.snapshots()})
+        except Exception:
+            pass
+        try:
+            while True:
+                # Dashboard clients only receive pushes; ignore inbound keepalive.
+                await ws.receive_text()
+        except WebSocketDisconnect:
+            await registry.hub_ws.disconnect(ws)
+        except Exception:
+            await registry.hub_ws.disconnect(ws)
+
+    @app.websocket("/ws/{session_id}")
+    async def session_ws(ws: WebSocket, session_id: str):
+        rt = registry.get(session_id)
+        if rt is None:
+            # Legacy alias: a bare /ws or unknown id maps to the sole session, if any.
+            rt = _default_session(registry)
+            if rt is None:
+                await ws.accept()
+                await ws.close(code=4404)
+                return
+        await rt.on_connect(ws)
+        try:
+            while True:
+                msg_text = await ws.receive_text()
+                await rt.handle_text(ws, msg_text)
+        except WebSocketDisconnect:
+            await rt.on_disconnect(ws)
+        except Exception:
+            await rt.on_disconnect(ws)
+
+    # Legacy single-session websocket alias.
+    @app.websocket("/ws")
+    async def legacy_ws(ws: WebSocket):
+        rt = _default_session(registry)
+        if rt is None:
+            await ws.accept()
+            await ws.close(code=4404)
+            return
+        await rt.on_connect(ws)
+        try:
+            while True:
+                msg_text = await ws.receive_text()
+                await rt.handle_text(ws, msg_text)
+        except WebSocketDisconnect:
+            await rt.on_disconnect(ws)
+        except Exception:
+            await rt.on_disconnect(ws)
+
+    return app
+
+
+def _default_session(registry: SessionRegistry):
+    if len(registry.sessions) == 1:
+        return next(iter(registry.sessions.values()))
+    return None
+
+
 async def main() -> None:
     print(_BANNER)
     # Required by PyneCore's NOTICE file (Apache-2.0, Section 4d)
     print("Powered by PyneSys (https://pynesys.io)\n")
 
-    cfg = load_config()
+    cfg = load_hub_config()
+    specs = load_initial_sessions()
+    registry = SessionRegistry(port=cfg.port)
+    app = build_app(registry)
 
-    ohlcv_path, toml_path = make_ohlcv_paths(cfg.provider, cfg.exchange, cfg.symbol, cfg.timeframe)
-    plot_path = make_plot_path(cfg)
-
-    state = DataState()
-    ws_manager = WSManager()
-
-    # Store trade events in memory
-    trades_history = []
-    # Store plot options (title -> options mapping)
-    plot_options = {}
-    # Store plotchar events in memory
-    plotchar_history = []
-    client_roles = {}
-    runner_count = 0  # Track active runner connections.
-
-    app = FastAPI()
-    app.include_router(build_ui_router())
-    chart_info = {
-        "exchange": cfg.exchange,
-        "symbol": cfg.symbol,
-        "timeframe": cfg.timeframe,
-        "provider": cfg.provider,
-        "script_title": None,
-        "script_source_name": None,
-        "script_source": "",
-    }
-    app.include_router(build_api_router(plot_path, ohlcv_path,
-                                        trades_history, plot_options, plotchar_history, chart_info, cfg))
-
-    @app.websocket("/ws")
-    async def ws_endpoint(ws: WebSocket):
-        nonlocal runner_count
-        await ws_manager.connect(ws)
-        client_roles[ws] = None
-        # Inform new clients if a runner is already connected.
-        if runner_count > 0:
-            await ws.send_json({"type": "runner_connected"})
-
-        # Send pending prerun event if exists (for runner_service that connects after history download)
-        async with state.lock:
-            if state.pending_prerun_event is not None:
-                try:
-                    await ws.send_json(state.pending_prerun_event)
-                    # print("[data_service] Sent pending prerun event, waiting for ACK")
-                except Exception as e:
-                    print(f"[data_service] Failed to send pending event: {e}")
-
-        try:
-            while True:
-                msg_text = await ws.receive_text()
-
-                # Try to parse as JSON for trade events
-                try:
-                    msg = json.loads(msg_text)
-
-                    # Handle batch (list) or single event (dict)
-                    events = msg if isinstance(msg, list) else [msg]
-
-                    for event in events:
-                        msg_type = event.get("type")
-                        if msg_type == "client_hello":
-                            role = event.get("role")
-                            client_roles[ws] = role
-                            if role == "runner":
-                                runner_count += 1
-                                # Broadcast runner availability to all clients.
-                                await ws_manager.broadcast_json({"type": "runner_connected"})
-                        elif msg_type == "last_bar_open_fix":
-                            last_bar_index = event.get("last_bar_index", -1)
-                            event_data = event.get("data")
-                            if isinstance(event_data, dict):
-                                # New runner sends the visible candle directly because visible indexes
-                                # can differ from raw file indexes when OKX hidden bars exist.
-                                await ws_manager.broadcast_json({
-                                    "type": "last_bar_open_fix",
-                                    "data": event_data,
-                                })
-                            elif last_bar_index > 0:
-                                try:
-                                    from pynecore.core.ohlcv_file import OHLCVReader
-                                    with OHLCVReader(ohlcv_path) as reader:
-                                        last_bar = reader.read(last_bar_index)
-                                        payload = {
-                                            "type": "last_bar_open_fix",
-                                            "data": {
-                                                "time": int(last_bar.timestamp),
-                                                "open": float(last_bar.open),
-                                                "high": float(last_bar.high),
-                                                "low": float(last_bar.low),
-                                                "close": float(last_bar.close),
-                                                "volume": float(last_bar.volume),
-                                            },
-                                        }
-                                        await ws_manager.broadcast_json(payload)
-                                        reader.close()
-                                except Exception as e:
-                                    print(f"[data_service] Failed to send confirmed bar: {e}")
-                        elif msg_type in ("trade_entry", "trade_close"):
-                            # Store trade event in history
-                            if event not in trades_history:
-                                trades_history.append(event)
-                            await ws_manager.broadcast_json(event)
-                        elif msg_type == "plotchar":
-                            # Store plotchar event in history
-                            if event not in plotchar_history:
-                                plotchar_history.append(event)
-                            await ws_manager.broadcast_json(event)
-                        elif msg_type == "plot_options":
-                            '''
-                            1. runner_service 가 보낸 confirmed_bar_time을 읽고
-                            2. plot_path CSV에서 그 timestamp의 row만 찾고
-                            3. plot_options.keys()에 있는 각 plot title별 값을 꺼내서
-                            4. 차트 UI 로 plot_data 이벤트를 브로드캐스트함
-                            '''
-                            # Store plot options from runner_service
-                            plot_options.update(event.get("data", {}))
-                            confirmed_bar_index = event.get("confirmed_bar_index", -1)
-                            confirmed_bar_time = event.get("confirmed_bar_time")
-                            # print(f"[data_service] Received plot_options: {plot_options}, confirmed_bar_index: {confirmed_bar_index}")
-
-                            # Read and broadcast plot data after confirmed_bar_index
-                            if plot_options and (confirmed_bar_time is not None or confirmed_bar_index >= 0):
-                                try:
-                                    if plot_path.exists():
-                                        from pynecore.core.csv_file import CSVReader
-
-                                        with CSVReader(plot_path) as reader:
-                                            candle = None
-                                            if confirmed_bar_time is not None:
-                                                for row in reader.read_from(int(confirmed_bar_time),
-                                                                            int(confirmed_bar_time)):
-                                                    candle = row
-                                                    break
-                                            else:
-                                                # Fallback for older runner_service events.
-                                                candle = reader.read(confirmed_bar_index)
-
-                                            if candle is None:
-                                                continue
-
-                                            # Broadcast plot data for each title
-                                            for title in plot_options.keys():
-                                                value = candle.extra_fields.get(title)
-                                                plot_data_event = {
-                                                    "type": "plot_data",
-                                                    "title": title,
-                                                    "time": int(candle.timestamp),
-                                                    "value": None if (value == "" or value is None) else float(value)
-                                                }
-                                                await ws_manager.broadcast_json(plot_data_event)
-                                            reader.close()
-                                            # print(f"[data_service] Broadcasted plot data")
-                                except Exception as e:
-                                    print(f"[data_service] Failed to broadcast plot data: {e}")
-                        elif msg_type == "script_info":
-                            title = event.get("title") or "No title"
-                            chart_info["script_title"] = title
-                            chart_info["script_source_name"] = event.get("source_name") or chart_info.get("script_source_name")
-                            if "source" in event:
-                                chart_info["script_source"] = event.get("source") or ""
-                            await ws_manager.broadcast_json({
-                                "type": "script_info",
-                                "title": title,
-                                "source_name": chart_info.get("script_source_name"),
-                                "source": chart_info.get("script_source") or "",
-                            })
-                        elif (msg_type == "reset_history") or (msg_type == "script_modified"):
-                            # Clear stored history when runner resets or script changes.
-                            trades_history.clear()
-                            plot_options.clear()
-                            plotchar_history.clear()
-                            if msg_type == "script_modified":
-                                chart_info["script_title"] = None
-                                chart_info["script_source_name"] = None
-                                chart_info["script_source"] = ""
-                                # Notify UI to reload chart state.
-                                await ws_manager.broadcast_json({"type": "script_modified"})
-                        elif msg_type == "ack_prerun_ready_after_history_download":
-                            # Clear pending event when ACK is received from runner_service
-                            async with state.lock:
-                                if state.pending_prerun_event is not None:
-                                    state.pending_prerun_event = None
-                except json.JSONDecodeError:
-                    # Not JSON, likely a keepalive ping
-                    pass
-        except WebSocketDisconnect:
-            await ws_manager.disconnect(ws)
-        except Exception:
-            await ws_manager.disconnect(ws)
-        finally:
-            role = client_roles.pop(ws, None)
-            if role == "runner":
-                runner_count -= 1
-                if runner_count <= 0:
-                    runner_count = 0
-                    # Notify clients when the last runner disconnects.
-                    await ws_manager.broadcast_json({"type": "runner_disconnected"})
-
-    async def broadcast_bar(bar: list) -> None:
-        payload = {
-            "type": "bar",
-            "data": {
-                "time": int(bar[0] // 1000),
-                "open": float(bar[1]),
-                "high": float(bar[2]),
-                "low": float(bar[3]),
-                "close": float(bar[4]),
-                "volume": float(bar[5]),
-            },
-        }
-        await ws_manager.broadcast_json(payload)
-
-    async def emit_event(payload: dict) -> None:
-        await ws_manager.broadcast_json(payload)
-
-    # Background tasks
-    t1 = asyncio.create_task(
-        watch_trades_loop(
-            cfg.exchange,
-            cfg.symbol,
-            cfg.timeframe,
-            state,
-            on_bar=broadcast_bar,
-        )
-    )
-    t2 = asyncio.create_task(fix_missing_bars_loop(cfg.exchange, cfg.timeframe, state))
-    t3 = asyncio.create_task(
-        file_update_loop(
-            config=cfg,
-            ohlcv_path=ohlcv_path,
-            toml_path=toml_path,
-            state=state,
-            emit_event=emit_event,
-        )
-    )
+    await registry.start_all(specs)
 
     server = uvicorn.Server(
         uvicorn.Config(app, host=cfg.host, port=cfg.port, loop="asyncio", lifespan="off",
                        ws_ping_interval=None, ws_ping_timeout=None)
     )
-    t4 = asyncio.create_task(server.serve())
-
-    await asyncio.gather(t1, t2, t3, t4)
+    try:
+        await server.serve()
+    finally:
+        await registry.shutdown()
 
 
 if __name__ == "__main__":

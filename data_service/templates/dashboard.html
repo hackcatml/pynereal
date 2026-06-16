@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>PyneReal Hub</title>
+  <link rel="stylesheet" href="/static/dashboard.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>PyneReal&nbsp;Hub</h1>
+    <span id="conn-status" class="conn">connecting…</span>
+  </header>
+
+  <section class="card collapsible collapsed" id="add-card">
+    <h2 class="card-toggle" id="add-toggle" role="button" tabindex="0" aria-expanded="false" aria-controls="add-body">
+      <span class="chevron" aria-hidden="true">&#9654;&#xFE0E;</span>
+      <span>Add session</span>
+    </h2>
+    <div class="card-body" id="add-body">
+    <form id="add-form" class="add-form">
+      <div class="field"><input name="provider" placeholder="provider" value="ccxt" required /></div>
+      <div class="field">
+        <input name="exchange" placeholder="exchange (okx)" required />
+        <small class="field-error" id="exchange-error"></small>
+      </div>
+      <div class="field">
+        <input name="symbol" placeholder="symbol (BTC/USDT:USDT)" required />
+        <small class="field-error" id="symbol-error"></small>
+      </div>
+      <div class="field"><input name="timeframe" placeholder="timeframe (1m)" required /></div>
+      <div class="field"><input name="history_since" placeholder="history_since (YYYY-MM-DD, optional)" /></div>
+      <div class="field">
+        <div class="script-row">
+          <select name="script_name" id="script-select" required>
+            <option value="">script_name…</option>
+          </select>
+          <label class="autostart-label"><input type="checkbox" name="autostart_runner" /> autostart runner</label>
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary">Add</button>
+    </form>
+    <div id="add-error" class="error"></div>
+    <div id="session-count" class="muted"></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <table id="sessions">
+      <thead>
+        <tr>
+          <th></th>
+          <th>Symbol</th>
+          <th>TF</th>
+          <th>Exchange</th>
+          <th>Script</th>
+          <th>Data</th>
+          <th>Last bar</th>
+          <th>Webhook</th>
+          <th>Telegram</th>
+          <th>Runner</th>
+          <th>Chart</th>
+          <th>Remove</th>
+        </tr>
+      </thead>
+      <tbody id="sessions-body"></tbody>
+    </table>
+    <div id="empty" class="muted">No sessions yet. Add one above.</div>
+  </section>
+
+  <div id="log-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-box">
+      <div class="modal-header">
+        <span id="log-title" class="mono"></span>
+        <div class="modal-actions">
+          <button id="log-clear" class="btn btn-danger" title="Clear log">&#x1f5d1;&#xfe0f;</button>
+          <button id="log-close" class="btn" title="Close">&times;</button>
+        </div>
+      </div>
+      <pre id="log-content" class="log-content"></pre>
+    </div>
+  </div>
+
+  <div id="settings-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-box modal-box-sm">
+      <div class="modal-header">
+        <span id="settings-title" class="mono"></span>
+        <button id="settings-close" class="btn" title="Close">&times;</button>
+      </div>
+      <div class="settings-body">
+        <div id="settings-fields"></div>
+        <div id="settings-error" class="error"></div>
+      </div>
+      <div class="settings-footer">
+        <button id="settings-save" class="btn btn-primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="remove-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-box modal-box-sm">
+      <div class="modal-header">
+        <span>Remove session</span>
+        <button id="remove-close" class="btn" title="Close">&times;</button>
+      </div>
+      <div class="confirm-body">
+        <div class="confirm-message">This will stop the runner and remove this session from the dashboard.</div>
+        <div id="remove-session-id" class="confirm-session mono"></div>
+        <div class="muted">Output files and logs will be kept.</div>
+        <div id="remove-error" class="error"></div>
+      </div>
+      <div class="confirm-footer">
+        <button id="remove-cancel" class="btn">Cancel</button>
+        <button id="remove-confirm" class="btn btn-danger-primary">Remove</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>

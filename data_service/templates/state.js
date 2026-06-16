@@ -1,5 +1,19 @@
 window.App = window.App || {};
 
+// Per-session runtime config injected by the hub at /s/{id} (see ui.py chart_page).
+// The chart page is always served with these injected, so the fallbacks below are
+// only a safety default. NOTE: the hub serves data under /api/{id}/... and /ws/{id}
+// (plus a /ws default-session alias); it does NOT serve un-namespaced /api/* data
+// routes, so the apiBase "/api" fallback is inert unless RUNTIME_ID is injected.
+window.App.config = {
+  runtimeId: window.RUNTIME_ID || null,
+  apiBase: window.API_BASE || "/api",
+  wsPath: window.WS_PATH || "/ws",
+  storageKey(name) {
+    return this.runtimeId ? `${name}:${this.runtimeId}` : name;
+  }
+};
+
 window.App.state = {
   ws: null,
   runnerConnected: false,
