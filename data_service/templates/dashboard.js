@@ -454,14 +454,28 @@
     }
   }
 
+  let hubWs = null;
+  let reconnectTimer = null;
+  let lastMsgAt = 0;
+
+  function scheduleReconnect(delay) {
+    if (reconnectTimer) return;            // a reconnect is already pending
+    reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, delay);
+  }
+
   function connect() {
+    // Don't stack sockets (an in-flight CONNECTING / live OPEN one is fine).
+    if (hubWs && (hubWs.readyState === WebSocket.OPEN || hubWs.readyState === WebSocket.CONNECTING)) return;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${proto}//${location.host}/ws/hub`);
+    hubWs = ws;
     ws.onopen = () => {
+      lastMsgAt = Date.now();
       el("conn-status").textContent = "live";
       el("conn-status").className = "conn ok";
     };
     ws.onmessage = (ev) => {
+      lastMsgAt = Date.now();
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === "sessions") {
@@ -472,9 +486,10 @@
     };
     ws.onclose = () => {
       if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
+      if (ws !== hubWs) return;            // superseded by a newer socket
       el("conn-status").textContent = "reconnecting…";
       el("conn-status").className = "conn";
-      setTimeout(connect, 1500);
+      scheduleReconnect(1500);
     };
     ws.onerror = () => { try { ws.close(); } catch {} };
     // Replace any prior keepalive so reconnects don't accumulate timers.
@@ -483,6 +498,28 @@
       if (ws.readyState === WebSocket.OPEN) ws.send("ping");
     }, 15000);
   }
+
+  // Mobile freezes timers and drops idle sockets while backgrounded, so on return
+  // the lazy setTimeout-based reconnect can sit at "reconnecting…" for a long time.
+  // Force an immediate reconnect when the page becomes visible / the network is back.
+  // The hub pushes a snapshot every ~10s, so a socket reporting OPEN but silent for
+  // >20s is treated as a zombie and rebuilt.
+  function forceReconnect() {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    const ws = hubWs;
+    const healthy = ws && ws.readyState === WebSocket.OPEN && (Date.now() - lastMsgAt) < 20000;
+    if (healthy) return;
+    if (ws && ws.readyState !== WebSocket.CLOSED) {
+      try { ws.onclose = null; ws.close(); } catch {}
+    }
+    hubWs = null;
+    connect();
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") forceReconnect();
+  });
+  window.addEventListener("online", forceReconnect);
 
   refresh();   // one-time initial load; thereafter the hub pushes via /ws/hub
   connect();
