@@ -10,6 +10,7 @@ from fastapi import WebSocket
 from config import FeedSpec, SessionSpec
 from ohlcv_paths import make_ohlcv_paths, runtime_output_dir
 from state import DataState
+from tv_logos import static_logo_info
 from ws_manager import WSManager
 
 
@@ -131,6 +132,7 @@ class Session:
             "script_source_name": None,
             "script_source": "",
         }
+        self.logo_info: Dict[str, str] = static_logo_info(spec.exchange, spec.symbol)
         # registry wires this to push /ws/hub status when runner connect/disconnect.
         self.on_status_change: Optional[Callable[[], Awaitable[None]]] = None
 
@@ -354,6 +356,10 @@ class Session:
             "symbol": self.spec.symbol,
             "timeframe": self.spec.timeframe,
             "script_name": self.spec.script_name,
+            "tv_symbol": self.logo_info.get("tv_symbol", ""),
+            "symbol_logo_url": self.logo_info.get("symbol_logo_url", ""),
+            "quote_logo_url": self.logo_info.get("quote_logo_url", ""),
+            "exchange_logo_url": self.logo_info.get("exchange_logo_url", ""),
             # Only the booleans go in the broadcast snapshot; url/token are fetched
             # on demand via GET /api/{id}/webhook-config (kept out of /ws/hub).
             "webhook": {

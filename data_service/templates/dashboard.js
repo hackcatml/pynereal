@@ -26,6 +26,12 @@
     ));
   }
 
+  function logoImg(url, label, cls) {
+    if (!url) return "";
+    return `<img class="${cls}" src="${esc(url)}" alt="" title="${esc(label)}" ` +
+           `loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">`;
+  }
+
   function render() {
     const body = el("sessions-body");
     body.innerHTML = "";
@@ -36,12 +42,17 @@
       const runner = s.runner || "stopped";
       const collector = s.collector || "stopped";
       const wh = s.webhook || {};
+      const exchange = (s.exchange || "").toUpperCase();
+      const symbolLogo = logoImg(s.symbol_logo_url, s.tv_symbol || s.symbol, "market-logo");
+      const exchangeLogo = logoImg(s.exchange_logo_url, exchange, "exchange-logo");
       const tr = document.createElement("tr");
       tr.innerHTML =
         `<td data-label="Status"><span class="led led-${runner}" title="${runner}"></span></td>` +
-        `<td data-label="Symbol" class="mono">${esc(s.symbol)}</td>` +
+        `<td data-label="Symbol" class="mono"><span class="symbol-cell">${symbolLogo}` +
+          `<span class="symbol-text">${esc(s.symbol)}</span></span></td>` +
         `<td data-label="TF">${esc(s.timeframe)}</td>` +
-        `<td data-label="Exchange">${esc((s.exchange || "").toUpperCase())}</td>` +
+        `<td data-label="Exchange"><span class="exchange-cell">${exchangeLogo}` +
+          `<span>${esc(exchange)}</span></span></td>` +
         `<td data-label="Script" class="mono">${esc(s.script_name)}</td>` +
         `<td data-label="Data"><span class="badge badge-${collector}">${collector}</span>` +
           `${s.history_ready ? "" : " <span class='muted'>loading</span>"}</td>` +

@@ -10,6 +10,7 @@ from collector_loop import fix_missing_bars_loop, watch_trades_loop
 from file_update_loop import file_update_loop
 from runner_supervisor import RunnerSupervisor
 from runtime import Feed, Session
+from tv_logos import TradingViewLogoResolver
 from ws_manager import WSManager
 
 
@@ -37,6 +38,8 @@ class SessionRegistry:
         self.sessions: Dict[str, Session] = {}
         self.hub_ws = WSManager()  # dashboard clients on /ws/hub
         self.supervisor = RunnerSupervisor(port=port, on_change=self.notify_hub)
+        self.logo_resolver = TradingViewLogoResolver()
+        self.logo_tasks: Dict[str, asyncio.Task] = {}
 
     # ------------------------------------------------------------------
     # Queries
@@ -62,6 +65,29 @@ class SessionRegistry:
             snap["runner"] = self.runner_status(s.spec.id)
             out.append(snap)
         return out
+
+    def _schedule_logo_resolution(self, session: Session) -> None:
+        task = self.logo_tasks.pop(session.spec.id, None)
+        if task is not None:
+            task.cancel()
+        self.logo_tasks[session.spec.id] = asyncio.create_task(self._resolve_session_logos(session))
+
+    async def _resolve_session_logos(self, session: Session) -> None:
+        session_id = session.spec.id
+        try:
+            info = await self.logo_resolver.resolve(session.spec.exchange, session.spec.symbol)
+            if self.sessions.get(session_id) is not session:
+                return
+            session.logo_info.update(info)
+            await self.notify_hub()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[registry] failed to resolve TradingView logos for {session_id}: {e}")
+        finally:
+            task = self.logo_tasks.get(session_id)
+            if task is asyncio.current_task():
+                self.logo_tasks.pop(session_id, None)
 
     # ------------------------------------------------------------------
     # Feed lifecycle (shared data layer)
@@ -122,6 +148,7 @@ class SessionRegistry:
         session.on_status_change = self.notify_hub
         feed.subscribers[spec.id] = session
         self.sessions[spec.id] = session
+        self._schedule_logo_resolution(session)
         if persist:
             self._persist()
         await self.notify_hub()
@@ -132,6 +159,10 @@ class SessionRegistry:
         session = self.sessions.get(session_id)
         if session is None:
             raise SessionNotFoundError(session_id)
+        logo_task = self.logo_tasks.pop(session_id, None)
+        if logo_task is not None:
+            logo_task.cancel()
+            await asyncio.gather(logo_task, return_exceptions=True)
         await self.supervisor.stop(session_id)
         feed = session.feed
         feed.subscribers.pop(session_id, None)
@@ -208,6 +239,12 @@ class SessionRegistry:
 
     async def shutdown(self) -> None:
         await self.supervisor.shutdown()
+        logo_tasks = list(self.logo_tasks.values())
+        self.logo_tasks.clear()
+        for t in logo_tasks:
+            t.cancel()
+        if logo_tasks:
+            await asyncio.gather(*logo_tasks, return_exceptions=True)
         all_tasks = [t for feed in self.feeds.values() for t in feed.tasks]
         for t in all_tasks:
             t.cancel()

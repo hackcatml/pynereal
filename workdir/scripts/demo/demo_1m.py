@@ -30,7 +30,7 @@ def main():
     _, _, bb_5_lower = request.security(syminfo.tickerid, '5', ta.bb(close, 20, 2), lookahead=barmerge.lookahead_on)
 
     # Execute the strategy
-    if not entered1 and rsi < 70 and (time - lastTpTime) >= 1 * 60 * 1000 * 5:
+    if not entered1 and rsi < 70 and (time - lastTpTime) >= 1 * 60 * 1000 * 2:
         entered1 = True
         entered1Time = time
         avgEntry = close

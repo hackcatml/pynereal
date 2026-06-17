@@ -122,6 +122,28 @@ tr:last-child td { border-bottom: none; }
 
 .runner-cell { display: flex; gap: 6px; }
 
+.symbol-cell,
+.exchange-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-width: 0;
+  vertical-align: middle;
+}
+.symbol-text { min-width: 0; word-break: break-all; }
+.market-logo,
+.exchange-logo {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  object-fit: contain;
+  background: #0b0e13;
+}
+.market-logo { border-radius: 50%; }
+.exchange-logo { border-radius: 4px; }
+
 .badge {
   font-size: 11px; padding: 2px 7px; border-radius: 10px;
   border: 1px solid var(--border); color: var(--muted);
@@ -303,6 +325,12 @@ tr:last-child td { border-bottom: none; }
   /* keep the "Runner" label left-aligned like other rows; push buttons right */
   td.runner-cell { flex-wrap: wrap; justify-content: flex-start; gap: 6px; }
   td.runner-cell::before { margin-right: auto; }
+  .symbol-cell,
+  .exchange-cell {
+    justify-content: flex-end;
+    text-align: right;
+  }
+  .symbol-cell { max-width: 70%; }
   /* bigger touch targets on mobile */
   .btn { padding: 8px 12px; }
   input[type="checkbox"] { width: 18px; height: 18px; }
