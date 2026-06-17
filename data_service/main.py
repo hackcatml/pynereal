@@ -90,6 +90,18 @@ def _default_session(registry: SessionRegistry):
     return None
 
 
+async def _hub_status_heartbeat(registry: SessionRegistry, interval: float = 10.0) -> None:
+    """Periodically push the session snapshot to /ws/hub clients so the dashboard's
+    'Last bar' / status stay fresh without each client polling /api/sessions.
+    One broadcast serves all connected dashboards (no-op when none are connected)."""
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await registry.notify_hub()
+        except Exception:
+            pass
+
+
 async def main() -> None:
     print(_BANNER)
     # Required by PyneCore's NOTICE file (Apache-2.0, Section 4d)
@@ -101,6 +113,7 @@ async def main() -> None:
     app = build_app(registry)
 
     await registry.start_all(specs)
+    heartbeat = asyncio.create_task(_hub_status_heartbeat(registry))
 
     server = uvicorn.Server(
         uvicorn.Config(app, host=cfg.host, port=cfg.port, loop="asyncio", lifespan="off",
@@ -109,6 +122,7 @@ async def main() -> None:
     try:
         await server.serve()
     finally:
+        heartbeat.cancel()
         await registry.shutdown()
 
 

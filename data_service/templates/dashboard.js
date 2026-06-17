@@ -484,8 +484,6 @@
     }, 15000);
   }
 
-  refresh();
+  refresh();   // one-time initial load; thereafter the hub pushes via /ws/hub
   connect();
-  // Periodic light refresh keeps "Last bar" / data status fresh between push events.
-  setInterval(refresh, 5000);
 })();
