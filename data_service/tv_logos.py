@@ -12,6 +12,7 @@ from urllib.parse import quote
 
 LOGO_BASE_URL = "https://s3-symbol-logo.tradingview.com/"
 CRYPTO_SCAN_URL = "https://scanner.tradingview.com/crypto/scan"
+HYPERLIQUID_COIN_LOGO_BASE_URL = "https://app.hyperliquid.xyz/coins/"
 
 _SCAN_COLUMNS = [
     "name",
@@ -70,6 +71,16 @@ def tradingview_logo_url(logoid: str | None) -> str:
     return LOGO_BASE_URL + quote(path, safe="/-_.")
 
 
+def hyperliquid_logo_url(coin_id: str | None) -> str:
+    if not coin_id:
+        return ""
+    coin_id = str(coin_id).strip()
+    if not coin_id:
+        return ""
+    path = coin_id if coin_id.endswith(".svg") else f"{coin_id}.svg"
+    return HYPERLIQUID_COIN_LOGO_BASE_URL + quote(path, safe=":-_.")
+
+
 def exchange_logo_url(exchange: str) -> str:
     slug = _provider_logo_slug(exchange)
     if not slug:
@@ -81,18 +92,42 @@ def _clean_symbol_part(part: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", (part or "").upper())
 
 
+def is_hyperliquid_exchange(exchange: str) -> bool:
+    return _exchange_key(exchange) == "hyperliquid"
+
+
+def _split_symbol_pair(symbol: str) -> tuple[str, str]:
+    market = (symbol or "").strip().upper()
+    pair = market.split(":", 1)[0]
+    if "/" not in pair:
+        return pair, ""
+    base, quote_symbol = pair.split("/", 1)
+    return base, quote_symbol
+
+
+def hyperliquid_coin_id(asset: str) -> str:
+    asset = (asset or "").strip().upper()
+    if not asset:
+        return ""
+    if "-" in asset:
+        dex, coin = asset.split("-", 1)
+        dex = re.sub(r"[^A-Z0-9]", "", dex)
+        coin = re.sub(r"[^A-Z0-9]", "", coin)
+        if dex and coin:
+            return f"{dex.lower()}:{coin}"
+    return re.sub(r"[^A-Z0-9]", "", asset)
+
+
 def tradingview_perp_ticker(exchange: str, symbol: str) -> str:
     tv_exchange = tradingview_exchange_code(exchange)
-    market = (symbol or "").strip().upper()
-    if not tv_exchange or not market:
+    if not tv_exchange or not (symbol or "").strip():
         return ""
 
-    pair = market.split(":", 1)[0]
-    if "/" in pair:
-        base, quote_symbol = pair.split("/", 1)
+    base, quote_symbol = _split_symbol_pair(symbol)
+    if quote_symbol:
         ticker = f"{_clean_symbol_part(base)}{_clean_symbol_part(quote_symbol)}"
     else:
-        ticker = _clean_symbol_part(pair.removesuffix(".P"))
+        ticker = _clean_symbol_part(base.removesuffix(".P"))
 
     if not ticker:
         return ""
@@ -100,6 +135,18 @@ def tradingview_perp_ticker(exchange: str, symbol: str) -> str:
 
 
 def static_logo_info(exchange: str, symbol: str) -> dict[str, str]:
+    if is_hyperliquid_exchange(exchange):
+        base, quote_symbol = _split_symbol_pair(symbol)
+        base_id = hyperliquid_coin_id(base)
+        quote_id = hyperliquid_coin_id(quote_symbol)
+        return {
+            "tv_symbol": f"HYPERLIQUID:{symbol}",
+            "symbol_logo_url": hyperliquid_logo_url(base_id),
+            "quote_logo_url": hyperliquid_logo_url(quote_id),
+            "exchange_logo_url": exchange_logo_url(exchange),
+            "symbol_logo_id": base_id,
+            "quote_logo_id": quote_id,
+        }
     return {
         "tv_symbol": tradingview_perp_ticker(exchange, symbol),
         "symbol_logo_url": "",
@@ -178,6 +225,11 @@ class TradingViewLogoResolver:
                 return dict(cached)
 
         info = static_logo_info(exchange, symbol)
+        if is_hyperliquid_exchange(exchange):
+            async with self._lock:
+                self._cache[key] = dict(info)
+            return info
+
         tv_symbol = info.get("tv_symbol") or ""
         if not tv_symbol:
             return info

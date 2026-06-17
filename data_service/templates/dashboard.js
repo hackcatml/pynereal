@@ -3,6 +3,7 @@
   let sessions = [];
   let keepaliveTimer = null;
   let removeSessionId = null;
+  let scriptsLoading = false;
 
   const el = (id) => document.getElementById(id);
 
@@ -346,7 +347,9 @@
     const card = el("add-card");
     const collapsed = card.classList.toggle("collapsed");
     el("add-toggle").setAttribute("aria-expanded", String(!collapsed));
-    if (!collapsed) loadScripts();  // refresh the script list each time it opens
+    if (!collapsed) {
+      loadScripts();  // refresh the script list each time it opens
+    }
   }
   el("add-toggle").addEventListener("click", toggleAddCard);
   el("add-toggle").addEventListener("keydown", (e) => {
@@ -421,8 +424,12 @@
 
   // ---- script list (populate the script_name <select>) --------------------
   async function loadScripts() {
+    if (scriptsLoading) return;
+    scriptsLoading = true;
+    const refreshBtn = el("script-refresh");
+    if (refreshBtn) refreshBtn.disabled = true;
     try {
-      const data = await api("/api/scripts");
+      const data = await api("/api/scripts", { cache: "no-store" });
       const sel = el("script-select");
       const cur = sel.value;
       const opts = (data.scripts || []).map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("");
@@ -430,8 +437,12 @@
       if (cur && (data.scripts || []).includes(cur)) sel.value = cur;
     } catch (e) {
       /* ignore */
+    } finally {
+      scriptsLoading = false;
+      if (refreshBtn) refreshBtn.disabled = false;
     }
   }
+  el("script-refresh").addEventListener("click", loadScripts);
 
   async function refresh() {
     try {

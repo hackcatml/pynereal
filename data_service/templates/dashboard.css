@@ -80,6 +80,7 @@ body {
 .field-error.warn { color: #e0a300; }
 /* script_name select + autostart grouped together */
 .script-row { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
+#script-refresh { flex: 0 0 auto; }
 .autostart-label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; white-space: nowrap; }
 .autostart-label input[type="checkbox"] {
   flex: 0 0 auto;
@@ -232,6 +233,24 @@ tr:last-child td { border-bottom: none; }
 /* webhook/telegram cell: checkbox + gear button */
 .cell-inline { display: inline-flex; align-items: center; gap: 8px; }
 .btn-icon { padding: 4px 9px; line-height: 1; }
+.btn-icon .icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+#script-refresh.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
 
 /* settings modal (per-session webhook url / telegram token) */
 .modal-box-sm { width: min(460px, 100%); }
@@ -277,6 +296,9 @@ tr:last-child td { border-bottom: none; }
   .add-form select,
   .add-form .btn,
   .add-form .autostart-label { width: 100%; min-width: 0; }
+  .script-row { flex-wrap: wrap; }
+  .script-row select { flex: 1 1 calc(100% - 50px); }
+  #script-refresh { width: auto; min-width: 42px; }
   .add-form .autostart-label input[type="checkbox"] { width: 18px; min-width: 18px; }
 
   table thead { display: none; }
