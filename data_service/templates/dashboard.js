@@ -8,7 +8,14 @@
 
   function fmtTime(ts) {
     if (!ts) return "-";
-    try { return new Date(ts * 1000).toLocaleTimeString(); } catch { return String(ts); }
+    try {
+      return new Date(ts * 1000).toLocaleTimeString("en-GB", {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23",
+      });
+    } catch { return String(ts); }
   }
 
   function runnerButtons(s) {
