@@ -23,9 +23,9 @@ App.chart = {
   },
   clearPersistedChartView() {
     try {
-      sessionStorage.removeItem("chartVisibleRange");
-      sessionStorage.removeItem("chartVisibleLogicalRange");
-      sessionStorage.removeItem("chartScaleOptions");
+      sessionStorage.removeItem(App.config.storageKey("chartVisibleRange"));
+      sessionStorage.removeItem(App.config.storageKey("chartVisibleLogicalRange"));
+      sessionStorage.removeItem(App.config.storageKey("chartScaleOptions"));
     } catch {}
   },
   getContainerSize() {
@@ -262,7 +262,7 @@ App.chart = {
             if (avg >= 80) {
               let reloadCount = 0;
               try {
-                reloadCount = parseInt(sessionStorage.getItem("chartJankReloadCount") || "0", 10) || 0;
+                reloadCount = parseInt(sessionStorage.getItem(App.config.storageKey("chartJankReloadCount")) || "0", 10) || 0;
               } catch {}
               if (reloadCount >= MAX_JANK_RELOADS) {
                 // 무한 reload 루프 방지: 상한 도달 시 더 이상 reload 하지 않는다.
@@ -270,20 +270,20 @@ App.chart = {
               } else {
                 state.jankReloaded = true;
                 try {
-                  sessionStorage.setItem("chartJankReloadCount", String(reloadCount + 1));
+                  sessionStorage.setItem(App.config.storageKey("chartJankReloadCount"), String(reloadCount + 1));
                   if (this.isPageZoomed()) {
                     this.clearPersistedChartView();
                   } else {
                     const range = this.chart.timeScale().getVisibleRange();
                     if (range) {
-                      sessionStorage.setItem("chartVisibleRange", JSON.stringify(range));
+                      sessionStorage.setItem(App.config.storageKey("chartVisibleRange"), JSON.stringify(range));
                     }
                     const logicalRange = this.chart.timeScale().getVisibleLogicalRange();
                     if (logicalRange) {
-                      sessionStorage.setItem("chartVisibleLogicalRange", JSON.stringify(logicalRange));
+                      sessionStorage.setItem(App.config.storageKey("chartVisibleLogicalRange"), JSON.stringify(logicalRange));
                     }
                     const scaleOptions = this.chart.timeScale().options();
-                    sessionStorage.setItem("chartScaleOptions", JSON.stringify({
+                    sessionStorage.setItem(App.config.storageKey("chartScaleOptions"), JSON.stringify({
                       rightOffset: scaleOptions.rightOffset,
                       barSpacing: scaleOptions.barSpacing,
                       rightBarStaysOnScroll: scaleOptions.rightBarStaysOnScroll
@@ -297,7 +297,7 @@ App.chart = {
               // 정상 상태(jank 없음)가 확인되면 reload 카운트를 리셋해
               // 이후 다시 과부하가 생겨도 복구 reload가 가능하도록 한다.
               try {
-                sessionStorage.removeItem("chartJankReloadCount");
+                sessionStorage.removeItem(App.config.storageKey("chartJankReloadCount"));
               } catch {}
             }
           }

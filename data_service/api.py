@@ -1,110 +1,155 @@
 from __future__ import annotations
 
 import ast
-from config import DataServiceConfig
-from fastapi import APIRouter, Body
-from fastapi.responses import JSONResponse
 from datetime import datetime, UTC
 from pathlib import Path
-from typing import Any, Dict, List
-from tomlkit import parse, dumps
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, Body
+from fastapi.responses import JSONResponse
 
 from pynecore.cli.app import app_state
-
 from pynecore.core.ohlcv_file import OHLCVReader
 from pynecore.core.csv_file import CSVReader
 
+import ccxt.pro as ccxtpro
 
-def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dict[str, Any]] = None,
-                    plot_options: Dict[str, Dict[str, Any]] = None,
-                    plotchar_history: List[Dict[str, Any]] = None,
-                    chart_info: Dict[str, Any] | None = None,
-                    cfg: DataServiceConfig = None) -> APIRouter:
-    r = APIRouter()
-    config_path = app_state.config_dir / "realtime_trade.toml"
+from registry import SessionNotFoundError, SessionExistsError, SessionLimitError, SessionRegistry
+from runtime import Session
+from config import SessionSpec
+from ohlcv_io import make_ccxt_pro_client
 
-    def _extract_script_title_from_source(source: str) -> str | None:
+# Cache of exchange -> set(symbols) so symbol validation hits the network at most
+# once per exchange for the hub's lifetime.
+_markets_cache: dict[str, set] = {}
+
+
+async def _load_exchange_symbols(exchange: str) -> set:
+    cached = _markets_cache.get(exchange)
+    if cached is not None:
+        return cached
+    ex = make_ccxt_pro_client(ccxtpro, exchange)
+    try:
+        await ex.load_markets()
+        symbols = set(ex.symbols or [])
+    finally:
         try:
-            tree = ast.parse(source)
+            await ex.close()
         except Exception:
-            return None
+            pass
+    _markets_cache[exchange] = symbols
+    return symbols
 
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-                if func.value.id != "script":
-                    continue
-                if func.attr not in {"strategy", "indicator", "library"}:
-                    continue
-                for kw in node.keywords:
-                    if kw.arg == "title" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
-                        return kw.value.value or "No title"
-                if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
-                    return node.args[0].value or "No title"
+
+# Cache of script path -> (mtime, is_strategy) so we only AST-parse on change.
+_strategy_scan_cache: dict[str, tuple] = {}
+
+
+def _declares_strategy(path: Path) -> bool:
+    """True if the file contains a real `script.strategy(...)` call (AST-checked,
+    so matches in comments/strings don't count). Indicators/libraries/plain
+    helper modules return False."""
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return False
+    cached = _strategy_scan_cache.get(str(path))
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+
+    result = False
+    try:
+        source = path.read_text(encoding="utf-8")
+        if "script.strategy" in source:  # cheap gate before parsing large files
+            tree = ast.parse(source)
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "script"
+                        and node.func.attr == "strategy"):
+                    result = True
+                    break
+    except Exception:
+        result = False
+
+    _strategy_scan_cache[str(path)] = (mtime, result)
+    return result
+
+
+# ----------------------------------------------------------------------
+# Shared helpers
+# ----------------------------------------------------------------------
+def _extract_script_title_from_source(source: str) -> str | None:
+    try:
+        tree = ast.parse(source)
+    except Exception:
         return None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            if func.value.id != "script":
+                continue
+            if func.attr not in {"strategy", "indicator", "library"}:
+                continue
+            for kw in node.keywords:
+                if kw.arg == "title" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                    return kw.value.value or "No title"
+            if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                return node.args[0].value or "No title"
+    return None
 
-    def _resolve_script_path() -> Path:
-        if cfg is None:
-            raise ValueError("config unavailable")
-        script_name = (cfg.realtime_section or {}).get("script_name") or ""
-        if not isinstance(script_name, str) or not script_name:
-            raise ValueError("script_name is empty in realtime_trade.toml")
 
-        scripts_dir = app_state.scripts_dir.resolve()
-        script_path = (scripts_dir / script_name).resolve()
-        try:
-            script_path.relative_to(scripts_dir)
-        except ValueError:
-            raise ValueError("script path must be inside scripts directory")
-        if script_path.suffix != ".py":
-            raise ValueError("script must be a .py file")
-        return script_path
+def _resolve_script_path(spec: SessionSpec) -> Path:
+    script_name = spec.script_name or ""
+    if not isinstance(script_name, str) or not script_name:
+        raise ValueError("script_name is empty for this session")
+    scripts_dir = app_state.scripts_dir.resolve()
+    script_path = (scripts_dir / script_name).resolve()
+    try:
+        script_path.relative_to(scripts_dir)
+    except ValueError:
+        raise ValueError("script path must be inside scripts directory")
+    if script_path.suffix != ".py":
+        raise ValueError("script must be a .py file")
+    return script_path
 
-    def _load_webhook_config() -> dict:
-        webhook_section = cfg.webhook_section or {}
-        return {
-            "enabled": bool(webhook_section.get("enabled", False)),
-            "telegram_notification": bool(webhook_section.get("telegram_notification", False)),
-        }
 
-    def _update_webhook_config(enabled: bool | None = None,
-                               telegram_notification: bool | None = None) -> dict:
-        config = parse(config_path.read_text(encoding="utf-8"))
-        webhook = config["webhook"]
-        if enabled is not None:
-            webhook["enabled"] = enabled
-            cfg.webhook_section["enabled"] = enabled
-        if telegram_notification is not None:
-            webhook["telegram_notification"] = telegram_notification
-            cfg.webhook_section["telegram_notification"] = telegram_notification
-        config_path.write_text(dumps(config), encoding="utf-8")
-        return {
-            "enabled": bool(webhook.get("enabled", False)),
-            "telegram_notification": bool(webhook.get("telegram_notification", False)),
-        }
+# ----------------------------------------------------------------------
+# Per-session data-plane router:  /api/{session_id}/...
+# ----------------------------------------------------------------------
+def build_session_api_router(registry: SessionRegistry) -> APIRouter:
+    r = APIRouter()
 
-    @r.get("/api/trades")
-    def get_trades() -> JSONResponse:
-        """Get all stored trade events (entry and close)"""
-        if trades_history is None:
+    def _rt(session_id: str) -> Optional[Session]:
+        return registry.get(session_id)
+
+    @r.get("/api/{session_id}/trades")
+    def get_trades(session_id: str) -> JSONResponse:
+        rt = _rt(session_id)
+        if rt is None:
+            return JSONResponse([], status_code=404)
+        return JSONResponse(rt.trades_history)
+
+    @r.get("/api/{session_id}/plotchar")
+    def get_plotchar(session_id: str) -> JSONResponse:
+        rt = _rt(session_id)
+        if rt is None:
+            return JSONResponse([], status_code=404)
+        return JSONResponse(rt.plotchar_history)
+
+    @r.get("/api/{session_id}/plot")
+    def get_plot(session_id: str, limit: int = 2000) -> JSONResponse:
+        rt = _rt(session_id)
+        if rt is None:
+            return JSONResponse([], status_code=404)
+        plot_options = rt.plot_options
+        plot_path = rt.paths.plot_path
+        ohlcv_path = rt.ohlcv_path
+        if not plot_options:
             return JSONResponse([])
-        return JSONResponse(trades_history)
-
-    @r.get("/api/plotchar")
-    def get_plotchar() -> JSONResponse:
-        """Get all stored plotchar events"""
-        if plotchar_history is None:
-            return JSONResponse([])
-        return JSONResponse(plotchar_history)
-
-    @r.get("/api/plot")
-    def get_plot(limit: int = 2000) -> JSONResponse:
-        """Get plot data from CSV file with options"""
-        if plot_options is None or not plot_options:
-            return JSONResponse([])
-
         if not plot_path.exists():
             return JSONResponse([])
 
@@ -116,68 +161,55 @@ def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dic
                     interval = ohlcv_reader.interval
                     if end_ts is not None and interval is not None:
                         now_ts = int(datetime.now(UTC).timestamp())
-                        # Exclude only the actual in-progress open bar. The plot CSV usually
-                        # ends at the latest confirmed bar, especially when OKX hides the
-                        # zero-volume current bar, so dropping the last CSV row unconditionally
-                        # hides one valid confirmed plot point on initial chart load.
                         if int(end_ts) <= now_ts < int(end_ts) + int(interval):
                             current_open_ts = int(end_ts)
                     ohlcv_reader.close()
             except Exception as e:
-                print(f"[api] Failed to read OHLCV end timestamp: {e}")
+                print(f"[{session_id}] Failed to read OHLCV end timestamp: {e}")
 
-        # Read CSV file and build plot data
         result = []
         try:
             with CSVReader(plot_path) as reader:
-                # Collect all candles
                 candles = []
                 for candle in reader:
                     if current_open_ts is not None and int(candle.timestamp) >= current_open_ts:
                         continue
                     candles.append(candle)
-
-                # Limit the number of candles
                 start_idx = max(0, len(candles) - limit)
                 candles = candles[start_idx:]
 
-                # Build plot data for each title
                 for title, options in plot_options.items():
                     series_data = []
                     for candle in candles:
-                        # Get value from extra_fields using title as key
                         value = candle.extra_fields.get(title)
-
-                        # Always append data point (convert "" to None for JSON null)
                         series_data.append({
                             "time": int(candle.timestamp),
-                            "value": None if (value == "" or value is None) else float(value)
+                            "value": None if (value == "" or value is None) else float(value),
                         })
-
                     result.append({
                         "title": title,
                         "color": options.get("color"),
                         "linewidth": options.get("linewidth"),
                         "style": options.get("style"),
-                        "data": series_data
+                        "data": series_data,
                     })
-                # Close CSV reader
                 reader.close()
-
         except Exception as e:
-            print(f"[api] Failed to read plot CSV: {e}")
+            print(f"[{session_id}] Failed to read plot CSV: {e}")
             return JSONResponse([])
-
         return JSONResponse(result)
 
-    @r.get("/api/ohlcv")
-    def get_ohlcv(limit: int = 2000) -> JSONResponse:
+    @r.get("/api/{session_id}/ohlcv")
+    def get_ohlcv(session_id: str, limit: int = 2000) -> JSONResponse:
+        rt = _rt(session_id)
+        if rt is None:
+            return JSONResponse([], status_code=404)
+        ohlcv_path = rt.ohlcv_path
         if not ohlcv_path.exists():
             return JSONResponse([])
 
-        # The chart must receive the same visible candle set as the runner.
-        # OKX hides zero-volume bars like TradingView; BITGET/Hyperliquid keep them visible.
-        skip_zero_volume = cfg is not None and cfg.exchange.upper() == "OKX"
+        # OKX hides zero-volume bars like TradingView; BITGET/Hyperliquid keep them.
+        skip_zero_volume = rt.spec.exchange.upper() == "OKX"
         out: List[Dict[str, Any]] = []
         with OHLCVReader(ohlcv_path) as reader:
             if reader.start_timestamp is None:
@@ -190,23 +222,25 @@ def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dic
                 )
             )
             for c in candles[-limit:]:
-                out.append(
-                    {
-                        "time": int(c.timestamp),
-                        "open": float(c.open),
-                        "high": float(c.high),
-                        "low": float(c.low),
-                        "close": float(c.close),
-                        "volume": float(c.volume),
-                    }
-                )
+                out.append({
+                    "time": int(c.timestamp),
+                    "open": float(c.open),
+                    "high": float(c.high),
+                    "low": float(c.low),
+                    "close": float(c.close),
+                    "volume": float(c.volume),
+                })
             reader.close()
         return JSONResponse(out)
 
-    @r.get("/api/info")
-    def get_info() -> JSONResponse:
-        info = chart_info or {}
+    @r.get("/api/{session_id}/info")
+    def get_info(session_id: str) -> JSONResponse:
+        rt = _rt(session_id)
+        if rt is None:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        info = rt.chart_info
         return JSONResponse({
+            "id": rt.spec.id,
             "exchange": info.get("exchange"),
             "symbol": info.get("symbol"),
             "timeframe": info.get("timeframe"),
@@ -216,72 +250,235 @@ def build_api_router(plot_path: Path, ohlcv_path: Path, trades_history: List[Dic
             "has_script_source": bool(info.get("script_source")),
         })
 
-    @r.get("/api/script-source")
-    def get_script_source() -> JSONResponse:
-        info = chart_info or {}
+    @r.get("/api/{session_id}/script-source")
+    def get_script_source(session_id: str) -> JSONResponse:
+        rt = _rt(session_id)
+        if rt is None:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        info = rt.chart_info
         title = info.get("script_title") or "No title"
         name = info.get("script_source_name") or ""
         source = info.get("script_source") or ""
-        # 디스크 파일이 최신 저장본이므로 우선 읽는다. 다른 기기에서 저장한 내용이
-        # pre_run 전에도 즉시 반영되도록(메모리 chart_info는 fallback).
+        # Disk file is the latest saved copy; prefer it (memory chart_info is fallback).
         try:
-            script_path = _resolve_script_path()
+            script_path = _resolve_script_path(rt.spec)
             if script_path.exists():
                 source = script_path.read_text(encoding="utf-8")
                 name = script_path.name
                 title = _extract_script_title_from_source(source) or title
         except Exception:
             pass
-        return JSONResponse({
-            "title": title,
-            "name": name,
-            "source": source,
-        })
+        return JSONResponse({"title": title, "name": name, "source": source})
 
-    @r.post("/api/script-source")
-    def save_script_source(payload: dict = Body(default_factory=dict)) -> JSONResponse:
+    @r.post("/api/{session_id}/script-source")
+    def save_script_source(session_id: str, payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        rt = _rt(session_id)
+        if rt is None:
+            return JSONResponse({"error": "session not found"}, status_code=404)
         source = payload.get("source")
         if not isinstance(source, str):
             return JSONResponse({"error": "source must be string"}, status_code=400)
-
         try:
-            script_path = _resolve_script_path()
+            script_path = _resolve_script_path(rt.spec)
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
-
         if not script_path.exists():
             return JSONResponse({"error": f"script not found: {script_path.name}"}, status_code=404)
-
         try:
             script_path.write_text(source, encoding="utf-8")
         except Exception as e:
             return JSONResponse({"error": f"failed to save script: {e}"}, status_code=500)
 
-        info = chart_info or {}
+        info = rt.chart_info
         title = _extract_script_title_from_source(source) or info.get("script_title") or "No title"
         info["script_title"] = title
         info["script_source_name"] = script_path.name
         info["script_source"] = source
+        return JSONResponse({"ok": True, "title": title, "name": script_path.name, "source": source})
+
+    @r.get("/api/{session_id}/webhook-config")
+    def get_webhook_config(session_id: str) -> JSONResponse:
+        rt = _rt(session_id)
+        if rt is None:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        wh = rt.spec.webhook
         return JSONResponse({
-            "ok": True,
-            "title": title,
-            "name": script_path.name,
-            "source": source,
+            "enabled": bool(wh.get("enabled", False)),
+            "url": wh.get("url", "") or "",
+            "telegram_notification": bool(wh.get("telegram_notification", False)),
+            "telegram_token": wh.get("telegram_token", "") or "",
+            "telegram_chat_id": wh.get("telegram_chat_id", "") or "",
         })
 
-    @r.get("/api/webhook-config")
-    def get_webhook_config() -> JSONResponse:
-        return JSONResponse(_load_webhook_config())
-
-    @r.post("/api/webhook-config")
-    def update_webhook_config(payload: dict = Body(default_factory=dict)) -> JSONResponse:
+    @r.post("/api/{session_id}/webhook-config")
+    async def update_webhook_config(session_id: str, payload: dict = Body(default_factory=dict)) -> JSONResponse:
         enabled = payload.get("enabled")
         telegram_notification = payload.get("telegram_notification")
+        url = payload.get("url")
+        telegram_token = payload.get("telegram_token")
+        telegram_chat_id = payload.get("telegram_chat_id")
         if enabled is not None and not isinstance(enabled, bool):
             return JSONResponse({"error": "enabled must be boolean"}, status_code=400)
         if telegram_notification is not None and not isinstance(telegram_notification, bool):
             return JSONResponse({"error": "telegram_notification must be boolean"}, status_code=400)
-        updated = _update_webhook_config(enabled=enabled, telegram_notification=telegram_notification)
+        for fname, fval in (("url", url), ("telegram_token", telegram_token),
+                            ("telegram_chat_id", telegram_chat_id)):
+            if fval is not None and not isinstance(fval, str):
+                return JSONResponse({"error": f"{fname} must be string"}, status_code=400)
+        try:
+            updated = await registry.update_webhook(
+                session_id, enabled=enabled, telegram_notification=telegram_notification,
+                url=url, telegram_token=telegram_token, telegram_chat_id=telegram_chat_id)
+        except SessionNotFoundError:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        except Exception as e:
+            return JSONResponse({"error": f"failed to update webhook: {e}"}, status_code=500)
         return JSONResponse(updated)
+
+    return r
+
+
+# ----------------------------------------------------------------------
+# Control-plane router:  /api/sessions ...
+# ----------------------------------------------------------------------
+def build_control_router(registry: SessionRegistry) -> APIRouter:
+    r = APIRouter()
+
+    @r.get("/api/sessions")
+    def list_sessions() -> JSONResponse:
+        return JSONResponse({"sessions": registry.snapshots()})
+
+    @r.post("/api/sessions")
+    async def create_session(payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        try:
+            spec = SessionSpec.from_dict(payload)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        try:
+            await registry.add_session(spec)
+        except SessionExistsError:
+            return JSONResponse({"error": f"session already exists: {spec.id}"}, status_code=409)
+        except SessionLimitError as e:
+            return JSONResponse({"error": str(e)}, status_code=409)
+        except Exception as e:
+            return JSONResponse({"error": f"failed to add session: {e}"}, status_code=500)
+        return JSONResponse({"ok": True, "id": spec.id})
+
+    @r.delete("/api/sessions/{session_id}")
+    async def delete_session(session_id: str, cleanup_output: bool = False) -> JSONResponse:
+        try:
+            await registry.remove_session(session_id, cleanup_output=cleanup_output)
+        except SessionNotFoundError:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        except Exception as e:
+            return JSONResponse({"error": f"failed to remove session: {e}"}, status_code=500)
+        return JSONResponse({"ok": True})
+
+    @r.post("/api/sessions/{session_id}/runner/start")
+    async def runner_start(session_id: str) -> JSONResponse:
+        try:
+            await registry.start_runner(session_id)
+        except SessionNotFoundError:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        return JSONResponse({"ok": True})
+
+    @r.post("/api/sessions/{session_id}/runner/stop")
+    async def runner_stop(session_id: str) -> JSONResponse:
+        try:
+            await registry.stop_runner(session_id)
+        except SessionNotFoundError:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        return JSONResponse({"ok": True})
+
+    @r.post("/api/sessions/{session_id}/runner/restart")
+    async def runner_restart(session_id: str) -> JSONResponse:
+        try:
+            await registry.restart_runner(session_id)
+        except SessionNotFoundError:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        return JSONResponse({"ok": True})
+
+    @r.get("/api/sessions/{session_id}/runner/logs")
+    def runner_logs(session_id: str, lines: int = 200) -> JSONResponse:
+        rt = registry.get(session_id)
+        if rt is None:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        log_path = rt.paths.log_path
+        if not log_path.exists():
+            return JSONResponse({"log": ""})
+        try:
+            content = log_path.read_text(encoding="utf-8", errors="replace")
+            tail = "\n".join(content.splitlines()[-lines:])
+        except Exception as e:
+            return JSONResponse({"error": f"failed to read log: {e}"}, status_code=500)
+        return JSONResponse({"log": tail})
+
+    @r.delete("/api/sessions/{session_id}/runner/logs")
+    def clear_runner_logs(session_id: str) -> JSONResponse:
+        rt = registry.get(session_id)
+        if rt is None:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        log_path = rt.paths.log_path
+        try:
+            if log_path.exists():
+                # Truncate; a running runner uses append mode and keeps logging from 0.
+                log_path.write_text("", encoding="utf-8")
+        except Exception as e:
+            return JSONResponse({"error": f"failed to clear log: {e}"}, status_code=500)
+        return JSONResponse({"ok": True})
+
+    return r
+
+
+# ----------------------------------------------------------------------
+# Validation router: /api/validate/...  (add-form field checks)
+# ----------------------------------------------------------------------
+def build_validation_router() -> APIRouter:
+    r = APIRouter()
+
+    @r.get("/api/validate/exchange")
+    async def validate_exchange(provider: str = "ccxt", exchange: str = "") -> JSONResponse:
+        exchange = (exchange or "").strip().lower()
+        if not exchange:
+            return JSONResponse({"exists": False, "error": "exchange is empty"})
+        if provider != "ccxt":
+            # Only ccxt is validated here; other providers pass through.
+            return JSONResponse({"exists": True, "skipped": True})
+        return JSONResponse({"exists": exchange in ccxtpro.exchanges})
+
+    @r.get("/api/validate/symbol")
+    async def validate_symbol(provider: str = "ccxt", exchange: str = "", symbol: str = "") -> JSONResponse:
+        exchange = (exchange or "").strip().lower()
+        symbol = (symbol or "").strip().upper()  # ccxt market symbols are uppercase
+        if not exchange or not symbol:
+            return JSONResponse({"exists": False, "error": "exchange and symbol required"})
+        if provider != "ccxt":
+            return JSONResponse({"exists": True, "skipped": True})
+        if exchange not in ccxtpro.exchanges:
+            return JSONResponse({"exists": False, "error": f"unknown exchange: {exchange}"})
+        try:
+            symbols = await _load_exchange_symbols(exchange)
+        except Exception as e:
+            # Network/market-load failure: don't claim the symbol is invalid.
+            return JSONResponse({"exists": None, "error": f"could not load markets: {e}"})
+        return JSONResponse({"exists": symbol in symbols})
+
+    @r.get("/api/scripts")
+    def list_scripts() -> JSONResponse:
+        """List strategy scripts under workdir/scripts/ recursively (subdirs kept as
+        relative paths, e.g. OKX_MU/test.py): .py files that declare a
+        script.strategy(...). Indicators/libraries/helpers and lib/__pycache__/hidden
+        dirs are excluded."""
+        scripts_dir = app_state.scripts_dir
+        items: List[str] = []
+        if scripts_dir.exists():
+            for p in scripts_dir.rglob("*.py"):
+                rel = p.relative_to(scripts_dir)
+                if any(part.startswith(".") or part in ("__pycache__", "lib") for part in rel.parts):
+                    continue
+                if _declares_strategy(p):
+                    items.append(rel.as_posix())  # forward slashes for the UI/value
+        items.sort()
+        return JSONResponse({"scripts": items})
 
     return r

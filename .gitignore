@@ -7,6 +7,10 @@ test*.py
 .env
 workdir/scripts/*.toml
 
+# Ignore runtime session state and per-session output (hub)
+workdir/config/sessions.json
+workdir/output/realtime/
+
 # Ignore SQLite cache files but keep the directory
 workdir/data/cache/*.sqlite
 
@@ -14,9 +18,11 @@ workdir/data/cache/*.sqlite
 workdir/data/ccxt*.ohlcv
 workdir/data/ccxt*.toml
 
-# Ignore all scripts except demo.py and demo_1m.py
+# Ignore all scripts except demo examples and shared libs
 workdir/scripts/*
-!workdir/scripts/demo.py
-!workdir/scripts/demo_1m.py
+!workdir/scripts/demo/
+workdir/scripts/demo/*
+!workdir/scripts/demo/demo.py
+!workdir/scripts/demo/demo_1m.py
 !workdir/scripts/lib/
 !workdir/scripts/lib/**

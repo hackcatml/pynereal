@@ -7,7 +7,7 @@ from dateutil.relativedelta import relativedelta
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
-from config import DataServiceConfig
+from config import FeedSpec
 from pynecore.cli.commands.data import parse_date_or_days
 from pynecore.core.ohlcv_file import OHLCVReader
 from pynecore.cli.app import app_state
@@ -36,7 +36,7 @@ from state import DataState
 
 async def file_update_loop(
     *,
-    config: DataServiceConfig,
+    config: FeedSpec,
     ohlcv_path: Path,
     toml_path: Path,
     state: DataState,
@@ -52,8 +52,7 @@ async def file_update_loop(
     # print(f"[data_service] sqlite cache path: {cache_path}")
 
     # Get history_since from the config
-    realtime_section: dict = config.realtime_section
-    history_since = realtime_section.get("history_since", "")
+    history_since = config.history_since
 
     start_timestamp: Optional[int] = None
     cache_ready = cache_has_data(cache_path, provider, exchange, symbol, timeframe)

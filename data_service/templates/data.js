@@ -140,7 +140,7 @@ App.data = {
       collections.entryPriceKeys.clear();
       collections.closePriceKeys.clear();
 
-      const resp = await fetch("/api/trades");
+      const resp = await fetch(`${App.config.apiBase}/trades`);
       const trades = await resp.json();
 
       trades.forEach(msg => {
@@ -216,7 +216,7 @@ App.data = {
       collections.plotcharMarkers.length = 0;
       collections.plotcharMarkerKeys.clear();
 
-      const resp = await fetch("/api/plotchar");
+      const resp = await fetch(`${App.config.apiBase}/plotchar`);
       const plotchars = await resp.json();
 
       plotchars.forEach(msg => {
@@ -262,7 +262,7 @@ App.data = {
     if (!state.runnerConnected) return;
     for (let i = 0; i < 30; i++) {
       try {
-        const resp = await fetch("/api/plot?limit=100000");
+        const resp = await fetch(`${App.config.apiBase}/plot?limit=100000`);
         const plots = await resp.json();
 
         if (Array.isArray(plots) && plots.length > 0) {
@@ -302,7 +302,7 @@ App.data = {
     state.initialLoadInProgress = true;
     for (let i = 0; i < 30; i++) {
       try {
-        const resp = await fetch("/api/ohlcv?limit=100000");
+        const resp = await fetch(`${App.config.apiBase}/ohlcv?limit=100000`);
         const data = await resp.json();
         if (Array.isArray(data) && data.length > 0) {
           const cleanData = data.filter(d => d && d.time != null && d.open != null && d.high != null &&
@@ -317,9 +317,9 @@ App.data = {
             value: d.volume,
             color: d.close >= d.open ? "#26a69a" : "#ef5350"
           })));
-          const savedRange = sessionStorage.getItem("chartVisibleRange");
-          const savedLogicalRange = sessionStorage.getItem("chartVisibleLogicalRange");
-          const savedScale = sessionStorage.getItem("chartScaleOptions");
+          const savedRange = sessionStorage.getItem(App.config.storageKey("chartVisibleRange"));
+          const savedLogicalRange = sessionStorage.getItem(App.config.storageKey("chartVisibleLogicalRange"));
+          const savedScale = sessionStorage.getItem(App.config.storageKey("chartScaleOptions"));
           if (savedRange || savedLogicalRange) {
             chart.chart.timeScale().fitContent();
           } else {
@@ -330,20 +330,20 @@ App.data = {
               const opts = JSON.parse(savedScale);
               chart.chart.timeScale().applyOptions(opts);
             } catch {}
-            sessionStorage.removeItem("chartScaleOptions");
+            sessionStorage.removeItem(App.config.storageKey("chartScaleOptions"));
           }
           if (savedLogicalRange) {
             try {
               const range = JSON.parse(savedLogicalRange);
               chart.chart.timeScale().setVisibleLogicalRange(range);
             } catch {}
-            sessionStorage.removeItem("chartVisibleLogicalRange");
+            sessionStorage.removeItem(App.config.storageKey("chartVisibleLogicalRange"));
           } else if (savedRange) {
             try {
               const range = JSON.parse(savedRange);
               chart.chart.timeScale().setVisibleRange(range);
             } catch {}
-            sessionStorage.removeItem("chartVisibleRange");
+            sessionStorage.removeItem(App.config.storageKey("chartVisibleRange"));
           }
 
           state.firstBarTime = data[0].time;
@@ -383,7 +383,7 @@ App.data = {
   async loadChartInfo() {
     const state = App.state;
     try {
-      const resp = await fetch("/api/info");
+      const resp = await fetch(`${App.config.apiBase}/info`);
       const info = await resp.json();
       const exchange = (info.exchange || "Unknown").toUpperCase();
       const symbol = info.symbol || "Unknown";
@@ -413,7 +413,7 @@ App.data = {
   },
   async loadScriptSource() {
     try {
-      const resp = await fetch("/api/script-source");
+      const resp = await fetch(`${App.config.apiBase}/script-source`);
       if (!resp.ok) {
         return false;
       }
@@ -435,7 +435,7 @@ App.data = {
   },
   async saveScriptSource(source) {
     try {
-      const resp = await fetch("/api/script-source", {
+      const resp = await fetch(`${App.config.apiBase}/script-source`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ source })
@@ -463,7 +463,7 @@ App.data = {
     const state = App.state;
     const ui = App.ui;
     try {
-      const resp = await fetch("/api/webhook-config");
+      const resp = await fetch(`${App.config.apiBase}/webhook-config`);
       if (!resp.ok) return;
       const cfg = await resp.json();
       state.webhookEnabled = Boolean(cfg.enabled);
@@ -476,7 +476,7 @@ App.data = {
   },
   async updateWebhookConfig(payload) {
     try {
-      const resp = await fetch("/api/webhook-config", {
+      const resp = await fetch(`${App.config.apiBase}/webhook-config`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
