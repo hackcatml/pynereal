@@ -30,10 +30,7 @@ def build_app(registry: SessionRegistry) -> FastAPI:
     @app.websocket("/ws/hub")
     async def hub_ws(ws: WebSocket):
         await registry.hub_ws.connect(ws)
-        try:
-            await ws.send_json({"type": "sessions", "sessions": registry.snapshots()})
-        except Exception:
-            pass
+        await registry.hub_ws.send(ws, {"type": "sessions", "sessions": registry.snapshots()})
         try:
             while True:
                 # Dashboard clients only receive pushes; ignore inbound keepalive.
