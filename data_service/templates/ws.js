@@ -11,6 +11,7 @@ App.ws = {
 
     state.ws.onopen = () => {
       console.log("ws connected");
+      state.ws.send(JSON.stringify({ type: "client_hello", role: "chart" }));
       App.data.loadInitialWithRetry();
     };
 

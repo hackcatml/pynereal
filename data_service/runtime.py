@@ -48,8 +48,8 @@ class SessionPaths:
 # ======================================================================
 # Feed: one shared data feed per (provider, exchange, symbol, timeframe).
 # Owns the collector/file_update tasks, the OHLCV file, and the live DataState.
-# Fans data-plane events (bar / prerun_ready / run_ready) out to every Session
-# subscribed to this market.
+# Fans data-plane events out to every Session subscribed to this market. Live
+# bars are chart-only; prerun_ready/run_ready are runner-only.
 # ======================================================================
 class Feed:
     def __init__(self, spec: FeedSpec) -> None:
@@ -58,11 +58,10 @@ class Feed:
         self.state = DataState()
         self.tasks: List[Any] = []
         self.collector_error: Optional[str] = None
+        self._history_start_mtime: Optional[float] = None
+        self._history_start_time: Optional[int] = None
         # session_id -> Session
         self.subscribers: Dict[str, "Session"] = {}
-
-    def _ws_managers(self) -> List[WSManager]:
-        return [s.ws_manager for s in self.subscribers.values()]
 
     async def broadcast_bar(self, bar: list) -> None:
         payload = {
@@ -76,21 +75,48 @@ class Feed:
                 "volume": float(bar[5]),
             },
         }
-        for wm in self._ws_managers():
-            await wm.broadcast_json(payload)
+        for session in list(self.subscribers.values()):
+            await session.send_to_charts(payload)
 
     async def emit_event(self, payload: dict) -> None:
         # prerun_ready / run_ready fan out to every runner subscribed to this feed.
-        for wm in self._ws_managers():
-            await wm.broadcast_json(payload)
+        for session in list(self.subscribers.values()):
+            await session.send_to_runners(payload)
 
     def history_ready(self) -> bool:
         return self.paths.ohlcv_path.exists()
+
+    def history_start_time(self) -> Optional[int]:
+        path = self.paths.ohlcv_path
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            self._history_start_mtime = None
+            self._history_start_time = None
+            return None
+        if self._history_start_mtime == mtime:
+            return self._history_start_time
+        try:
+            from pynecore.core.ohlcv_file import OHLCVReader
+            with OHLCVReader(path) as reader:
+                start_ts = reader.start_timestamp
+                reader.close()
+        except Exception:
+            start_ts = None
+        self._history_start_mtime = mtime
+        self._history_start_time = int(start_ts) if start_ts is not None else None
+        return self._history_start_time
 
     def last_bar_time(self) -> Optional[int]:
         bars = self.state.live_bars
         if bars:
             return int(bars[-1][0] // 1000)
+        return None
+
+    def last_price(self) -> Optional[float]:
+        bars = self.state.live_bars
+        if bars:
+            return float(bars[-1][4])
         return None
 
     def collector_status(self) -> str:
@@ -113,7 +139,7 @@ class Session:
         self.feed = feed
         self.paths = SessionPaths.build(spec.id)
 
-        self.ws_manager = WSManager()
+        self.ws_manager = WSManager(on_disconnect=self._cleanup_client)
         self.trades_history: List[Dict[str, Any]] = []
         self.plot_options: Dict[str, Dict[str, Any]] = {}
         self.plotchar_history: List[Dict[str, Any]] = []
@@ -154,28 +180,19 @@ class Session:
         await self.ws_manager.connect(ws)
         self.client_roles[ws] = None
         if self.runner_count > 0:
-            await ws.send_json({"type": "runner_connected"})
-
-        # Replay the feed's pending after-history prerun to every newly connected
-        # runner (each strategy's runner needs its own history prerun). Unlike the
-        # single-session version we do NOT clear it on ack, so late-joining runners
-        # on the same shared feed still receive it.
-        async with self.feed.state.lock:
-            if self.feed.state.pending_prerun_event is not None:
-                try:
-                    await ws.send_json(self.feed.state.pending_prerun_event)
-                except Exception as e:
-                    print(f"[{self.spec.id}] Failed to send pending event: {e}")
+            await self.ws_manager.send(ws, {"type": "runner_connected"})
 
     async def on_disconnect(self, ws: WebSocket) -> None:
         await self.ws_manager.disconnect(ws)
+
+    async def _cleanup_client(self, ws: WebSocket) -> None:
         role = self.client_roles.pop(ws, None)
         if role == "runner":
             self.runner_count -= 1
             if self.runner_count <= 0:
                 self.runner_count = 0
                 self.runner_ready = False
-                await self.ws_manager.broadcast_json({"type": "runner_disconnected"})
+                await self.send_to_charts({"type": "runner_disconnected"})
             await self._notify_status()
 
     async def handle_text(self, ws: WebSocket, msg_text: str) -> None:
@@ -195,18 +212,29 @@ class Session:
 
         if msg_type == "client_hello":
             role = event.get("role")
-            self.client_roles[ws] = role
             if role == "runner":
+                # Replay the feed's pending after-history prerun only after the
+                # client identifies as a runner. Until then it receives no live
+                # bars, so long pre_run cannot build up a chart-message backlog.
+                async with self.feed.state.lock:
+                    pending_prerun_event = self.feed.state.pending_prerun_event
+                if pending_prerun_event is not None:
+                    await ws_manager.send(ws, pending_prerun_event)
+
+                self.client_roles[ws] = role
                 self.runner_count += 1
                 self.runner_ready = False  # fresh runner: pre_run not done yet (amber)
-                await ws_manager.broadcast_json({"type": "runner_connected"})
+                await self.send_to_charts({"type": "runner_connected"})
                 await self._notify_status()
                 # Push this session's webhook/telegram config to the runner only
                 # (carries url/token — must not reach chart-page browsers).
-                try:
-                    await ws.send_json(self._webhook_config_payload())
-                except Exception:
-                    pass
+                await ws_manager.send(ws, self._webhook_config_payload())
+            elif role == "chart":
+                self.client_roles[ws] = role
+                if self.runner_count > 0:
+                    await ws_manager.send(ws, {"type": "runner_connected"})
+            else:
+                self.client_roles[ws] = None
 
         elif msg_type == "runner_ready":
             # Runner finished its first pre_run -> flip the LED to green.
@@ -217,7 +245,7 @@ class Session:
             last_bar_index = event.get("last_bar_index", -1)
             event_data = event.get("data")
             if isinstance(event_data, dict):
-                await ws_manager.broadcast_json({
+                await self.send_to_charts({
                     "type": "last_bar_open_fix",
                     "data": event_data,
                 })
@@ -237,7 +265,7 @@ class Session:
                                 "volume": float(last_bar.volume),
                             },
                         }
-                        await ws_manager.broadcast_json(payload)
+                        await self.send_to_charts(payload)
                         reader.close()
                 except Exception as e:
                     print(f"[{self.spec.id}] Failed to send confirmed bar: {e}")
@@ -245,12 +273,12 @@ class Session:
         elif msg_type in ("trade_entry", "trade_close"):
             if event not in self.trades_history:
                 self.trades_history.append(event)
-            await ws_manager.broadcast_json(event)
+            await self.send_to_charts(event)
 
         elif msg_type == "plotchar":
             if event not in self.plotchar_history:
                 self.plotchar_history.append(event)
-            await ws_manager.broadcast_json(event)
+            await self.send_to_charts(event)
 
         elif msg_type == "plot_options":
             self.plot_options.update(event.get("data", {}))
@@ -282,7 +310,7 @@ class Session:
                                     "time": int(candle.timestamp),
                                     "value": None if (value == "" or value is None) else float(value),
                                 }
-                                await ws_manager.broadcast_json(plot_data_event)
+                                await self.send_to_charts(plot_data_event)
                             reader.close()
                 except Exception as e:
                     print(f"[{self.spec.id}] Failed to broadcast plot data: {e}")
@@ -295,7 +323,7 @@ class Session:
             )
             if "source" in event:
                 self.chart_info["script_source"] = event.get("source") or ""
-            await ws_manager.broadcast_json({
+            await self.send_to_charts({
                 "type": "script_info",
                 "title": title,
                 "source_name": self.chart_info.get("script_source_name"),
@@ -310,11 +338,11 @@ class Session:
                 self.chart_info["script_title"] = None
                 self.chart_info["script_source_name"] = None
                 self.chart_info["script_source"] = ""
-                await ws_manager.broadcast_json({"type": "script_modified"})
+                await self.send_to_charts({"type": "script_modified"})
 
         elif msg_type == "ack_prerun_ready_after_history_download":
             # No-op: with a shared feed the pending event must reach every session's
-            # runner, so it is not cleared globally (see on_connect).
+            # runner, so it is not cleared globally (see client_hello handling).
             pass
 
     # ------------------------------------------------------------------
@@ -331,17 +359,19 @@ class Session:
             "telegram_chat_id": wh.get("telegram_chat_id", "") or "",
         }
 
-    async def _send_to_runners(self, payload: dict) -> None:
+    async def send_to_charts(self, payload: dict) -> None:
+        for ws, role in list(self.client_roles.items()):
+            if role == "chart":
+                await self.ws_manager.send(ws, payload)
+
+    async def send_to_runners(self, payload: dict) -> None:
         for ws, role in list(self.client_roles.items()):
             if role == "runner":
-                try:
-                    await ws.send_json(payload)
-                except Exception:
-                    pass
+                await self.ws_manager.send(ws, payload)
 
     async def push_webhook_config(self) -> None:
         # Runner-only (contains url/token); never broadcast to chart browsers.
-        await self._send_to_runners(self._webhook_config_payload())
+        await self.send_to_runners(self._webhook_config_payload())
 
     # ------------------------------------------------------------------
     # Status snapshot (merges feed data-plane state)
@@ -355,6 +385,7 @@ class Session:
             "exchange": self.spec.exchange,
             "symbol": self.spec.symbol,
             "timeframe": self.spec.timeframe,
+            "history_since": self.spec.history_since,
             "script_name": self.spec.script_name,
             "tv_symbol": self.logo_info.get("tv_symbol", ""),
             "symbol_logo_url": self.logo_info.get("symbol_logo_url", ""),
@@ -368,6 +399,8 @@ class Session:
             },
             "collector": feed.collector_status(),
             "history_ready": feed.history_ready(),
+            "data_since_time": feed.history_start_time(),
             "runner_connected": self.runner_count > 0,
             "last_bar_time": feed.last_bar_time(),
+            "last_price": feed.last_price(),
         }
