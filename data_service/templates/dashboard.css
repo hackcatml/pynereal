@@ -145,9 +145,70 @@ tr:last-child td { border-bottom: none; }
 .market-logo { border-radius: 50%; }
 .exchange-logo { border-radius: 4px; }
 
+.last-bar-value {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+  line-height: 1.25;
+}
+.last-bar-time {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.last-bar-price {
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .badge {
   font-size: 11px; padding: 2px 7px; border-radius: 10px;
   border: 1px solid var(--border); color: var(--muted);
+}
+.data-cell {
+  overflow: visible;
+}
+.data-badge-wrap {
+  position: relative;
+  display: inline-block;
+  vertical-align: middle;
+}
+.data-badge {
+  cursor: help;
+}
+.data-since-popover {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  top: calc(100% + 3px);
+  width: max-content;
+  max-width: min(320px, 80vw);
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #0b0e13;
+  color: var(--text);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+.data-badge-wrap.show-since .data-since-popover {
+  opacity: 1;
+  transform: translateY(0);
+}
+@media (hover: hover) and (pointer: fine) {
+  .data-badge-wrap:hover .data-since-popover {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 .badge-running { color: #28a745; border-color: #28a745; }
 .badge-error { color: var(--danger); border-color: var(--danger); }
@@ -353,6 +414,15 @@ tr:last-child td { border-bottom: none; }
     text-align: right;
   }
   .symbol-cell { max-width: 70%; }
+  .last-bar-value {
+    align-items: flex-end;
+    text-align: right;
+  }
+  .data-since-popover {
+    left: auto;
+    right: 0;
+    text-align: left;
+  }
   /* bigger touch targets on mobile */
   .btn { padding: 8px 12px; }
   input[type="checkbox"] { width: 18px; height: 18px; }

@@ -87,9 +87,9 @@ def _default_session(registry: SessionRegistry):
     return None
 
 
-async def _hub_status_heartbeat(registry: SessionRegistry, interval: float = 10.0) -> None:
+async def _hub_status_heartbeat(registry: SessionRegistry, interval: float = 1.0) -> None:
     """Periodically push the session snapshot to /ws/hub clients so the dashboard's
-    'Last bar' / status stay fresh without each client polling /api/sessions.
+    'Last bar' / price / status stay fresh without each client polling /api/sessions.
     One broadcast serves all connected dashboards (no-op when none are connected)."""
     while True:
         await asyncio.sleep(interval)

@@ -4,6 +4,7 @@
   let keepaliveTimer = null;
   let removeSessionId = null;
   let scriptsLoading = false;
+  const priceFormatters = new Map();
 
   const el = (id) => document.getElementById(id);
 
@@ -17,6 +18,79 @@
         hourCycle: "h23",
       });
     } catch { return String(ts); }
+  }
+
+  function fmtPrice(value) {
+    if (value == null || value === "") return "-";
+    const n = Number(value);
+    if (!Number.isFinite(n)) return "-";
+    const abs = Math.abs(n);
+    const digits = abs >= 100 ? 2 : abs >= 1 ? 4 : 8;
+    if (!priceFormatters.has(digits)) {
+      priceFormatters.set(digits, new Intl.NumberFormat("en-US", {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: digits,
+      }));
+    }
+    return priceFormatters.get(digits).format(n);
+  }
+
+  function sessionId(s) {
+    return String((s && s.id) || "");
+  }
+
+  function sessionPrice(s) {
+    const raw = s && s.last_price;
+    if (raw != null && raw !== "") {
+      const direct = Number(raw);
+      if (Number.isFinite(direct)) return direct;
+    }
+    return null;
+  }
+
+  function formatUtcDate(d) {
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ` +
+      `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} UTC`;
+  }
+
+  function parseDateAsUtc(raw) {
+    const value = String(raw || "").trim();
+    if (!value) return null;
+    const hasZone = /(?:z|[+-]\d{2}:?\d{2})$/i.test(value);
+    const iso = value.includes("T") ? value : value.replace(" ", "T");
+    const normalized = hasZone ? iso : (iso.length <= 10 ? `${iso}T00:00:00Z` : `${iso}Z`);
+    const d = new Date(normalized);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  function historySinceText(s) {
+    const actual = Number(s && s.data_since_time);
+    if (Number.isFinite(actual) && actual > 0) {
+      return `Data since: ${formatUtcDate(new Date(actual * 1000))}`;
+    }
+    const raw = String((s && s.history_since) || "").trim();
+    if (!raw) return "Data since: default window";
+    if (raw === "continue") return "Data since: continue";
+    if (/^\d+$/.test(raw)) {
+      const d = new Date(Date.now() - Number(raw) * 24 * 60 * 60 * 1000);
+      d.setUTCSeconds(0, 0);
+      return `Data since: ${formatUtcDate(d)} (${raw} days)`;
+    }
+    const d = parseDateAsUtc(raw);
+    return d ? `Data since: ${formatUtcDate(d)}` : `Data since: ${raw}`;
+  }
+
+  function lastBarCell(s) {
+    return `<span class="last-bar-value">` +
+      `<span class="last-bar-time">${fmtTime(s.last_bar_time)}</span>` +
+      `<span class="last-bar-price">${fmtPrice(sessionPrice(s))}</span>` +
+      `</span>`;
+  }
+
+  function applySessions(nextSessions) {
+    sessions = nextSessions || [];
+    render();
   }
 
   function runnerButtons(s) {
@@ -40,54 +114,195 @@
            `loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">`;
   }
 
+  function setText(node, text) {
+    const next = String(text == null ? "" : text);
+    if (node && node.textContent !== next) node.textContent = next;
+  }
+
+  function setClass(node, cls) {
+    if (node && node.className !== cls) node.className = cls;
+  }
+
+  function setHTML(node, html) {
+    if (node && node.innerHTML !== html) node.innerHTML = html;
+  }
+
+  function setChecked(node, checked) {
+    if (node && node.checked !== checked) node.checked = checked;
+  }
+
+  function isTouchTooltipMode() {
+    return window.matchMedia("(hover: none)").matches ||
+      window.matchMedia("(pointer: coarse)").matches;
+  }
+
+  function closeDataSinceTooltips(exceptWrap) {
+    document.querySelectorAll(".data-badge-wrap.show-since").forEach((wrap) => {
+      if (wrap !== exceptWrap) wrap.classList.remove("show-since");
+    });
+  }
+
+  function toggleDataSinceTooltip(tr) {
+    const wrap = tr.querySelector(".data-badge-wrap");
+    if (!wrap) return;
+    const show = !wrap.classList.contains("show-since");
+    closeDataSinceTooltips(wrap);
+    wrap.classList.toggle("show-since", show);
+  }
+
+  function createSessionRow(id) {
+    const tr = document.createElement("tr");
+    tr.dataset.sessionId = id;
+    tr.innerHTML =
+      `<td data-label="Status"><span data-field="runner-led" class="led"></span></td>` +
+      `<td data-label="Symbol" class="mono"><span data-field="symbol-cell" class="symbol-cell"></span></td>` +
+      `<td data-label="TF" data-field="timeframe"></td>` +
+      `<td data-label="Exchange"><span data-field="exchange-cell" class="exchange-cell"></span></td>` +
+      `<td data-label="Script" class="mono" data-field="script-name"></td>` +
+      `<td data-label="Data" class="data-cell"><span class="data-badge-wrap">` +
+        `<span data-field="collector-badge" class="badge data-badge" ` +
+        `data-act="data-since"></span>` +
+        `<span data-field="data-since-popover" class="data-since-popover"></span></span>` +
+        ` <span data-field="history-loading" class="muted">loading</span>` +
+        `</td>` +
+      `<td data-label="Last bar" class="muted">${lastBarCell({})}</td>` +
+      `<td data-label="Webhook"><span class="cell-inline">` +
+        `<input type="checkbox" data-act="webhook">` +
+        `<button class="btn btn-icon" data-act="webhook-settings" title="Webhook URL">&#9881;</button></span></td>` +
+      `<td data-label="Telegram"><span class="cell-inline">` +
+        `<input type="checkbox" data-act="telegram">` +
+        `<button class="btn btn-icon" data-act="telegram-settings" title="Telegram bot">&#9881;</button></span></td>` +
+      `<td data-label="Runner" class="runner-cell" data-field="runner-cell"></td>` +
+      `<td data-label="Chart"><a data-field="chart-link" class="btn btn-chart" target="_blank">Open</a></td>` +
+      `<td data-label="Remove"><button class="btn btn-danger" data-act="delete" title="Delete session">&times;</button></td>`;
+
+    tr.addEventListener("change", (e) => {
+      const target = e.target;
+      const id = tr.dataset.sessionId;
+      if (!target || !id) return;
+      if (target.getAttribute("data-act") === "webhook") {
+        toggleWebhook(id, { enabled: target.checked });
+      } else if (target.getAttribute("data-act") === "telegram") {
+        toggleWebhook(id, { telegram_notification: target.checked });
+      }
+    });
+
+    tr.addEventListener("click", (e) => {
+      const target = e.target && e.target.closest
+        ? e.target.closest("[data-runner], [data-act]")
+        : null;
+      const id = tr.dataset.sessionId;
+      if (!target || !tr.contains(target) || !id) return;
+      const runnerAct = target.getAttribute("data-runner");
+      if (runnerAct) {
+        runnerAction(id, runnerAct);
+        return;
+      }
+      const act = target.getAttribute("data-act");
+      if (act === "data-since") {
+        if (isTouchTooltipMode()) {
+          e.preventDefault();
+          e.stopPropagation();
+          toggleDataSinceTooltip(tr);
+        }
+      } else if (act === "delete") openRemoveConfirm(id);
+      else if (act === "logs") openLogs(id);
+      else if (act === "webhook-settings") openSettings(id, "webhook");
+      else if (act === "telegram-settings") openSettings(id, "telegram");
+    });
+    return tr;
+  }
+
+  function patchSessionRow(tr, s) {
+    const id = sessionId(s);
+    const runner = s.runner || "stopped";
+    const collector = s.collector || "stopped";
+    const wh = s.webhook || {};
+    const exchange = (s.exchange || "").toUpperCase();
+
+    const led = tr.querySelector('[data-field="runner-led"]');
+    setClass(led, `led led-${runner}`);
+    if (led && led.title !== runner) led.title = runner;
+
+    const symbolKey = JSON.stringify([s.symbol || "", s.tv_symbol || "", s.symbol_logo_url || ""]);
+    if (tr.dataset.symbolKey !== symbolKey) {
+      const symbolLogo = logoImg(s.symbol_logo_url, s.tv_symbol || s.symbol, "market-logo");
+      setHTML(
+        tr.querySelector('[data-field="symbol-cell"]'),
+        `${symbolLogo}<span class="symbol-text">${esc(s.symbol)}</span>`,
+      );
+      tr.dataset.symbolKey = symbolKey;
+    }
+
+    const exchangeKey = JSON.stringify([exchange, s.exchange_logo_url || ""]);
+    if (tr.dataset.exchangeKey !== exchangeKey) {
+      const exchangeLogo = logoImg(s.exchange_logo_url, exchange, "exchange-logo");
+      setHTML(
+        tr.querySelector('[data-field="exchange-cell"]'),
+        `${exchangeLogo}<span>${esc(exchange)}</span>`,
+      );
+      tr.dataset.exchangeKey = exchangeKey;
+    }
+
+    setText(tr.querySelector('[data-field="timeframe"]'), s.timeframe);
+    setText(tr.querySelector('[data-field="script-name"]'), s.script_name);
+
+    const badge = tr.querySelector('[data-field="collector-badge"]');
+    setClass(badge, `badge data-badge badge-${collector}`);
+    setText(badge, collector);
+    const sinceText = historySinceText(s);
+    if (badge) {
+      badge.setAttribute("aria-label", sinceText);
+    }
+    setText(tr.querySelector('[data-field="data-since-popover"]'), sinceText);
+    const loading = tr.querySelector('[data-field="history-loading"]');
+    if (loading) loading.hidden = !!s.history_ready;
+
+    setText(tr.querySelector(".last-bar-time"), fmtTime(s.last_bar_time));
+    setText(tr.querySelector(".last-bar-price"), fmtPrice(sessionPrice(s)));
+
+    setChecked(tr.querySelector('[data-act="webhook"]'), !!wh.enabled);
+    setChecked(tr.querySelector('[data-act="telegram"]'), !!wh.telegram_notification);
+
+    if (tr.dataset.runnerControlsKey !== runner) {
+      setHTML(
+        tr.querySelector('[data-field="runner-cell"]'),
+        `${runnerButtons(s)}<button class="btn" data-act="logs">Logs</button>`,
+      );
+      tr.dataset.runnerControlsKey = runner;
+    }
+
+    const chart = tr.querySelector('[data-field="chart-link"]');
+    const href = `/s/${encodeURIComponent(id)}`;
+    if (chart && chart.getAttribute("href") !== href) chart.setAttribute("href", href);
+  }
+
   function render() {
     const body = el("sessions-body");
-    body.innerHTML = "";
     el("empty").style.display = sessions.length ? "none" : "block";
     el("session-count").textContent = `${sessions.length} / ${MAX_SESSIONS} sessions`;
 
+    const rows = new Map(Array.from(body.children).map((row) => [row.dataset.sessionId, row]));
+    const liveIds = new Set(sessions.map(sessionId).filter((id) => id));
+    rows.forEach((row, id) => {
+      if (!liveIds.has(id)) {
+        row.remove();
+        rows.delete(id);
+      }
+    });
+    let cursor = body.firstElementChild;
+
     sessions.forEach((s) => {
-      const runner = s.runner || "stopped";
-      const collector = s.collector || "stopped";
-      const wh = s.webhook || {};
-      const exchange = (s.exchange || "").toUpperCase();
-      const symbolLogo = logoImg(s.symbol_logo_url, s.tv_symbol || s.symbol, "market-logo");
-      const exchangeLogo = logoImg(s.exchange_logo_url, exchange, "exchange-logo");
-      const tr = document.createElement("tr");
-      tr.innerHTML =
-        `<td data-label="Status"><span class="led led-${runner}" title="${runner}"></span></td>` +
-        `<td data-label="Symbol" class="mono"><span class="symbol-cell">${symbolLogo}` +
-          `<span class="symbol-text">${esc(s.symbol)}</span></span></td>` +
-        `<td data-label="TF">${esc(s.timeframe)}</td>` +
-        `<td data-label="Exchange"><span class="exchange-cell">${exchangeLogo}` +
-          `<span>${esc(exchange)}</span></span></td>` +
-        `<td data-label="Script" class="mono">${esc(s.script_name)}</td>` +
-        `<td data-label="Data"><span class="badge badge-${collector}">${collector}</span>` +
-          `${s.history_ready ? "" : " <span class='muted'>loading</span>"}</td>` +
-        `<td data-label="Last bar" class="muted">${fmtTime(s.last_bar_time)}</td>` +
-        `<td data-label="Webhook"><span class="cell-inline">` +
-          `<input type="checkbox" data-act="webhook" ${wh.enabled ? "checked" : ""}>` +
-          `<button class="btn btn-icon" data-act="webhook-settings" title="Webhook URL">&#9881;</button></span></td>` +
-        `<td data-label="Telegram"><span class="cell-inline">` +
-          `<input type="checkbox" data-act="telegram" ${wh.telegram_notification ? "checked" : ""}>` +
-          `<button class="btn btn-icon" data-act="telegram-settings" title="Telegram bot">&#9881;</button></span></td>` +
-        `<td data-label="Runner" class="runner-cell">${runnerButtons(s)}` +
-          `<button class="btn" data-act="logs">Logs</button></td>` +
-        `<td data-label="Chart"><a class="btn btn-chart" href="/s/${encodeURIComponent(s.id)}" target="_blank">Open</a></td>` +
-        `<td data-label="Remove"><button class="btn btn-danger" data-act="delete" title="Delete session">&times;</button></td>`;
-
-      tr.querySelector('[data-act="webhook"]').addEventListener("change", (e) =>
-        toggleWebhook(s.id, { enabled: e.target.checked }));
-      tr.querySelector('[data-act="telegram"]').addEventListener("change", (e) =>
-        toggleWebhook(s.id, { telegram_notification: e.target.checked }));
-      tr.querySelector('[data-act="delete"]').addEventListener("click", () => openRemoveConfirm(s.id));
-      tr.querySelector('[data-act="logs"]').addEventListener("click", () => openLogs(s.id));
-      tr.querySelector('[data-act="webhook-settings"]').addEventListener("click", () => openSettings(s.id, "webhook"));
-      tr.querySelector('[data-act="telegram-settings"]').addEventListener("click", () => openSettings(s.id, "telegram"));
-      tr.querySelectorAll("[data-runner]").forEach((btn) =>
-        btn.addEventListener("click", () => runnerAction(s.id, btn.getAttribute("data-runner"))));
-
-      body.appendChild(tr);
+      const id = sessionId(s);
+      if (!id) return;
+      let row = rows.get(id);
+      if (!row) row = createSessionRow(id);
+      patchSessionRow(row, s);
+      if (row === cursor) {
+        cursor = cursor.nextElementSibling;
+      } else {
+        body.insertBefore(row, cursor);
+      }
     });
   }
 
@@ -187,6 +402,8 @@
   // ---- live log viewer ----------------------------------------------------
   let logTimer = null;
   let logSession = null;
+  let logRequestSeq = 0;
+  let logAbort = null;
   let savedScrollY = 0;
 
   // Lock the page behind the modal (iOS-safe position:fixed technique) so
@@ -210,44 +427,84 @@
     window.scrollTo(0, savedScrollY);
   }
 
-  async function fetchLogs() {
-    if (!logSession) return;
+  function clearLogTimer() {
+    if (logTimer) {
+      clearTimeout(logTimer);
+      logTimer = null;
+    }
+  }
+
+  function cancelLogFetch() {
+    if (logAbort) {
+      logAbort.abort();
+      logAbort = null;
+    }
+  }
+
+  async function fetchLogs(sessionId, seq) {
+    if (!sessionId || seq !== logRequestSeq) return;
+    const controller = new AbortController();
+    logAbort = controller;
     try {
-      const data = await api(`/api/sessions/${encodeURIComponent(logSession)}/runner/logs?lines=500`);
+      const data = await api(
+        `/api/sessions/${encodeURIComponent(sessionId)}/runner/logs?lines=500`,
+        { signal: controller.signal },
+      );
+      if (logAbort === controller) logAbort = null;
+      if (seq !== logRequestSeq || logSession !== sessionId) return;
       const pre = el("log-content");
       const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
       pre.textContent = data.log && data.log.length ? data.log : "(no log output yet)";
       if (atBottom) pre.scrollTop = pre.scrollHeight;  // follow tail unless user scrolled up
     } catch (e) {
+      if (logAbort === controller) logAbort = null;
+      if (e.name === "AbortError" || seq !== logRequestSeq || logSession !== sessionId) return;
       el("log-content").textContent = `failed to load logs: ${e.message}`;
     }
   }
 
+  async function pollLogs(sessionId, seq) {
+    await fetchLogs(sessionId, seq);
+    if (seq !== logRequestSeq || logSession !== sessionId) return;
+    logTimer = setTimeout(() => pollLogs(sessionId, seq), 1500);
+  }
+
   function openLogs(id) {
+    clearLogTimer();
+    cancelLogFetch();
     logSession = id;
+    logRequestSeq += 1;
+    const seq = logRequestSeq;
     el("log-title").textContent = id;
     el("log-content").textContent = "loading…";
     el("log-modal").classList.remove("hidden");
     lockBodyScroll();
-    fetchLogs();
-    if (logTimer) clearInterval(logTimer);
-    logTimer = setInterval(fetchLogs, 1500);
+    pollLogs(id, seq);
   }
 
   function closeLogs() {
     if (el("log-modal").classList.contains("hidden")) return;
+    logRequestSeq += 1;
+    clearLogTimer();
+    cancelLogFetch();
     el("log-modal").classList.add("hidden");
     unlockBodyScroll();
     logSession = null;
-    if (logTimer) { clearInterval(logTimer); logTimer = null; }
   }
 
   async function clearLogs() {
-    if (!logSession) return;
+    const sessionId = logSession;
+    if (!sessionId) return;
+    clearLogTimer();
+    cancelLogFetch();
+    logRequestSeq += 1;
+    const seq = logRequestSeq;
     try {
-      await api(`/api/sessions/${encodeURIComponent(logSession)}/runner/logs`, { method: "DELETE" });
+      await api(`/api/sessions/${encodeURIComponent(sessionId)}/runner/logs`, { method: "DELETE" });
+      if (seq !== logRequestSeq || logSession !== sessionId) return;
       el("log-content").textContent = "(cleared)";
-      fetchLogs();
+      logRequestSeq += 1;
+      pollLogs(sessionId, logRequestSeq);
     } catch (e) {
       alert(`clear failed: ${e.message}`);
     }
@@ -337,9 +594,15 @@
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
+    closeDataSinceTooltips();
     if (!el("log-modal").classList.contains("hidden")) closeLogs();
     if (!el("settings-modal").classList.contains("hidden")) closeSettings();
     if (!el("remove-modal").classList.contains("hidden")) closeRemoveConfirm();
+  });
+  document.addEventListener("click", (e) => {
+    if (!isTouchTooltipMode()) return;
+    if (!e.target || !e.target.closest || e.target.closest(".data-badge-wrap")) return;
+    closeDataSinceTooltips();
   });
 
   // ---- collapsible "Add session" card (collapsed by default) ---------------
@@ -447,8 +710,7 @@
   async function refresh() {
     try {
       const data = await api("/api/sessions");
-      sessions = data.sessions || [];
-      render();
+      applySessions(data.sessions || []);
     } catch (e) {
       /* ignore */
     }
@@ -479,8 +741,7 @@
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === "sessions") {
-          sessions = msg.sessions || [];
-          render();
+          applySessions(msg.sessions || []);
         }
       } catch {}
     };
@@ -502,7 +763,7 @@
   // Mobile freezes timers and drops idle sockets while backgrounded, so on return
   // the lazy setTimeout-based reconnect can sit at "reconnecting…" for a long time.
   // Force an immediate reconnect when the page becomes visible / the network is back.
-  // The hub pushes a snapshot every ~10s, so a socket reporting OPEN but silent for
+  // The hub pushes a snapshot every ~1s, so a socket reporting OPEN but silent for
   // >20s is treated as a zombie and rebuilt.
   function forceReconnect() {
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }

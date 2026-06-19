@@ -58,6 +58,8 @@ class Feed:
         self.state = DataState()
         self.tasks: List[Any] = []
         self.collector_error: Optional[str] = None
+        self._history_start_mtime: Optional[float] = None
+        self._history_start_time: Optional[int] = None
         # session_id -> Session
         self.subscribers: Dict[str, "Session"] = {}
 
@@ -84,10 +86,37 @@ class Feed:
     def history_ready(self) -> bool:
         return self.paths.ohlcv_path.exists()
 
+    def history_start_time(self) -> Optional[int]:
+        path = self.paths.ohlcv_path
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            self._history_start_mtime = None
+            self._history_start_time = None
+            return None
+        if self._history_start_mtime == mtime:
+            return self._history_start_time
+        try:
+            from pynecore.core.ohlcv_file import OHLCVReader
+            with OHLCVReader(path) as reader:
+                start_ts = reader.start_timestamp
+                reader.close()
+        except Exception:
+            start_ts = None
+        self._history_start_mtime = mtime
+        self._history_start_time = int(start_ts) if start_ts is not None else None
+        return self._history_start_time
+
     def last_bar_time(self) -> Optional[int]:
         bars = self.state.live_bars
         if bars:
             return int(bars[-1][0] // 1000)
+        return None
+
+    def last_price(self) -> Optional[float]:
+        bars = self.state.live_bars
+        if bars:
+            return float(bars[-1][4])
         return None
 
     def collector_status(self) -> str:
@@ -356,6 +385,7 @@ class Session:
             "exchange": self.spec.exchange,
             "symbol": self.spec.symbol,
             "timeframe": self.spec.timeframe,
+            "history_since": self.spec.history_since,
             "script_name": self.spec.script_name,
             "tv_symbol": self.logo_info.get("tv_symbol", ""),
             "symbol_logo_url": self.logo_info.get("symbol_logo_url", ""),
@@ -369,6 +399,8 @@ class Session:
             },
             "collector": feed.collector_status(),
             "history_ready": feed.history_ready(),
+            "data_since_time": feed.history_start_time(),
             "runner_connected": self.runner_count > 0,
             "last_bar_time": feed.last_bar_time(),
+            "last_price": feed.last_price(),
         }
