@@ -711,33 +711,142 @@
     try {
       const data = await api("/api/sessions");
       applySessions(data.sessions || []);
+      return true;
     } catch (e) {
       /* ignore */
+      return false;
     }
   }
 
   let hubWs = null;
   let reconnectTimer = null;
-  let lastMsgAt = 0;
+  let firstMessageTimer = null;
+  let fallbackTimer = null;
+  let hubGeneration = 0;
+  let reconnectAttempt = 0;
+  let hubLive = false;
 
-  function scheduleReconnect(delay) {
-    if (reconnectTimer) return;            // a reconnect is already pending
-    reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, delay);
+  function clearReconnectTimer() {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   }
 
-  function connect() {
+  function clearFirstMessageTimer() {
+    if (firstMessageTimer) { clearTimeout(firstMessageTimer); firstMessageTimer = null; }
+  }
+
+  function clearFallbackTimer() {
+    if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
+  }
+
+  function clearKeepaliveTimer() {
+    if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
+  }
+
+  function closeHubSocket(ws) {
+    if (!ws) return;
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onclose = null;
+    ws.onerror = null;
+    if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+      try { ws.close(); } catch {}
+    }
+  }
+
+  function setHubStatus(text, ok = false) {
+    el("conn-status").textContent = text;
+    el("conn-status").className = ok ? "conn ok" : "conn";
+  }
+
+  function scheduleFallbackPoll(delay = 0, generation = hubGeneration) {
+    if (fallbackTimer || document.visibilityState === "hidden") return;
+    fallbackTimer = setTimeout(async () => {
+      fallbackTimer = null;
+      if (generation !== hubGeneration || document.visibilityState === "hidden" || hubLive) return;
+      const ok = await refresh();
+      if (generation !== hubGeneration || document.visibilityState === "hidden" || hubLive) return;
+      if (ok) {
+        setHubStatus("polling", true);
+      } else {
+        setHubStatus("reconnecting…");
+      }
+      scheduleFallbackPoll(ok ? 5000 : 1500, generation);
+    }, delay);
+  }
+
+  function scheduleReconnect(delay, generation = hubGeneration) {
+    if (reconnectTimer) return;            // a reconnect is already pending
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      if (generation !== hubGeneration) return;
+      connect(generation);
+    }, delay);
+  }
+
+  function retryHub(generation) {
+    if (generation !== hubGeneration) return;
+    reconnectAttempt += 1;
+    hubLive = false;
+    clearFirstMessageTimer();
+    clearKeepaliveTimer();
+    closeHubSocket(hubWs);
+    hubWs = null;
+    setHubStatus("reconnecting…");
+    scheduleFallbackPoll(0, generation);
+    scheduleReconnect(reconnectAttempt <= 3 ? 500 : 5000, generation);
+  }
+
+  function rebuildHub() {
+    if (document.visibilityState === "hidden") return;
+    hubGeneration += 1;
+    reconnectAttempt = 0;
+    hubLive = false;
+    clearReconnectTimer();
+    clearFirstMessageTimer();
+    clearKeepaliveTimer();
+    closeHubSocket(hubWs);
+    hubWs = null;
+    setHubStatus("reconnecting…");
+    scheduleFallbackPoll(0, hubGeneration);
+    connect(hubGeneration);
+  }
+
+  function connect(generation = hubGeneration) {
+    if (generation !== hubGeneration) return;
     // Don't stack sockets (an in-flight CONNECTING / live OPEN one is fine).
     if (hubWs && (hubWs.readyState === WebSocket.OPEN || hubWs.readyState === WebSocket.CONNECTING)) return;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${proto}//${location.host}/ws/hub`);
     hubWs = ws;
+    // Mobile resume often leaves the first attempt hung in CONNECTING (radio not
+    // ready). CONNECTING never fires onclose, so without this watchdog the retry
+    // loop never starts and we sit at "reconnecting…" forever. Force-close it so
+    // onclose -> scheduleReconnect kicks in.
+    const connectGuard = setTimeout(() => {
+      if (ws !== hubWs || generation !== hubGeneration) return;
+      if (ws.readyState === WebSocket.CONNECTING) retryHub(generation);
+    }, 5000);
     ws.onopen = () => {
-      lastMsgAt = Date.now();
-      el("conn-status").textContent = "live";
-      el("conn-status").className = "conn ok";
+      if (ws !== hubWs || generation !== hubGeneration) return;
+      clearTimeout(connectGuard);
+      setHubStatus("syncing…");
+      refresh().then((ok) => {
+        if (ws !== hubWs || generation !== hubGeneration || hubLive) return;
+        if (ok) {
+          setHubStatus("polling", true);
+          scheduleFallbackPoll(5000, generation);
+        }
+      });
+      clearFirstMessageTimer();
+      firstMessageTimer = setTimeout(() => retryHub(generation), 7000);
     };
     ws.onmessage = (ev) => {
-      lastMsgAt = Date.now();
+      if (ws !== hubWs || generation !== hubGeneration) return;
+      reconnectAttempt = 0;
+      hubLive = true;
+      clearFirstMessageTimer();
+      clearFallbackTimer();
+      setHubStatus("live", true);
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === "sessions") {
@@ -746,41 +855,44 @@
       } catch {}
     };
     ws.onclose = () => {
-      if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
-      if (ws !== hubWs) return;            // superseded by a newer socket
-      el("conn-status").textContent = "reconnecting…";
-      el("conn-status").className = "conn";
-      scheduleReconnect(1500);
+      clearTimeout(connectGuard);
+      clearFirstMessageTimer();
+      clearKeepaliveTimer();
+      if (ws !== hubWs || generation !== hubGeneration) return; // superseded by a newer socket
+      hubWs = null;
+      hubLive = false;
+      setHubStatus("reconnecting…");
+      scheduleFallbackPoll(0, generation);
+      scheduleReconnect(1500, generation);
     };
     ws.onerror = () => { try { ws.close(); } catch {} };
     // Replace any prior keepalive so reconnects don't accumulate timers.
-    if (keepaliveTimer) clearInterval(keepaliveTimer);
+    clearKeepaliveTimer();
     keepaliveTimer = setInterval(() => {
+      if (ws !== hubWs || generation !== hubGeneration) return;
       if (ws.readyState === WebSocket.OPEN) ws.send("ping");
     }, 15000);
   }
 
-  // Mobile freezes timers and drops idle sockets while backgrounded, so on return
-  // the lazy setTimeout-based reconnect can sit at "reconnecting…" for a long time.
-  // Force an immediate reconnect when the page becomes visible / the network is back.
-  // The hub pushes a snapshot every ~1s, so a socket reporting OPEN but silent for
-  // >20s is treated as a zombie and rebuilt.
-  function forceReconnect() {
-    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-    const ws = hubWs;
-    const healthy = ws && ws.readyState === WebSocket.OPEN && (Date.now() - lastMsgAt) < 20000;
-    if (healthy) return;
-    if (ws && ws.readyState !== WebSocket.CLOSED) {
-      try { ws.onclose = null; ws.close(); } catch {}
-    }
+  // Close the socket while backgrounded so the 1s hub push can't flood a frozen socket
+  // (which iOS then drops, leaving the resumed page unable to re-establish). We reconnect
+  // cleanly on return.
+  function closeForBackground() {
+    hubGeneration += 1;
+    hubLive = false;
+    clearReconnectTimer();
+    clearFirstMessageTimer();
+    clearFallbackTimer();
+    clearKeepaliveTimer();
+    closeHubSocket(hubWs);
     hubWs = null;
-    connect();
   }
 
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") forceReconnect();
+    if (document.visibilityState === "visible") rebuildHub();
+    else closeForBackground();
   });
-  window.addEventListener("online", forceReconnect);
+  window.addEventListener("online", rebuildHub);
 
   refresh();   // one-time initial load; thereafter the hub pushes via /ws/hub
   connect();
