@@ -396,7 +396,7 @@ App.data = {
       if (info.script_title) {
         state.scriptTitle = info.script_title || "No title";
         state.scriptTitleVisible = true;
-      } else {
+      } else if (!state.scriptSourceLoaded) {
         state.scriptTitleVisible = false;
       }
       if (info.script_source_name != null) {
@@ -428,6 +428,7 @@ App.data = {
         App.state.scriptTitleVisible = true;
       }
       App.ui.renderSourcePanel();
+      App.ui.setChartInfo();
       return true;
     } catch (e) {
       return false;

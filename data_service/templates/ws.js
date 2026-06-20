@@ -28,14 +28,6 @@ App.ws = {
         } else if (msg.type === "runner_disconnected") {
           state.runnerConnected = false;
           chart.resetChartState(false);
-          state.scriptTitle = "No title";
-          state.scriptTitleVisible = false;
-          state.scriptSourceName = "";
-          state.scriptSource = "";
-          state.scriptSourceLoaded = false;
-          if (state.sourcePanelOpen) {
-            App.ui.renderSourcePanel();
-          }
           App.ui.setChartInfo();
         } else if (msg.type === "runner_connected") {
           state.runnerConnected = true;

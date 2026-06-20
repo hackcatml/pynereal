@@ -117,6 +117,37 @@ def _resolve_script_path(spec: SessionSpec) -> Path:
     return script_path
 
 
+def _script_source_display_name(spec: SessionSpec, script_path: Path | None = None) -> str:
+    if isinstance(spec.script_name, str) and spec.script_name:
+        return Path(spec.script_name).as_posix()
+    if script_path is not None:
+        return script_path.name
+    return ""
+
+
+def _load_script_source_info(spec: SessionSpec, info: dict) -> tuple[str | None, str, str, bool]:
+    title = info.get("script_title") or None
+    name = info.get("script_source_name") or _script_source_display_name(spec)
+    source = info.get("script_source") or ""
+    has_source = bool(source)
+
+    # Disk is the source of truth, so newly registered but not-yet-started sessions
+    # can still expose their script metadata and editable source.
+    try:
+        script_path = _resolve_script_path(spec)
+        if script_path.exists():
+            source = script_path.read_text(encoding="utf-8")
+            name = _script_source_display_name(spec, script_path)
+            title = _extract_script_title_from_source(source) or title
+            has_source = True
+    except Exception:
+        pass
+
+    if not title and name:
+        title = name
+    return title, name, source, has_source
+
+
 # ----------------------------------------------------------------------
 # Per-session data-plane router:  /api/{session_id}/...
 # ----------------------------------------------------------------------
@@ -239,15 +270,16 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
         if rt is None:
             return JSONResponse({"error": "session not found"}, status_code=404)
         info = rt.chart_info
+        script_title, script_source_name, _, has_script_source = _load_script_source_info(rt.spec, info)
         return JSONResponse({
             "id": rt.spec.id,
             "exchange": info.get("exchange"),
             "symbol": info.get("symbol"),
             "timeframe": info.get("timeframe"),
             "provider": info.get("provider"),
-            "script_title": info.get("script_title"),
-            "script_source_name": info.get("script_source_name"),
-            "has_script_source": bool(info.get("script_source")),
+            "script_title": script_title,
+            "script_source_name": script_source_name,
+            "has_script_source": has_script_source,
         })
 
     @r.get("/api/{session_id}/script-source")
@@ -256,18 +288,8 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
         if rt is None:
             return JSONResponse({"error": "session not found"}, status_code=404)
         info = rt.chart_info
-        title = info.get("script_title") or "No title"
-        name = info.get("script_source_name") or ""
-        source = info.get("script_source") or ""
-        # Disk file is the latest saved copy; prefer it (memory chart_info is fallback).
-        try:
-            script_path = _resolve_script_path(rt.spec)
-            if script_path.exists():
-                source = script_path.read_text(encoding="utf-8")
-                name = script_path.name
-                title = _extract_script_title_from_source(source) or title
-        except Exception:
-            pass
+        title, name, source, _ = _load_script_source_info(rt.spec, info)
+        title = title or "No title"
         return JSONResponse({"title": title, "name": name, "source": source})
 
     @r.post("/api/{session_id}/script-source")
@@ -290,11 +312,12 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
             return JSONResponse({"error": f"failed to save script: {e}"}, status_code=500)
 
         info = rt.chart_info
-        title = _extract_script_title_from_source(source) or info.get("script_title") or "No title"
+        name = _script_source_display_name(rt.spec, script_path)
+        title = _extract_script_title_from_source(source) or info.get("script_title") or name or "No title"
         info["script_title"] = title
-        info["script_source_name"] = script_path.name
+        info["script_source_name"] = name
         info["script_source"] = source
-        return JSONResponse({"ok": True, "title": title, "name": script_path.name, "source": source})
+        return JSONResponse({"ok": True, "title": title, "name": name, "source": source})
 
     @r.get("/api/{session_id}/webhook-config")
     def get_webhook_config(session_id: str) -> JSONResponse:
