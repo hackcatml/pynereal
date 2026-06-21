@@ -67,20 +67,19 @@ App.ws = {
             state.lastPrice = msg.data.close;
           }
         } else if (msg.type === "last_bar_open_fix") {
+          if (!msg.data || msg.data.time == null || msg.data.open == null) {
+            return;
+          }
+
           state.lastOpenPrice.time = msg.data.time;
           state.lastOpenPrice.value = msg.data.open;
-
-          chart.candleSeries.update(msg.data);
-          chart.volumeSeries.update({
-            time: msg.data.time,
-            value: msg.data.volume,
-            color: msg.data.close >= msg.data.open ? "#26a69a" : "#ef5350"
-          });
-          state.lastBarTime = Math.max(state.lastBarTime, msg.data.time);
-          state.lastOhlcv = msg.data;
-          if (msg.data && msg.data.close !== undefined) {
-            state.lastPrice = msg.data.close;
+          // Only the opening price is corrected; keep live high/low/close/volume intact.
+          if (state.lastOhlcv && state.lastOhlcv.time === msg.data.time) {
+            const fixedBar = { ...state.lastOhlcv, open: msg.data.open };
+            chart.candleSeries.update(fixedBar);
+            state.lastOhlcv = fixedBar;
           }
+          state.lastBarTime = Math.max(state.lastBarTime, msg.data.time);
 
           const entryIndex = collections.entryMarkerData.findIndex(m => m.time === msg.data.time);
           if (entryIndex !== -1) {
