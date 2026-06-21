@@ -259,10 +259,6 @@ class Session:
                             "data": {
                                 "time": int(last_bar.timestamp),
                                 "open": float(last_bar.open),
-                                "high": float(last_bar.high),
-                                "low": float(last_bar.low),
-                                "close": float(last_bar.close),
-                                "volume": float(last_bar.volume),
                             },
                         }
                         await self.send_to_charts(payload)

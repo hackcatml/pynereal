@@ -393,6 +393,13 @@ def ohlcv_event_data(ohlcv: OHLCV) -> dict:
     }
 
 
+def ohlcv_open_fix_event_data(ohlcv: OHLCV) -> dict:
+    return {
+        "time": int(ohlcv.timestamp),
+        "open": float(ohlcv.open),
+    }
+
+
 def get_runner_candle(runner: ScriptRunner, index: int) -> OHLCV | None:
     candles = getattr(runner, "_all_ohlcv", None)
     if not candles or index < 0 or index >= len(candles):
@@ -743,7 +750,7 @@ async def main():
                     "last_bar_index": runner.last_bar_index,
                 }
                 if last_bar is not None:
-                    event["data"] = ohlcv_event_data(last_bar)
+                    event["data"] = ohlcv_open_fix_event_data(last_bar)
                 await ws.send(json.dumps(event))
             except Exception as e:
                 print(f"[runner] Failed to send bar confirmation: {e}")
