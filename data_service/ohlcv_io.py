@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, UTC
 import struct
+import time
 from typing import Optional
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -194,6 +195,8 @@ def fix_last_open_if_needed(
     symbol: str = "",
     timeframe: str = "",
 ) -> float:
+    retry_delays = (1.0, 2.0)
+    max_attempts = len(retry_delays) + 1
     fixed_candle_open_price = 0.0
     open_price, high_price, low_price, close_price, vol, prev_close_price = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     last_timestamp, interval = 0, 0
@@ -212,24 +215,50 @@ def fix_last_open_if_needed(
         reader.close()
 
     if exchange.upper() in ("OKX", "HYPERLIQUID"):
-        try:
-            res = fetch_ohlcv_data(
-                exchange=exchange,
-                symbol=symbol,
-                timeframe=timeframe,
-                since=(last_timestamp - interval) * 1000,
-                limit=3,
-            )
-        except Exception as e:
-            print(f"[fix_last_open_if_needed] Error fetching current open: {e}")
-            return fixed_candle_open_price
-
+        # OKX, HYPERLIQUID 의 경우 이전 봉 종가 != 현재 봉 시가 이므로 fetch 로 현재 봉 값을 가져와야 함.
+        # fetch 에서 에러가 발생할 경우 현재 봉 시가 fix 가 안되므로 retry 필요함 (현재 봉 시가는 현재 봉이 confirmed 되면 계산에 쓰이므로 fix 되어야 함)
         target_open_price = None
-        for bar in res or []:
-            if int(bar[0] / 1000) == last_timestamp:
-                # fetch 로 받은 bar open 데이터를 float32 타입으로 변경하여 저장
-                target_open_price = _ohlcv_float(bar[1])
+        for attempt in range(1, max_attempts + 1):
+            try:
+                res = fetch_ohlcv_data(
+                    exchange=exchange,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    since=(last_timestamp - interval) * 1000,
+                    limit=3,
+                )
+            except Exception as e:
+                if attempt >= max_attempts:
+                    print(
+                        f"[fix_last_open_if_needed] Error fetching current open: {e}; "
+                        f"failed after {attempt}/{max_attempts}"
+                    )
+                    return fixed_candle_open_price
+                delay = retry_delays[attempt - 1]
+                print(
+                    f"[fix_last_open_if_needed] Error fetching current open: {e}; "
+                    f"retrying in {delay:g}s ({attempt}/{max_attempts})"
+                )
+                time.sleep(delay)
+                continue
+
+            for bar in res or []:
+                if int(bar[0] / 1000) == last_timestamp:
+                    # fetch 로 받은 bar open 데이터를 float32 타입으로 변경하여 저장
+                    target_open_price = _ohlcv_float(bar[1])
+                    break
+            if target_open_price is not None:
                 break
+
+            if attempt >= max_attempts:
+                return fixed_candle_open_price
+            delay = retry_delays[attempt - 1]
+            print(
+                "[fix_last_open_if_needed] current open not found in fetched OHLCV; "
+                f"retrying in {delay:g}s ({attempt}/{max_attempts})"
+            )
+            time.sleep(delay)
+
         if target_open_price is None:
             return fixed_candle_open_price
     else:
