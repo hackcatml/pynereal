@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from typing import Callable, Optional, Awaitable
 
 import ccxt.pro as ccxt
 
 from state import DataState
 from ohlcv_io import convert_timeframe, make_ccxt_pro_client
+from exchange_clock import release_exchange_clock, retain_exchange_clock
 
 
 async def _safe_close(ex) -> None:
@@ -81,35 +81,15 @@ async def fix_missing_bars_loop(
 ) -> None:
     tf_ms = convert_timeframe(timeframe, to_ms=True)
     grace_ms = 0.2 * 1000
-    ex = make_ccxt_pro_client(ccxt, exchange_name)
-
-    # Exchange time is sampled every time_sync_interval_sec and applied as an
-    # offset to the local clock. Polling fetch_time() on every tick exceeds the
-    # exchange rate limit (OKX public time endpoint: 10 req per 2s per IP).
-    time_offset_ms = 0.0
-    next_sync = 0.0  # monotonic deadline for the next fetch_time sync
+    clock = retain_exchange_clock(exchange_name, time_sync_interval_sec)
 
     try:
         while True:
             await asyncio.sleep(check_interval_sec)
 
-            mono = time.monotonic()
-            if mono >= next_sync:
-                try:
-                    server_ms = await ex.fetch_time()
-                    time_offset_ms = server_ms - time.time() * 1000
-                    next_sync = mono + time_sync_interval_sec
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    print(f"[fix_missing_bars_loop] fetch_time error: {type(e).__name__}: {e}; reconnecting")
-                    await _safe_close(ex)
-                    ex = make_ccxt_pro_client(ccxt, exchange_name)
-                    next_sync = mono + 5.0
-
-            # Until the first successful sync this equals plain local time
-            # (offset 0), same as the previous fallback behavior.
-            now_ms = time.time() * 1000 + time_offset_ms
+            # Shared per exchange, so many feeds do not stampede the public
+            # time endpoint with synchronized fetch_time requests.
+            now_ms = await clock.now_ms()
 
             missing_ts: Optional[int] = None
 
@@ -134,6 +114,7 @@ async def fix_missing_bars_loop(
                 # OKX policy will hide it; BITGET/Hyperliquid policy will still treat it as a visible bar.
                 fake = [missing_ts, prev_close, prev_close, prev_close, prev_close, 0.0]
                 bars.append(fake)
+                # print(f"[fix_missing_bars_loop] {exchange_name} bar: {fake}")
                 state.last_fix_bar_ts = missing_ts
     finally:
-        await _safe_close(ex)
+        await release_exchange_clock(exchange_name)
