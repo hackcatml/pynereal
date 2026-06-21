@@ -330,7 +330,8 @@ async def file_update_loop(
                         ]
                         upsert_bars(cache_path, provider, exchange, symbol, timeframe, cache_rows)
                     # Current candle open price fix if needed
-                    fixed_open_price = fix_last_open_if_needed(
+                    fixed_open_price = await asyncio.to_thread(
+                        fix_last_open_if_needed,
                         str(ohlcv_path),
                         exchange=exchange,
                         symbol=symbol,
