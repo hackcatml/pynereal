@@ -7,6 +7,8 @@ from ..lib import syminfo
 # Standard formats for non-ISO dates
 # %b = abbreviated month (Jan, Feb), %B = full month (January, February)
 STANDARD_FORMATS = [
+    "%Y-%m-%d %H:%M:%S %z",  # "2026-06-23 00:00:00 +0900"
+    "%Y-%m-%d %H:%M %z",  # "2026-06-23 00:00 +0900"
     "%d %b %Y %H:%M:%S %z",  # "20 Feb 2020 15:30:00 +0200"
     "%d %b %Y %H:%M %z",  # "01 Jan 2018 00:00 +0000"
     "%d %B %Y %H:%M:%S %z",  # "20 February 2020 15:30:00 +0200"
@@ -16,6 +18,8 @@ STANDARD_FORMATS = [
 # Pine Script specific formats (without timezone)
 # %b = abbreviated month (Jan, Feb), %B = full month (January, February)
 PINE_FORMATS = [
+    "%Y-%m-%d %H:%M:%S",  # "2026-06-23 00:00:00"
+    "%Y-%m-%d %H:%M",  # "2026-06-23 00:00"
     "%b %d %Y %H:%M:%S",  # "Feb 01 2020 22:10:05"
     "%d %b %Y %H:%M:%S",  # "04 Dec 1995 00:12:00"
     "%d %b %Y %H:%M",  # "01 Jan 2018 00:00"
