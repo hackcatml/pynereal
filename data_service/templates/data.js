@@ -350,7 +350,7 @@ App.data = {
           if (state.configuredTimeframeSec) {
             state.timeframeInterval = state.configuredTimeframeSec;
           } else if (data.length >= 2) {
-            // Fallback only: on OKX zero-volume bars are hidden, so the gap
+            // Fallback only: on OKX/Binance zero-volume bars are hidden, so the gap
             // between the first two visible bars may not be the timeframe.
             state.timeframeInterval = data[1].time - data[0].time;
           }

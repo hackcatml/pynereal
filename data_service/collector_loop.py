@@ -111,7 +111,7 @@ async def fix_missing_bars_loop(
 
                 prev_close = bars[-1][4]
                 # No trades occurred in this interval. Store the placeholder as true 0-volume.
-                # OKX policy will hide it; BITGET/Hyperliquid policy will still treat it as a visible bar.
+                # OKX/Binance policy will hide it; BITGET/Hyperliquid still treat it as visible.
                 fake = [missing_ts, prev_close, prev_close, prev_close, prev_close, 0.0]
                 bars.append(fake)
                 # print(f"[fix_missing_bars_loop] {exchange_name} bar: {fake}")

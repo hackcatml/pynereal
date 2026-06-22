@@ -9,6 +9,7 @@ from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
 
 from pynecore.cli.app import app_state
+from pynecore.core.exchange_policy import tradingview_hides_zero_volume
 from pynecore.core.ohlcv_file import OHLCVReader
 from pynecore.core.csv_file import CSVReader
 
@@ -239,8 +240,8 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
         if not ohlcv_path.exists():
             return JSONResponse([])
 
-        # OKX hides zero-volume bars like TradingView; BITGET/Hyperliquid keep them.
-        skip_zero_volume = rt.spec.exchange.upper() == "OKX"
+        # Match TradingView: OKX/Binance hide zero-volume bars; BITGET/Hyperliquid keep them.
+        skip_zero_volume = tradingview_hides_zero_volume(rt.spec.exchange)
         out: List[Dict[str, Any]] = []
         with OHLCVReader(ohlcv_path) as reader:
             if reader.start_timestamp is None:
