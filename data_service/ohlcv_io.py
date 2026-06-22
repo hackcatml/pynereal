@@ -8,6 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from dateutil.relativedelta import relativedelta
+from pynecore.core.exchange_policy import fetch_current_open_from_exchange
 from pynecore.core.ohlcv_file import OHLCVReader, OHLCVWriter
 from pynecore.types.ohlcv import OHLCV
 from ohlcv_cache import import_from_ohlcv
@@ -214,8 +215,8 @@ def fix_last_open_if_needed(
         prev_close_price = prev.close
         reader.close()
 
-    if exchange.upper() in ("OKX", "HYPERLIQUID"):
-        # OKX, HYPERLIQUID 의 경우 이전 봉 종가 != 현재 봉 시가 이므로 fetch 로 현재 봉 값을 가져와야 함.
+    if fetch_current_open_from_exchange(exchange):
+        # OKX, Binance, HYPERLIQUID 의 경우 이전 봉 종가 != 현재 봉 시가 이므로 fetch 로 현재 봉 값을 가져와야 함.
         # fetch 에서 에러가 발생할 경우 현재 봉 시가 fix 가 안되므로 retry 필요함 (현재 봉 시가는 현재 봉이 confirmed 되면 계산에 쓰이므로 fix 되어야 함)
         target_open_price = None
         for attempt in range(1, max_attempts + 1):

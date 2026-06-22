@@ -20,6 +20,7 @@ from ...utils.rich.date_column import DateColumn
 from pynecore.core.ohlcv_file import OHLCVReader
 from pynecore.core.data_converter import DataConverter, DataFormatError, ConversionError
 
+from pynecore.core.exchange_policy import tradingview_hides_zero_volume
 from pynecore.core.syminfo import SymInfo
 from pynecore.core.script_runner import ScriptRunner
 from pynecore.pynesys.compiler import PyneComp
@@ -294,8 +295,8 @@ def run(
         total_seconds = int((time_to - time_from).total_seconds())
 
         # Use the same exchange-specific hidden-bar policy as realtime runner.
-        # OKX zero-volume bars are hidden; BITGET/Hyperliquid zero-volume bars are visible.
-        skip_zero_volume = syminfo.prefix.upper() == "OKX"
+        # OKX/Binance zero-volume bars are hidden; BITGET/Hyperliquid bars remain visible.
+        skip_zero_volume = tradingview_hides_zero_volume(syminfo.prefix)
         preload_list = list(reader.read_from(time_from_ts, time_to_ts, skip_zero_volume=skip_zero_volume))
         size = len(preload_list)
         if size == 0:

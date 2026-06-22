@@ -20,6 +20,7 @@ import websockets
 from appendable_iter import AppendableIterable
 from pynecore.cli.app import app_state
 from pynecore.core.ohlcv_file import OHLCVReader
+from pynecore.core.exchange_policy import tradingview_hides_zero_volume
 from pynecore.core.script_runner import ScriptRunner
 from pynecore.core.syminfo import SymInfo
 from pynecore.types.ohlcv import OHLCV
@@ -267,9 +268,9 @@ def on_alert_event(message: str, runner: ScriptRunner):
 
 def hide_zero_volume_bars(exchange: str | None) -> bool:
     # TradingView policy differs by exchange:
-    # - OKX: zero-volume candles are hidden and excluded from calculations.
+    # - OKX/Binance: zero-volume candles are hidden and excluded from calculations.
     # - BITGET/Hyperliquid: zero-volume candles remain visible and are included.
-    return (exchange or "").upper() == "OKX"
+    return tradingview_hides_zero_volume(exchange)
 
 
 def is_visible_ohlcv(ohlcv: OHLCV, *, hide_zero_volume: bool) -> bool:
@@ -702,8 +703,8 @@ async def main():
             last_visible_bar = get_runner_candle(runner, runner.last_bar_index)
             # In normal realtime pre-run, the file may already contain the open current bar.
             # If that bar is visible, keep it in the stream for the next run_ready and
-            # pre-run only up to the last confirmed bar. If the raw last bar is hidden
-            # (OKX zero-volume), the visible list already ends at a confirmed bar.
+            # pre-run only up to the last confirmed bar. If the raw last bar is a
+            # hidden zero-volume candle, the visible list already ends at a confirmed bar.
             has_unconfirmed_visible_bar = (
                 last_visible_bar is not None
                 and reader.end_timestamp is not None
@@ -833,7 +834,7 @@ async def main():
             confirmed_visible = is_visible_ohlcv(confirmed_ohlcv, hide_zero_volume=hide_zero_volume)
             new_visible = is_visible_ohlcv(new_ohlcv, hide_zero_volume=hide_zero_volume)
 
-            # OKX fake/no-trade bars can stay in the raw file with volume 0, but they must not
+            # Hidden fake/no-trade bars can stay in the raw file with volume 0, but they must not
             # enter the runner stream. BITGET/Hyperliquid leave hide_zero_volume=False, so their
             # 0-volume bars still take this visible path.
             confirmed_appended = False
@@ -901,7 +902,7 @@ async def main():
                     if step_res is None:
                         break
 
-                # OKX hidden-bar fix:
+                # Hidden-bar fix:
                 # 새로 열린 봉이 volume 0 hidden bar 면 new_ohlcv 가 stream 에 append 되지
                 # 않아(line 619-620) confirmed bar 의 main() 에서 접수된 주문을 체결할
                 # process_orders() 패스가 없어 webhook alert 이 나가지 않는다. fake bar 의
