@@ -62,6 +62,9 @@ App.chart = {
       height: size.height,
       layout: { background: { color: "#ffffff" }, textColor: "#000000" },
       // grid: { vertLines: { color: "#2b2b43" }, horzLines: { color: "#2b2b43" } },
+      rightPriceScale: {
+        minimumWidth: 76
+      },
       timeScale: {
         timeVisible: true,
         secondsVisible: true,
@@ -95,6 +98,8 @@ App.chart = {
       {
         color: "#90caf9",
         priceFormat: { type: "volume" },
+        lastValueVisible: true,
+        priceLineVisible: true,
         priceScaleId: ""
       }
     );
