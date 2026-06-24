@@ -226,9 +226,27 @@ class CCXTProvider(Provider):
 
             exchange_class = SafeOKX
 
-        self._client: ccxt.Exchange = exchange_class({
+        client_config = {
             'enableRateLimit': True,
             'adjustForTimeDifference': True,
+        }
+        if exchange_name == 'binance':
+            client_config['options'] = {'defaultType': 'swap'}
+
+        exchange_options = exchange_config.get('options')
+        if isinstance(exchange_options, dict):
+            client_config['options'] = {
+                **client_config.get('options', {}),
+                **exchange_options,
+            }
+            exchange_config = {
+                key: value
+                for key, value in exchange_config.items()
+                if key != 'options'
+            }
+
+        self._client: ccxt.Exchange = exchange_class({
+            **client_config,
             **exchange_config
         })
 

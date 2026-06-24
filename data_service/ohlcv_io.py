@@ -142,14 +142,15 @@ def make_ccxt_client(ccxt_module, exchange: str):
     are created as-is.
     """
     exchange_class = getattr(ccxt_module, exchange)
+    config = _make_ccxt_config(exchange)
     if exchange.lower() != "okx":
-        return exchange_class(config={})
+        return exchange_class(config=config)
 
     class SafeOKX(exchange_class):
         def fetch_markets(self, params={}):
             return _filter_invalid_ccxt_markets(super().fetch_markets(params))
 
-    return SafeOKX(config={})
+    return SafeOKX(config=config)
 
 
 def make_ccxt_pro_client(ccxt_module, exchange: str):
@@ -161,15 +162,22 @@ def make_ccxt_pro_client(ccxt_module, exchange: str):
     coroutine to sync callers.
     """
     exchange_class = getattr(ccxt_module, exchange)
+    config = _make_ccxt_config(exchange)
     if exchange.lower() != "okx":
-        return exchange_class(config={})
+        return exchange_class(config=config)
 
     class SafeOKXPro(exchange_class):
         async def fetch_markets(self, params={}):
             markets = await super().fetch_markets(params)
             return _filter_invalid_ccxt_markets(markets)
 
-    return SafeOKXPro(config={})
+    return SafeOKXPro(config=config)
+
+
+def _make_ccxt_config(exchange: str) -> dict:
+    if exchange.lower() == "binance":
+        return {"options": {"defaultType": "swap"}}
+    return {}
 
 
 def fetch_ohlcv_data(
