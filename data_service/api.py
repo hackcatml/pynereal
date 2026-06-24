@@ -158,6 +158,23 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
     def _rt(session_id: str) -> Optional[Session]:
         return registry.get(session_id)
 
+    def _normalize_limit(limit: int) -> int:
+        try:
+            limit = int(limit)
+        except Exception:
+            limit = 2000
+        return max(1, limit)
+
+    def _slice_by_time_window(items: list, limit: int, before: Optional[int], after: Optional[int]) -> list:
+        limit = _normalize_limit(limit)
+        if before is not None:
+            before_ts = int(before)
+            return [item for item in items if int(item.timestamp) < before_ts][-limit:]
+        if after is not None:
+            after_ts = int(after)
+            return [item for item in items if int(item.timestamp) > after_ts][:limit]
+        return items[-limit:]
+
     @r.get("/api/{session_id}/trades")
     def get_trades(session_id: str) -> JSONResponse:
         rt = _rt(session_id)
@@ -173,7 +190,12 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
         return JSONResponse(rt.plotchar_history)
 
     @r.get("/api/{session_id}/plot")
-    def get_plot(session_id: str, limit: int = 2000) -> JSONResponse:
+    def get_plot(
+        session_id: str,
+        limit: int = 2000,
+        before: Optional[int] = None,
+        after: Optional[int] = None,
+    ) -> JSONResponse:
         rt = _rt(session_id)
         if rt is None:
             return JSONResponse([], status_code=404)
@@ -207,8 +229,7 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
                     if current_open_ts is not None and int(candle.timestamp) >= current_open_ts:
                         continue
                     candles.append(candle)
-                start_idx = max(0, len(candles) - limit)
-                candles = candles[start_idx:]
+                candles = _slice_by_time_window(candles, limit, before, after)
 
                 for title, options in plot_options.items():
                     series_data = []
@@ -232,7 +253,12 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
         return JSONResponse(result)
 
     @r.get("/api/{session_id}/ohlcv")
-    def get_ohlcv(session_id: str, limit: int = 2000) -> JSONResponse:
+    def get_ohlcv(
+        session_id: str,
+        limit: int = 2000,
+        before: Optional[int] = None,
+        after: Optional[int] = None,
+    ) -> JSONResponse:
         rt = _rt(session_id)
         if rt is None:
             return JSONResponse([], status_code=404)
@@ -253,7 +279,8 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
                     skip_zero_volume=skip_zero_volume,
                 )
             )
-            for c in candles[-limit:]:
+            candles = _slice_by_time_window(candles, limit, before, after)
+            for c in candles:
                 out.append({
                     "time": int(c.timestamp),
                     "open": float(c.open),

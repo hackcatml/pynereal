@@ -60,8 +60,9 @@ App.ws = {
             value: msg.data.volume,
             color: msg.data.close >= msg.data.open ? "#26a69a" : "#ef5350"
           });
+          const mergedBar = App.data.mergeLiveOhlcv(msg.data);
           state.lastBarTime = msg.data.time;
-          state.lastOhlcv = msg.data;
+          state.lastOhlcv = mergedBar || msg.data;
 
           if (msg.data && msg.data.close !== undefined) {
             state.lastPrice = msg.data.close;
@@ -74,10 +75,10 @@ App.ws = {
           state.lastOpenPrice.time = msg.data.time;
           state.lastOpenPrice.value = msg.data.open;
           // Only the opening price is corrected; keep live high/low/close/volume intact.
-          if (state.lastOhlcv && state.lastOhlcv.time === msg.data.time) {
-            const fixedBar = { ...state.lastOhlcv, open: msg.data.open };
+          const fixedBar = App.data.applyLastBarOpenFix(msg.data);
+          if (fixedBar) {
             chart.candleSeries.update(fixedBar);
-            state.lastOhlcv = fixedBar;
+            chart.volumeSeries.update(App.data.toVolumePoint(fixedBar));
           }
           state.lastBarTime = Math.max(state.lastBarTime, msg.data.time);
 
@@ -87,7 +88,7 @@ App.ws = {
             if (priceDiff > 0.01) {
               console.log(`Fix entry marker: ${collections.entryMarkerData[entryIndex].value} --> ${msg.data.open}`);
               collections.entryMarkerData[entryIndex].value = msg.data.open;
-              chart.entryMarkerSeries.setData(collections.entryMarkerData);
+              App.data.setMarkerLineData(chart.entryMarkerSeries, collections.entryMarkerData);
             }
           }
 
@@ -97,7 +98,7 @@ App.ws = {
             if (priceDiff > 0.01) {
               console.log(`Fix close marker: ${collections.closeMarkerData[closeIndex].value} --> ${msg.data.open}`);
               collections.closeMarkerData[closeIndex].value = msg.data.open;
-              chart.closeMarkerSeries.setData(collections.closeMarkerData);
+              App.data.setMarkerLineData(chart.closeMarkerSeries, collections.closeMarkerData);
             }
           }
         } else if (msg.type === "trade_entry") {
@@ -128,14 +129,15 @@ App.ws = {
               collections.entryMarkerData = collections.entryMarkerData.filter(m =>
                 Number.isFinite(Number(m.time)) && Number.isFinite(Number(m.value))
               );
-              chart.entryMarkerSeries.setData(collections.entryMarkerData);
+              App.data.setMarkerLineData(chart.entryMarkerSeries, collections.entryMarkerData);
             }
           }
 
           if (collections.seriesMarkers) {
-            collections.seriesMarkers.setMarkers([]);
+            collections.seriesMarkers.setMarkers(collections.markers);
+          } else {
+            collections.seriesMarkers = LightweightCharts.createSeriesMarkers(chart.candleSeries, collections.markers);
           }
-          collections.seriesMarkers = LightweightCharts.createSeriesMarkers(chart.candleSeries, collections.markers);
         } else if (msg.type === "trade_close") {
           if (state.firstBarTime !== null && msg.time < state.firstBarTime) {
             return;
@@ -164,14 +166,15 @@ App.ws = {
               collections.closeMarkerData = collections.closeMarkerData.filter(m =>
                 Number.isFinite(Number(m.time)) && Number.isFinite(Number(m.value))
               );
-              chart.closeMarkerSeries.setData(collections.closeMarkerData);
+              App.data.setMarkerLineData(chart.closeMarkerSeries, collections.closeMarkerData);
             }
           }
 
           if (collections.seriesMarkers) {
-            collections.seriesMarkers.setMarkers([]);
+            collections.seriesMarkers.setMarkers(collections.markers);
+          } else {
+            collections.seriesMarkers = LightweightCharts.createSeriesMarkers(chart.candleSeries, collections.markers);
           }
-          collections.seriesMarkers = LightweightCharts.createSeriesMarkers(chart.candleSeries, collections.markers);
         } else if (msg.type === "plotchar") {
           if (state.firstBarTime !== null && msg.time < state.firstBarTime) {
             return;
@@ -200,14 +203,16 @@ App.ws = {
           collections.plotcharMarkerKeys.add(markerKey);
 
           if (collections.plotcharSeriesMarkers) {
-            collections.plotcharSeriesMarkers.setMarkers([]);
+            collections.plotcharSeriesMarkers.setMarkers(collections.plotcharMarkers);
+          } else {
+            collections.plotcharSeriesMarkers = LightweightCharts.createSeriesMarkers(
+              chart.candleSeries,
+              collections.plotcharMarkers
+            );
           }
-          collections.plotcharSeriesMarkers = LightweightCharts.createSeriesMarkers(
-            chart.candleSeries,
-            collections.plotcharMarkers
-          );
         } else if (msg.type === "plot_data") {
           const { title, time, value } = msg;
+          App.data.mergeLivePlotPoint(title, time, value);
           App.data.updatePlotSeries(chart, collections, title, time, value);
         }
       } catch (e) {

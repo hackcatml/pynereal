@@ -167,6 +167,16 @@ App.chart = {
     const collections = App.collections;
     state.initialLoadDone = false;
     state.initialLoadInProgress = false;
+    state.loadingOlder = false;
+    state.loadingNewer = false;
+    state.historyStartReached = false;
+    state.historyEndReached = false;
+    state.oldestLoadedTime = null;
+    state.newestLoadedTime = null;
+    if (state.lazyLoadTimer) {
+      clearTimeout(state.lazyLoadTimer);
+      state.lazyLoadTimer = null;
+    }
     if (resetCandles) {
       this.candleSeries.setData([]);
       this.volumeSeries.setData([]);
@@ -184,6 +194,10 @@ App.chart = {
     }
     collections.plotSeriesList.length = 0;
     collections.plotSeriesMap.clear();
+    collections.plotMetaByTitle.clear();
+    collections.plotDataByTitle.clear();
+    collections.ohlcvData.length = 0;
+    collections.ohlcvByTime.clear();
     collections.markers.length = 0;
     collections.markerKeys.clear();
     collections.plotcharMarkers.length = 0;

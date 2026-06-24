@@ -19,6 +19,14 @@ window.App.state = {
   runnerConnected: false,
   initialLoadInProgress: false,
   initialLoadDone: false,
+  loadingOlder: false,
+  loadingNewer: false,
+  historyStartReached: false,
+  historyEndReached: false,
+  lazyLoadAttached: false,
+  lazyLoadTimer: null,
+  oldestLoadedTime: null,
+  newestLoadedTime: null,
   firstBarTime: null,
   timeframeInterval: 60,
   // Timeframe from /api/info (seconds). Source of truth for the countdown:
@@ -47,8 +55,12 @@ window.App.state = {
 };
 
 window.App.collections = {
+  ohlcvData: [],
+  ohlcvByTime: new Map(),
   plotSeriesMap: new Map(),
   plotSeriesList: [],
+  plotMetaByTitle: new Map(),
+  plotDataByTitle: new Map(),
   markers: [],
   markerKeys: new Set(),
   seriesMarkers: null,
