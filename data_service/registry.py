@@ -66,6 +66,16 @@ class SessionRegistry:
             out.append(snap)
         return out
 
+    def retry_missing_symbol_logos(self) -> None:
+        """Retry logo resolution when a dashboard reconnects after an earlier miss."""
+        for session in list(self.sessions.values()):
+            if (session.logo_info.get("symbol_logo_url") or "").strip():
+                continue
+            task = self.logo_tasks.get(session.spec.id)
+            if task is not None and not task.done():
+                continue
+            self._schedule_logo_resolution(session)
+
     def _schedule_logo_resolution(self, session: Session) -> None:
         task = self.logo_tasks.pop(session.spec.id, None)
         if task is not None:

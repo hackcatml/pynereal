@@ -30,6 +30,7 @@ def build_app(registry: SessionRegistry) -> FastAPI:
     @app.websocket("/ws/hub")
     async def hub_ws(ws: WebSocket):
         await registry.hub_ws.connect(ws)
+        registry.retry_missing_symbol_logos()
         await registry.hub_ws.send(ws, {"type": "sessions", "sessions": registry.snapshots()})
         try:
             while True:
