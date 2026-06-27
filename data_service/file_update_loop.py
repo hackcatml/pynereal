@@ -7,7 +7,7 @@ from dateutil.relativedelta import relativedelta
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
-from config import DataServiceConfig
+from config import FeedSpec
 from pynecore.cli.commands.data import parse_date_or_days
 from pynecore.core.ohlcv_file import OHLCVReader
 from pynecore.cli.app import app_state
@@ -34,9 +34,26 @@ from ohlcv_paths import make_cache_path
 from state import DataState
 
 
+async def _retry_ohlcv_update(label: str, call: Callable[[], list | None]) -> list | None:
+    delays = (1.0, 2.0)
+    attempts = len(delays) + 1
+    for attempt in range(1, attempts + 1):
+        res = await asyncio.to_thread(call)
+        if res:
+            if attempt > 1:
+                print(f"[data_service] {label} succeeded on retry {attempt}/{attempts}")
+            return res
+        if attempt < attempts:
+            delay = delays[attempt - 1]
+            print(f"[data_service] {label} failed; retrying in {delay:g}s ({attempt}/{attempts})")
+            await asyncio.sleep(delay)
+    print(f"[data_service] {label} failed after {attempts} attempts; continuing with local OHLCV")
+    return None
+
+
 async def file_update_loop(
     *,
-    config: DataServiceConfig,
+    config: FeedSpec,
     ohlcv_path: Path,
     toml_path: Path,
     state: DataState,
@@ -52,8 +69,7 @@ async def file_update_loop(
     # print(f"[data_service] sqlite cache path: {cache_path}")
 
     # Get history_since from the config
-    realtime_section: dict = config.realtime_section
-    history_since = realtime_section.get("history_since", "")
+    history_since = config.history_since
 
     start_timestamp: Optional[int] = None
     cache_ready = cache_has_data(cache_path, provider, exchange, symbol, timeframe)
@@ -277,7 +293,10 @@ async def file_update_loop(
 
                 # Fetch candles via fetch_ohlcv at the first pre_run after history download
                 if not first_fetch_after_download_done:
-                    res = fetch_and_update_ohlcv_data(exchange, symbol, timeframe, str(ohlcv_path))
+                    res = await _retry_ohlcv_update(
+                        "pre_run initial OHLCV refresh",
+                        lambda: fetch_and_update_ohlcv_data(exchange, symbol, timeframe, str(ohlcv_path)),
+                    )
                     if res:
                         # print(f"[data_service] pre_run fetch updated {len(res)} bars")
                         cache_rows = []
@@ -292,13 +311,17 @@ async def file_update_loop(
                     first_fetch_after_download_done = True
                 else:
                     # 현재 진행중인 봉 제외 N 개봉 fetch and update 하여 거래소 데이터와 싱크 맞춤
-                    res = fetch_and_update_recent_ohlcv_data(
-                        exchange,
-                        symbol,
-                        timeframe,
-                        str(ohlcv_path),
-                        current_bar_ts_ms=int(bars[1][0]),
-                        bar_count=10,
+                    current_bar_ts_ms = int(bars[1][0])
+                    res = await _retry_ohlcv_update(
+                        "pre_run recent OHLCV refresh",
+                        lambda: fetch_and_update_recent_ohlcv_data(
+                            exchange,
+                            symbol,
+                            timeframe,
+                            str(ohlcv_path),
+                            current_bar_ts_ms=current_bar_ts_ms,
+                            bar_count=10,
+                        ),
                     )
                     if res:
                         cache_rows = [
@@ -307,7 +330,8 @@ async def file_update_loop(
                         ]
                         upsert_bars(cache_path, provider, exchange, symbol, timeframe, cache_rows)
                     # Current candle open price fix if needed
-                    fixed_open_price = fix_last_open_if_needed(
+                    fixed_open_price = await asyncio.to_thread(
+                        fix_last_open_if_needed,
                         str(ohlcv_path),
                         exchange=exchange,
                         symbol=symbol,

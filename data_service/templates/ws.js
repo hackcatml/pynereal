@@ -7,10 +7,11 @@ App.ws = {
     const collections = App.collections;
 
     const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
-    state.ws = new WebSocket(`${wsProtocol}//${location.host}/ws`);
+    state.ws = new WebSocket(`${wsProtocol}//${location.host}${App.config.wsPath}`);
 
     state.ws.onopen = () => {
       console.log("ws connected");
+      state.ws.send(JSON.stringify({ type: "client_hello", role: "chart" }));
       App.data.loadInitialWithRetry();
     };
 
@@ -18,13 +19,15 @@ App.ws = {
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === "script_modified") {
+          state.sourceSaveStatus = "";
+          if (state.sourcePanelOpen) {
+            App.ui.updateSourceSaveState();
+          }
           chart.resetChartState(false);
           App.data.loadInitialWithRetry();
         } else if (msg.type === "runner_disconnected") {
           state.runnerConnected = false;
           chart.resetChartState(false);
-          state.scriptTitle = "No title";
-          state.scriptTitleVisible = false;
           App.ui.setChartInfo();
         } else if (msg.type === "runner_connected") {
           state.runnerConnected = true;
@@ -32,6 +35,14 @@ App.ws = {
         } else if (msg.type === "script_info") {
           state.scriptTitle = msg.title || "No title";
           state.scriptTitleVisible = true;
+          state.scriptSourceName = msg.source_name || state.scriptSourceName || "";
+          if (msg.source != null) {
+            state.scriptSource = msg.source || "";
+            state.scriptSourceLoaded = true;
+          }
+          if (state.sourcePanelOpen) {
+            App.ui.renderSourcePanel();
+          }
           App.ui.setChartInfo();
         } else if (msg.type === "bar") {
           if (msg.data.time < state.lastBarTime) {
@@ -56,20 +67,19 @@ App.ws = {
             state.lastPrice = msg.data.close;
           }
         } else if (msg.type === "last_bar_open_fix") {
+          if (!msg.data || msg.data.time == null || msg.data.open == null) {
+            return;
+          }
+
           state.lastOpenPrice.time = msg.data.time;
           state.lastOpenPrice.value = msg.data.open;
-
-          chart.candleSeries.update(msg.data);
-          chart.volumeSeries.update({
-            time: msg.data.time,
-            value: msg.data.volume,
-            color: msg.data.close >= msg.data.open ? "#26a69a" : "#ef5350"
-          });
-          state.lastBarTime = Math.max(state.lastBarTime, msg.data.time);
-          state.lastOhlcv = msg.data;
-          if (msg.data && msg.data.close !== undefined) {
-            state.lastPrice = msg.data.close;
+          // Only the opening price is corrected; keep live high/low/close/volume intact.
+          if (state.lastOhlcv && state.lastOhlcv.time === msg.data.time) {
+            const fixedBar = { ...state.lastOhlcv, open: msg.data.open };
+            chart.candleSeries.update(fixedBar);
+            state.lastOhlcv = fixedBar;
           }
+          state.lastBarTime = Math.max(state.lastBarTime, msg.data.time);
 
           const entryIndex = collections.entryMarkerData.findIndex(m => m.time === msg.data.time);
           if (entryIndex !== -1) {
@@ -198,13 +208,7 @@ App.ws = {
           );
         } else if (msg.type === "plot_data") {
           const { title, time, value } = msg;
-          const series = collections.plotSeriesMap.get(title);
-          if (series) {
-            const linePoint = App.data.toLinePoint(time, value);
-            if (linePoint) {
-              series.update(linePoint);
-            }
-          }
+          App.data.updatePlotSeries(chart, collections, title, time, value);
         }
       } catch (e) {
         console.error("ws parse error", e);

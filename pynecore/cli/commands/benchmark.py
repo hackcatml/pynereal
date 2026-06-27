@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
 from ..app import app, app_state
+from ...core.exchange_policy import tradingview_hides_zero_volume
 from ...core.ohlcv_file import OHLCVReader
 from ...core.syminfo import SymInfo
 from ...core.script_runner import ScriptRunner
@@ -116,7 +117,7 @@ def benchmark(
                 # Get only the requested number of candles
                 ohlcv_list = []
                 # Match realtime/CLI run behavior for exchange-specific hidden bars.
-                skip_zero_volume = syminfo.prefix.upper() == "OKX"
+                skip_zero_volume = tradingview_hides_zero_volume(syminfo.prefix)
                 # Use read_from to get all data from the beginning
                 for idx, ohlcv in enumerate(
                     reader.read_from(reader.start_timestamp, reader.end_timestamp, skip_zero_volume=skip_zero_volume)

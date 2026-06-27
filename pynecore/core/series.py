@@ -193,12 +193,11 @@ class SeriesImpl(Generic[T]):
             if key < 0:
                 raise IndexError("Negative indices not supported!")
             if key >= self._size:
-                return cast(NA[T], NA())
+                return NA()  # type: ignore[return-value]
             pos = self._write_pos - 1 - key
             if pos < 0:
                 pos += self._capacity
-            result = self._buffer[pos]
-            return cast(T | NA[T], result)
+            return self._buffer[pos]  # type: ignore[return-value]
 
         elif isinstance(key, slice):
             # Handle slice notation

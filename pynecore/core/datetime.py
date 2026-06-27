@@ -7,6 +7,8 @@ from ..lib import syminfo
 # Standard formats for non-ISO dates
 # %b = abbreviated month (Jan, Feb), %B = full month (January, February)
 STANDARD_FORMATS = [
+    "%Y-%m-%d %H:%M:%S %z",  # "2026-06-23 00:00:00 +0900"
+    "%Y-%m-%d %H:%M %z",  # "2026-06-23 00:00 +0900"
     "%d %b %Y %H:%M:%S %z",  # "20 Feb 2020 15:30:00 +0200"
     "%d %b %Y %H:%M %z",  # "01 Jan 2018 00:00 +0000"
     "%d %B %Y %H:%M:%S %z",  # "20 February 2020 15:30:00 +0200"
@@ -16,6 +18,8 @@ STANDARD_FORMATS = [
 # Pine Script specific formats (without timezone)
 # %b = abbreviated month (Jan, Feb), %B = full month (January, February)
 PINE_FORMATS = [
+    "%Y-%m-%d %H:%M:%S",  # "2026-06-23 00:00:00"
+    "%Y-%m-%d %H:%M",  # "2026-06-23 00:00"
     "%b %d %Y %H:%M:%S",  # "Feb 01 2020 22:10:05"
     "%d %b %Y %H:%M:%S",  # "04 Dec 1995 00:12:00"
     "%d %b %Y %H:%M",  # "01 Jan 2018 00:00"
@@ -98,6 +102,12 @@ def parse_timezone(timezone: str | None) -> ZoneInfo:
     return ZoneInfo(zone)
 
 
+# Result cache for parse_datestring. The parse depends on syminfo.timezone
+# (via parse_timezone(None) for strings without an explicit timezone), so the
+# timezone must be part of the key.
+_datestring_cache: dict[tuple[str, str], datetime] = {}
+
+
 def parse_datestring(datestring: str) -> datetime:
     """
     Parse date string using multiple formats.
@@ -111,7 +121,20 @@ def parse_datestring(datestring: str) -> datetime:
     """
     datestring = datestring.strip()
     if not datestring:
+        # Depends on the current time, not cacheable
         return datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    cache_key = (datestring, str(syminfo.timezone))
+    try:
+        return _datestring_cache[cache_key]
+    except KeyError:
+        pass
+    result = _parse_datestring_impl(datestring)
+    _datestring_cache[cache_key] = result
+    return result
+
+
+def _parse_datestring_impl(datestring: str) -> datetime:
 
     # Try parsing ISO 8601 style dates WITH TIME first (handles both T and space separator)
     iso_match = re.match(

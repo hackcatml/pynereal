@@ -8,11 +8,193 @@ App.chart = {
   entryMarkerSeries: null,
   closeMarkerSeries: null,
   currentPriceLine: null,
+  manualAlertPriceLine: null,
+  resizeObserver: null,
+  touchGuardsAttached: false,
+  manualAlertLastTap: null,
+  isMobileViewport() {
+    return window.matchMedia("(max-width: 640px), (hover: none) and (pointer: coarse)").matches;
+  },
+  isPageZoomed() {
+    return Boolean(window.visualViewport && window.visualViewport.scale && window.visualViewport.scale > 1.01);
+  },
+  isChartGestureTarget(target) {
+    if (!(target instanceof Element)) return false;
+    if (target.closest("#source-panel")) return false;
+    return Boolean(target.closest("#chart, #chart-info, .nav-btn"));
+  },
+  candleTextColor(bar) {
+    if (!bar) return "#d32f2f";
+    return Number(bar.close) >= Number(bar.open) ? "#26a69a" : "#ef5350";
+  },
+  formatCandleChangePercent(bar) {
+    if (!bar) return "";
+    const open = Number(bar.open);
+    const close = Number(bar.close);
+    if (!Number.isFinite(open) || !Number.isFinite(close) || open === 0) return "";
+    const pct = ((close - open) / open) * 100;
+    if (!Number.isFinite(pct)) return "";
+    const sign = pct >= 0 ? "+" : "";
+    return ` (${sign}${pct.toFixed(2)}%)`;
+  },
+  formatOhlcvText(bar, volumeValue = null) {
+    if (!bar) return "";
+    const color = this.candleTextColor(bar);
+    const volume = volumeValue == null ? bar.volume : volumeValue;
+    const changeText = this.formatCandleChangePercent(bar);
+    const value = (label, number) =>
+      `${label} <span style="color:${color}">${App.ui.formatNumber(number, 2)}</span>`;
+    return value("O", bar.open) +
+      ` ${value("H", bar.high)}` +
+      ` ${value("L", bar.low)}` +
+      ` ${value("C", bar.close)}` +
+      ` Vol <span style="color:${color}">${App.ui.formatNumber(volume, 2)}${changeText}</span>`;
+  },
+  setMagnetMode(enabled) {
+    if (!this.chart) return;
+    this.chart.applyOptions({
+      crosshair: {
+        mode: enabled ? LightweightCharts.CrosshairMode.Magnet : LightweightCharts.CrosshairMode.Normal
+      }
+    });
+  },
+  restoreMagnetMode() {
+    this.setMagnetMode(true);
+  },
+  removeManualAlertPriceGuide() {
+    if (this.manualAlertPriceLine && this.candleSeries && this.candleSeries.removePriceLine) {
+      this.candleSeries.removePriceLine(this.manualAlertPriceLine);
+    }
+    this.manualAlertPriceLine = null;
+  },
+  updateManualAlertPriceGuide(price) {
+    if (!this.candleSeries || !Number.isFinite(Number(price))) return;
+    const dottedLineStyle = (LightweightCharts.LineStyle && LightweightCharts.LineStyle.Dotted != null)
+      ? LightweightCharts.LineStyle.Dotted
+      : 1;
+    const options = {
+      price: Number(price),
+      color: "#111111",
+      lineWidth: 1,
+      lineStyle: dottedLineStyle,
+      axisLabelVisible: true,
+      title: "Alert"
+    };
+    if (this.manualAlertPriceLine) {
+      this.manualAlertPriceLine.applyOptions(options);
+    } else {
+      this.manualAlertPriceLine = this.candleSeries.createPriceLine(options);
+    }
+  },
+  priceFromClientY(clientY) {
+    if (!this.candleSeries || !this.container) return null;
+    const rect = this.container.getBoundingClientRect();
+    const price = this.candleSeries.coordinateToPrice(clientY - rect.top);
+    return Number.isFinite(Number(price)) ? Number(price) : null;
+  },
+  normalizeAlertTime(time) {
+    if (typeof time === "number") return time;
+    if (time && typeof time.timestamp === "number") return time.timestamp;
+    return App.state.lastBarTime || null;
+  },
+  manualAlertContextFromPointer(pointer) {
+    if (!pointer || !this.chart || !this.candleSeries) return null;
+    const rect = this.container.getBoundingClientRect();
+    const x = pointer.clientX - rect.left;
+    const y = pointer.clientY - rect.top;
+    const price = this.candleSeries.coordinateToPrice(y);
+    if (!Number.isFinite(Number(price))) return null;
+    const time = this.chart.timeScale().coordinateToTime(x);
+    return {
+      clientX: pointer.clientX,
+      clientY: pointer.clientY,
+      price: Number(price),
+      time: this.normalizeAlertTime(time)
+    };
+  },
+  openManualAlertMenuFromPointer(pointer) {
+    if (App.state.sourcePanelOpen) return;
+    if (!App.ui.elements.alertTemplateModal.classList.contains("hidden")) return;
+    const context = this.manualAlertContextFromPointer(pointer);
+    if (!context) return;
+    App.ui.showManualAlertMenu(context);
+    this.setMagnetMode(false);
+  },
+  attachManualAlertGesture() {
+    this.container.addEventListener("dblclick", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      App.ui.closeManualAlertMenu();
+      this.openManualAlertMenuFromPointer({ clientX: e.clientX, clientY: e.clientY });
+    }, { passive: false });
+
+    this.container.addEventListener("pointerup", (e) => {
+      if (e.pointerType === "mouse") return;
+      const now = performance.now();
+      const previous = this.manualAlertLastTap;
+      this.manualAlertLastTap = { time: now, clientX: e.clientX, clientY: e.clientY };
+      if (!previous) return;
+      const dt = now - previous.time;
+      const distance = Math.hypot(e.clientX - previous.clientX, e.clientY - previous.clientY);
+      if (dt > 360 || distance > 28) return;
+      e.preventDefault();
+      this.manualAlertLastTap = null;
+      App.ui.closeManualAlertMenu();
+      this.openManualAlertMenuFromPointer({ clientX: e.clientX, clientY: e.clientY });
+    }, { passive: false });
+  },
+  clearPersistedChartView() {
+    try {
+      sessionStorage.removeItem(App.config.storageKey("chartVisibleRange"));
+      sessionStorage.removeItem(App.config.storageKey("chartVisibleLogicalRange"));
+      sessionStorage.removeItem(App.config.storageKey("chartScaleOptions"));
+    } catch {}
+  },
+  getContainerSize() {
+    const rect = this.container.getBoundingClientRect();
+    return {
+      width: Math.max(1, Math.round(rect.width || this.container.clientWidth || window.innerWidth || 1)),
+      height: Math.max(1, Math.round(rect.height || this.container.clientHeight || window.innerHeight || 1))
+    };
+  },
+  resizeToContainer() {
+    if (!this.chart || !this.container) return;
+    const size = this.getContainerSize();
+    this.chart.applyOptions(size);
+    this.positionNavButtons();
+  },
+  applyInitialVisibleRange(dataLength) {
+    const ts = this.chart.timeScale();
+    if (!this.isMobileViewport() || dataLength <= 0) {
+      ts.fitContent();
+      return;
+    }
+    const width = Math.max(1, this.container.clientWidth || window.innerWidth || 1);
+    const visibleBars = Math.min(dataLength, Math.max(140, Math.round(width / 2)));
+    const rightPadding = Math.max(4, Math.round(visibleBars * 0.04));
+    ts.setVisibleLogicalRange({
+      from: Math.max(0, dataLength - visibleBars),
+      to: dataLength - 1 + rightPadding
+    });
+  },
   init() {
+    const size = this.getContainerSize();
     this.chart = LightweightCharts.createChart(this.container, {
+      width: size.width,
+      height: size.height,
       layout: { background: { color: "#ffffff" }, textColor: "#000000" },
       // grid: { vertLines: { color: "#2b2b43" }, horzLines: { color: "#2b2b43" } },
-      timeScale: { timeVisible: true, secondsVisible: true },
+      rightPriceScale: {
+        minimumWidth: 76
+      },
+      timeScale: {
+        timeVisible: true,
+        secondsVisible: true,
+        rightOffset: this.isMobileViewport() ? 4 : 10,
+        barSpacing: this.isMobileViewport() ? 5 : 6,
+        minBarSpacing: 0.5,
+        rightBarStaysOnScroll: true
+      },
       crosshair: {
         mode: LightweightCharts.CrosshairMode.Magnet
       }
@@ -38,11 +220,13 @@ App.chart = {
       {
         color: "#90caf9",
         priceFormat: { type: "volume" },
+        lastValueVisible: true,
+        priceLineVisible: true,
         priceScaleId: ""
       }
     );
     this.volumeSeries.priceScale().applyOptions({
-      scaleMargins: { top: 0.8, bottom: 0 }
+      scaleMargins: { top: 0.78, bottom: 0.02 }
     });
 
     this.entryMarkerSeries = this.chart.addSeries(
@@ -76,12 +260,7 @@ App.chart = {
           App.ui.setChartInfo();
           return;
         }
-        const ohlcvText = `O <span style="color:#d32f2f">${App.ui.formatNumber(state.lastOhlcv.open, 2)}</span>` +
-          ` H <span style="color:#d32f2f">${App.ui.formatNumber(state.lastOhlcv.high, 2)}</span>` +
-          ` L <span style="color:#d32f2f">${App.ui.formatNumber(state.lastOhlcv.low, 2)}</span>` +
-          ` C <span style="color:#d32f2f">${App.ui.formatNumber(state.lastOhlcv.close, 2)}</span>` +
-          ` Vol <span style="color:#d32f2f">${App.ui.formatNumber(state.lastOhlcv.volume, 2)}</span>`;
-        App.ui.setChartInfo(ohlcvText);
+        App.ui.setChartInfo(this.formatOhlcvText(state.lastOhlcv));
         return;
       }
       const bar = param.seriesData.get(this.candleSeries);
@@ -91,13 +270,10 @@ App.chart = {
         return;
       }
       const volumeValue = volBar ? volBar.value : (state.lastOhlcv ? state.lastOhlcv.volume : null);
-      const ohlcvText = `O <span style="color:#d32f2f">${App.ui.formatNumber(bar.open, 2)}</span>` +
-        ` H <span style="color:#d32f2f">${App.ui.formatNumber(bar.high, 2)}</span>` +
-        ` L <span style="color:#d32f2f">${App.ui.formatNumber(bar.low, 2)}</span>` +
-        ` C <span style="color:#d32f2f">${App.ui.formatNumber(bar.close, 2)}</span>` +
-        ` Vol <span style="color:#d32f2f">${App.ui.formatNumber(volumeValue, 2)}</span>`;
-      App.ui.setChartInfo(ohlcvText);
+      App.ui.setChartInfo(this.formatOhlcvText(bar, volumeValue));
     });
+    this.attachManualAlertGesture();
+    this.attachTouchGuards();
   },
   resetChartState(resetCandles = true) {
     const state = App.state;
@@ -140,6 +316,7 @@ App.chart = {
       this.candleSeries.removePriceLine(this.currentPriceLine);
     }
     this.currentPriceLine = null;
+    this.removeManualAlertPriceGuide();
   },
   updatePriceLineWithTimer() {
     const state = App.state;
@@ -204,7 +381,7 @@ App.chart = {
             if (avg >= 80) {
               let reloadCount = 0;
               try {
-                reloadCount = parseInt(sessionStorage.getItem("chartJankReloadCount") || "0", 10) || 0;
+                reloadCount = parseInt(sessionStorage.getItem(App.config.storageKey("chartJankReloadCount")) || "0", 10) || 0;
               } catch {}
               if (reloadCount >= MAX_JANK_RELOADS) {
                 // 무한 reload 루프 방지: 상한 도달 시 더 이상 reload 하지 않는다.
@@ -212,21 +389,25 @@ App.chart = {
               } else {
                 state.jankReloaded = true;
                 try {
-                  sessionStorage.setItem("chartJankReloadCount", String(reloadCount + 1));
-                  const range = this.chart.timeScale().getVisibleRange();
-                  if (range) {
-                    sessionStorage.setItem("chartVisibleRange", JSON.stringify(range));
+                  sessionStorage.setItem(App.config.storageKey("chartJankReloadCount"), String(reloadCount + 1));
+                  if (this.isPageZoomed()) {
+                    this.clearPersistedChartView();
+                  } else {
+                    const range = this.chart.timeScale().getVisibleRange();
+                    if (range) {
+                      sessionStorage.setItem(App.config.storageKey("chartVisibleRange"), JSON.stringify(range));
+                    }
+                    const logicalRange = this.chart.timeScale().getVisibleLogicalRange();
+                    if (logicalRange) {
+                      sessionStorage.setItem(App.config.storageKey("chartVisibleLogicalRange"), JSON.stringify(logicalRange));
+                    }
+                    const scaleOptions = this.chart.timeScale().options();
+                    sessionStorage.setItem(App.config.storageKey("chartScaleOptions"), JSON.stringify({
+                      rightOffset: scaleOptions.rightOffset,
+                      barSpacing: scaleOptions.barSpacing,
+                      rightBarStaysOnScroll: scaleOptions.rightBarStaysOnScroll
+                    }));
                   }
-                  const logicalRange = this.chart.timeScale().getVisibleLogicalRange();
-                  if (logicalRange) {
-                    sessionStorage.setItem("chartVisibleLogicalRange", JSON.stringify(logicalRange));
-                  }
-                  const scaleOptions = this.chart.timeScale().options();
-                  sessionStorage.setItem("chartScaleOptions", JSON.stringify({
-                    rightOffset: scaleOptions.rightOffset,
-                    barSpacing: scaleOptions.barSpacing,
-                    rightBarStaysOnScroll: scaleOptions.rightBarStaysOnScroll
-                  }));
                 } catch {}
                 location.reload();
                 return;
@@ -235,7 +416,7 @@ App.chart = {
               // 정상 상태(jank 없음)가 확인되면 reload 카운트를 리셋해
               // 이후 다시 과부하가 생겨도 복구 reload가 가능하도록 한다.
               try {
-                sessionStorage.removeItem("chartJankReloadCount");
+                sessionStorage.removeItem(App.config.storageKey("chartJankReloadCount"));
               } catch {}
             }
           }
@@ -247,12 +428,47 @@ App.chart = {
     requestAnimationFrame(monitorJank);
   },
   attachResizeHandler() {
-    window.addEventListener("resize", () => {
-      this.chart.applyOptions({
-        width: this.container.clientWidth,
-        height: this.container.clientHeight
+    let resizeFrame = null;
+    const scheduleResize = () => {
+      if (resizeFrame !== null) return;
+      resizeFrame = requestAnimationFrame(() => {
+        resizeFrame = null;
+        if (this.isPageZoomed()) return;
+        this.resizeToContainer();
       });
-    });
+    };
+
+    window.addEventListener("resize", scheduleResize);
+    window.addEventListener("orientationchange", scheduleResize);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", scheduleResize);
+      window.visualViewport.addEventListener("scroll", scheduleResize);
+    }
+    if (window.ResizeObserver) {
+      this.resizeObserver = new ResizeObserver(scheduleResize);
+      this.resizeObserver.observe(this.container);
+    }
+    scheduleResize();
+  },
+  attachTouchGuards() {
+    if (this.touchGuardsAttached) return;
+    this.touchGuardsAttached = true;
+
+    const preventBrowserPinch = (event) => {
+      if (!this.isChartGestureTarget(event.target)) return;
+      if (event.touches && event.touches.length < 2) return;
+      event.preventDefault();
+    };
+    const preventGestureEvent = (event) => {
+      if (!this.isChartGestureTarget(event.target)) return;
+      event.preventDefault();
+    };
+    const options = { passive: false, capture: true };
+
+    document.addEventListener("touchmove", preventBrowserPinch, options);
+    document.addEventListener("gesturestart", preventGestureEvent, options);
+    document.addEventListener("gesturechange", preventGestureEvent, options);
+    document.addEventListener("gestureend", preventGestureEvent, options);
   },
   goToStart() {
     const ts = this.chart.timeScale();
@@ -275,6 +491,7 @@ App.chart = {
     const startBtn = document.getElementById("nav-to-start");
     const endBtn = document.getElementById("nav-to-end");
     if (!startBtn || !endBtn) return;
+    if (this.isMobileViewport()) return;
     const container = this.container;
 
     // 우측 버튼(»): 가격 축 너비만큼 왼쪽으로 이동시켜 축과 겹치지 않게 한다.
@@ -301,6 +518,13 @@ App.chart = {
     const startBtn = document.getElementById("nav-to-start");
     const endBtn = document.getElementById("nav-to-end");
     if (!startBtn || !endBtn) return;
+    if (this.isMobileViewport()) {
+      startBtn.classList.add("visible");
+      endBtn.classList.add("visible");
+      startBtn.addEventListener("click", () => this.goToStart());
+      endBtn.addEventListener("click", () => this.goToEnd());
+      return;
+    }
     const container = this.container;
     const CORNER_W = 160;
     const CORNER_H = 110;

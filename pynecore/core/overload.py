@@ -1,3 +1,4 @@
+import builtins
 from typing import (TypeVar, Callable, get_type_hints, overload as typing_overload,
                     Any, Type, Union, get_args, get_origin, cast)
 from inspect import signature
@@ -15,17 +16,21 @@ __scope_id__ = ""
 
 
 class Implementation:
-    __slots__ = ('func', 'sig', 'type_hints', 'param_types')
+    __slots__ = ('func', 'sig', 'type_hints', 'param_types', 'min_args')
     func: Callable
     sig: Any  # Signature object
     type_hints: dict
     param_types: tuple  # Cached parameter types for quick checking
+    min_args: int  # Number of parameters without a default value
 
     def __init__(self, func: Callable, sig: Any, type_hints: dict, param_types: tuple):
         self.func = func
         self.sig = sig
         self.type_hints = type_hints
         self.param_types = param_types
+        self.min_args = builtins.sum(
+            1 for p in sig.parameters.values() if p.default is p.empty
+        )
 
 
 _registry: dict[str, list[Implementation]] = defaultdict(list)
@@ -122,9 +127,10 @@ def overload(func: Callable[..., T]) -> Callable[..., T]:
         # noinspection PyShadowingNames
         def dispatcher(*args: Any, **kwargs: Any) -> Any:
             # Quick path: try direct positional args match first
+            # (trailing parameters with defaults may be omitted)
             if not kwargs:
                 for impl in _registry[qualname]:
-                    if len(args) == len(impl.param_types):
+                    if impl.min_args <= len(args) <= len(impl.param_types):
                         if all(_check_type(arg, type_)
                                for arg, (_, type_) in zip(args, impl.param_types)):
                             return isolate_function(impl.func, '__overloaded__', __scope_id__)(*args)

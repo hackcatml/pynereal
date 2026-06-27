@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>OHLCV Chart (data_service)</title>
   <link rel="stylesheet" href="/static/styles.css" />
   <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.9/dist/lightweight-charts.standalone.production.js"></script>
@@ -16,9 +17,12 @@
       <span id="chart-info-title"></span>
       <div id="toolbar">
         <button id="alerts-toggle" class="toolbar-btn">Alert ▼</button>
+        <button id="source-toggle" class="toolbar-btn source-btn" title="Source code" aria-controls="source-panel" aria-expanded="false">&lt;/&gt;</button>
         <div id="alerts-menu" class="dropdown">
           <div class="dropdown-row">
-            <span>Webhook</span>
+            <span class="dropdown-label">Webhook
+              <button id="alert-template-settings" class="inline-icon-btn" title="Alert message templates" aria-label="Alert message templates">⚙</button>
+            </span>
             <label class="toggle-pill">
               <input type="checkbox" id="alert-webhook-toggle" />
               <span>ON</span>
@@ -35,6 +39,97 @@
       </div>
     </div>
   </div>
+  <div id="source-backdrop" class="source-backdrop"></div>
+  <aside id="source-panel" class="source-panel" aria-hidden="true" aria-label="Script source">
+    <div id="source-resize-handle" class="source-resize-handle" role="separator" aria-orientation="vertical" title="Resize source pane"></div>
+    <div class="source-panel-header">
+      <div>
+        <div class="source-panel-title">Source</div>
+        <div id="source-panel-name" class="source-panel-name"></div>
+      </div>
+      <div class="source-panel-actions">
+        <span id="source-status" class="source-status"></span>
+        <button id="source-save" class="source-action source-save" title="Save script" aria-label="Save script" disabled>💾</button>
+        <button id="source-close" class="source-action source-close" title="Close" aria-label="Close source panel">&times;</button>
+      </div>
+    </div>
+    <div class="source-editor-wrap">
+      <pre id="source-highlight" class="source-code source-highlight" aria-hidden="true">No source loaded.</pre>
+      <textarea id="source-code" class="source-editor" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="soft">No source loaded.</textarea>
+    </div>
+  </aside>
+  <div id="alert-template-backdrop" class="template-backdrop hidden"></div>
+  <section id="alert-template-modal" class="template-modal hidden" aria-hidden="true" aria-label="Alert message templates">
+    <div class="template-modal-header">
+      <div class="template-modal-title-group">
+        <div class="template-modal-title">Manual Alert Templates</div>
+        <button id="alert-template-help-toggle" class="template-help-toggle" type="button" aria-expanded="false" aria-controls="alert-template-help" aria-label="Manual alert help">?</button>
+      </div>
+    </div>
+    <div id="alert-template-help" class="template-help hidden">
+      <div><strong>Purpose</strong>: send a one-off manual webhook alert from the chart at a selected price.</div>
+      <div><strong>Use</strong>: double-click or double-tap the chart, choose a template, drag the menu to adjust price, then Send.</div>
+      <div>
+        <strong>Placeholders</strong>:
+        <span class="template-placeholder-list">
+          <button class="template-placeholder" type="button" data-help="Selected alert price. Drag the manual alert menu to adjust it."><code>{{price}}</code></button>
+          <button class="template-placeholder" type="button" data-help="Latest live close/last price at the final Send click."><code>{{market}}</code></button>
+          <button class="template-placeholder" type="button" data-help="Chart time under the cursor, or the latest bar time if unavailable."><code>{{time}}</code></button>
+          <button class="template-placeholder" type="button" data-help="Session symbol, for example BTC/USDT:USDT."><code>{{symbol}}</code></button>
+          <button class="template-placeholder" type="button" data-help="Alias of symbol, kept for webhook template readability."><code>{{ticker}}</code></button>
+          <button class="template-placeholder" type="button" data-help="Session exchange id, for example okx, bitget, binance, hyperliquid."><code>{{exchange}}</code></button>
+          <button class="template-placeholder" type="button" data-help="Session timeframe, for example 1m or 5m."><code>{{timeframe}}</code></button>
+          <button class="template-placeholder" type="button" data-help="Template title selected in the manual alert menu."><code>{{title}}</code></button>
+        </span>
+      </div>
+      <pre>{"signal":"LONG 1","price":{{market}},"weight":0.0275}</pre>
+      <pre>{"signal":"CLOSE TP3","ticker":"{{ticker}}"}</pre>
+    </div>
+    <div class="template-table">
+      <div class="template-table-head">
+        <div>TITLE</div>
+        <div>MESSAGE</div>
+        <div></div>
+      </div>
+      <div id="alert-template-rows"></div>
+    </div>
+    <div class="template-actions">
+      <button id="alert-template-add" class="template-btn" title="Add template" aria-label="Add template">+</button>
+      <span id="alert-template-status" class="template-status"></span>
+      <button id="alert-template-save" class="template-btn primary">Save</button>
+    </div>
+  </section>
+  <div id="alert-template-placeholder-tip" class="template-placeholder-tooltip hidden" role="tooltip"></div>
+  <div id="manual-alert-menu" class="manual-alert-menu hidden">
+    <div id="manual-alert-drag" class="manual-alert-drag">
+      <div id="manual-alert-price" class="manual-alert-price"></div>
+    </div>
+    <div class="manual-alert-controls">
+      <div id="manual-alert-template-picker" class="manual-alert-template-picker">
+        <button id="manual-alert-template-button" class="manual-alert-template-button" type="button" aria-haspopup="listbox" aria-expanded="false">
+          <span id="manual-alert-template-label" class="manual-alert-template-label"></span>
+          <span class="manual-alert-template-caret" aria-hidden="true"></span>
+        </button>
+        <div id="manual-alert-template-options" class="manual-alert-template-options hidden" role="listbox"></div>
+      </div>
+      <button id="manual-alert-send" class="template-btn primary">Send</button>
+    </div>
+    <div id="manual-alert-status" class="manual-alert-status"></div>
+  </div>
+  <div id="manual-alert-confirm-backdrop" class="manual-alert-confirm-backdrop hidden"></div>
+  <section id="manual-alert-confirm" class="manual-alert-confirm hidden" aria-hidden="true" aria-label="Confirm manual alert">
+    <div class="manual-alert-confirm-title">Send Manual Alert?</div>
+    <div class="manual-alert-confirm-body">
+      <div>Webhook URL</div>
+      <div id="manual-alert-confirm-url" class="manual-alert-confirm-url"></div>
+      <div class="manual-alert-confirm-note">Telegram will also be sent if credentials are configured.</div>
+    </div>
+    <div class="manual-alert-confirm-actions">
+      <button id="manual-alert-confirm-cancel" class="template-btn" type="button">Cancel</button>
+      <button id="manual-alert-confirm-send" class="template-btn primary" type="button">Send</button>
+    </div>
+  </section>
+  <!--RUNTIME_CONFIG-->
   <script src="/static/state.js"></script>
   <script src="/static/ui.js"></script>
   <script src="/static/chart.js"></script>

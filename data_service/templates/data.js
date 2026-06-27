@@ -1,6 +1,9 @@
 var App = window.App || (window.App = {});
 
 App.data = {
+  STYLE_CIRCLES: 2,
+  STYLE_CROSS: 4,
+  STYLE_LINEBR: 7,
   toLinePoint(time, value) {
     const pointTime = Number(time);
     if (!Number.isFinite(pointTime)) {
@@ -15,6 +18,115 @@ App.data = {
     }
     return { time: pointTime, value: pointValue };
   },
+  hasLineValue(point) {
+    return point && Object.prototype.hasOwnProperty.call(point, "value");
+  },
+  buildPlotSeriesOptions(color, linewidth, style) {
+    const styleCode = parseInt(style, 10);
+    const isCrossStyle = styleCode === this.STYLE_CROSS || styleCode === this.STYLE_CIRCLES;
+    const seriesOptions = {
+      color: color || "#2962FF",
+      lastValueVisible: false,
+      priceLineVisible: false,
+      crosshairMarkerVisible: true
+    };
+
+    if (isCrossStyle) {
+      seriesOptions.lineVisible = false;
+      seriesOptions.pointMarkersVisible = true;
+      seriesOptions.pointMarkersRadius = 1;
+    } else {
+      seriesOptions.lineWidth = linewidth || 2;
+    }
+
+    return {
+      options: seriesOptions,
+      styleCode,
+      isLineBreakStyle: styleCode === this.STYLE_LINEBR
+    };
+  },
+  addPlotLineSeries(chart, collections, seriesOptions, data) {
+    const series = chart.chart.addSeries(LightweightCharts.LineSeries, seriesOptions);
+    collections.plotSeriesList.push(series);
+    if (data && data.length > 0) {
+      series.setData(data);
+    }
+    return series;
+  },
+  createLineBreakPlot(chart, collections, seriesOptions, seriesData) {
+    const controller = {
+      type: "linebr",
+      options: seriesOptions,
+      activeSeries: null,
+      lastHadValue: false
+    };
+    let segment = [];
+
+    const flushSegment = (isActive) => {
+      if (segment.length === 0) {
+        return;
+      }
+      const series = this.addPlotLineSeries(chart, collections, seriesOptions, segment);
+      if (isActive) {
+        controller.activeSeries = series;
+      }
+      segment = [];
+    };
+
+    seriesData.forEach(point => {
+      if (this.hasLineValue(point)) {
+        segment.push(point);
+        controller.lastHadValue = true;
+      } else {
+        flushSegment(false);
+        controller.lastHadValue = false;
+        controller.activeSeries = null;
+      }
+    });
+    flushSegment(controller.lastHadValue);
+
+    return controller;
+  },
+  createPlotSeries(chart, collections, plot, seriesData) {
+    const { title, color, linewidth, style } = plot;
+    const { options, isLineBreakStyle } = this.buildPlotSeriesOptions(color, linewidth, style);
+    if (isLineBreakStyle) {
+      const controller = this.createLineBreakPlot(chart, collections, options, seriesData);
+      collections.plotSeriesMap.set(title, controller);
+      return;
+    }
+
+    const series = this.addPlotLineSeries(chart, collections, options, seriesData);
+    collections.plotSeriesMap.set(title, { type: "single", series });
+  },
+  updatePlotSeries(chart, collections, title, time, value) {
+    const controller = collections.plotSeriesMap.get(title);
+    if (!controller) {
+      return;
+    }
+
+    const linePoint = this.toLinePoint(time, value);
+    if (!linePoint) {
+      return;
+    }
+
+    if (controller.type !== "linebr") {
+      controller.series.update(linePoint);
+      return;
+    }
+
+    if (!this.hasLineValue(linePoint)) {
+      controller.lastHadValue = false;
+      controller.activeSeries = null;
+      return;
+    }
+
+    if (!controller.lastHadValue || !controller.activeSeries) {
+      controller.activeSeries = this.addPlotLineSeries(chart, collections, controller.options, []);
+    }
+    controller.activeSeries.update(linePoint);
+    controller.lastHadValue = true;
+  },
   async loadTradeHistory() {
     const state = App.state;
     const collections = App.collections;
@@ -28,7 +140,7 @@ App.data = {
       collections.entryPriceKeys.clear();
       collections.closePriceKeys.clear();
 
-      const resp = await fetch("/api/trades");
+      const resp = await fetch(`${App.config.apiBase}/trades`);
       const trades = await resp.json();
 
       trades.forEach(msg => {
@@ -104,7 +216,7 @@ App.data = {
       collections.plotcharMarkers.length = 0;
       collections.plotcharMarkerKeys.clear();
 
-      const resp = await fetch("/api/plotchar");
+      const resp = await fetch(`${App.config.apiBase}/plotchar`);
       const plotchars = await resp.json();
 
       plotchars.forEach(msg => {
@@ -150,7 +262,7 @@ App.data = {
     if (!state.runnerConnected) return;
     for (let i = 0; i < 30; i++) {
       try {
-        const resp = await fetch("/api/plot?limit=100000");
+        const resp = await fetch(`${App.config.apiBase}/plot?limit=100000`);
         const plots = await resp.json();
 
         if (Array.isArray(plots) && plots.length > 0) {
@@ -166,35 +278,11 @@ App.data = {
               });
             }
 
-            const { title, color, linewidth, style } = plot;
-            const STYLE_CIRCLES = 2;
-            const STYLE_CROSS = 4;
-            const isCrossStyle = (parseInt(style) === STYLE_CROSS || parseInt(style) === STYLE_CIRCLES);
-            const seriesOptions = {
-              color: color || "#2962FF",
-              lastValueVisible: false,
-              priceLineVisible: false,
-              crosshairMarkerVisible: true
-            };
-
-            if (isCrossStyle) {
-              seriesOptions.lineVisible = false;
-              seriesOptions.pointMarkersVisible = true;
-              seriesOptions.pointMarkersRadius = 1;
-            } else {
-              seriesOptions.lineWidth = linewidth || 2;
-            }
-
-            const series = chart.chart.addSeries(LightweightCharts.LineSeries, seriesOptions);
-            collections.plotSeriesList.push(series);
-            collections.plotSeriesMap.set(title, series);
-            pendingSeriesData.push([series, seriesData]);
+            pendingSeriesData.push([plot, seriesData]);
           });
 
-          pendingSeriesData.forEach(([series, data]) => {
-            if (data && data.length > 0) {
-              series.setData(data);
-            }
+          pendingSeriesData.forEach(([plot, data]) => {
+            this.createPlotSeries(chart, collections, plot, data);
           });
           return;
         }
@@ -214,7 +302,7 @@ App.data = {
     state.initialLoadInProgress = true;
     for (let i = 0; i < 30; i++) {
       try {
-        const resp = await fetch("/api/ohlcv?limit=100000");
+        const resp = await fetch(`${App.config.apiBase}/ohlcv?limit=100000`);
         const data = await resp.json();
         if (Array.isArray(data) && data.length > 0) {
           const cleanData = data.filter(d => d && d.time != null && d.open != null && d.high != null &&
@@ -229,36 +317,40 @@ App.data = {
             value: d.volume,
             color: d.close >= d.open ? "#26a69a" : "#ef5350"
           })));
-          chart.chart.timeScale().fitContent();
-          const savedRange = sessionStorage.getItem("chartVisibleRange");
-          const savedLogicalRange = sessionStorage.getItem("chartVisibleLogicalRange");
-          const savedScale = sessionStorage.getItem("chartScaleOptions");
+          const savedRange = sessionStorage.getItem(App.config.storageKey("chartVisibleRange"));
+          const savedLogicalRange = sessionStorage.getItem(App.config.storageKey("chartVisibleLogicalRange"));
+          const savedScale = sessionStorage.getItem(App.config.storageKey("chartScaleOptions"));
+          if (savedRange || savedLogicalRange) {
+            chart.chart.timeScale().fitContent();
+          } else {
+            chart.applyInitialVisibleRange(cleanData.length);
+          }
           if (savedScale) {
             try {
               const opts = JSON.parse(savedScale);
               chart.chart.timeScale().applyOptions(opts);
             } catch {}
-            sessionStorage.removeItem("chartScaleOptions");
+            sessionStorage.removeItem(App.config.storageKey("chartScaleOptions"));
           }
           if (savedLogicalRange) {
             try {
               const range = JSON.parse(savedLogicalRange);
               chart.chart.timeScale().setVisibleLogicalRange(range);
             } catch {}
-            sessionStorage.removeItem("chartVisibleLogicalRange");
+            sessionStorage.removeItem(App.config.storageKey("chartVisibleLogicalRange"));
           } else if (savedRange) {
             try {
               const range = JSON.parse(savedRange);
               chart.chart.timeScale().setVisibleRange(range);
             } catch {}
-            sessionStorage.removeItem("chartVisibleRange");
+            sessionStorage.removeItem(App.config.storageKey("chartVisibleRange"));
           }
 
           state.firstBarTime = data[0].time;
           if (state.configuredTimeframeSec) {
             state.timeframeInterval = state.configuredTimeframeSec;
           } else if (data.length >= 2) {
-            // Fallback only: on OKX zero-volume bars are hidden, so the gap
+            // Fallback only: on OKX/Binance zero-volume bars are hidden, so the gap
             // between the first two visible bars may not be the timeframe.
             state.timeframeInterval = data[1].time - data[0].time;
           }
@@ -291,11 +383,14 @@ App.data = {
   async loadChartInfo() {
     const state = App.state;
     try {
-      const resp = await fetch("/api/info");
+      const resp = await fetch(`${App.config.apiBase}/info`);
       const info = await resp.json();
       const exchange = (info.exchange || "Unknown").toUpperCase();
       const symbol = info.symbol || "Unknown";
       const timeframe = info.timeframe || "Unknown";
+      state.exchange = exchange;
+      state.symbol = symbol;
+      state.timeframe = timeframe;
       const tfSeconds = App.data.timeframeToSeconds(info.timeframe);
       if (tfSeconds) {
         state.configuredTimeframeSec = tfSeconds;
@@ -304,8 +399,11 @@ App.data = {
       if (info.script_title) {
         state.scriptTitle = info.script_title || "No title";
         state.scriptTitleVisible = true;
-      } else {
+      } else if (!state.scriptSourceLoaded) {
         state.scriptTitleVisible = false;
+      }
+      if (info.script_source_name != null) {
+        state.scriptSourceName = info.script_source_name || "";
       }
       state.baseInfoTop = `<span class="info-main">${symbol} | ${timeframe} | ${exchange}</span>`;
       state.baseInfoText = state.baseInfoTop;
@@ -316,24 +414,79 @@ App.data = {
       App.ui.setChartInfo();
     }
   },
+  async loadScriptSource() {
+    try {
+      const resp = await fetch(`${App.config.apiBase}/script-source`);
+      if (!resp.ok) {
+        return false;
+      }
+      const data = await resp.json();
+      App.state.scriptSourceName = data.name || "";
+      App.state.scriptSource = data.source || "";
+      App.state.scriptSourceLoaded = true;
+      App.state.sourceDirty = false;
+      App.state.sourceSaveStatus = "";
+      if (data.title) {
+        App.state.scriptTitle = data.title;
+        App.state.scriptTitleVisible = true;
+      }
+      App.ui.renderSourcePanel();
+      App.ui.setChartInfo();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  },
+  async saveScriptSource(source) {
+    try {
+      const resp = await fetch(`${App.config.apiBase}/script-source`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        return { ok: false, error: data.error || `Save failed (${resp.status})` };
+      }
+      App.state.scriptSourceName = data.name || App.state.scriptSourceName || "";
+      App.state.scriptSource = data.source || "";
+      App.state.scriptSourceLoaded = true;
+      App.state.sourceDirty = false;
+      App.state.sourceSaveStatus = "";
+      if (data.title) {
+        App.state.scriptTitle = data.title;
+        App.state.scriptTitleVisible = true;
+      }
+      App.ui.setChartInfo();
+      return { ok: true, data };
+    } catch (e) {
+      return { ok: false, error: "Save failed" };
+    }
+  },
   async loadWebhookConfig() {
     const state = App.state;
     const ui = App.ui;
     try {
-      const resp = await fetch("/api/webhook-config");
-      if (!resp.ok) return;
+      const resp = await fetch(`${App.config.apiBase}/webhook-config`);
+      if (!resp.ok) {
+        state.webhookUrl = "";
+        return null;
+      }
       const cfg = await resp.json();
       state.webhookEnabled = Boolean(cfg.enabled);
       state.telegramEnabled = Boolean(cfg.telegram_notification);
+      state.webhookUrl = cfg.url || "";
       ui.elements.webhookToggle.checked = state.webhookEnabled;
       ui.elements.telegramToggle.checked = state.telegramEnabled;
+      return cfg;
     } catch (e) {
-      // ignore
+      state.webhookUrl = "";
+      return null;
     }
   },
   async updateWebhookConfig(payload) {
     try {
-      const resp = await fetch("/api/webhook-config", {
+      const resp = await fetch(`${App.config.apiBase}/webhook-config`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
@@ -344,11 +497,65 @@ App.data = {
       const cfg = await resp.json();
       App.state.webhookEnabled = Boolean(cfg.enabled);
       App.state.telegramEnabled = Boolean(cfg.telegram_notification);
+      App.state.webhookUrl = cfg.url || "";
       App.ui.elements.webhookToggle.checked = App.state.webhookEnabled;
       App.ui.elements.telegramToggle.checked = App.state.telegramEnabled;
       return true;
     } catch (e) {
       return false;
+    }
+  },
+  normalizeManualAlertTemplates(templates) {
+    return Array.isArray(templates)
+      ? templates.filter(t => t && typeof t.title === "string" && typeof t.message === "string")
+      : [];
+  },
+  async loadManualAlertTemplates() {
+    try {
+      const resp = await fetch(`${App.config.apiBase}/manual-alert-templates`);
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        return { ok: false, error: data.error || `Load failed (${resp.status})` };
+      }
+      const templates = this.normalizeManualAlertTemplates(data.templates);
+      App.state.manualAlertTemplates = templates;
+      return { ok: true, templates };
+    } catch (e) {
+      return { ok: false, error: "Load failed" };
+    }
+  },
+  async saveManualAlertTemplates(templates) {
+    try {
+      const resp = await fetch(`${App.config.apiBase}/manual-alert-templates`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ templates })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        return { ok: false, error: data.error || `Save failed (${resp.status})` };
+      }
+      const savedTemplates = this.normalizeManualAlertTemplates(data.templates);
+      App.state.manualAlertTemplates = savedTemplates;
+      return { ok: true, templates: savedTemplates };
+    } catch (e) {
+      return { ok: false, error: "Save failed" };
+    }
+  },
+  async sendManualAlert(payload) {
+    try {
+      const resp = await fetch(`${App.config.apiBase}/manual-alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        return { ok: false, error: data.error || `Send failed (${resp.status})` };
+      }
+      return { ok: true, data };
+    } catch (e) {
+      return { ok: false, error: "Send failed" };
     }
   }
 };

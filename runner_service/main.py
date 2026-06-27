@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import os
@@ -19,6 +20,7 @@ import websockets
 from appendable_iter import AppendableIterable
 from pynecore.cli.app import app_state
 from pynecore.core.ohlcv_file import OHLCVReader
+from pynecore.core.exchange_policy import tradingview_hides_zero_volume
 from pynecore.core.script_runner import ScriptRunner
 from pynecore.core.syminfo import SymInfo
 from pynecore.types.ohlcv import OHLCV
@@ -26,6 +28,17 @@ from pynecore.types.ohlcv import OHLCV
 DATA_WS = ""
 SCRIPT_PATH: Path | None = None
 SCRIPT_HASH_PATH: Path | None = None  # CSV path for persisted script hashes.
+PLOT_PATH: Path | None = None  # per-session plot CSV path (from --plot-path).
+SESSION_ID: str = "default"
+# Live webhook/telegram toggles for this session (decision 8-1). Updated at
+# startup from args/env and at runtime via the "webhook_config" WS message.
+WEBHOOK_ENABLED: bool = False
+TELEGRAM_ENABLED: bool = False
+# Per-session webhook URL / telegram credentials (from the hub's webhook_config WS
+# message). Empty => fall back to the script's webhook_url / .env BOT_TOKEN.
+WEBHOOK_URL: str = ""
+TELEGRAM_TOKEN: str = ""
+TELEGRAM_CHAT_ID: str = ""
 
 # Event queue for trade events
 trade_event_queue = deque()
@@ -57,6 +70,21 @@ def extract_script_title(script_path: Path) -> str:
             if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
                 return node.args[0].value or "No title"
     return "No title"
+
+
+def build_script_info_payload(script_path: Path, title: str | None = None) -> dict:
+    source = ""
+    try:
+        source = script_path.read_text(encoding="utf-8")
+    except Exception:
+        source = ""
+
+    return {
+        "type": "script_info",
+        "title": title or extract_script_title(script_path),
+        "source_name": script_path.name,
+        "source": source,
+    }
 
 
 def format_timeframe(period: str | None) -> str:
@@ -91,7 +119,7 @@ def send_webhook_message(webhook_url: str, message: str, *, script_title: str | 
                message)
     parsed = json.loads(s)
     json_alert_message = parsed.get('message', '')
-    if json_alert_message != '':
+    if json_alert_message != '' and webhook_url:
         payload = json_alert_message
         try:
             response = requests.post(webhook_url, json=payload, timeout=(5, 10))
@@ -211,38 +239,38 @@ def on_plotchar_event(plotchar_data):
 def on_alert_event(message: str, runner: ScriptRunner):
     """Callback for alert events - webhook/telegram notifications"""
     script = runner.script
-    if not script.webhook_url and not script.telegram_notification:
+
+    # Per-session overrides (from the hub's webhook_config WS message) take
+    # precedence over the script's webhook_url / .env credentials. Sending is gated
+    # by the live session toggles (decision 8-1). Webhook and telegram are
+    # independent: either, both, or neither can fire.
+    webhook_url = WEBHOOK_URL or script.webhook_url
+    telegram_token = TELEGRAM_TOKEN or script.telegram_token
+    telegram_chat_id = TELEGRAM_CHAT_ID or script.telegram_chat_id
+
+    do_webhook = WEBHOOK_ENABLED and bool(webhook_url)
+    do_telegram = TELEGRAM_ENABLED and bool(telegram_token) and bool(telegram_chat_id)
+    if not do_webhook and not do_telegram:
         return
 
-    # Last check if webhook/telegram notification is enabled in config
-    config_dir = app_state.config_dir
-    webhook_enabled = False
-    telegram_notification_enabled = False
-    with open(config_dir / "realtime_trade.toml", "rb") as f:
-        config = tomllib.load(f)
-        webhook_section = config.get("webhook", {})
-        webhook_enabled = webhook_section.get("enabled", False)
-        telegram_notification_enabled = webhook_section.get("telegram_notification", False)
-
-    if webhook_enabled and script.webhook_url:
-        syminfo = getattr(runner, "syminfo", None)
-        send_webhook_message(
-            webhook_url=script.webhook_url,
-            message=message,
-            script_title=script.title,
-            timeframe=format_timeframe(getattr(syminfo, "period", None)),
-            ticker=getattr(syminfo, "ticker", None),
-            telegram_notification=telegram_notification_enabled,
-            telegram_token=script.telegram_token,
-            telegram_chat_id=script.telegram_chat_id,
-        )
+    syminfo = getattr(runner, "syminfo", None)
+    send_webhook_message(
+        webhook_url=webhook_url if do_webhook else "",
+        message=message,
+        script_title=script.title,
+        timeframe=format_timeframe(getattr(syminfo, "period", None)),
+        ticker=getattr(syminfo, "ticker", None),
+        telegram_notification=do_telegram,
+        telegram_token=telegram_token,
+        telegram_chat_id=telegram_chat_id,
+    )
 
 
 def hide_zero_volume_bars(exchange: str | None) -> bool:
     # TradingView policy differs by exchange:
-    # - OKX: zero-volume candles are hidden and excluded from calculations.
+    # - OKX/Binance: zero-volume candles are hidden and excluded from calculations.
     # - BITGET/Hyperliquid: zero-volume candles remain visible and are included.
-    return (exchange or "").upper() == "OKX"
+    return tradingview_hides_zero_volume(exchange)
 
 
 def is_visible_ohlcv(ohlcv: OHLCV, *, hide_zero_volume: bool) -> bool:
@@ -292,53 +320,67 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
     # Add lib directory to Python path for library imports
     lib_dir = app_state.scripts_dir / "lib"
     lib_path_added = False
+    # Add lib directory to Python path for library imports only if it exists.
+    # The ScriptRunner must be created regardless (a clean workdir may have no lib dir).
     if lib_dir.exists() and lib_dir.is_dir():
         sys.path.insert(0, str(lib_dir))
         lib_path_added = True
 
-        try:
-            # #################################### Module calculation ####################################
-            # # bb1d / weekly high, low calculation
-            # from modules.bb1d_calc import get_bb1d_lower
-            # from modules.weekly_hl_calc import get_weekly_high_low
-            # bb1d_lower = get_bb1d_lower(str(data_path), period=20, mult=2.0,
-            #                             lookahead_on=True)
-            # macro_high, macro_low = get_weekly_high_low(str(data_path), ago=2, session_offset_hours=9,
-            #                                             lookahead_on=True)
-            # #################################### Module calculation ####################################
+    try:
+        # #################################### Module calculation ####################################
+        # # bb1d / weekly high, low calculation
+        # from modules.bb1d_calc import get_bb1d_lower
+        # from modules.weekly_hl_calc import get_weekly_high_low
+        # bb1d_lower = get_bb1d_lower(str(data_path), period=20, mult=2.0,
+        #                             lookahead_on=True)
+        # macro_high, macro_low = get_weekly_high_low(str(data_path), ago=2, session_offset_hours=9,
+        #                                             lookahead_on=True)
+        # #################################### Module calculation ####################################
 
-            # Create script runner (this is where the import happens)
-            config_dir = app_state.config_dir
-            plot_path = app_state.output_dir / f"{script_path.stem}.csv"
-            with open(config_dir / "realtime_trade.toml", "rb") as f:
-                realtime_config = tomllib.load(f)
-                runner = ScriptRunner(script_path, stream, syminfo,
-                                      last_bar_index=size - 1,
-                                      plot_path=plot_path, strat_path=None, trade_path=None,
-                                      realtime_config=realtime_config,
-                                      custom_inputs={
-                                            # "bb1d_lower": bb1d_lower,
-                                            # "macro_high": macro_high,
-                                            # "macro_low": macro_low
-                                      },
-                                      preload_ohlcv=preload_list)
-                runner.init_step()
+        # Create script runner (this is where the import happens)
+        config_dir = app_state.config_dir
+        plot_path = PLOT_PATH if PLOT_PATH is not None else app_state.output_dir / f"{script_path.stem}.csv"
+        with open(config_dir / "realtime_trade.toml", "rb") as f:
+            realtime_config = tomllib.load(f)
+            # Always populate webhook_url / telegram credentials on the script so the
+            # per-session runtime toggle can gate sending in both directions without a
+            # restart. Actual on/off lives in WEBHOOK_ENABLED / TELEGRAM_ENABLED, which
+            # the hub updates live via the "webhook_config" WS message.
+            realtime_config = dict(realtime_config)
+            _rt_sec = dict(realtime_config.get("realtime", {}))
+            _rt_sec["enabled"] = True
+            realtime_config["realtime"] = _rt_sec
+            _wh_sec = dict(realtime_config.get("webhook", {}))
+            _wh_sec["enabled"] = True
+            _wh_sec["telegram_notification"] = True
+            realtime_config["webhook"] = _wh_sec
+            runner = ScriptRunner(script_path, stream, syminfo,
+                                  last_bar_index=size - 1,
+                                  plot_path=plot_path, strat_path=None, trade_path=None,
+                                  realtime_config=realtime_config,
+                                  custom_inputs={
+                                        # "bb1d_lower": bb1d_lower,
+                                        # "macro_high": macro_high,
+                                        # "macro_low": macro_low
+                                  },
+                                  preload_ohlcv=preload_list)
+            runner.init_step()
 
-                # Register trade event callbacks
-                runner.script.position.on_entry_callback = partial(on_entry_event, runner=runner)
-                runner.script.position.on_close_callback = partial(on_close_event, runner=runner)
-                runner.script.position.on_alert_callback = partial(on_alert_event, runner=runner)
-                # Register plot event callback
-                runner.script.on_plot_callback = on_plot_event
-                # Register plotchar event callback
-                runner.script.on_plotchar_callback = on_plotchar_event
-        finally:
-            # Remove lib directory from Python path
-            if lib_path_added:
-                sys.path.remove(str(lib_dir))
+            # Register trade event callbacks
+            runner.script.position.on_entry_callback = partial(on_entry_event, runner=runner)
+            runner.script.position.on_close_callback = partial(on_close_event, runner=runner)
+            runner.script.position.on_alert_callback = partial(on_alert_event, runner=runner)
+            # Register plot event callback
+            runner.script.on_plot_callback = on_plot_event
+            # Register plotchar event callback
+            runner.script.on_plotchar_callback = on_plotchar_event
+    finally:
+        # Remove lib directory from Python path
+        if lib_path_added:
+            sys.path.remove(str(lib_dir))
 
-        # return reader too. So we can close it later
-        return runner, stream, reader
+    # return reader too. So we can close it later
+    return runner, stream, reader
 
 
 def ohlcv_event_data(ohlcv: OHLCV) -> dict:
@@ -349,6 +391,13 @@ def ohlcv_event_data(ohlcv: OHLCV) -> dict:
         "low": float(ohlcv.low),
         "close": float(ohlcv.close),
         "volume": float(ohlcv.volume),
+    }
+
+
+def ohlcv_open_fix_event_data(ohlcv: OHLCV) -> dict:
+    return {
+        "time": int(ohlcv.timestamp),
+        "open": float(ohlcv.open),
     }
 
 
@@ -396,16 +445,13 @@ async def ws_loop():
         try:
             async with websockets.connect(DATA_WS, ping_interval=None) as ws:
                 try:
-                    await ws.send(json.dumps({"type": "client_hello", "role": "runner"}))
+                    await ws.send(json.dumps({"type": "client_hello", "role": "runner",
+                                              "session_id": SESSION_ID}))
                 except Exception:
                     pass
                 try:
                     if SCRIPT_PATH and SCRIPT_PATH.exists():
-                        title = extract_script_title(SCRIPT_PATH)
-                        await ws.send(json.dumps({
-                            "type": "script_info",
-                            "title": title,
-                        }))
+                        await ws.send(json.dumps(build_script_info_payload(SCRIPT_PATH)))
                 except Exception as e:
                     print(f"[runner] Failed to send script_info (connect): {e}")
                 try:
@@ -450,41 +496,130 @@ def parse_timeframe_to_ms(tf: str) -> int:
         return value * 24 * 60 * 60 * 1000
 
 
-async def main():
-    # Load realtime config
-    config_dir = app_state.config_dir
-    with open(config_dir / "realtime_trade.toml", "rb") as f:
-        realtime_config = tomllib.load(f)
+def parse_runner_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="PyneReal runner_service")
+    p.add_argument("--session-id")
+    p.add_argument("--data-service-ws")
+    p.add_argument("--provider")
+    p.add_argument("--exchange")
+    p.add_argument("--symbol")
+    p.add_argument("--timeframe")
+    p.add_argument("--script-name")
+    p.add_argument("--plot-path")
+    p.add_argument("--hash-path")
+    p.add_argument("--webhook-enabled")
+    p.add_argument("--telegram-enabled")
+    # Ignore unknown args so a manual launch is forgiving.
+    args, _ = p.parse_known_args()
+    return args
 
+
+def _resolve(arg_val, env_key, toml_val, default=None):
+    """Resolve a setting: CLI arg > env var > toml value > default."""
+    if arg_val is not None and arg_val != "":
+        return arg_val
+    env_val = os.environ.get(env_key)
+    if env_val:
+        return env_val
+    if toml_val not in (None, ""):
+        return toml_val
+    return default
+
+
+def _as_bool(v, fallback: bool) -> bool:
+    if v is None:
+        return fallback
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+async def _parent_watchdog(initial_ppid: int) -> None:
+    """Self-terminate if the parent hub dies (orphan cleanup). When the spawning
+    hub exits ungracefully (SIGKILL/crash), this child is reparented (its ppid
+    changes, typically to 1 on macOS/Linux); without this it would keep
+    reconnecting to whatever hub later binds the port and double-run the strategy."""
+    while True:
+        await asyncio.sleep(2)
+        if os.getppid() != initial_ppid:
+            print("[runner] parent hub gone; exiting to avoid orphan.")
+            os._exit(0)
+
+
+async def main():
+    args = parse_runner_args()
+
+    # Load realtime config (still required for pynecore/ScriptRunner behavior; also
+    # the fallback source when CLI args / env are absent for a manual launch).
+    config_dir = app_state.config_dir
+    realtime_config: dict = {}
+    try:
+        with open(config_dir / "realtime_trade.toml", "rb") as f:
+            realtime_config = tomllib.load(f)
+    except Exception:
+        realtime_config = {}
     realtime_section: dict = realtime_config.get("realtime", {})
-    tf = realtime_section.get("timeframe", "")
-    if tf == "":
-        raise RuntimeError("timeframe is empty in realtime_trade.toml")
+
+    tf = _resolve(args.timeframe, "PYNEREAL_TIMEFRAME", realtime_section.get("timeframe", ""))
+    if not tf:
+        raise RuntimeError("timeframe is empty (args/env/realtime_trade.toml)")
 
     pyne_section: dict = realtime_config.get("pyne", {})
     if pyne_section.get("no_logo", False):
         os.environ["PYNE_NO_LOGO"] = "True"
         os.environ["PYNE_QUIET"] = "True"
 
-    script_name = realtime_section.get("script_name", "")
+    script_name = _resolve(args.script_name, "PYNEREAL_SCRIPT_NAME", realtime_section.get("script_name", ""))
     if not script_name:
-        raise RuntimeError("script_name is empty in realtime_trade.toml")
+        raise RuntimeError("script_name is empty (args/env/realtime_trade.toml)")
 
     script_path = app_state.scripts_dir / script_name
     if not script_path.exists():
         raise RuntimeError(f"script not found: {script_path}")
-    global SCRIPT_PATH
-    SCRIPT_PATH = script_path
-    global SCRIPT_HASH_PATH
-    SCRIPT_HASH_PATH = SCRIPT_PATH.parent / ".script_hash.csv"
 
-    data_service_addr = realtime_section.get("data_service_addr", "")
-    data_service_port = int(data_service_addr.split(":")[1]) if data_service_addr else 9001
-    global DATA_WS
-    DATA_WS = f"ws://127.0.0.1:{data_service_port}/ws"
+    global SCRIPT_PATH, SCRIPT_HASH_PATH, DATA_WS, PLOT_PATH, SESSION_ID
+    global WEBHOOK_ENABLED, TELEGRAM_ENABLED, WEBHOOK_URL, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+    SCRIPT_PATH = script_path
+    SESSION_ID = _resolve(args.session_id, "PYNEREAL_SESSION_ID", None, default="default")
+
+    # Per-session script-hash path (decision: avoid multi-runner contention).
+    hash_path = _resolve(args.hash_path, "PYNEREAL_HASH_PATH", None)
+    SCRIPT_HASH_PATH = Path(hash_path) if hash_path else SCRIPT_PATH.parent / ".script_hash.csv"
+    SCRIPT_HASH_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    # Per-session plot CSV path.
+    plot_path = _resolve(args.plot_path, "PYNEREAL_PLOT_PATH", None)
+    PLOT_PATH = Path(plot_path) if plot_path else app_state.output_dir / f"{script_path.stem}.csv"
+    PLOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    # data_service websocket endpoint.
+    data_ws = _resolve(args.data_service_ws, "PYNEREAL_DATA_WS", None)
+    if data_ws:
+        DATA_WS = data_ws
+    else:
+        data_service_addr = realtime_section.get("data_service_addr", "")
+        data_service_port = int(data_service_addr.split(":")[1]) if data_service_addr else 9001
+        DATA_WS = f"ws://127.0.0.1:{data_service_port}/ws"
+
+    # Initial webhook/telegram toggles (live-updated later via webhook_config WS msg).
+    webhook_section = realtime_config.get("webhook", {})
+    WEBHOOK_ENABLED = _as_bool(_resolve(args.webhook_enabled, "PYNEREAL_WEBHOOK_ENABLED", None),
+                               bool(webhook_section.get("enabled", False)))
+    TELEGRAM_ENABLED = _as_bool(_resolve(args.telegram_enabled, "PYNEREAL_TELEGRAM_ENABLED", None),
+                                bool(webhook_section.get("telegram_notification", False)))
+
+    from datetime import datetime
+    started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{started_at}] [runner] started | session={SESSION_ID} tf={tf} "
+          f"script={script_name} ws={DATA_WS}")
+
+    # Exit if the spawning hub dies, so a killed/crashed hub never leaves an
+    # orphan runner reconnecting to the next hub instance.
+    asyncio.create_task(_parent_watchdog(os.getppid()))
 
     ctx: Optional[RunnerCtx] = None
     last_ws = None
+    # Becomes True after the first pre_run completes; tells the hub to switch the
+    # dashboard LED from amber (pre-running) to green. Reset on a fresh connection.
+    ready_sent = False
     # Re-emit all trade markers on the next prerun when the connection is fresh
     # (runner restart/reconnect) or the script was edited mid-run. Trade-event
     # callbacks are pre_run-gated, so a cleared trades_history (reset_history on
@@ -497,12 +632,28 @@ async def main():
         if ws is not last_ws:
             last_ws = ws
             pending_full_reemit = True
+            ready_sent = False
         try:
             msg = json.loads(raw)
         except Exception:
             continue
 
         mtype = msg.get("type")
+
+        # -----------------------------
+        # Live per-session webhook toggle (decision 8-1)
+        # -----------------------------
+        if mtype == "webhook_config":
+            WEBHOOK_ENABLED = bool(msg.get("enabled", WEBHOOK_ENABLED))
+            TELEGRAM_ENABLED = bool(msg.get("telegram_notification", TELEGRAM_ENABLED))
+            WEBHOOK_URL = msg.get("url", WEBHOOK_URL) or ""
+            TELEGRAM_TOKEN = msg.get("telegram_token", TELEGRAM_TOKEN) or ""
+            TELEGRAM_CHAT_ID = msg.get("telegram_chat_id", TELEGRAM_CHAT_ID) or ""
+            # Only log when something is actually configured (skip the noisy all-off default).
+            if WEBHOOK_ENABLED or TELEGRAM_ENABLED or WEBHOOK_URL or TELEGRAM_TOKEN:
+                print(f"[runner] webhook_config: webhook={WEBHOOK_ENABLED} telegram={TELEGRAM_ENABLED} "
+                      f"url={'set' if WEBHOOK_URL else '-'} token={'set' if TELEGRAM_TOKEN else '-'}")
+            continue
 
         # -----------------------------
         # Pre script run stage
@@ -541,7 +692,7 @@ async def main():
             result = ready_scrip_runner(script_path, ohlcv_path, toml_path)
             if result is None:
                 from datetime import datetime
-                print(f"[{datetime.now().strftime("%y-%m-%d %H:%M:%S")}] [runner] failed to prepare runner")
+                print(f"[{datetime.now().strftime('%y-%m-%d %H:%M:%S')}] [runner] failed to prepare runner")
                 continue
             else:
                 runner, stream, reader = result
@@ -552,8 +703,8 @@ async def main():
             last_visible_bar = get_runner_candle(runner, runner.last_bar_index)
             # In normal realtime pre-run, the file may already contain the open current bar.
             # If that bar is visible, keep it in the stream for the next run_ready and
-            # pre-run only up to the last confirmed bar. If the raw last bar is hidden
-            # (OKX zero-volume), the visible list already ends at a confirmed bar.
+            # pre-run only up to the last confirmed bar. If the raw last bar is a
+            # hidden zero-volume candle, the visible list already ends at a confirmed bar.
             has_unconfirmed_visible_bar = (
                 last_visible_bar is not None
                 and reader.end_timestamp is not None
@@ -575,14 +726,19 @@ async def main():
                 runner.script.pre_run = False
             await asyncio.to_thread(run_prerun_steps, runner, prerun_range)
             pending_full_reemit = False
+
+            # First pre_run done -> tell the hub the chart plots are ready (LED green).
+            if not ready_sent:
+                try:
+                    await ws.send(json.dumps({"type": "runner_ready"}))
+                    ready_sent = True
+                except Exception as e:
+                    print(f"[runner] Failed to send runner_ready: {e}")
             # print("=== Pre-run finished ===")
 
             try:
                 title = runner.script.title or "No title"
-                await ws.send(json.dumps({
-                    "type": "script_info",
-                    "title": title,
-                }))
+                await ws.send(json.dumps(build_script_info_payload(script_path, title)))
             except Exception as e:
                 print(f"[runner] Failed to send script_info: {e}")
 
@@ -595,7 +751,7 @@ async def main():
                     "last_bar_index": runner.last_bar_index,
                 }
                 if last_bar is not None:
-                    event["data"] = ohlcv_event_data(last_bar)
+                    event["data"] = ohlcv_open_fix_event_data(last_bar)
                 await ws.send(json.dumps(event))
             except Exception as e:
                 print(f"[runner] Failed to send bar confirmation: {e}")
@@ -678,7 +834,7 @@ async def main():
             confirmed_visible = is_visible_ohlcv(confirmed_ohlcv, hide_zero_volume=hide_zero_volume)
             new_visible = is_visible_ohlcv(new_ohlcv, hide_zero_volume=hide_zero_volume)
 
-            # OKX fake/no-trade bars can stay in the raw file with volume 0, but they must not
+            # Hidden fake/no-trade bars can stay in the raw file with volume 0, but they must not
             # enter the runner stream. BITGET/Hyperliquid leave hide_zero_volume=False, so their
             # 0-volume bars still take this visible path.
             confirmed_appended = False
@@ -746,7 +902,7 @@ async def main():
                     if step_res is None:
                         break
 
-                # OKX hidden-bar fix:
+                # Hidden-bar fix:
                 # 새로 열린 봉이 volume 0 hidden bar 면 new_ohlcv 가 stream 에 append 되지
                 # 않아(line 619-620) confirmed bar 의 main() 에서 접수된 주문을 체결할
                 # process_orders() 패스가 없어 webhook alert 이 나가지 않는다. fake bar 의
