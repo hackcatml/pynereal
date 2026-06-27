@@ -28,6 +28,9 @@ window.App.state = {
   lastOpenPrice: { time: 0, value: 0 },
   lastPrice: 0,
   lastOhlcv: null,
+  exchange: "",
+  symbol: "",
+  timeframe: "",
   scriptTitle: "No title",
   scriptTitleVisible: false,
   scriptSourceName: "",
@@ -43,7 +46,15 @@ window.App.state = {
   jankReloaded: false,
   lastFrameTs: null,
   webhookEnabled: false,
-  telegramEnabled: false
+  telegramEnabled: false,
+  webhookUrl: "",
+  manualAlertTemplates: [],
+  manualAlertContext: null,
+  manualAlertMenuOpen: false,
+  manualAlertTemplateOpen: false,
+  manualAlertConfirmOpen: false,
+  manualAlertSelectedTemplateIndex: -1,
+  manualAlertSuppressClickUntil: 0
 };
 
 window.App.collections = {

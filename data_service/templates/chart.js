@@ -8,8 +8,10 @@ App.chart = {
   entryMarkerSeries: null,
   closeMarkerSeries: null,
   currentPriceLine: null,
+  manualAlertPriceLine: null,
   resizeObserver: null,
   touchGuardsAttached: false,
+  manualAlertLastTap: null,
   isMobileViewport() {
     return window.matchMedia("(max-width: 640px), (hover: none) and (pointer: coarse)").matches;
   },
@@ -20,6 +22,126 @@ App.chart = {
     if (!(target instanceof Element)) return false;
     if (target.closest("#source-panel")) return false;
     return Boolean(target.closest("#chart, #chart-info, .nav-btn"));
+  },
+  candleTextColor(bar) {
+    if (!bar) return "#d32f2f";
+    return Number(bar.close) >= Number(bar.open) ? "#26a69a" : "#ef5350";
+  },
+  formatCandleChangePercent(bar) {
+    if (!bar) return "";
+    const open = Number(bar.open);
+    const close = Number(bar.close);
+    if (!Number.isFinite(open) || !Number.isFinite(close) || open === 0) return "";
+    const pct = ((close - open) / open) * 100;
+    if (!Number.isFinite(pct)) return "";
+    const sign = pct >= 0 ? "+" : "";
+    return ` (${sign}${pct.toFixed(2)}%)`;
+  },
+  formatOhlcvText(bar, volumeValue = null) {
+    if (!bar) return "";
+    const color = this.candleTextColor(bar);
+    const volume = volumeValue == null ? bar.volume : volumeValue;
+    const changeText = this.formatCandleChangePercent(bar);
+    const value = (label, number) =>
+      `${label} <span style="color:${color}">${App.ui.formatNumber(number, 2)}</span>`;
+    return value("O", bar.open) +
+      ` ${value("H", bar.high)}` +
+      ` ${value("L", bar.low)}` +
+      ` ${value("C", bar.close)}` +
+      ` Vol <span style="color:${color}">${App.ui.formatNumber(volume, 2)}${changeText}</span>`;
+  },
+  setMagnetMode(enabled) {
+    if (!this.chart) return;
+    this.chart.applyOptions({
+      crosshair: {
+        mode: enabled ? LightweightCharts.CrosshairMode.Magnet : LightweightCharts.CrosshairMode.Normal
+      }
+    });
+  },
+  restoreMagnetMode() {
+    this.setMagnetMode(true);
+  },
+  removeManualAlertPriceGuide() {
+    if (this.manualAlertPriceLine && this.candleSeries && this.candleSeries.removePriceLine) {
+      this.candleSeries.removePriceLine(this.manualAlertPriceLine);
+    }
+    this.manualAlertPriceLine = null;
+  },
+  updateManualAlertPriceGuide(price) {
+    if (!this.candleSeries || !Number.isFinite(Number(price))) return;
+    const dottedLineStyle = (LightweightCharts.LineStyle && LightweightCharts.LineStyle.Dotted != null)
+      ? LightweightCharts.LineStyle.Dotted
+      : 1;
+    const options = {
+      price: Number(price),
+      color: "#111111",
+      lineWidth: 1,
+      lineStyle: dottedLineStyle,
+      axisLabelVisible: true,
+      title: "Alert"
+    };
+    if (this.manualAlertPriceLine) {
+      this.manualAlertPriceLine.applyOptions(options);
+    } else {
+      this.manualAlertPriceLine = this.candleSeries.createPriceLine(options);
+    }
+  },
+  priceFromClientY(clientY) {
+    if (!this.candleSeries || !this.container) return null;
+    const rect = this.container.getBoundingClientRect();
+    const price = this.candleSeries.coordinateToPrice(clientY - rect.top);
+    return Number.isFinite(Number(price)) ? Number(price) : null;
+  },
+  normalizeAlertTime(time) {
+    if (typeof time === "number") return time;
+    if (time && typeof time.timestamp === "number") return time.timestamp;
+    return App.state.lastBarTime || null;
+  },
+  manualAlertContextFromPointer(pointer) {
+    if (!pointer || !this.chart || !this.candleSeries) return null;
+    const rect = this.container.getBoundingClientRect();
+    const x = pointer.clientX - rect.left;
+    const y = pointer.clientY - rect.top;
+    const price = this.candleSeries.coordinateToPrice(y);
+    if (!Number.isFinite(Number(price))) return null;
+    const time = this.chart.timeScale().coordinateToTime(x);
+    return {
+      clientX: pointer.clientX,
+      clientY: pointer.clientY,
+      price: Number(price),
+      time: this.normalizeAlertTime(time)
+    };
+  },
+  openManualAlertMenuFromPointer(pointer) {
+    if (App.state.sourcePanelOpen) return;
+    if (!App.ui.elements.alertTemplateModal.classList.contains("hidden")) return;
+    const context = this.manualAlertContextFromPointer(pointer);
+    if (!context) return;
+    App.ui.showManualAlertMenu(context);
+    this.setMagnetMode(false);
+  },
+  attachManualAlertGesture() {
+    this.container.addEventListener("dblclick", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      App.ui.closeManualAlertMenu();
+      this.openManualAlertMenuFromPointer({ clientX: e.clientX, clientY: e.clientY });
+    }, { passive: false });
+
+    this.container.addEventListener("pointerup", (e) => {
+      if (e.pointerType === "mouse") return;
+      const now = performance.now();
+      const previous = this.manualAlertLastTap;
+      this.manualAlertLastTap = { time: now, clientX: e.clientX, clientY: e.clientY };
+      if (!previous) return;
+      const dt = now - previous.time;
+      const distance = Math.hypot(e.clientX - previous.clientX, e.clientY - previous.clientY);
+      if (dt > 360 || distance > 28) return;
+      e.preventDefault();
+      this.manualAlertLastTap = null;
+      App.ui.closeManualAlertMenu();
+      this.openManualAlertMenuFromPointer({ clientX: e.clientX, clientY: e.clientY });
+    }, { passive: false });
   },
   clearPersistedChartView() {
     try {
@@ -138,12 +260,7 @@ App.chart = {
           App.ui.setChartInfo();
           return;
         }
-        const ohlcvText = `O <span style="color:#d32f2f">${App.ui.formatNumber(state.lastOhlcv.open, 2)}</span>` +
-          ` H <span style="color:#d32f2f">${App.ui.formatNumber(state.lastOhlcv.high, 2)}</span>` +
-          ` L <span style="color:#d32f2f">${App.ui.formatNumber(state.lastOhlcv.low, 2)}</span>` +
-          ` C <span style="color:#d32f2f">${App.ui.formatNumber(state.lastOhlcv.close, 2)}</span>` +
-          ` Vol <span style="color:#d32f2f">${App.ui.formatNumber(state.lastOhlcv.volume, 2)}</span>`;
-        App.ui.setChartInfo(ohlcvText);
+        App.ui.setChartInfo(this.formatOhlcvText(state.lastOhlcv));
         return;
       }
       const bar = param.seriesData.get(this.candleSeries);
@@ -153,13 +270,9 @@ App.chart = {
         return;
       }
       const volumeValue = volBar ? volBar.value : (state.lastOhlcv ? state.lastOhlcv.volume : null);
-      const ohlcvText = `O <span style="color:#d32f2f">${App.ui.formatNumber(bar.open, 2)}</span>` +
-        ` H <span style="color:#d32f2f">${App.ui.formatNumber(bar.high, 2)}</span>` +
-        ` L <span style="color:#d32f2f">${App.ui.formatNumber(bar.low, 2)}</span>` +
-        ` C <span style="color:#d32f2f">${App.ui.formatNumber(bar.close, 2)}</span>` +
-        ` Vol <span style="color:#d32f2f">${App.ui.formatNumber(volumeValue, 2)}</span>`;
-      App.ui.setChartInfo(ohlcvText);
+      App.ui.setChartInfo(this.formatOhlcvText(bar, volumeValue));
     });
+    this.attachManualAlertGesture();
     this.attachTouchGuards();
   },
   resetChartState(resetCandles = true) {
@@ -203,6 +316,7 @@ App.chart = {
       this.candleSeries.removePriceLine(this.currentPriceLine);
     }
     this.currentPriceLine = null;
+    this.removeManualAlertPriceGuide();
   },
   updatePriceLineWithTimer() {
     const state = App.state;

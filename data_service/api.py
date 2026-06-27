@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import ast
+import json
+import urllib.error
+import urllib.request
 from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -17,7 +21,13 @@ import ccxt.pro as ccxtpro
 
 from registry import SessionNotFoundError, SessionExistsError, SessionLimitError, SessionRegistry
 from runtime import Session
-from config import SessionSpec
+from config import (
+    SessionSpec,
+    default_telegram_chat_id,
+    default_telegram_token,
+    default_webhook_url,
+    sanitize_manual_alert_templates,
+)
 from ohlcv_io import make_ccxt_pro_client
 
 # Cache of exchange -> set(symbols) so symbol validation hits the network at most
@@ -147,6 +157,67 @@ def _load_script_source_info(spec: SessionSpec, info: dict) -> tuple[str | None,
     if not title and name:
         title = name
     return title, name, source, has_source
+
+
+def _post_json_webhook(url: str, payload: Any) -> dict:
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = resp.read(4096).decode("utf-8", errors="replace")
+            return {"status": int(resp.status), "body": body}
+    except urllib.error.HTTPError as e:
+        body = e.read(4096).decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {e.code}: {body}") from e
+
+
+def _post_telegram_message(token: str, chat_id: str, text: str) -> dict:
+    import requests
+
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+    }
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data=payload,
+            timeout=(5, 10),
+        )
+        resp.raise_for_status()
+        return {"status": int(resp.status_code), "body": resp.text[:4096]}
+    except requests.HTTPError as e:
+        body = e.response.text[:4096] if e.response is not None else ""
+        status = e.response.status_code if e.response is not None else "?"
+        raise RuntimeError(f"HTTP {status}: {body}") from e
+    except requests.RequestException as e:
+        raise RuntimeError(type(e).__name__) from e
+
+
+def _manual_alert_signal_text(message: Any) -> str:
+    if isinstance(message, str):
+        return message
+    try:
+        return json.dumps(message, ensure_ascii=False).replace('"', '')
+    except Exception:
+        return str(message)
+
+
+def _manual_alert_telegram_text(*, script_title: str | None, timeframe: str,
+                                ticker: str, message: Any) -> str:
+    time_str = datetime.now().strftime("%H:%M:%S")
+    return (
+        f"🚨 [M][{script_title or 'No title'}]\n"
+        f"Time: {time_str}\n"
+        f"Timeframe: {timeframe or ''}\n"
+        f"Ticker: {ticker or ''}\n"
+        f"Signal: {_manual_alert_signal_text(message)}"
+    )
 
 
 # ----------------------------------------------------------------------
@@ -326,9 +397,10 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
         if rt is None:
             return JSONResponse({"error": "session not found"}, status_code=404)
         wh = rt.spec.webhook
+        url = (wh.get("url") or "").strip() or default_webhook_url()
         return JSONResponse({
             "enabled": bool(wh.get("enabled", False)),
-            "url": wh.get("url", "") or "",
+            "url": url,
             "telegram_notification": bool(wh.get("telegram_notification", False)),
             "telegram_token": wh.get("telegram_token", "") or "",
             "telegram_chat_id": wh.get("telegram_chat_id", "") or "",
@@ -358,6 +430,73 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
         except Exception as e:
             return JSONResponse({"error": f"failed to update webhook: {e}"}, status_code=500)
         return JSONResponse(updated)
+
+    @r.get("/api/{session_id}/manual-alert-templates")
+    def get_manual_alert_templates(session_id: str) -> JSONResponse:
+        rt = _rt(session_id)
+        if rt is None:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        return JSONResponse({
+            "templates": [dict(t) for t in rt.spec.manual_alert_templates],
+        })
+
+    @r.post("/api/{session_id}/manual-alert-templates")
+    async def update_manual_alert_templates(session_id: str, payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        templates = payload.get("templates")
+        if not isinstance(templates, list):
+            return JSONResponse({"error": "templates must be array"}, status_code=400)
+        if len(templates) > 50:
+            return JSONResponse({"error": "templates can contain at most 50 items"}, status_code=400)
+        sanitized = sanitize_manual_alert_templates(templates)
+        if len(sanitized) != len(templates):
+            return JSONResponse({"error": "each template requires string title and message"}, status_code=400)
+        try:
+            updated = await registry.update_manual_alert_templates(session_id, sanitized)
+        except SessionNotFoundError:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        except Exception as e:
+            return JSONResponse({"error": f"failed to update templates: {e}"}, status_code=500)
+        return JSONResponse({"templates": updated})
+
+    @r.post("/api/{session_id}/manual-alert")
+    async def send_manual_alert(session_id: str, payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        rt = _rt(session_id)
+        if rt is None:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        if "message" not in payload:
+            return JSONResponse({"error": "message is required"}, status_code=400)
+
+        wh = rt.spec.webhook
+        url = (wh.get("url") or "").strip() or default_webhook_url()
+        if not url:
+            return JSONResponse({"error": "webhook url is empty"}, status_code=400)
+        if not url.startswith(("http://", "https://")):
+            return JSONResponse({"error": "webhook url must start with http:// or https://"}, status_code=400)
+
+        try:
+            webhook_result = await asyncio.to_thread(_post_json_webhook, url, payload["message"])
+        except Exception as e:
+            return JSONResponse({"error": f"webhook send failed: {e}"}, status_code=502)
+
+        token = (wh.get("telegram_token") or "").strip() or default_telegram_token()
+        chat_id = (wh.get("telegram_chat_id") or "").strip() or default_telegram_chat_id()
+        telegram_result: dict[str, Any] = {"sent": False}
+        if token and chat_id:
+            script_title, _, _, _ = _load_script_source_info(rt.spec, rt.chart_info)
+            text = _manual_alert_telegram_text(
+                script_title=script_title,
+                timeframe=rt.spec.timeframe,
+                ticker=rt.spec.symbol,
+                message=payload["message"],
+            )
+            try:
+                telegram_result = {
+                    "sent": True,
+                    **await asyncio.to_thread(_post_telegram_message, token, chat_id, text),
+                }
+            except Exception as e:
+                telegram_result = {"sent": False, "error": str(e)}
+        return JSONResponse({"ok": True, "webhook": webhook_result, "telegram": telegram_result})
 
     return r
 

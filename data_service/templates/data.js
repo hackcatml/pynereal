@@ -388,6 +388,9 @@ App.data = {
       const exchange = (info.exchange || "Unknown").toUpperCase();
       const symbol = info.symbol || "Unknown";
       const timeframe = info.timeframe || "Unknown";
+      state.exchange = exchange;
+      state.symbol = symbol;
+      state.timeframe = timeframe;
       const tfSeconds = App.data.timeframeToSeconds(info.timeframe);
       if (tfSeconds) {
         state.configuredTimeframeSec = tfSeconds;
@@ -465,14 +468,20 @@ App.data = {
     const ui = App.ui;
     try {
       const resp = await fetch(`${App.config.apiBase}/webhook-config`);
-      if (!resp.ok) return;
+      if (!resp.ok) {
+        state.webhookUrl = "";
+        return null;
+      }
       const cfg = await resp.json();
       state.webhookEnabled = Boolean(cfg.enabled);
       state.telegramEnabled = Boolean(cfg.telegram_notification);
+      state.webhookUrl = cfg.url || "";
       ui.elements.webhookToggle.checked = state.webhookEnabled;
       ui.elements.telegramToggle.checked = state.telegramEnabled;
+      return cfg;
     } catch (e) {
-      // ignore
+      state.webhookUrl = "";
+      return null;
     }
   },
   async updateWebhookConfig(payload) {
@@ -488,11 +497,65 @@ App.data = {
       const cfg = await resp.json();
       App.state.webhookEnabled = Boolean(cfg.enabled);
       App.state.telegramEnabled = Boolean(cfg.telegram_notification);
+      App.state.webhookUrl = cfg.url || "";
       App.ui.elements.webhookToggle.checked = App.state.webhookEnabled;
       App.ui.elements.telegramToggle.checked = App.state.telegramEnabled;
       return true;
     } catch (e) {
       return false;
+    }
+  },
+  normalizeManualAlertTemplates(templates) {
+    return Array.isArray(templates)
+      ? templates.filter(t => t && typeof t.title === "string" && typeof t.message === "string")
+      : [];
+  },
+  async loadManualAlertTemplates() {
+    try {
+      const resp = await fetch(`${App.config.apiBase}/manual-alert-templates`);
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        return { ok: false, error: data.error || `Load failed (${resp.status})` };
+      }
+      const templates = this.normalizeManualAlertTemplates(data.templates);
+      App.state.manualAlertTemplates = templates;
+      return { ok: true, templates };
+    } catch (e) {
+      return { ok: false, error: "Load failed" };
+    }
+  },
+  async saveManualAlertTemplates(templates) {
+    try {
+      const resp = await fetch(`${App.config.apiBase}/manual-alert-templates`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ templates })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        return { ok: false, error: data.error || `Save failed (${resp.status})` };
+      }
+      const savedTemplates = this.normalizeManualAlertTemplates(data.templates);
+      App.state.manualAlertTemplates = savedTemplates;
+      return { ok: true, templates: savedTemplates };
+    } catch (e) {
+      return { ok: false, error: "Save failed" };
+    }
+  },
+  async sendManualAlert(payload) {
+    try {
+      const resp = await fetch(`${App.config.apiBase}/manual-alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        return { ok: false, error: data.error || `Send failed (${resp.status})` };
+      }
+      return { ok: true, data };
+    } catch (e) {
+      return { ok: false, error: "Send failed" };
     }
   }
 };
