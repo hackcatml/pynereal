@@ -203,6 +203,14 @@ class SessionRegistry:
         await self.notify_hub()
         return dict(session.spec.webhook)
 
+    async def update_manual_alert_templates(self, session_id: str, templates: list[dict]) -> list[dict]:
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise SessionNotFoundError(session_id)
+        session.spec = session.spec.with_manual_alert_templates(templates)
+        self._persist()
+        return [dict(t) for t in session.spec.manual_alert_templates]
+
     # ------------------------------------------------------------------
     # Runner control
     # ------------------------------------------------------------------

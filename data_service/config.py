@@ -4,7 +4,7 @@ import json
 import os
 import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from pynecore.cli.app import app_state
@@ -34,6 +34,25 @@ def slugify_session_id(exchange: str, symbol: str, timeframe: str, script_name: 
     return _slug(raw)
 
 
+def sanitize_manual_alert_templates(raw: object) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+    templates: list[dict] = []
+    for item in raw[:50]:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title")
+        message = item.get("message")
+        if not isinstance(title, str) or not isinstance(message, str):
+            continue
+        title = title.strip()[:100]
+        message = message.strip()
+        if not title or not message:
+            continue
+        templates.append({"title": title, "message": message[:5000]})
+    return templates
+
+
 @dataclass(frozen=True)
 class SessionSpec:
     """Immutable per-session definition loaded from config / sessions.json."""
@@ -46,6 +65,7 @@ class SessionSpec:
     script_name: str
     webhook: dict  # {"enabled": bool, "telegram_notification": bool}  (decision 8-1)
     autostart_runner: bool = False  # start the runner automatically on hub boot
+    manual_alert_templates: list[dict] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict) -> "SessionSpec":
@@ -76,6 +96,7 @@ class SessionSpec:
                 "telegram_chat_id": (webhook.get("telegram_chat_id") or ""),
             },
             autostart_runner=bool(d.get("autostart_runner", False)),
+            manual_alert_templates=sanitize_manual_alert_templates(d.get("manual_alert_templates")),
         )
 
     def with_webhook(self, *, enabled: bool | None = None,
@@ -99,6 +120,16 @@ class SessionSpec:
             symbol=self.symbol, timeframe=self.timeframe,
             history_since=self.history_since, script_name=self.script_name,
             webhook=wh, autostart_runner=self.autostart_runner,
+            manual_alert_templates=[dict(t) for t in self.manual_alert_templates],
+        )
+
+    def with_manual_alert_templates(self, templates: list[dict]) -> "SessionSpec":
+        return SessionSpec(
+            id=self.id, provider=self.provider, exchange=self.exchange,
+            symbol=self.symbol, timeframe=self.timeframe,
+            history_since=self.history_since, script_name=self.script_name,
+            webhook=dict(self.webhook), autostart_runner=self.autostart_runner,
+            manual_alert_templates=sanitize_manual_alert_templates(templates),
         )
 
     def to_dict(self) -> dict:
@@ -112,6 +143,7 @@ class SessionSpec:
             "script_name": self.script_name,
             "webhook": dict(self.webhook),
             "autostart_runner": self.autostart_runner,
+            "manual_alert_templates": [dict(t) for t in self.manual_alert_templates],
         }
 
     @property
@@ -153,6 +185,46 @@ def _toml_path() -> Path:
 def _read_toml() -> dict:
     with open(_toml_path(), "rb") as f:
         return tomllib.load(f)
+
+
+def default_webhook_url() -> str:
+    try:
+        webhook = (_read_toml().get("webhook", {}) or {})
+    except Exception:
+        return ""
+    return str(webhook.get("url") or "").strip()
+
+
+def _dotenv_value(name: str) -> str:
+    value = os.getenv(name)
+    if value:
+        return value.strip()
+
+    candidates = [
+        Path.cwd() / ".env",
+        app_state.config_dir.parent.parent / ".env",
+    ]
+    for path in candidates:
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, raw_value = line.split("=", 1)
+                if key.strip() != name:
+                    continue
+                return raw_value.strip().strip("\"'")
+        except Exception:
+            continue
+    return ""
+
+
+def default_telegram_token() -> str:
+    return _dotenv_value("BOT_TOKEN")
+
+
+def default_telegram_chat_id() -> str:
+    return _dotenv_value("CHAT_ID")
 
 
 def load_hub_config() -> HubConfig:
