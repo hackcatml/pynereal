@@ -60,6 +60,7 @@ App.ws = {
             value: msg.data.volume,
             color: msg.data.close >= msg.data.open ? "#26a69a" : "#ef5350"
           });
+          App.data.upsertOhlcvCache(msg.data);
           state.lastBarTime = msg.data.time;
           state.lastOhlcv = msg.data;
 
@@ -77,6 +78,7 @@ App.ws = {
           if (state.lastOhlcv && state.lastOhlcv.time === msg.data.time) {
             const fixedBar = { ...state.lastOhlcv, open: msg.data.open };
             chart.candleSeries.update(fixedBar);
+            App.data.upsertOhlcvCache(fixedBar);
             state.lastOhlcv = fixedBar;
           }
           state.lastBarTime = Math.max(state.lastBarTime, msg.data.time);

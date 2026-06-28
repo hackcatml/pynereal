@@ -4,6 +4,60 @@ App.data = {
   STYLE_CIRCLES: 2,
   STYLE_CROSS: 4,
   STYLE_LINEBR: 7,
+  rebuildOhlcvCache(data) {
+    const collections = App.collections;
+    collections.ohlcvData = Array.isArray(data)
+      ? data
+          .filter(d => d && Number.isFinite(Number(d.time)))
+          .map(d => ({
+            time: Number(d.time),
+            open: Number(d.open),
+            high: Number(d.high),
+            low: Number(d.low),
+            close: Number(d.close),
+            volume: Number(d.volume) || 0
+          }))
+          .sort((a, b) => a.time - b.time)
+      : [];
+    collections.ohlcvIndexByTime = new Map();
+    collections.ohlcvVolumePrefix = [];
+    let volumeTotal = 0;
+    collections.ohlcvData.forEach((bar, index) => {
+      collections.ohlcvIndexByTime.set(bar.time, index);
+      volumeTotal += Number(bar.volume) || 0;
+      collections.ohlcvVolumePrefix[index] = volumeTotal;
+    });
+    if (App.measure) {
+      App.measure.scheduleRender();
+    }
+  },
+  upsertOhlcvCache(bar) {
+    if (!bar || !Number.isFinite(Number(bar.time))) return;
+    const collections = App.collections;
+    const time = Number(bar.time);
+    const cachedBar = {
+      time,
+      open: Number(bar.open),
+      high: Number(bar.high),
+      low: Number(bar.low),
+      close: Number(bar.close),
+      volume: Number(bar.volume) || 0
+    };
+    const existingIndex = collections.ohlcvIndexByTime.get(time);
+    if (existingIndex != null) {
+      collections.ohlcvData[existingIndex] = cachedBar;
+      this.rebuildOhlcvCache(collections.ohlcvData);
+      return;
+    }
+    const last = collections.ohlcvData[collections.ohlcvData.length - 1];
+    if (!last || time > last.time) {
+      collections.ohlcvData.push(cachedBar);
+    } else {
+      collections.ohlcvData.push(cachedBar);
+      collections.ohlcvData.sort((a, b) => a.time - b.time);
+    }
+    this.rebuildOhlcvCache(collections.ohlcvData);
+  },
   toLinePoint(time, value) {
     const pointTime = Number(time);
     if (!Number.isFinite(pointTime)) {
@@ -311,6 +365,7 @@ App.data = {
             await App.util.sleep(1000);
             continue;
           }
+          this.rebuildOhlcvCache(cleanData);
           chart.candleSeries.setData(cleanData);
           chart.volumeSeries.setData(cleanData.map(d => ({
             time: d.time,

@@ -72,6 +72,12 @@ App.ui = {
       App.data.loadWebhookConfig();
     }
   },
+  isAlertsMenuEventTarget(target) {
+    return Boolean(
+      target &&
+      (this.elements.alertsMenu.contains(target) || this.elements.alertsToggle.contains(target))
+    );
+  },
   alertTemplateStorageKey() {
     return App.config.storageKey("manualAlertTemplates");
   },
@@ -1121,7 +1127,7 @@ App.ui = {
     });
 
     document.addEventListener("click", (e) => {
-      if (!alertsMenu.contains(e.target) && e.target !== alertsToggle) {
+      if (!this.isAlertsMenuEventTarget(e.target)) {
         this.toggleAlertsMenu(false);
       }
       if (Date.now() < App.state.manualAlertSuppressClickUntil) {
@@ -1141,6 +1147,9 @@ App.ui = {
     });
 
     document.addEventListener("pointerdown", (e) => {
+      if (!this.isAlertsMenuEventTarget(e.target)) {
+        this.toggleAlertsMenu(false);
+      }
       if (!e.target.closest(".template-placeholder")) {
         this.clearActiveTemplatePlaceholder();
       }

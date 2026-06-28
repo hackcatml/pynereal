@@ -76,6 +76,110 @@ body.source-open #chart {
   align-items: center;
   position: relative;
 }
+.drawing-toolbar {
+  position: fixed;
+  left: 12px;
+  top: 104px;
+  z-index: 15;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 5px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.drawing-tool-palette {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.drawing-tool-palette:not(.hidden) {
+  animation: drawing-palette-reveal 0.16s ease-out;
+}
+@keyframes drawing-palette-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.drawing-tool-btn {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 6px;
+  background: #ffffff;
+  color: #111;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.drawing-tool-btn.active {
+  border-color: rgba(11, 51, 232, 0.42);
+  background: #eef2ff;
+  color: #0b33e8;
+}
+.drawing-tool-btn:active {
+  transform: translateY(1px);
+}
+.drawing-tools-toggle.active {
+  border-color: rgba(11, 51, 232, 0.42);
+}
+.tool-icon {
+  width: 19px;
+  height: 19px;
+  display: block;
+}
+.measure-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 14;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  pointer-events: none;
+  touch-action: none;
+}
+body.measure-active #chart {
+  cursor: crosshair;
+}
+.measure-label {
+  position: fixed;
+  z-index: 16;
+  min-width: 128px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  color: #ffffff;
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: center;
+  pointer-events: none;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  white-space: nowrap;
+}
+.measure-label.up {
+  background: rgba(38, 166, 154, 0.94);
+}
+.measure-label.down {
+  background: rgba(239, 83, 80, 0.94);
+}
+.measure-label.flat {
+  background: rgba(90, 90, 90, 0.94);
+}
 .toolbar-btn {
   border: 1px solid rgba(0, 0, 0, 0.15);
   background: #ffffff;
@@ -926,6 +1030,26 @@ body.source-open .source-panel {
 
   .template-btn {
     padding: 7px 10px;
+  }
+
+  .drawing-toolbar {
+    left: max(8px, env(safe-area-inset-left));
+    top: max(112px, calc(env(safe-area-inset-top) + 112px));
+    gap: 5px;
+    padding: 4px;
+  }
+
+  .drawing-tool-btn {
+    width: 34px;
+    height: 34px;
+    border-radius: 7px;
+    font-size: 13px;
+  }
+
+  .measure-label {
+    max-width: calc(100vw - 24px);
+    white-space: normal;
+    font-size: 11.5px;
   }
 
   .manual-alert-menu {
