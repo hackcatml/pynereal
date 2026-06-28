@@ -13,6 +13,7 @@ _STATIC_FILES = {
     "state.js": "text/javascript",
     "ui.js": "text/javascript",
     "chart.js": "text/javascript",
+    "measure.js": "text/javascript",
     "data.js": "text/javascript",
     "ws.js": "text/javascript",
     "main.js": "text/javascript",

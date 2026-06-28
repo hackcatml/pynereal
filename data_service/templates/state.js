@@ -54,10 +54,16 @@ window.App.state = {
   manualAlertTemplateOpen: false,
   manualAlertConfirmOpen: false,
   manualAlertSelectedTemplateIndex: -1,
-  manualAlertSuppressClickUntil: 0
+  manualAlertSuppressClickUntil: 0,
+  measureToolActive: false,
+  measureDraft: null,
+  measureResult: null
 };
 
 window.App.collections = {
+  ohlcvData: [],
+  ohlcvIndexByTime: new Map(),
+  ohlcvVolumePrefix: [],
   plotSeriesMap: new Map(),
   plotSeriesList: [],
   markers: [],

@@ -97,22 +97,52 @@ App.chart = {
     if (time && typeof time.timestamp === "number") return time.timestamp;
     return App.state.lastBarTime || null;
   },
-  manualAlertContextFromPointer(pointer) {
-    if (!pointer || !this.chart || !this.candleSeries) return null;
+  plotPointFromClient(clientX, clientY) {
+    if (!this.chart || !this.candleSeries || !this.container) return null;
     const rect = this.container.getBoundingClientRect();
-    const x = pointer.clientX - rect.left;
-    const y = pointer.clientY - rect.top;
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    if (x < 0 || x > rect.width || y < 0 || y > rect.height) return null;
+
+    let priceScaleWidth = 0;
+    try {
+      priceScaleWidth = this.chart.priceScale("right").width() || 0;
+    } catch {}
+    // The right price scale and bottom time scale also live inside #chart, but
+    // they are not candle area. Keep right-side chart whitespace clickable.
+    const timeScaleHeight = 28;
+    if (priceScaleWidth > 0 && x >= rect.width - priceScaleWidth) return null;
+    if (y >= rect.height - timeScaleHeight) return null;
+
+    const timeScale = this.chart.timeScale();
+    const time = timeScale.coordinateToTime(x);
+    let logical = null;
+    try {
+      logical = timeScale.coordinateToLogical(x);
+    } catch {}
     const price = this.candleSeries.coordinateToPrice(y);
     if (!Number.isFinite(Number(price))) return null;
-    const time = this.chart.timeScale().coordinateToTime(x);
+    return {
+      x,
+      y,
+      price: Number(price),
+      time,
+      logical: Number.isFinite(Number(logical)) ? Number(logical) : null
+    };
+  },
+  manualAlertContextFromPointer(pointer) {
+    if (!pointer) return null;
+    const point = this.plotPointFromClient(pointer.clientX, pointer.clientY);
+    if (!point) return null;
     return {
       clientX: pointer.clientX,
       clientY: pointer.clientY,
-      price: Number(price),
-      time: this.normalizeAlertTime(time)
+      price: point.price,
+      time: this.normalizeAlertTime(point.time)
     };
   },
   openManualAlertMenuFromPointer(pointer) {
+    if (App.state.measureToolActive) return;
     if (App.state.sourcePanelOpen) return;
     if (!App.ui.elements.alertTemplateModal.classList.contains("hidden")) return;
     const context = this.manualAlertContextFromPointer(pointer);
@@ -162,6 +192,9 @@ App.chart = {
     const size = this.getContainerSize();
     this.chart.applyOptions(size);
     this.positionNavButtons();
+    if (App.measure) {
+      App.measure.scheduleRender();
+    }
   },
   applyInitialVisibleRange(dataLength) {
     const ts = this.chart.timeScale();
@@ -301,6 +334,9 @@ App.chart = {
     collections.markerKeys.clear();
     collections.plotcharMarkers.length = 0;
     collections.plotcharMarkerKeys.clear();
+    collections.ohlcvData.length = 0;
+    collections.ohlcvIndexByTime.clear();
+    collections.ohlcvVolumePrefix.length = 0;
     collections.entryMarkerData.length = 0;
     collections.closeMarkerData.length = 0;
     collections.entryPriceKeys.clear();
@@ -317,6 +353,9 @@ App.chart = {
     }
     this.currentPriceLine = null;
     this.removeManualAlertPriceGuide();
+    if (App.measure) {
+      App.measure.clear();
+    }
   },
   updatePriceLineWithTimer() {
     const state = App.state;

@@ -9,6 +9,26 @@
 </head>
 <body>
   <div id="chart"></div>
+  <div id="drawing-toolbar" class="drawing-toolbar" aria-label="Drawing tools">
+    <button id="drawing-tools-toggle" class="drawing-tool-btn drawing-tools-toggle" type="button" title="Tools" aria-label="Tools" aria-expanded="false">
+      <svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+      </svg>
+    </button>
+    <div id="drawing-tool-palette" class="drawing-tool-palette hidden" role="menu" aria-label="Drawing tool list">
+      <button id="measure-tool-toggle" class="drawing-tool-btn measure-tool-icon" type="button" title="Measure price change" aria-label="Measure price change" role="menuitem">
+        <svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.41 2.41 0 0 1 0-3.4l2.6-2.6a2.41 2.41 0 0 1 3.4 0Z"/>
+          <path d="m14.5 12.5 2-2"/>
+          <path d="m11.5 9.5 2-2"/>
+          <path d="m8.5 6.5 2-2"/>
+          <path d="m17.5 15.5 2-2"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+  <svg id="measure-overlay" class="measure-overlay" aria-hidden="true"></svg>
+  <div id="measure-label" class="measure-label hidden"></div>
   <button id="nav-to-start" class="nav-btn nav-btn-left" title="처음으로">&laquo;</button>
   <button id="nav-to-end" class="nav-btn nav-btn-right" title="최신으로">&raquo;</button>
   <div id="chart-info">
@@ -82,7 +102,7 @@
           <button class="template-placeholder" type="button" data-help="Template title selected in the manual alert menu."><code>{{title}}</code></button>
         </span>
       </div>
-      <pre>{"signal":"LONG 1","price":{{market}},"weight":0.0275}</pre>
+      <pre>{"signal":"LONG 1","price":{{market}},"exchange":{{exchange}}}</pre>
       <pre>{"signal":"CLOSE TP3","ticker":"{{ticker}}"}</pre>
     </div>
     <div class="template-table">
@@ -133,6 +153,7 @@
   <script src="/static/state.js"></script>
   <script src="/static/ui.js"></script>
   <script src="/static/chart.js"></script>
+  <script src="/static/measure.js"></script>
   <script src="/static/data.js"></script>
   <script src="/static/ws.js"></script>
   <script src="/static/main.js"></script>

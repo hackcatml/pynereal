@@ -223,6 +223,54 @@ BOT_TOKEN=your_bot_token
 CHAT_ID=your_chat_id
 ```
 
+## Manual Alerts
+
+Manual alerts let you send one-off webhook messages directly from the chart.
+They are useful when you want discretionary control in addition to fully
+automated strategy alerts.
+
+Open a chart, click the alert menu gear, and configure **Manual Alert
+Templates**. Each template has a `TITLE` and a JSON `MESSAGE`. Templates are
+stored with the session, so they are shared between desktop and mobile browsers.
+
+To send a manual alert:
+
+1. Double-click the chart on desktop, or double-tap it on mobile.
+2. Choose a template from the manual alert menu.
+3. Drag the menu if you need to adjust the selected chart price.
+4. Click `Send` and confirm the webhook URL.
+
+Manual alerts are independent from the Webhook checkbox. The checkbox controls
+strategy-generated alerts only; a manual alert can still be sent while the
+checkbox is off. A valid webhook URL is still required. PyneReal sends the final
+JSON message directly to that URL.
+
+If Telegram credentials are configured for the session, or through the root
+`.env` fallback, PyneReal also sends a Telegram manual-alert message after the
+webhook send succeeds. This does not depend on the Telegram checkbox.
+
+Supported placeholders:
+
+- `{{price}}`: the selected chart price. Drag the manual alert menu to adjust it.
+- `{{market}}`: the latest live price at the final `Send` click.
+- `{{time}}`: the chart time under the cursor, or the latest bar time if unavailable.
+- `{{symbol}}`: the session symbol, for example `BTC/USDT:USDT`.
+- `{{ticker}}`: alias of `{{symbol}}`, kept for template readability.
+- `{{exchange}}`: the session exchange id, for example `okx` or `bitget`.
+- `{{timeframe}}`: the session timeframe, for example `1m` or `5m`.
+- `{{title}}`: the selected template title.
+
+Use raw placeholders for numeric JSON values and quoted placeholders for string
+values:
+
+```json
+{"signal":"LONG 1","price":"{{market}}","title":"{{title}}"}
+```
+
+```json
+{"signal":"CLOSE TP3","ticker":"{{ticker}}","timeframe":"{{timeframe}}"}
+```
+
 ## Backtesting
 
 Backtesting still uses the PyneCore CLI. It does not require the hub.
@@ -301,7 +349,7 @@ Search for `module calculation` in:
 
 The dashboard is usable from a mobile browser as well as from a desktop
 browser.<br>
-open the dashboard from the phone with the server IP address:
+Open the dashboard from the phone with the server IP address:
 
 ```text
 http://<server-ip>:9001
