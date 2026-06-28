@@ -154,6 +154,15 @@ body.source-open #chart {
   pointer-events: none;
   touch-action: none;
 }
+.measure-overlay * {
+  pointer-events: none;
+}
+.measure-overlay .measure-hit-area {
+  pointer-events: all;
+}
+body.measure-active .measure-overlay {
+  touch-action: none;
+}
 body.measure-active #chart {
   cursor: crosshair;
 }
