@@ -12,17 +12,23 @@ App.measure = {
   lastToolbarTouchAt: 0,
   mobileAimClientX: null,
   mobileAimClientY: null,
+  toolbarDrag: null,
+  toolbarDragTimer: null,
+  toolbarSuppressClickUntil: 0,
 
   init() {
     if (!this.overlay || !this.label || !this.toolsButton || !this.palette || !this.toggleButton) return;
     this.installToolbarDoubleTapGuard();
+    this.installMobileToolbarDrag();
 
     this.toolsButton.addEventListener("click", (e) => {
+      if (this.shouldSuppressToolbarClick(e)) return;
       e.stopPropagation();
       this.togglePalette();
     });
 
     this.toggleButton.addEventListener("click", (e) => {
+      if (this.shouldSuppressToolbarClick(e)) return;
       e.stopPropagation();
       this.closePalette();
       this.setActive(!App.state.measureToolActive);
@@ -55,8 +61,14 @@ App.measure = {
       App.chart.chart.timeScale().subscribeVisibleLogicalRangeChange(() => this.scheduleRender());
     } catch {}
 
-    window.addEventListener("resize", () => this.scheduleRender());
-    window.addEventListener("orientationchange", () => this.scheduleRender());
+    window.addEventListener("resize", () => {
+      this.clampToolbarPosition();
+      this.scheduleRender();
+    });
+    window.addEventListener("orientationchange", () => {
+      this.clampToolbarPosition();
+      this.scheduleRender();
+    });
     this.scheduleRender();
   },
 
@@ -64,6 +76,10 @@ App.measure = {
     const toolbar = document.getElementById("drawing-toolbar");
     if (!toolbar) return;
     toolbar.addEventListener("touchend", (e) => {
+      if (Date.now() < this.toolbarSuppressClickUntil) {
+        e.preventDefault();
+        return;
+      }
       const now = Date.now();
       const isDoubleTap = now - this.lastToolbarTouchAt < 360;
       this.lastToolbarTouchAt = now;
@@ -74,6 +90,126 @@ App.measure = {
       e.preventDefault();
       button.click();
     }, { passive: false });
+  },
+
+  installMobileToolbarDrag() {
+    const toolbar = document.getElementById("drawing-toolbar");
+    if (!toolbar) return;
+    toolbar.addEventListener("pointerdown", (e) => this.onToolbarPointerDown(e), { passive: false });
+    window.addEventListener("pointermove", (e) => this.onToolbarPointerMove(e), { passive: false });
+    window.addEventListener("pointerup", (e) => this.onToolbarPointerUp(e), { passive: false });
+    window.addEventListener("pointercancel", (e) => this.onToolbarPointerUp(e), { passive: false });
+  },
+
+  shouldSuppressToolbarClick(e) {
+    if (Date.now() >= this.toolbarSuppressClickUntil) return false;
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    return true;
+  },
+
+  clearToolbarDragTimer() {
+    if (this.toolbarDragTimer !== null) {
+      clearTimeout(this.toolbarDragTimer);
+      this.toolbarDragTimer = null;
+    }
+  },
+
+  toolbarBoundsFor(rect) {
+    const margin = 6;
+    const safeLeft = Math.max(margin, Number(rect && rect.width) || 0);
+    const safeTop = Math.max(margin, Number(rect && rect.height) || 0);
+    return {
+      minLeft: margin,
+      minTop: margin,
+      maxLeft: Math.max(margin, window.innerWidth - safeLeft - margin),
+      maxTop: Math.max(margin, window.innerHeight - safeTop - margin)
+    };
+  },
+
+  clampToolbarPosition() {
+    const toolbar = document.getElementById("drawing-toolbar");
+    if (!toolbar || !toolbar.style.left || !toolbar.style.top) return;
+    const rect = toolbar.getBoundingClientRect();
+    const bounds = this.toolbarBoundsFor(rect);
+    const left = Math.max(bounds.minLeft, Math.min(rect.left, bounds.maxLeft));
+    const top = Math.max(bounds.minTop, Math.min(rect.top, bounds.maxTop));
+    toolbar.style.left = `${Math.round(left)}px`;
+    toolbar.style.top = `${Math.round(top)}px`;
+  },
+
+  startToolbarDrag() {
+    const drag = this.toolbarDrag;
+    if (!drag) return;
+    drag.active = true;
+    drag.toolbar.classList.add("dragging");
+    if (window.navigator && typeof window.navigator.vibrate === "function") {
+      window.navigator.vibrate(25);
+    }
+    this.toolbarSuppressClickUntil = Date.now() + 800;
+  },
+
+  onToolbarPointerDown(e) {
+    if (!this.isMobilePointer(e) || e.pointerType === "mouse") return;
+    const toolbar = e.currentTarget;
+    const rect = toolbar.getBoundingClientRect();
+    this.clearToolbarDragTimer();
+    this.toolbarDrag = {
+      toolbar,
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      originLeft: rect.left,
+      originTop: rect.top,
+      active: false,
+      moved: false
+    };
+    try {
+      toolbar.setPointerCapture(e.pointerId);
+    } catch {}
+    this.toolbarDragTimer = setTimeout(() => this.startToolbarDrag(), 1000);
+  },
+
+  onToolbarPointerMove(e) {
+    const drag = this.toolbarDrag;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+
+    const dx = e.clientX - drag.startX;
+    const dy = e.clientY - drag.startY;
+    const distance = Math.hypot(dx, dy);
+    if (!drag.active) {
+      if (distance > 10) {
+        drag.moved = true;
+        this.clearToolbarDragTimer();
+      }
+      return;
+    }
+
+    this.stopTouchDrawingEvent(e);
+    const rect = drag.toolbar.getBoundingClientRect();
+    const bounds = this.toolbarBoundsFor(rect);
+    const left = Math.max(bounds.minLeft, Math.min(drag.originLeft + dx, bounds.maxLeft));
+    const top = Math.max(bounds.minTop, Math.min(drag.originTop + dy, bounds.maxTop));
+    drag.toolbar.style.left = `${Math.round(left)}px`;
+    drag.toolbar.style.top = `${Math.round(top)}px`;
+  },
+
+  onToolbarPointerUp(e) {
+    const drag = this.toolbarDrag;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+
+    this.clearToolbarDragTimer();
+    if (drag.active) {
+      this.stopTouchDrawingEvent(e);
+      this.toolbarSuppressClickUntil = Date.now() + 800;
+    }
+    drag.toolbar.classList.remove("dragging");
+    try {
+      drag.toolbar.releasePointerCapture(e.pointerId);
+    } catch {}
+    this.toolbarDrag = null;
   },
 
   togglePalette(forceOpen = null) {

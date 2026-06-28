@@ -79,7 +79,7 @@ body.source-open #chart {
 .drawing-toolbar {
   position: fixed;
   left: 12px;
-  top: 104px;
+  top: 88px;
   z-index: 15;
   display: flex;
   flex-direction: column;
@@ -92,6 +92,13 @@ body.source-open #chart {
   touch-action: manipulation;
   -webkit-user-select: none;
   user-select: none;
+  -webkit-touch-callout: none;
+}
+.drawing-toolbar.dragging {
+  opacity: 0.96;
+  border-color: rgba(41, 98, 255, 0.75);
+  background: rgba(238, 242, 255, 0.94);
+  box-shadow: 0 0 0 2px rgba(41, 98, 255, 0.18), 0 8px 24px rgba(0, 0, 0, 0.18);
 }
 .drawing-tool-palette {
   display: flex;
@@ -1043,7 +1050,7 @@ body.source-open .source-panel {
 
   .drawing-toolbar {
     left: max(8px, env(safe-area-inset-left));
-    top: max(112px, calc(env(safe-area-inset-top) + 112px));
+    top: max(96px, calc(env(safe-area-inset-top) + 96px));
     gap: 5px;
     padding: 4px;
   }
