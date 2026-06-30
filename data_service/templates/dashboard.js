@@ -4,6 +4,8 @@
   let keepaliveTimer = null;
   let removeSessionId = null;
   let scriptsLoading = false;
+  let scriptOptions = [];
+  let scriptActiveIndex = -1;
   const priceFormatters = new Map();
 
   const el = (id) => document.getElementById(id);
@@ -140,6 +142,120 @@
     document.querySelectorAll(".data-badge-wrap.show-since").forEach((wrap) => {
       if (wrap !== exceptWrap) wrap.classList.remove("show-since");
     });
+  }
+
+  function scriptSelectNodes() {
+    return {
+      control: el("script-select-control"),
+      select: el("script-select"),
+      button: el("script-select-button"),
+      label: el("script-select-label"),
+      options: el("script-select-options"),
+    };
+  }
+
+  function selectedScriptValue() {
+    const sel = el("script-select");
+    return sel ? String(sel.value || "") : "";
+  }
+
+  function syncScriptSelectLabel() {
+    const nodes = scriptSelectNodes();
+    const value = selectedScriptValue();
+    const text = value || "script_name…";
+    if (nodes.label) nodes.label.textContent = text;
+    if (nodes.button) nodes.button.title = value || "Select script";
+    if (nodes.options) {
+      nodes.options.querySelectorAll(".script-select-option").forEach((option, index) => {
+        const selected = option.dataset.scriptValue === value;
+        option.classList.toggle("selected", selected);
+        option.classList.toggle("active", index === scriptActiveIndex);
+        option.setAttribute("aria-selected", selected ? "true" : "false");
+      });
+    }
+  }
+
+  function renderScriptOptions() {
+    const nodes = scriptSelectNodes();
+    if (!nodes.options) return;
+    if (!scriptOptions.length) {
+      nodes.options.innerHTML = `<div class="script-select-empty">No scripts found</div>`;
+      scriptActiveIndex = -1;
+      syncScriptSelectLabel();
+      return;
+    }
+    const value = selectedScriptValue();
+    nodes.options.innerHTML = scriptOptions.map((script, index) => {
+      const selected = script === value;
+      const active = index === scriptActiveIndex;
+      return `<button type="button" role="option" ` +
+        `class="script-select-option${selected ? " selected" : ""}${active ? " active" : ""}" ` +
+        `data-script-index="${index}" data-script-value="${esc(script)}" ` +
+        `aria-selected="${selected ? "true" : "false"}" title="${esc(script)}">${esc(script)}</button>`;
+    }).join("");
+  }
+
+  function setScriptActiveIndex(index) {
+    if (!scriptOptions.length) {
+      scriptActiveIndex = -1;
+      renderScriptOptions();
+      return;
+    }
+    const next = Math.max(0, Math.min(Number(index) || 0, scriptOptions.length - 1));
+    scriptActiveIndex = next;
+    renderScriptOptions();
+    const active = el("script-select-options").querySelector(".script-select-option.active");
+    if (active) active.scrollIntoView({ block: "nearest" });
+  }
+
+  function openScriptDropdown() {
+    const nodes = scriptSelectNodes();
+    if (!nodes.control || !nodes.button || !nodes.options) return;
+    const currentIndex = scriptOptions.indexOf(selectedScriptValue());
+    scriptActiveIndex = currentIndex >= 0 ? currentIndex : 0;
+    renderScriptOptions();
+    nodes.control.classList.add("open");
+    nodes.button.setAttribute("aria-expanded", "true");
+    nodes.options.classList.remove("hidden");
+    nodes.options.setAttribute("tabindex", "-1");
+  }
+
+  function closeScriptDropdown() {
+    const nodes = scriptSelectNodes();
+    if (!nodes.control || !nodes.button || !nodes.options) return;
+    nodes.control.classList.remove("open");
+    nodes.button.setAttribute("aria-expanded", "false");
+    nodes.options.classList.add("hidden");
+  }
+
+  function toggleScriptDropdown() {
+    const nodes = scriptSelectNodes();
+    if (!nodes.options) return;
+    if (nodes.options.classList.contains("hidden")) openScriptDropdown();
+    else closeScriptDropdown();
+  }
+
+  function selectScriptValue(value) {
+    const nodes = scriptSelectNodes();
+    if (!nodes.select) return;
+    nodes.select.value = String(value || "");
+    nodes.select.dispatchEvent(new Event("change", { bubbles: true }));
+    syncScriptSelectLabel();
+  }
+
+  function moveScriptActive(delta) {
+    if (!scriptOptions.length) return;
+    const current = scriptActiveIndex >= 0 ? scriptActiveIndex : 0;
+    setScriptActiveIndex(current + delta);
+  }
+
+  function commitScriptActive() {
+    if (scriptActiveIndex < 0 || scriptActiveIndex >= scriptOptions.length) return false;
+    selectScriptValue(scriptOptions[scriptActiveIndex]);
+    closeScriptDropdown();
+    const button = el("script-select-button");
+    if (button) button.focus();
+    return true;
   }
 
   function toggleDataSinceTooltip(tr) {
@@ -368,6 +484,13 @@
   el("add-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     el("add-error").textContent = "";
+    if (!selectedScriptValue()) {
+      el("add-error").textContent = "스크립트를 선택하세요.";
+      openScriptDropdown();
+      const button = el("script-select-button");
+      if (button) button.focus();
+      return;
+    }
     const fd = new FormData(e.target);
     const payload = {};
     fd.forEach((v, k) => {
@@ -393,6 +516,8 @@
       });
       e.target.reset();
       e.target.querySelector('[name="provider"]').value = "ccxt";
+      syncScriptSelectLabel();
+      closeScriptDropdown();
       clearFieldErrors();
     } catch (err) {
       el("add-error").textContent = err.message;
@@ -594,12 +719,17 @@
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
+    closeScriptDropdown();
     closeDataSinceTooltips();
     if (!el("log-modal").classList.contains("hidden")) closeLogs();
     if (!el("settings-modal").classList.contains("hidden")) closeSettings();
     if (!el("remove-modal").classList.contains("hidden")) closeRemoveConfirm();
   });
   document.addEventListener("click", (e) => {
+    const scriptControl = el("script-select-control");
+    if (scriptControl && e.target && !scriptControl.contains(e.target)) {
+      closeScriptDropdown();
+    }
     if (!isTouchTooltipMode()) return;
     if (!e.target || !e.target.closest || e.target.closest(".data-badge-wrap")) return;
     closeDataSinceTooltips();
@@ -612,6 +742,8 @@
     el("add-toggle").setAttribute("aria-expanded", String(!collapsed));
     if (!collapsed) {
       loadScripts();  // refresh the script list each time it opens
+    } else {
+      closeScriptDropdown();
     }
   }
   el("add-toggle").addEventListener("click", toggleAddCard);
@@ -695,9 +827,12 @@
       const data = await api("/api/scripts", { cache: "no-store" });
       const sel = el("script-select");
       const cur = sel.value;
-      const opts = (data.scripts || []).map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("");
+      scriptOptions = Array.isArray(data.scripts) ? data.scripts : [];
+      const opts = scriptOptions.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("");
       sel.innerHTML = '<option value="">script_name…</option>' + opts;
-      if (cur && (data.scripts || []).includes(cur)) sel.value = cur;
+      sel.value = cur && scriptOptions.includes(cur) ? cur : "";
+      renderScriptOptions();
+      syncScriptSelectLabel();
     } catch (e) {
       /* ignore */
     } finally {
@@ -706,6 +841,51 @@
     }
   }
   el("script-refresh").addEventListener("click", loadScripts);
+  el("script-select").addEventListener("change", syncScriptSelectLabel);
+  el("script-select-button").addEventListener("click", (e) => {
+    e.preventDefault();
+    toggleScriptDropdown();
+  });
+  el("script-select-button").addEventListener("keydown", (e) => {
+    const optionsOpen = !el("script-select-options").classList.contains("hidden");
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!optionsOpen) openScriptDropdown();
+      else moveScriptActive(e.key === "ArrowDown" ? 1 : -1);
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      if (optionsOpen) commitScriptActive();
+      else openScriptDropdown();
+    } else if (e.key === "Escape") {
+      closeScriptDropdown();
+    }
+  });
+  el("script-select-options").addEventListener("click", (e) => {
+    const option = e.target && e.target.closest ? e.target.closest(".script-select-option") : null;
+    if (!option) return;
+    selectScriptValue(option.dataset.scriptValue || "");
+    closeScriptDropdown();
+    el("script-select-button").focus();
+  });
+  el("script-select-options").addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      moveScriptActive(e.key === "ArrowDown" ? 1 : -1);
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      setScriptActiveIndex(0);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      setScriptActiveIndex(scriptOptions.length - 1);
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      commitScriptActive();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      closeScriptDropdown();
+      el("script-select-button").focus();
+    }
+  });
 
   async function refresh() {
     try {
