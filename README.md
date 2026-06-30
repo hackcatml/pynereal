@@ -18,6 +18,7 @@ Tested in realtime:
 - [x] Hyperliquid
 - [x] OKX
 - [x] Binance
+- [x] Bybit
 
 ## Supported Timeframes
 
@@ -156,8 +157,8 @@ When a feed starts, PyneReal prepares an OHLCV file under `workdir/data`.
   calculation so the strategy uses exchange-confirmed OHLCV where available.
 
 Supported exchange behavior is handled per exchange.<br>
-For example, **OKX** and
-**Binance** zero-volume candles are **hidden** to match TradingView, while **Bitget** and
+For example, **OKX**, **Binance**, and
+**Bybit** zero-volume candles are **hidden** to match TradingView, while **Bitget** and
 **Hyperliquid** zero-volume candles remain **visible**.
 
 ## Running a Strategy
