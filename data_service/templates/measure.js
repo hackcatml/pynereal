@@ -362,6 +362,40 @@ App.measure = {
     return clamped;
   },
 
+  mobileDragOriginPoint() {
+    if (App.state.measureDraft && App.state.measureDraft.end) {
+      const coord = this.pointToCoordinate(App.state.measureDraft.end);
+      if (coord) {
+        return { clientX: coord.x, clientY: coord.y };
+      }
+    }
+    return this.ensureMobileAim();
+  },
+
+  mobilePointerCandidate(e, mode) {
+    const origin = this.mobileDragOriginPoint();
+    return {
+      pointerId: e.pointerId,
+      mode,
+      clientX: e.clientX,
+      clientY: e.clientY,
+      aimClientX: origin ? origin.clientX : e.clientX,
+      aimClientY: origin ? origin.clientY : e.clientY,
+      moved: false
+    };
+  },
+
+  applyMobileCandidateDrag(candidate, e) {
+    if (!candidate) return null;
+    const aimClientX = Number(candidate.aimClientX);
+    const aimClientY = Number(candidate.aimClientY);
+    if (!Number.isFinite(aimClientX) || !Number.isFinite(aimClientY)) return null;
+    return this.setMobileAim(
+      aimClientX + (e.clientX - candidate.clientX),
+      aimClientY + (e.clientY - candidate.clientY)
+    );
+  },
+
   shouldSnapToOhlc(e) {
     const isCoarsePointer = window.matchMedia &&
       window.matchMedia("(hover: none) and (pointer: coarse)").matches;
@@ -490,24 +524,12 @@ App.measure = {
 
     if (!App.state.measureDraft) {
       this.ensureMobileAim();
-      this.pointerCandidate = {
-        pointerId: e.pointerId,
-        mode: "mobile-start",
-        clientX: e.clientX,
-        clientY: e.clientY,
-        moved: false
-      };
+      this.pointerCandidate = this.mobilePointerCandidate(e, "mobile-start");
       this.stopTouchDrawingEvent(e);
       return;
     }
 
-    this.pointerCandidate = {
-      pointerId: e.pointerId,
-      mode: "mobile-adjust",
-      clientX: e.clientX,
-      clientY: e.clientY,
-      moved: false
-    };
+    this.pointerCandidate = this.mobilePointerCandidate(e, "mobile-adjust");
     this.stopTouchDrawingEvent(e);
   },
 
@@ -546,14 +568,14 @@ App.measure = {
 
     if (candidate.mode === "mobile-start") {
       if (!candidate.moved) return;
-      this.setMobileAim(e.clientX, e.clientY);
+      this.applyMobileCandidateDrag(candidate, e);
       this.scheduleRender();
       return;
     }
 
     if (candidate.mode !== "mobile-adjust" || !candidate.moved) return;
 
-    this.setMobileAim(e.clientX, e.clientY);
+    this.applyMobileCandidateDrag(candidate, e);
     const point = this.pointFromMobileAim();
     if (!point) return;
     App.state.measureDraft.end = point;
@@ -600,6 +622,7 @@ App.measure = {
 
     if (candidate.mode === "mobile-start") {
       if (!isTap) {
+        this.applyMobileCandidateDrag(candidate, e);
         this.scheduleRender();
         return;
       }
@@ -613,7 +636,7 @@ App.measure = {
 
     if (candidate.mode === "mobile-adjust") {
       if (candidate.moved) {
-        this.setMobileAim(e.clientX, e.clientY);
+        this.applyMobileCandidateDrag(candidate, e);
         const point = this.pointFromMobileAim();
         if (point) {
           App.state.measureDraft.end = point;
