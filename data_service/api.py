@@ -311,7 +311,7 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
         if not ohlcv_path.exists():
             return JSONResponse([])
 
-        # Match TradingView: OKX/Binance hide zero-volume bars; BITGET/Hyperliquid keep them.
+        # Match TradingView: OKX/Binance/Bybit hide zero-volume bars; BITGET/Hyperliquid keep them.
         skip_zero_volume = tradingview_hides_zero_volume(rt.spec.exchange)
         out: List[Dict[str, Any]] = []
         with OHLCVReader(ohlcv_path) as reader:

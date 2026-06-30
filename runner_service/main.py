@@ -268,7 +268,7 @@ def on_alert_event(message: str, runner: ScriptRunner):
 
 def hide_zero_volume_bars(exchange: str | None) -> bool:
     # TradingView policy differs by exchange:
-    # - OKX/Binance: zero-volume candles are hidden and excluded from calculations.
+    # - OKX/Binance/Bybit: zero-volume candles are hidden and excluded from calculations.
     # - BITGET/Hyperliquid: zero-volume candles remain visible and are included.
     return tradingview_hides_zero_volume(exchange)
 
