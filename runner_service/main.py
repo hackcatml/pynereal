@@ -104,8 +104,17 @@ def format_timeframe(period: str | None) -> str:
     return mapping.get(period.upper(), period)
 
 
+def _webhook_failed_status(error: object) -> str:
+    reason = str(error).strip() or type(error).__name__
+    reason = " ".join(reason.split())
+    if len(reason) > 120:
+        reason = reason[:117] + "..."
+    return f"Failed({reason})"
+
+
 def send_webhook_message(webhook_url: str, message: str, *, script_title: str | None,
                          timeframe: str | None, ticker: str | None,
+                         webhook_enabled: bool,
                          telegram_notification: bool, telegram_token: str | None,
                          telegram_chat_id: str | None) -> None:
     import json
@@ -119,14 +128,25 @@ def send_webhook_message(webhook_url: str, message: str, *, script_title: str | 
                message)
     parsed = json.loads(s)
     json_alert_message = parsed.get('message', '')
-    if json_alert_message != '' and webhook_url:
-        payload = json_alert_message
-        try:
-            response = requests.post(webhook_url, json=payload, timeout=(5, 10))
-            response.raise_for_status()
-            print("Webhook response:", response.json())
-        except Exception as e:
-            print(f"Webhook error: {e}")
+    webhook_status = "Disabled"
+    if webhook_enabled:
+        webhook_status = "Failed(missing URL)"
+    if webhook_enabled and webhook_url:
+        if json_alert_message == '':
+            webhook_status = "Failed(empty message)"
+        else:
+            payload = json_alert_message
+            try:
+                response = requests.post(webhook_url, json=payload, timeout=(5, 10))
+                response.raise_for_status()
+                try:
+                    print("Webhook response:", response.json())
+                except ValueError:
+                    print("Webhook response:", response.text[:500])
+                webhook_status = "Sent"
+            except Exception as e:
+                webhook_status = _webhook_failed_status(e)
+                print(f"Webhook error: {e}")
 
     if telegram_notification and telegram_token and telegram_chat_id:
         # Wall-clock time at which the notification is sent.
@@ -142,7 +162,8 @@ def send_webhook_message(webhook_url: str, message: str, *, script_title: str | 
         payload = {
             "chat_id": telegram_chat_id,
             "text": (
-                f"🚨 [{script_title}]\n"
+                f"🚨 [{script_title or 'No title'}]\n"
+                f"Webhook: {webhook_status}\n"
                 f"Time: {time_str}\n"
                 f"Timeframe: {timeframe or ''}\n"
                 f"Ticker: {ticker or ''}\n"
@@ -260,6 +281,7 @@ def on_alert_event(message: str, runner: ScriptRunner):
         script_title=script.title,
         timeframe=format_timeframe(getattr(syminfo, "period", None)),
         ticker=getattr(syminfo, "ticker", None),
+        webhook_enabled=WEBHOOK_ENABLED,
         telegram_notification=do_telegram,
         telegram_token=telegram_token,
         telegram_chat_id=telegram_chat_id,

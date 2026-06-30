@@ -209,10 +209,12 @@ def _manual_alert_signal_text(message: Any) -> str:
 
 
 def _manual_alert_telegram_text(*, script_title: str | None, timeframe: str,
-                                ticker: str, message: Any) -> str:
+                                ticker: str, message: Any,
+                                webhook_status: str) -> str:
     time_str = datetime.now().strftime("%H:%M:%S")
     return (
-        f"🚨 [M][{script_title or 'No title'}]\n"
+        f"🚨 [Manual][{script_title or 'No title'}]\n"
+        f"Webhook: {webhook_status}\n"
         f"Time: {time_str}\n"
         f"Timeframe: {timeframe or ''}\n"
         f"Ticker: {ticker or ''}\n"
@@ -488,6 +490,7 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
                 timeframe=rt.spec.timeframe,
                 ticker=rt.spec.symbol,
                 message=payload["message"],
+                webhook_status="Sent",
             )
             try:
                 telegram_result = {
