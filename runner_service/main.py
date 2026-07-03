@@ -20,7 +20,7 @@ import websockets
 from appendable_iter import AppendableIterable
 from pynecore.cli.app import app_state
 from pynecore.core.ohlcv_file import OHLCVReader
-from pynecore.core.exchange_policy import tradingview_hides_zero_volume
+from pynecore.core.exchange_policy import normalize_exchange_name, tradingview_hides_zero_volume
 from pynecore.core.script_runner import ScriptRunner
 from pynecore.core.syminfo import SymInfo
 from pynecore.types.ohlcv import OHLCV
@@ -39,6 +39,9 @@ TELEGRAM_ENABLED: bool = False
 WEBHOOK_URL: str = ""
 TELEGRAM_TOKEN: str = ""
 TELEGRAM_CHAT_ID: str = ""
+DEFAULT_WEBHOOK_REQUEST_TIMEOUT = (5, 10)
+HYPERLIQUID_WEBHOOK_REQUEST_TIMEOUT = (5, 30)
+TELEGRAM_REQUEST_TIMEOUT = (5, 10)
 
 # Event queue for trade events
 trade_event_queue = deque()
@@ -112,8 +115,15 @@ def _webhook_failed_status(error: object) -> str:
     return f"Failed({reason})"
 
 
+def _webhook_request_timeout(exchange: str | None) -> tuple[int, int]:
+    if normalize_exchange_name(exchange) == "HYPERLIQUID":
+        return HYPERLIQUID_WEBHOOK_REQUEST_TIMEOUT
+    return DEFAULT_WEBHOOK_REQUEST_TIMEOUT
+
+
 def send_webhook_message(webhook_url: str, message: str, *, script_title: str | None,
                          timeframe: str | None, ticker: str | None,
+                         exchange: str | None,
                          webhook_enabled: bool,
                          telegram_notification: bool, telegram_token: str | None,
                          telegram_chat_id: str | None) -> None:
@@ -137,7 +147,7 @@ def send_webhook_message(webhook_url: str, message: str, *, script_title: str | 
         else:
             payload = json_alert_message
             try:
-                response = requests.post(webhook_url, json=payload, timeout=(5, 10))
+                response = requests.post(webhook_url, json=payload, timeout=_webhook_request_timeout(exchange))
                 response.raise_for_status()
                 try:
                     print("Webhook response:", response.json())
@@ -172,7 +182,7 @@ def send_webhook_message(webhook_url: str, message: str, *, script_title: str | 
             # "parse_mode": "Markdown"  # 굵게/이탤릭 등 쓰고 싶으면 선택
         }
         try:
-            response = requests.get(url, params=payload, timeout=(5, 10))
+            response = requests.get(url, params=payload, timeout=TELEGRAM_REQUEST_TIMEOUT)
             response.raise_for_status()
             print("Telegram response:", response.json())
         except Exception as e:
@@ -281,6 +291,7 @@ def on_alert_event(message: str, runner: ScriptRunner):
         script_title=script.title,
         timeframe=format_timeframe(getattr(syminfo, "period", None)),
         ticker=getattr(syminfo, "ticker", None),
+        exchange=getattr(syminfo, "prefix", None),
         webhook_enabled=WEBHOOK_ENABLED,
         telegram_notification=do_telegram,
         telegram_token=telegram_token,

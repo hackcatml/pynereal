@@ -3,17 +3,16 @@ from __future__ import annotations
 import asyncio
 import ast
 import json
-import urllib.error
-import urllib.request
 from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import requests
 from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
 
 from pynecore.cli.app import app_state
-from pynecore.core.exchange_policy import tradingview_hides_zero_volume
+from pynecore.core.exchange_policy import normalize_exchange_name, tradingview_hides_zero_volume
 from pynecore.core.ohlcv_file import OHLCVReader
 from pynecore.core.csv_file import CSVReader
 
@@ -33,6 +32,9 @@ from ohlcv_io import make_ccxt_pro_client
 # Cache of exchange -> set(symbols) so symbol validation hits the network at most
 # once per exchange for the hub's lifetime.
 _markets_cache: dict[str, set] = {}
+DEFAULT_WEBHOOK_REQUEST_TIMEOUT = (5, 10)
+HYPERLIQUID_WEBHOOK_REQUEST_TIMEOUT = (5, 30)
+TELEGRAM_REQUEST_TIMEOUT = (5, 10)
 
 
 async def _load_exchange_symbols(exchange: str) -> set:
@@ -159,26 +161,26 @@ def _load_script_source_info(spec: SessionSpec, info: dict) -> tuple[str | None,
     return title, name, source, has_source
 
 
-def _post_json_webhook(url: str, payload: Any) -> dict:
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+def _webhook_request_timeout(exchange: str | None) -> tuple[int, int]:
+    if normalize_exchange_name(exchange) == "HYPERLIQUID":
+        return HYPERLIQUID_WEBHOOK_REQUEST_TIMEOUT
+    return DEFAULT_WEBHOOK_REQUEST_TIMEOUT
+
+
+def _post_json_webhook(url: str, payload: Any, exchange: str | None) -> dict:
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            body = resp.read(4096).decode("utf-8", errors="replace")
-            return {"status": int(resp.status), "body": body}
-    except urllib.error.HTTPError as e:
-        body = e.read(4096).decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {e.code}: {body}") from e
+        resp = requests.post(url, json=payload, timeout=_webhook_request_timeout(exchange))
+        resp.raise_for_status()
+        return {"status": int(resp.status_code), "body": resp.text[:4096]}
+    except requests.HTTPError as e:
+        body = e.response.text[:4096] if e.response is not None else ""
+        status = e.response.status_code if e.response is not None else "?"
+        raise RuntimeError(f"HTTP {status}: {body}") from e
+    except requests.RequestException as e:
+        raise RuntimeError(type(e).__name__) from e
 
 
 def _post_telegram_message(token: str, chat_id: str, text: str) -> dict:
-    import requests
-
     payload = {
         "chat_id": chat_id,
         "text": text,
@@ -187,7 +189,7 @@ def _post_telegram_message(token: str, chat_id: str, text: str) -> dict:
         resp = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
             data=payload,
-            timeout=(5, 10),
+            timeout=TELEGRAM_REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
         return {"status": int(resp.status_code), "body": resp.text[:4096]}
@@ -476,7 +478,7 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
             return JSONResponse({"error": "webhook url must start with http:// or https://"}, status_code=400)
 
         try:
-            webhook_result = await asyncio.to_thread(_post_json_webhook, url, payload["message"])
+            webhook_result = await asyncio.to_thread(_post_json_webhook, url, payload["message"], rt.spec.exchange)
         except Exception as e:
             return JSONResponse({"error": f"webhook send failed: {e}"}, status_code=502)
 
