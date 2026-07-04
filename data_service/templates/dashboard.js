@@ -529,7 +529,10 @@
   let logSession = null;
   let logRequestSeq = 0;
   let logAbort = null;
+  let logSource = null;
+  let logShowingPlaceholder = false;
   let savedScrollY = 0;
+  const MAX_LOG_CHARS = 600000;
 
   // Lock the page behind the modal (iOS-safe position:fixed technique) so
   // scrolling inside the log panel doesn't bleed through to the dashboard.
@@ -566,6 +569,49 @@
     }
   }
 
+  function closeLogStream() {
+    if (logSource) {
+      logSource.close();
+      logSource = null;
+    }
+  }
+
+  function logSelectionInside(pre) {
+    const selection = window.getSelection && window.getSelection();
+    if (!selection || selection.isCollapsed) return false;
+    return pre.contains(selection.anchorNode) || pre.contains(selection.focusNode);
+  }
+
+  function shouldFollowLogTail(pre) {
+    if (logSelectionInside(pre)) return false;
+    return pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
+  }
+
+  function setLogContent(text) {
+    const pre = el("log-content");
+    const log = text && text.length ? text : "(no log output yet)";
+    logShowingPlaceholder = !text || !text.length;
+    pre.textContent = log;
+    pre.scrollTop = pre.scrollHeight;
+  }
+
+  function appendLogContent(chunk) {
+    if (!chunk) return;
+    const pre = el("log-content");
+    const followTail = shouldFollowLogTail(pre);
+    if (logShowingPlaceholder) {
+      pre.textContent = "";
+      logShowingPlaceholder = false;
+    } else if (pre.textContent && !pre.textContent.endsWith("\n") && !chunk.startsWith("\n")) {
+      chunk = `\n${chunk}`;
+    }
+    pre.appendChild(document.createTextNode(chunk));
+    if (!logSelectionInside(pre) && pre.textContent.length > MAX_LOG_CHARS) {
+      pre.textContent = pre.textContent.slice(-MAX_LOG_CHARS);
+    }
+    if (followTail) pre.scrollTop = pre.scrollHeight;
+  }
+
   async function fetchLogs(sessionId, seq) {
     if (!sessionId || seq !== logRequestSeq) return;
     const controller = new AbortController();
@@ -578,9 +624,10 @@
       if (logAbort === controller) logAbort = null;
       if (seq !== logRequestSeq || logSession !== sessionId) return;
       const pre = el("log-content");
-      const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
-      pre.textContent = data.log && data.log.length ? data.log : "(no log output yet)";
-      if (atBottom) pre.scrollTop = pre.scrollHeight;  // follow tail unless user scrolled up
+      const followTail = shouldFollowLogTail(pre);
+      logShowingPlaceholder = !(data.log && data.log.length);
+      pre.textContent = logShowingPlaceholder ? "(no log output yet)" : data.log;
+      if (followTail) pre.scrollTop = pre.scrollHeight;  // follow tail unless user scrolled up
     } catch (e) {
       if (logAbort === controller) logAbort = null;
       if (e.name === "AbortError" || seq !== logRequestSeq || logSession !== sessionId) return;
@@ -594,17 +641,62 @@
     logTimer = setTimeout(() => pollLogs(sessionId, seq), 1500);
   }
 
+  function streamLogs(sessionId, seq) {
+    if (!window.EventSource) {
+      pollLogs(sessionId, seq);
+      return;
+    }
+    const url = `/api/sessions/${encodeURIComponent(sessionId)}/runner/logs/stream?lines=500`;
+    const source = new EventSource(url);
+    logSource = source;
+
+    source.addEventListener("snapshot", (ev) => {
+      if (seq !== logRequestSeq || logSession !== sessionId || logSource !== source) return;
+      try {
+        const data = JSON.parse(ev.data || "{}");
+        setLogContent(data.log || "");
+      } catch {
+        setLogContent("");
+      }
+    });
+
+    source.addEventListener("append", (ev) => {
+      if (seq !== logRequestSeq || logSession !== sessionId || logSource !== source) return;
+      try {
+        const data = JSON.parse(ev.data || "{}");
+        appendLogContent(data.chunk || "");
+      } catch {}
+    });
+
+    source.addEventListener("stream_error", (ev) => {
+      if (seq !== logRequestSeq || logSession !== sessionId || logSource !== source) return;
+      try {
+        const data = JSON.parse(ev.data || "{}");
+        appendLogContent(`\n[log stream] ${data.error || "stream error"}\n`);
+      } catch {
+        appendLogContent("\n[log stream] stream error\n");
+      }
+    });
+
+    source.onerror = () => {
+      // EventSource reconnects automatically. Keep the current log content so
+      // text selection and scroll position are not disturbed by transient errors.
+    };
+  }
+
   function openLogs(id) {
     clearLogTimer();
     cancelLogFetch();
+    closeLogStream();
     logSession = id;
     logRequestSeq += 1;
     const seq = logRequestSeq;
     el("log-title").textContent = id;
     el("log-content").textContent = "loading…";
+    logShowingPlaceholder = true;
     el("log-modal").classList.remove("hidden");
     lockBodyScroll();
-    pollLogs(id, seq);
+    streamLogs(id, seq);
   }
 
   function closeLogs() {
@@ -612,9 +704,11 @@
     logRequestSeq += 1;
     clearLogTimer();
     cancelLogFetch();
+    closeLogStream();
     el("log-modal").classList.add("hidden");
     unlockBodyScroll();
     logSession = null;
+    logShowingPlaceholder = false;
   }
 
   async function clearLogs() {
@@ -622,14 +716,16 @@
     if (!sessionId) return;
     clearLogTimer();
     cancelLogFetch();
+    closeLogStream();
     logRequestSeq += 1;
     const seq = logRequestSeq;
     try {
       await api(`/api/sessions/${encodeURIComponent(sessionId)}/runner/logs`, { method: "DELETE" });
       if (seq !== logRequestSeq || logSession !== sessionId) return;
       el("log-content").textContent = "(cleared)";
+      logShowingPlaceholder = true;
       logRequestSeq += 1;
-      pollLogs(sessionId, logRequestSeq);
+      streamLogs(sessionId, logRequestSeq);
     } catch (e) {
       alert(`clear failed: ${e.message}`);
     }
