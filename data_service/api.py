@@ -2,17 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import ast
-import json
 from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import requests
 from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
 
 from pynecore.cli.app import app_state
-from pynecore.core.exchange_policy import normalize_exchange_name, tradingview_hides_zero_volume
+from pynecore.core.exchange_policy import tradingview_hides_zero_volume
 from pynecore.core.ohlcv_file import OHLCVReader
 from pynecore.core.csv_file import CSVReader
 
@@ -22,19 +20,16 @@ from registry import SessionNotFoundError, SessionExistsError, SessionLimitError
 from runtime import Session
 from config import (
     SessionSpec,
-    default_telegram_chat_id,
-    default_telegram_token,
     default_webhook_url,
     sanitize_manual_alert_templates,
+    sanitize_manual_alert_trigger,
 )
+from manual_alerts import send_manual_alert_payload
 from ohlcv_io import make_ccxt_pro_client
 
 # Cache of exchange -> set(symbols) so symbol validation hits the network at most
 # once per exchange for the hub's lifetime.
 _markets_cache: dict[str, set] = {}
-DEFAULT_WEBHOOK_REQUEST_TIMEOUT = (5, 10)
-HYPERLIQUID_WEBHOOK_REQUEST_TIMEOUT = (5, 30)
-TELEGRAM_REQUEST_TIMEOUT = (5, 10)
 
 
 async def _load_exchange_symbols(exchange: str) -> set:
@@ -159,69 +154,6 @@ def _load_script_source_info(spec: SessionSpec, info: dict) -> tuple[str | None,
     if not title and name:
         title = name
     return title, name, source, has_source
-
-
-def _webhook_request_timeout(exchange: str | None) -> tuple[int, int]:
-    if normalize_exchange_name(exchange) == "HYPERLIQUID":
-        return HYPERLIQUID_WEBHOOK_REQUEST_TIMEOUT
-    return DEFAULT_WEBHOOK_REQUEST_TIMEOUT
-
-
-def _post_json_webhook(url: str, payload: Any, exchange: str | None) -> dict:
-    try:
-        resp = requests.post(url, json=payload, timeout=_webhook_request_timeout(exchange))
-        resp.raise_for_status()
-        return {"status": int(resp.status_code), "body": resp.text[:4096]}
-    except requests.HTTPError as e:
-        body = e.response.text[:4096] if e.response is not None else ""
-        status = e.response.status_code if e.response is not None else "?"
-        raise RuntimeError(f"HTTP {status}: {body}") from e
-    except requests.RequestException as e:
-        raise RuntimeError(type(e).__name__) from e
-
-
-def _post_telegram_message(token: str, chat_id: str, text: str) -> dict:
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-    }
-    try:
-        resp = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            data=payload,
-            timeout=TELEGRAM_REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return {"status": int(resp.status_code), "body": resp.text[:4096]}
-    except requests.HTTPError as e:
-        body = e.response.text[:4096] if e.response is not None else ""
-        status = e.response.status_code if e.response is not None else "?"
-        raise RuntimeError(f"HTTP {status}: {body}") from e
-    except requests.RequestException as e:
-        raise RuntimeError(type(e).__name__) from e
-
-
-def _manual_alert_signal_text(message: Any) -> str:
-    if isinstance(message, str):
-        return message
-    try:
-        return json.dumps(message, ensure_ascii=False).replace('"', '')
-    except Exception:
-        return str(message)
-
-
-def _manual_alert_telegram_text(*, script_title: str | None, timeframe: str,
-                                ticker: str, message: Any,
-                                webhook_status: str) -> str:
-    time_str = datetime.now().strftime("%H:%M:%S")
-    return (
-        f"🚨 [Manual][{script_title or 'No title'}]\n"
-        f"Webhook: {webhook_status}\n"
-        f"Time: {time_str}\n"
-        f"Timeframe: {timeframe or ''}\n"
-        f"Ticker: {ticker or ''}\n"
-        f"Signal: {_manual_alert_signal_text(message)}"
-    )
 
 
 # ----------------------------------------------------------------------
@@ -462,6 +394,35 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
             return JSONResponse({"error": f"failed to update templates: {e}"}, status_code=500)
         return JSONResponse({"templates": updated})
 
+    @r.get("/api/{session_id}/manual-alert-trigger")
+    def get_manual_alert_trigger(session_id: str) -> JSONResponse:
+        rt = _rt(session_id)
+        if rt is None:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        return JSONResponse({"trigger": dict(rt.spec.manual_alert_trigger)})
+
+    @r.post("/api/{session_id}/manual-alert-trigger")
+    async def update_manual_alert_trigger(session_id: str, payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        enabled = bool(payload.get("enabled", False))
+        if enabled:
+            trigger = sanitize_manual_alert_trigger({
+                "enabled": True,
+                "price": payload.get("price"),
+                "template": payload.get("template"),
+            })
+            if not trigger.get("enabled"):
+                return JSONResponse({"error": "trigger requires valid price and template"}, status_code=400)
+        else:
+            trigger = {"enabled": False}
+
+        try:
+            updated = await registry.update_manual_alert_trigger(session_id, trigger)
+        except SessionNotFoundError:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        except Exception as e:
+            return JSONResponse({"error": f"failed to update trigger: {e}"}, status_code=500)
+        return JSONResponse({"trigger": updated})
+
     @r.post("/api/{session_id}/manual-alert")
     async def send_manual_alert(session_id: str, payload: dict = Body(default_factory=dict)) -> JSONResponse:
         rt = _rt(session_id)
@@ -470,38 +431,19 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
         if "message" not in payload:
             return JSONResponse({"error": "message is required"}, status_code=400)
 
-        wh = rt.spec.webhook
-        url = (wh.get("url") or "").strip() or default_webhook_url()
-        if not url:
-            return JSONResponse({"error": "webhook url is empty"}, status_code=400)
-        if not url.startswith(("http://", "https://")):
-            return JSONResponse({"error": "webhook url must start with http:// or https://"}, status_code=400)
-
         try:
-            webhook_result = await asyncio.to_thread(_post_json_webhook, url, payload["message"], rt.spec.exchange)
+            script_title, _, _, _ = _load_script_source_info(rt.spec, rt.chart_info)
+            result = await asyncio.to_thread(
+                send_manual_alert_payload,
+                spec=rt.spec,
+                script_title=script_title,
+                payload=payload,
+            )
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
         except Exception as e:
             return JSONResponse({"error": f"webhook send failed: {e}"}, status_code=502)
-
-        token = (wh.get("telegram_token") or "").strip() or default_telegram_token()
-        chat_id = (wh.get("telegram_chat_id") or "").strip() or default_telegram_chat_id()
-        telegram_result: dict[str, Any] = {"sent": False}
-        if token and chat_id:
-            script_title, _, _, _ = _load_script_source_info(rt.spec, rt.chart_info)
-            text = _manual_alert_telegram_text(
-                script_title=script_title,
-                timeframe=rt.spec.timeframe,
-                ticker=rt.spec.symbol,
-                message=payload["message"],
-                webhook_status="Sent",
-            )
-            try:
-                telegram_result = {
-                    "sent": True,
-                    **await asyncio.to_thread(_post_telegram_message, token, chat_id, text),
-                }
-            except Exception as e:
-                telegram_result = {"sent": False, "error": str(e)}
-        return JSONResponse({"ok": True, "webhook": webhook_result, "telegram": telegram_result})
+        return JSONResponse(result)
 
     return r
 

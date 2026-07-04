@@ -67,6 +67,23 @@ App.ws = {
           if (msg.data && msg.data.close !== undefined) {
             state.lastPrice = msg.data.close;
           }
+        } else if (msg.type === "manual_alert_trigger") {
+          if (App.ui && App.ui.applyManualAlertTriggerState) {
+            App.ui.applyManualAlertTriggerState(msg.trigger || { enabled: false });
+          }
+        } else if (msg.type === "manual_alert_trigger_fired") {
+          if (App.ui && App.ui.applyManualAlertTriggerState) {
+            App.ui.applyManualAlertTriggerState({ enabled: false });
+          }
+          if (App.ui && App.ui.elements && App.ui.elements.manualAlertStatus) {
+            App.ui.elements.manualAlertStatus.textContent = "Triggered";
+            App.ui.elements.manualAlertStatus.classList.remove("error");
+          }
+        } else if (msg.type === "manual_alert_trigger_error") {
+          if (App.ui && App.ui.elements && App.ui.elements.manualAlertStatus) {
+            App.ui.elements.manualAlertStatus.textContent = msg.error ? `Trigger failed: ${msg.error}` : "Trigger failed";
+            App.ui.elements.manualAlertStatus.classList.add("error");
+          }
         } else if (msg.type === "last_bar_open_fix") {
           if (!msg.data || msg.data.time == null || msg.data.open == null) {
             return;

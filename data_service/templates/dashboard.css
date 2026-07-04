@@ -228,7 +228,12 @@ th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--bor
 th { color: var(--muted); font-weight: 600; font-size: 12px; }
 tr:last-child td { border-bottom: none; }
 
-.runner-cell { display: flex; gap: 6px; }
+.runner-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
 
 .symbol-cell,
 .exchange-cell {
@@ -515,8 +520,13 @@ tr:last-child td { border-bottom: none; }
   }
   td.mono { word-break: break-all; }
   /* keep the "Runner" label left-aligned like other rows; push buttons right */
-  td.runner-cell { flex-wrap: wrap; justify-content: flex-start; gap: 6px; }
+  td.runner-cell { justify-content: flex-start; gap: 6px; }
   td.runner-cell::before { margin-right: auto; }
+  .runner-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    white-space: normal;
+  }
   .symbol-cell,
   .exchange-cell {
     justify-content: flex-end;
