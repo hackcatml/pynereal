@@ -13,6 +13,7 @@ from pynecore.core.ohlcv_file import OHLCVReader, OHLCVWriter
 from pynecore.types.ohlcv import OHLCV
 from ohlcv_cache import import_from_ohlcv
 from pynecore.cli.app import app_state
+from log_utils import log_with_time
 
 
 def convert_timeframe(timeframe: str, to_ms: bool = False) -> int | str:
@@ -238,13 +239,13 @@ def fix_last_open_if_needed(
                 )
             except Exception as e:
                 if attempt >= max_attempts:
-                    print(
+                    log_with_time(
                         f"[fix_last_open_if_needed] Error fetching current open: {e}; "
                         f"failed after {attempt}/{max_attempts}"
                     )
                     return fixed_candle_open_price
                 delay = retry_delays[attempt - 1]
-                print(
+                log_with_time(
                     f"[fix_last_open_if_needed] Error fetching current open: {e}; "
                     f"retrying in {delay:g}s ({attempt}/{max_attempts})"
                 )
@@ -262,7 +263,7 @@ def fix_last_open_if_needed(
             if attempt >= max_attempts:
                 return fixed_candle_open_price
             delay = retry_delays[attempt - 1]
-            print(
+            log_with_time(
                 "[fix_last_open_if_needed] current open not found in fetched OHLCV; "
                 f"retrying in {delay:g}s ({attempt}/{max_attempts})"
             )
@@ -369,7 +370,7 @@ def fetch_and_update_ohlcv_data(
         return res
 
     except Exception as e:
-        print(f"[fetch_and_update_ohlcv_data] Error fetching OHLCV: {e}")
+        log_with_time(f"[fetch_and_update_ohlcv_data] Error fetching OHLCV: {e}")
         return None
 
 
@@ -396,7 +397,7 @@ def fetch_and_update_recent_ohlcv_data(
         return None
 
     if last_bar.timestamp != current_ts_sec:
-        print(
+        log_with_time(
             "[fetch_and_update_recent_closed_ohlcv_data] "
             f"current bar mismatch: file={last_bar.timestamp}, live={current_ts_sec}"
         )
@@ -438,5 +439,5 @@ def fetch_and_update_recent_ohlcv_data(
         return closed_bars
 
     except Exception as e:
-        print(f"[fetch_and_update_recent_closed_ohlcv_data] Error fetching OHLCV: {e}")
+        log_with_time(f"[fetch_and_update_recent_closed_ohlcv_data] Error fetching OHLCV: {e}")
         return None

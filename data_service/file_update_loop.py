@@ -32,6 +32,7 @@ from ohlcv_cache import (
 )
 from ohlcv_paths import make_cache_path
 from state import DataState
+from log_utils import log_with_time
 
 
 async def _retry_ohlcv_update(label: str, call: Callable[[], list | None]) -> list | None:
@@ -41,13 +42,13 @@ async def _retry_ohlcv_update(label: str, call: Callable[[], list | None]) -> li
         res = await asyncio.to_thread(call)
         if res:
             if attempt > 1:
-                print(f"[data_service] {label} succeeded on retry {attempt}/{attempts}")
+                log_with_time(f"[data_service] {label} succeeded on retry {attempt}/{attempts}")
             return res
         if attempt < attempts:
             delay = delays[attempt - 1]
-            print(f"[data_service] {label} failed; retrying in {delay:g}s ({attempt}/{attempts})")
+            log_with_time(f"[data_service] {label} failed; retrying in {delay:g}s ({attempt}/{attempts})")
             await asyncio.sleep(delay)
-    print(f"[data_service] {label} failed after {attempts} attempts; continuing with local OHLCV")
+    log_with_time(f"[data_service] {label} failed after {attempts} attempts; continuing with local OHLCV")
     return None
 
 
