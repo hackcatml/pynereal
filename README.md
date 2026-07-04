@@ -18,6 +18,7 @@ Tested in realtime:
 - [x] Hyperliquid
 - [x] OKX
 - [x] Binance
+- [x] Bybit
 
 ## Supported Timeframes
 
@@ -156,8 +157,8 @@ When a feed starts, PyneReal prepares an OHLCV file under `workdir/data`.
   calculation so the strategy uses exchange-confirmed OHLCV where available.
 
 Supported exchange behavior is handled per exchange.<br>
-For example, **OKX** and
-**Binance** zero-volume candles are **hidden** to match TradingView, while **Bitget** and
+For example, **OKX**, **Binance**, and
+**Bybit** zero-volume candles are **hidden** to match TradingView, while **Bitget** and
 **Hyperliquid** zero-volume candles remain **visible**.
 
 ## Running a Strategy
@@ -239,6 +240,14 @@ To send a manual alert:
 2. Choose a template from the manual alert menu.
 3. Drag the menu if you need to adjust the selected chart price.
 4. Click `Send` and confirm the webhook URL.
+
+To set a price trigger, enter or adjust the `Price`, choose a template, and
+click `Set`. PyneReal keeps the red dotted alert line with the session, so the
+trigger stays active after the chart is closed or the browser reconnects.
+When the live price touches the line, PyneReal sends the selected manual-alert
+template and then automatically unsets the trigger. While a trigger is active,
+you can move it by dragging the alert label on the price axis, click `Unset`, or
+use `Send` to send a one-off manual alert immediately.
 
 Manual alerts are independent from the Webhook checkbox. The checkbox controls
 strategy-generated alerts only; a manual alert can still be sent while the

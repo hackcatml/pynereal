@@ -156,6 +156,7 @@ class SessionRegistry:
         feed = self._get_or_create_feed(spec)
         session = Session(spec, feed)
         session.on_status_change = self.notify_hub
+        session.on_spec_change = self._persist_and_notify
         feed.subscribers[spec.id] = session
         self.sessions[spec.id] = session
         self._schedule_logo_resolution(session)
@@ -210,6 +211,17 @@ class SessionRegistry:
         session.spec = session.spec.with_manual_alert_templates(templates)
         self._persist()
         return [dict(t) for t in session.spec.manual_alert_templates]
+
+    async def update_manual_alert_trigger(self, session_id: str, trigger: object) -> dict:
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise SessionNotFoundError(session_id)
+        session.spec = session.spec.with_manual_alert_trigger(trigger)
+        session.reset_manual_alert_trigger_gate()
+        self._persist()
+        await session.push_manual_alert_trigger()
+        await self.notify_hub()
+        return dict(session.spec.manual_alert_trigger)
 
     # ------------------------------------------------------------------
     # Runner control
@@ -276,6 +288,10 @@ class SessionRegistry:
         # Raises on failure so mutating API calls surface a 500 instead of
         # returning ok=true while sessions.json silently fails to update.
         save_sessions([s.spec for s in self.sessions.values()])
+
+    async def _persist_and_notify(self) -> None:
+        self._persist()
+        await self.notify_hub()
 
     async def notify_hub(self) -> None:
         await self.hub_ws.broadcast_json({"type": "sessions", "sessions": self.snapshots()})

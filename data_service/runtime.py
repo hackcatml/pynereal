@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from fastapi import WebSocket
 
 from config import FeedSpec, SessionSpec
+from manual_alerts import build_manual_alert_payload, send_manual_alert_payload
 from ohlcv_paths import make_ohlcv_paths, runtime_output_dir
 from state import DataState
 from tv_logos import static_logo_info
@@ -60,10 +62,12 @@ class Feed:
         self.collector_error: Optional[str] = None
         self._history_start_mtime: Optional[float] = None
         self._history_start_time: Optional[int] = None
+        self._last_broadcast_close: Optional[float] = None
         # session_id -> Session
         self.subscribers: Dict[str, "Session"] = {}
 
     async def broadcast_bar(self, bar: list) -> None:
+        prev_price = self._last_broadcast_close
         payload = {
             "type": "bar",
             "data": {
@@ -75,7 +79,9 @@ class Feed:
                 "volume": float(bar[5]),
             },
         }
+        self._last_broadcast_close = payload["data"]["close"]
         for session in list(self.subscribers.values()):
+            await session.maybe_fire_manual_alert_trigger(payload["data"], prev_price)
             await session.send_to_charts(payload)
 
     async def emit_event(self, payload: dict) -> None:
@@ -161,6 +167,9 @@ class Session:
         self.logo_info: Dict[str, str] = static_logo_info(spec.exchange, spec.symbol)
         # registry wires this to push /ws/hub status when runner connect/disconnect.
         self.on_status_change: Optional[Callable[[], Awaitable[None]]] = None
+        self.on_spec_change: Optional[Callable[[], Awaitable[None]]] = None
+        self._manual_alert_trigger_sending = False
+        self._manual_alert_trigger_last_bar_time: Optional[int] = None
 
     @property
     def ohlcv_path(self) -> Path:
@@ -170,6 +179,13 @@ class Session:
         if self.on_status_change is not None:
             try:
                 await self.on_status_change()
+            except Exception:
+                pass
+
+    async def _notify_spec_change(self) -> None:
+        if self.on_spec_change is not None:
+            try:
+                await self.on_spec_change()
             except Exception:
                 pass
 
@@ -233,6 +249,10 @@ class Session:
                 self.client_roles[ws] = role
                 if self.runner_count > 0:
                     await ws_manager.send(ws, {"type": "runner_connected"})
+                await ws_manager.send(ws, {
+                    "type": "manual_alert_trigger",
+                    "trigger": self.manual_alert_trigger_payload(),
+                })
             else:
                 self.client_roles[ws] = None
 
@@ -365,9 +385,108 @@ class Session:
             if role == "runner":
                 await self.ws_manager.send(ws, payload)
 
+    def manual_alert_trigger_payload(self) -> dict:
+        return dict(self.spec.manual_alert_trigger or {"enabled": False})
+
+    def reset_manual_alert_trigger_gate(self) -> None:
+        self._manual_alert_trigger_last_bar_time = None
+
+    async def push_manual_alert_trigger(self) -> None:
+        await self.send_to_charts({
+            "type": "manual_alert_trigger",
+            "trigger": self.manual_alert_trigger_payload(),
+        })
+
     async def push_webhook_config(self) -> None:
         # Runner-only (contains url/token); never broadcast to chart browsers.
         await self.send_to_runners(self._webhook_config_payload())
+
+    def _manual_alert_script_title(self) -> str | None:
+        title = self.chart_info.get("script_title")
+        if title:
+            return str(title)
+        if self.spec.script_name:
+            return Path(self.spec.script_name).stem
+        return None
+
+    def _manual_alert_trigger_touched(self, bar: dict, prev_price: float | None,
+                                      trigger_price: float) -> bool:
+        close = float(bar.get("close"))
+        if prev_price is None:
+            prev_price = float(bar.get("open", close))
+        low = min(float(prev_price), close)
+        high = max(float(prev_price), close)
+        return low <= trigger_price <= high
+
+    def _manual_alert_trigger_matches(self, trigger: dict) -> bool:
+        current = self.spec.manual_alert_trigger or {}
+        if not current.get("enabled"):
+            return False
+        current_template = current.get("template") or {}
+        trigger_template = trigger.get("template") or {}
+        try:
+            if float(current.get("price")) != float(trigger.get("price")):
+                return False
+        except (TypeError, ValueError):
+            return False
+        return (
+            current_template.get("title") == trigger_template.get("title")
+            and current_template.get("message") == trigger_template.get("message")
+        )
+
+    async def _send_manual_alert_trigger(self, trigger: dict, trigger_price: float,
+                                         market_price: float, bar_time: int) -> None:
+        template = trigger.get("template") or {}
+        try:
+            payload = build_manual_alert_payload(
+                template=template,
+                spec=self.spec,
+                price=trigger_price,
+                market=market_price,
+                time=bar_time,
+            )
+            result = await asyncio.to_thread(
+                send_manual_alert_payload,
+                spec=self.spec,
+                script_title=self._manual_alert_script_title(),
+                payload=payload,
+            )
+        except Exception as e:
+            await self.send_to_charts({
+                "type": "manual_alert_trigger_error",
+                "error": str(e)[:240],
+                "trigger": self.manual_alert_trigger_payload(),
+            })
+        else:
+            if self._manual_alert_trigger_matches(trigger):
+                self.spec = self.spec.with_manual_alert_trigger({"enabled": False})
+                await self._notify_spec_change()
+                await self.push_manual_alert_trigger()
+            await self.send_to_charts({
+                "type": "manual_alert_trigger_fired",
+                "result": result,
+            })
+        finally:
+            self._manual_alert_trigger_sending = False
+
+    async def maybe_fire_manual_alert_trigger(self, bar: dict, prev_price: float | None) -> None:
+        trigger = self.spec.manual_alert_trigger or {}
+        if not trigger.get("enabled") or self._manual_alert_trigger_sending:
+            return
+        try:
+            trigger_price = float(trigger.get("price"))
+            bar_time = int(bar.get("time"))
+            market_price = float(bar.get("close"))
+        except (TypeError, ValueError):
+            return
+        if self._manual_alert_trigger_last_bar_time == bar_time:
+            return
+        if not self._manual_alert_trigger_touched(bar, prev_price, trigger_price):
+            return
+
+        self._manual_alert_trigger_last_bar_time = bar_time
+        self._manual_alert_trigger_sending = True
+        asyncio.create_task(self._send_manual_alert_trigger(dict(trigger), trigger_price, market_price, bar_time))
 
     # ------------------------------------------------------------------
     # Status snapshot (merges feed data-plane state)

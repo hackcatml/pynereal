@@ -32,9 +32,17 @@
       <div class="field"><input name="history_since" placeholder="history_since (YYYY-MM-DD, optional)" /></div>
       <div class="field">
         <div class="script-row">
-          <select name="script_name" id="script-select" required>
-            <option value="">script_name…</option>
-          </select>
+          <div class="script-select" id="script-select-control">
+            <select name="script_name" id="script-select" class="script-native-select" tabindex="-1" aria-hidden="true">
+              <option value="">script_name…</option>
+            </select>
+            <button type="button" id="script-select-button" class="script-select-button"
+                    aria-haspopup="listbox" aria-expanded="false" aria-controls="script-select-options">
+              <span id="script-select-label" class="script-select-label">script_name…</span>
+              <span class="script-select-chevron" aria-hidden="true">&#9662;</span>
+            </button>
+            <div id="script-select-options" class="script-select-options hidden" role="listbox"></div>
+          </div>
           <button type="button" id="script-refresh" class="btn btn-icon" title="Refresh scripts" aria-label="Refresh scripts">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M3 12a9 9 0 0 1 15.7-6L21 8" />

@@ -6,9 +6,17 @@ _ZERO_VOLUME_HIDDEN_EXCHANGES = {
     "BINANCE",
     "BINANCEUSDM",
     "BINANCECOINM",
+    "BYBIT",
 }
 
-_FETCH_CURRENT_OPEN_EXCHANGES = _ZERO_VOLUME_HIDDEN_EXCHANGES | {
+# Bybit hides zero-volume bars like TradingView, but sampled REST/TradingView
+# candles keep previous close equal to the next open, so it does not need the
+# current-open REST correction used by OKX/Binance/Hyperliquid.
+_FETCH_CURRENT_OPEN_EXCHANGES = {
+    "OKX",
+    "BINANCE",
+    "BINANCEUSDM",
+    "BINANCECOINM",
     "HYPERLIQUID",
 }
 

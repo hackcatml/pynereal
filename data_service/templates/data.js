@@ -405,7 +405,7 @@ App.data = {
           if (state.configuredTimeframeSec) {
             state.timeframeInterval = state.configuredTimeframeSec;
           } else if (data.length >= 2) {
-            // Fallback only: on OKX/Binance zero-volume bars are hidden, so the gap
+            // Fallback only: on OKX/Binance/Bybit zero-volume bars are hidden, so the gap
             // between the first two visible bars may not be the timeframe.
             state.timeframeInterval = data[1].time - data[0].time;
           }
@@ -417,6 +417,9 @@ App.data = {
           await this.loadTradeHistory();
           await this.loadPlotcharHistory();
           await this.loadPlotData();
+          if (App.ui && App.ui.applyManualAlertTriggerState) {
+            App.ui.applyManualAlertTriggerState(App.state.manualAlertTrigger);
+          }
           state.initialLoadDone = true;
           state.initialLoadInProgress = false;
           return;
@@ -611,6 +614,42 @@ App.data = {
       return { ok: true, data };
     } catch (e) {
       return { ok: false, error: "Send failed" };
+    }
+  },
+  async loadManualAlertTrigger() {
+    try {
+      const resp = await fetch(`${App.config.apiBase}/manual-alert-trigger`);
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        return { ok: false, error: data.error || `Load trigger failed (${resp.status})` };
+      }
+      const trigger = data && data.trigger && typeof data.trigger === "object"
+        ? data.trigger
+        : { enabled: false };
+      App.state.manualAlertTrigger = trigger;
+      return { ok: true, trigger };
+    } catch (e) {
+      return { ok: false, error: "Load trigger failed" };
+    }
+  },
+  async saveManualAlertTrigger(trigger) {
+    try {
+      const resp = await fetch(`${App.config.apiBase}/manual-alert-trigger`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(trigger || { enabled: false })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        return { ok: false, error: data.error || `Save trigger failed (${resp.status})` };
+      }
+      const saved = data && data.trigger && typeof data.trigger === "object"
+        ? data.trigger
+        : { enabled: false };
+      App.state.manualAlertTrigger = saved;
+      return { ok: true, trigger: saved };
+    } catch (e) {
+      return { ok: false, error: "Save trigger failed" };
     }
   }
 };

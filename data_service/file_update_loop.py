@@ -35,7 +35,7 @@ from state import DataState
 
 
 async def _retry_ohlcv_update(label: str, call: Callable[[], list | None]) -> list | None:
-    delays = (1.0, 2.0)
+    delays = (1.0, 2.0, 4.0, 8.0)
     attempts = len(delays) + 1
     for attempt in range(1, attempts + 1):
         res = await asyncio.to_thread(call)
