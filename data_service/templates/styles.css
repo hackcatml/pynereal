@@ -501,10 +501,72 @@ body.measure-active #chart {
 .manual-alert-status.error {
   color: #d32f2f;
 }
+body.manual-alert-line-dragging,
+body.manual-alert-line-dragging * {
+  cursor: ns-resize !important;
+  user-select: none;
+  -webkit-user-select: none;
+}
+#manual-alert-chip {
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  align-items: stretch;
+  height: 17px; /* 네이티브 가격축 라벨 높이와 동일 */
+  border-radius: 2px 0 0 2px;
+  overflow: hidden;
+  color: #ffffff;
+  font-family: -apple-system, BlinkMacSystemFont, "Trebuchet MS", Roboto, Ubuntu, sans-serif;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+#manual-alert-chip .chip-x {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  background: #b71c1c;
+}
+#manual-alert-chip .chip-x svg {
+  display: block;
+}
+#manual-alert-chip.x-hover .chip-x {
+  background: #e04545;
+}
+#manual-alert-chip.x-pressed .chip-x {
+  background: #8e1515;
+}
+#manual-alert-chip .chip-divider {
+  width: 1px;
+  background: rgba(255, 255, 255, 0.4);
+}
+#manual-alert-chip .chip-label {
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  background: #d32f2f;
+}
+#manual-alert-chip:not(.armed) .chip-x,
+#manual-alert-chip:not(.armed) .chip-divider {
+  display: none;
+}
+#manual-alert-chip:not(.armed) .chip-label {
+  background: #111111;
+}
+#chart.manual-alert-x-hover * {
+  cursor: pointer !important;
+}
+#chart.manual-alert-grab-hover * {
+  cursor: ns-resize !important;
+}
 .manual-alert-menu {
   position: fixed;
   z-index: 18;
-  width: 160px;
+  width: 176px;
   box-sizing: border-box;
   padding: 0;
   background: rgba(255, 255, 255, 0.96);
@@ -515,25 +577,57 @@ body.measure-active #chart {
   overflow: visible;
 }
 .manual-alert-drag {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 46px;
   align-items: center;
   gap: 5px;
-  min-height: 23px;
-  padding: 3px 5px 3px 7px;
+  min-height: 28px;
+  padding: 4px 7px 4px 7px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.08);
   cursor: move;
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
 }
-.manual-alert-price {
-  flex: 1 1 auto;
+.manual-alert-price-label {
+  flex: 0 0 auto;
   min-width: 0;
   font-size: 10.5px;
   font-weight: 700;
 }
-.manual-alert-controls {
+.manual-alert-price-input {
+  min-width: 0;
+  width: 100%;
+  height: 24px;
+  box-sizing: border-box;
+  padding: 0 5px;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  border-radius: 5px;
+  background: #ffffff;
+  color: #111;
+  font-size: 11px;
+  line-height: 1.25;
+}
+.manual-alert-drag .manual-alert-set {
   display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 24px;
+  box-sizing: border-box;
+  margin-left: 0;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.manual-alert-drag .manual-alert-set.armed {
+  background: #d32f2f;
+  color: #ffffff;
+}
+.manual-alert-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 46px;
   align-items: center;
   gap: 5px;
   padding: 4px 7px 0;
@@ -608,9 +702,9 @@ body.measure-active #chart {
   color: #fff;
 }
 .manual-alert-controls .template-btn.primary {
-  flex: 0 0 auto;
+  width: 46px;
   margin-left: 0;
-  padding: 3px 7px;
+  padding: 3px 0;
   font-size: 11px;
 }
 .manual-alert-status {
@@ -1069,7 +1163,7 @@ body.source-open .source-panel {
   }
 
   .manual-alert-menu {
-    width: min(160px, calc(100vw - 24px));
+    width: min(176px, calc(100vw - 24px));
   }
 
   #chart-info {

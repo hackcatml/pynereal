@@ -169,7 +169,7 @@ App.measure = {
     try {
       toolbar.setPointerCapture(e.pointerId);
     } catch {}
-    this.toolbarDragTimer = setTimeout(() => this.startToolbarDrag(), 1000);
+    this.toolbarDragTimer = setTimeout(() => this.startToolbarDrag(), 500);
   },
 
   onToolbarPointerMove(e) {

@@ -241,6 +241,14 @@ To send a manual alert:
 3. Drag the menu if you need to adjust the selected chart price.
 4. Click `Send` and confirm the webhook URL.
 
+To set a price trigger, enter or adjust the `Price`, choose a template, and
+click `Set`. PyneReal keeps the red dotted alert line with the session, so the
+trigger stays active after the chart is closed or the browser reconnects.
+When the live price touches the line, PyneReal sends the selected manual-alert
+template and then automatically unsets the trigger. While a trigger is active,
+you can move it by dragging the alert label on the price axis, click `Unset`, or
+use `Send` to send a one-off manual alert immediately.
+
 Manual alerts are independent from the Webhook checkbox. The checkbox controls
 strategy-generated alerts only; a manual alert can still be sent while the
 checkbox is off. A valid webhook URL is still required. PyneReal sends the final

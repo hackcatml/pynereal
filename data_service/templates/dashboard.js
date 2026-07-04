@@ -383,7 +383,7 @@
     if (tr.dataset.runnerControlsKey !== runner) {
       setHTML(
         tr.querySelector('[data-field="runner-cell"]'),
-        `${runnerButtons(s)}<button class="btn" data-act="logs">Logs</button>`,
+        `<span class="runner-actions">${runnerButtons(s)}<button class="btn" data-act="logs">Logs</button></span>`,
       );
       tr.dataset.runnerControlsKey = runner;
     }
