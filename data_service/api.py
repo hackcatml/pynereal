@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import json
 from datetime import datetime, UTC
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
-from fastapi import APIRouter, Body
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Body, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from pynecore.cli.app import app_state
 from pynecore.core.exchange_policy import tradingview_hides_zero_volume
@@ -30,6 +31,18 @@ from ohlcv_io import make_ccxt_pro_client
 # Cache of exchange -> set(symbols) so symbol validation hits the network at most
 # once per exchange for the hub's lifetime.
 _markets_cache: dict[str, set] = {}
+
+
+def _tail_log_text(log_path: Path, lines: int) -> tuple[str, int]:
+    data = log_path.read_bytes()
+    text = data.decode("utf-8", errors="replace")
+    tail = "\n".join(text.splitlines()[-lines:])
+    return tail, len(data)
+
+
+def _sse_event(event: str, payload: dict[str, Any]) -> str:
+    data = json.dumps(payload, ensure_ascii=False)
+    return f"event: {event}\ndata: {data}\n\n"
 
 
 async def _load_exchange_symbols(exchange: str) -> set:
@@ -517,11 +530,73 @@ def build_control_router(registry: SessionRegistry) -> APIRouter:
         if not log_path.exists():
             return JSONResponse({"log": ""})
         try:
-            content = log_path.read_text(encoding="utf-8", errors="replace")
-            tail = "\n".join(content.splitlines()[-lines:])
+            tail, _ = _tail_log_text(log_path, lines)
         except Exception as e:
             return JSONResponse({"error": f"failed to read log: {e}"}, status_code=500)
         return JSONResponse({"log": tail})
+
+    @r.get("/api/sessions/{session_id}/runner/logs/stream", response_model=None)
+    async def runner_logs_stream(
+        request: Request,
+        session_id: str,
+        lines: int = 500,
+    ):
+        rt = registry.get(session_id)
+        if rt is None:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        log_path = rt.paths.log_path
+        lines = max(1, min(int(lines or 500), 5000))
+
+        async def events() -> AsyncIterator[str]:
+            offset = 0
+            try:
+                if log_path.exists():
+                    tail, offset = await asyncio.to_thread(_tail_log_text, log_path, lines)
+                else:
+                    tail = ""
+                yield _sse_event("snapshot", {"log": tail})
+            except Exception as e:
+                yield _sse_event("stream_error", {"error": f"failed to read log: {e}"})
+
+            heartbeat_after = 0
+            while not await request.is_disconnected():
+                try:
+                    if not log_path.exists():
+                        if offset != 0:
+                            offset = 0
+                            yield _sse_event("snapshot", {"log": ""})
+                    else:
+                        size = log_path.stat().st_size
+                        if size < offset:
+                            tail, offset = await asyncio.to_thread(_tail_log_text, log_path, lines)
+                            yield _sse_event("snapshot", {"log": tail})
+                        elif size > offset:
+                            def read_chunk() -> tuple[str, int]:
+                                with log_path.open("rb") as fh:
+                                    fh.seek(offset)
+                                    chunk = fh.read(size - offset)
+                                return chunk.decode("utf-8", errors="replace"), size
+
+                            chunk_text, offset = await asyncio.to_thread(read_chunk)
+                            if chunk_text:
+                                yield _sse_event("append", {"chunk": chunk_text})
+                except Exception as e:
+                    yield _sse_event("stream_error", {"error": f"failed to stream log: {e}"})
+
+                heartbeat_after += 1
+                if heartbeat_after >= 30:
+                    heartbeat_after = 0
+                    yield ": heartbeat\n\n"
+                await asyncio.sleep(0.5)
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @r.delete("/api/sessions/{session_id}/runner/logs")
     def clear_runner_logs(session_id: str) -> JSONResponse:
