@@ -449,6 +449,7 @@ App.data = {
       state.exchange = exchange;
       state.symbol = symbol;
       state.timeframe = timeframe;
+      document.title = `Chart (${symbol})`;
       const tfSeconds = App.data.timeframeToSeconds(info.timeframe);
       if (tfSeconds) {
         state.configuredTimeframeSec = tfSeconds;
