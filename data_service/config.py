@@ -5,6 +5,7 @@ import math
 import os
 import re
 import tomllib
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -54,7 +55,7 @@ def sanitize_manual_alert_templates(raw: object) -> list[dict]:
     return templates
 
 
-def sanitize_manual_alert_trigger(raw: object) -> dict:
+def _sanitize_manual_alert_trigger_item(raw: object) -> dict:
     if not isinstance(raw, dict) or not bool(raw.get("enabled", False)):
         return {"enabled": False}
 
@@ -70,11 +71,36 @@ def sanitize_manual_alert_trigger(raw: object) -> dict:
     if len(templates) != 1:
         return {"enabled": False}
 
+    trigger_id = raw.get("id")
+    if not isinstance(trigger_id, str) or not trigger_id.strip():
+        trigger_id = uuid.uuid4().hex
+    trigger_id = re.sub(r"[^A-Za-z0-9_-]+", "_", trigger_id.strip())[:64] or uuid.uuid4().hex
+
     return {
+        "id": trigger_id,
         "enabled": True,
         "price": price,
         "template": templates[0],
     }
+
+
+def sanitize_manual_alert_triggers(raw: object) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+
+    triggers: list[dict] = []
+    seen_ids: set[str] = set()
+    for item in raw[:50]:
+        trigger = _sanitize_manual_alert_trigger_item(item)
+        if not trigger.get("enabled"):
+            continue
+        trigger_id = str(trigger["id"])
+        if trigger_id in seen_ids:
+            trigger["id"] = uuid.uuid4().hex
+            trigger_id = str(trigger["id"])
+        seen_ids.add(trigger_id)
+        triggers.append(trigger)
+    return triggers
 
 
 @dataclass(frozen=True)
@@ -90,7 +116,7 @@ class SessionSpec:
     webhook: dict  # {"enabled": bool, "telegram_notification": bool}  (decision 8-1)
     autostart_runner: bool = False  # start the runner automatically on hub boot
     manual_alert_templates: list[dict] = field(default_factory=list)
-    manual_alert_trigger: dict = field(default_factory=lambda: {"enabled": False})
+    manual_alert_triggers: list[dict] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict) -> "SessionSpec":
@@ -122,7 +148,7 @@ class SessionSpec:
             },
             autostart_runner=bool(d.get("autostart_runner", False)),
             manual_alert_templates=sanitize_manual_alert_templates(d.get("manual_alert_templates")),
-            manual_alert_trigger=sanitize_manual_alert_trigger(d.get("manual_alert_trigger")),
+            manual_alert_triggers=sanitize_manual_alert_triggers(d.get("manual_alert_triggers")),
         )
 
     def with_webhook(self, *, enabled: bool | None = None,
@@ -147,7 +173,7 @@ class SessionSpec:
             history_since=self.history_since, script_name=self.script_name,
             webhook=wh, autostart_runner=self.autostart_runner,
             manual_alert_templates=[dict(t) for t in self.manual_alert_templates],
-            manual_alert_trigger=dict(self.manual_alert_trigger),
+            manual_alert_triggers=[dict(t) for t in self.manual_alert_triggers],
         )
 
     def with_manual_alert_templates(self, templates: list[dict]) -> "SessionSpec":
@@ -157,17 +183,17 @@ class SessionSpec:
             history_since=self.history_since, script_name=self.script_name,
             webhook=dict(self.webhook), autostart_runner=self.autostart_runner,
             manual_alert_templates=sanitize_manual_alert_templates(templates),
-            manual_alert_trigger=dict(self.manual_alert_trigger),
+            manual_alert_triggers=[dict(t) for t in self.manual_alert_triggers],
         )
 
-    def with_manual_alert_trigger(self, trigger: object) -> "SessionSpec":
+    def with_manual_alert_triggers(self, triggers: object) -> "SessionSpec":
         return SessionSpec(
             id=self.id, provider=self.provider, exchange=self.exchange,
             symbol=self.symbol, timeframe=self.timeframe,
             history_since=self.history_since, script_name=self.script_name,
             webhook=dict(self.webhook), autostart_runner=self.autostart_runner,
             manual_alert_templates=[dict(t) for t in self.manual_alert_templates],
-            manual_alert_trigger=sanitize_manual_alert_trigger(trigger),
+            manual_alert_triggers=sanitize_manual_alert_triggers(triggers),
         )
 
     def to_dict(self) -> dict:
@@ -182,7 +208,7 @@ class SessionSpec:
             "webhook": dict(self.webhook),
             "autostart_runner": self.autostart_runner,
             "manual_alert_templates": [dict(t) for t in self.manual_alert_templates],
-            "manual_alert_trigger": dict(self.manual_alert_trigger),
+            "manual_alert_triggers": [dict(t) for t in self.manual_alert_triggers],
         }
 
     @property

@@ -212,16 +212,16 @@ class SessionRegistry:
         self._persist()
         return [dict(t) for t in session.spec.manual_alert_templates]
 
-    async def update_manual_alert_trigger(self, session_id: str, trigger: object) -> dict:
+    async def update_manual_alert_triggers(self, session_id: str, triggers: object) -> list[dict]:
         session = self.sessions.get(session_id)
         if session is None:
             raise SessionNotFoundError(session_id)
-        session.spec = session.spec.with_manual_alert_trigger(trigger)
+        session.spec = session.spec.with_manual_alert_triggers(triggers)
         session.reset_manual_alert_trigger_gate()
         self._persist()
         await session.push_manual_alert_trigger()
         await self.notify_hub()
-        return dict(session.spec.manual_alert_trigger)
+        return [dict(t) for t in session.spec.manual_alert_triggers]
 
     # ------------------------------------------------------------------
     # Runner control

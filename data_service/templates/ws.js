@@ -69,11 +69,11 @@ App.ws = {
           }
         } else if (msg.type === "manual_alert_trigger") {
           if (App.ui && App.ui.applyManualAlertTriggerState) {
-            App.ui.applyManualAlertTriggerState(msg.trigger || { enabled: false });
+            App.ui.applyManualAlertTriggerState(msg.triggers || []);
           }
         } else if (msg.type === "manual_alert_trigger_fired") {
           if (App.ui && App.ui.applyManualAlertTriggerState) {
-            App.ui.applyManualAlertTriggerState({ enabled: false });
+            App.ui.applyManualAlertTriggerState(msg.triggers || App.state.manualAlertTriggers || []);
           }
           if (App.ui && App.ui.elements && App.ui.elements.manualAlertStatus) {
             App.ui.elements.manualAlertStatus.textContent = "Triggered";

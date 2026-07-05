@@ -418,7 +418,7 @@ App.data = {
           await this.loadPlotcharHistory();
           await this.loadPlotData();
           if (App.ui && App.ui.applyManualAlertTriggerState) {
-            App.ui.applyManualAlertTriggerState(App.state.manualAlertTrigger);
+            App.ui.applyManualAlertTriggerState(App.state.manualAlertTriggers || []);
           }
           state.initialLoadDone = true;
           state.initialLoadInProgress = false;
@@ -616,6 +616,10 @@ App.data = {
       return { ok: false, error: "Send failed" };
     }
   },
+  normalizeManualAlertTriggers(data) {
+    const raw = data && Array.isArray(data.triggers) ? data.triggers : [];
+    return raw.filter(t => t && t.enabled && Number.isFinite(Number(t.price)));
+  },
   async loadManualAlertTrigger() {
     try {
       const resp = await fetch(`${App.config.apiBase}/manual-alert-trigger`);
@@ -623,31 +627,27 @@ App.data = {
       if (!resp.ok) {
         return { ok: false, error: data.error || `Load trigger failed (${resp.status})` };
       }
-      const trigger = data && data.trigger && typeof data.trigger === "object"
-        ? data.trigger
-        : { enabled: false };
-      App.state.manualAlertTrigger = trigger;
-      return { ok: true, trigger };
+      const triggers = this.normalizeManualAlertTriggers(data);
+      App.state.manualAlertTriggers = triggers;
+      return { ok: true, triggers };
     } catch (e) {
       return { ok: false, error: "Load trigger failed" };
     }
   },
-  async saveManualAlertTrigger(trigger) {
+  async saveManualAlertTriggers(triggers) {
     try {
       const resp = await fetch(`${App.config.apiBase}/manual-alert-trigger`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(trigger || { enabled: false })
+        body: JSON.stringify({ triggers: triggers || [] })
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
         return { ok: false, error: data.error || `Save trigger failed (${resp.status})` };
       }
-      const saved = data && data.trigger && typeof data.trigger === "object"
-        ? data.trigger
-        : { enabled: false };
-      App.state.manualAlertTrigger = saved;
-      return { ok: true, trigger: saved };
+      const savedTriggers = this.normalizeManualAlertTriggers(data);
+      App.state.manualAlertTriggers = savedTriggers;
+      return { ok: true, triggers: savedTriggers };
     } catch (e) {
       return { ok: false, error: "Save trigger failed" };
     }

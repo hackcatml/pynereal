@@ -23,7 +23,7 @@ from config import (
     SessionSpec,
     default_webhook_url,
     sanitize_manual_alert_templates,
-    sanitize_manual_alert_trigger,
+    sanitize_manual_alert_triggers,
 )
 from manual_alerts import send_manual_alert_payload
 from ohlcv_io import make_ccxt_pro_client
@@ -412,29 +412,25 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
         rt = _rt(session_id)
         if rt is None:
             return JSONResponse({"error": "session not found"}, status_code=404)
-        return JSONResponse({"trigger": dict(rt.spec.manual_alert_trigger)})
+        triggers = [dict(t) for t in rt.spec.manual_alert_triggers]
+        return JSONResponse({"triggers": triggers})
 
     @r.post("/api/{session_id}/manual-alert-trigger")
     async def update_manual_alert_trigger(session_id: str, payload: dict = Body(default_factory=dict)) -> JSONResponse:
-        enabled = bool(payload.get("enabled", False))
-        if enabled:
-            trigger = sanitize_manual_alert_trigger({
-                "enabled": True,
-                "price": payload.get("price"),
-                "template": payload.get("template"),
-            })
-            if not trigger.get("enabled"):
-                return JSONResponse({"error": "trigger requires valid price and template"}, status_code=400)
-        else:
-            trigger = {"enabled": False}
+        raw_triggers = payload.get("triggers")
+        if not isinstance(raw_triggers, list):
+            return JSONResponse({"error": "triggers must be array"}, status_code=400)
+        triggers = sanitize_manual_alert_triggers(raw_triggers)
+        if len(triggers) != len(raw_triggers):
+            return JSONResponse({"error": "each trigger requires valid price and template"}, status_code=400)
 
         try:
-            updated = await registry.update_manual_alert_trigger(session_id, trigger)
+            updated = await registry.update_manual_alert_triggers(session_id, triggers)
         except SessionNotFoundError:
             return JSONResponse({"error": "session not found"}, status_code=404)
         except Exception as e:
             return JSONResponse({"error": f"failed to update trigger: {e}"}, status_code=500)
-        return JSONResponse({"trigger": updated})
+        return JSONResponse({"triggers": updated})
 
     @r.post("/api/{session_id}/manual-alert")
     async def send_manual_alert(session_id: str, payload: dict = Body(default_factory=dict)) -> JSONResponse:

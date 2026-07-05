@@ -55,7 +55,7 @@ window.App.state = {
   manualAlertConfirmOpen: false,
   manualAlertSelectedTemplateIndex: -1,
   manualAlertSuppressClickUntil: 0,
-  manualAlertTrigger: { enabled: false },
+  manualAlertTriggers: [],
   measureToolActive: false,
   measureDraft: null,
   measureResult: null
