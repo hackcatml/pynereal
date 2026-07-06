@@ -43,16 +43,19 @@ body {
   --clock-hour: 0deg;
   --clock-minute: 0deg;
   --clock-second: 0deg;
+  --clock-size: 34px;
+  --clock-center-fade: 54%;
   position: absolute;
   right: 20px;
   top: 50%;
-  width: 34px;
-  height: 34px;
+  width: var(--clock-size);
+  height: var(--clock-size);
   border: 1px solid #3a4350;
   border-radius: 50%;
+  /* 눈금은 conic-gradient 대신 SVG로: conic은 데스크톱(저배율)에서 안티앨리어싱이 안 돼 픽셀이 깨진다. */
   background:
-    radial-gradient(circle at center, #151a21 0 52%, transparent 53%),
-    repeating-conic-gradient(from 0deg, rgba(215, 221, 229, 0.84) 0 2deg, transparent 2deg 30deg),
+    radial-gradient(circle at center, #151a21 0 52%, transparent var(--clock-center-fade)),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 34 34'%3E%3Cg stroke='rgba(215,221,229,0.84)' stroke-width='1'%3E%3Cline x1='17' y1='1' x2='17' y2='8' transform='rotate(0 17 17)'/%3E%3Cline x1='17' y1='1' x2='17' y2='8' transform='rotate(30 17 17)'/%3E%3Cline x1='17' y1='1' x2='17' y2='8' transform='rotate(60 17 17)'/%3E%3Cline x1='17' y1='1' x2='17' y2='8' transform='rotate(90 17 17)'/%3E%3Cline x1='17' y1='1' x2='17' y2='8' transform='rotate(120 17 17)'/%3E%3Cline x1='17' y1='1' x2='17' y2='8' transform='rotate(150 17 17)'/%3E%3Cline x1='17' y1='1' x2='17' y2='8' transform='rotate(180 17 17)'/%3E%3Cline x1='17' y1='1' x2='17' y2='8' transform='rotate(210 17 17)'/%3E%3Cline x1='17' y1='1' x2='17' y2='8' transform='rotate(240 17 17)'/%3E%3Cline x1='17' y1='1' x2='17' y2='8' transform='rotate(270 17 17)'/%3E%3Cline x1='17' y1='1' x2='17' y2='8' transform='rotate(300 17 17)'/%3E%3Cline x1='17' y1='1' x2='17' y2='8' transform='rotate(330 17 17)'/%3E%3C/g%3E%3C/svg%3E") center / 100% 100% no-repeat,
     #0b0e13;
   box-shadow:
     inset 0 0 0 2px rgba(255, 255, 255, 0.03),
@@ -63,6 +66,7 @@ body {
   position: absolute;
   left: 50%;
   bottom: 50%;
+  z-index: 2;
   border-radius: 999px;
   transform-origin: 50% 100%;
 }
@@ -91,6 +95,7 @@ body {
   position: absolute;
   left: 50%;
   top: 50%;
+  z-index: 3;
   width: 5px;
   height: 5px;
   margin: -2.5px 0 0 -2.5px;
@@ -527,9 +532,9 @@ tr:last-child td { border-bottom: none; }
     padding-right: 58px;
   }
   .hub-clock {
+    --clock-size: 30px;
+    --clock-center-fade: 53%;
     right: 14px;
-    width: 30px;
-    height: 30px;
   }
   .clock-hour { height: 8px; }
   .clock-minute { height: 11px; }
