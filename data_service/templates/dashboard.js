@@ -10,6 +10,29 @@
 
   const el = (id) => document.getElementById(id);
 
+  function updateHubClock() {
+    const clock = el("hub-clock");
+    if (!clock) return;
+    const now = new Date();
+    const seconds = now.getSeconds();
+    const minutes = now.getMinutes() + seconds / 60;
+    const hours = (now.getHours() % 12) + minutes / 60;
+    clock.style.setProperty("--clock-second", `${seconds * 6}deg`);
+    clock.style.setProperty("--clock-minute", `${minutes * 6}deg`);
+    clock.style.setProperty("--clock-hour", `${hours * 30}deg`);
+    clock.title = now.toLocaleTimeString("en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    });
+  }
+
+  function startHubClock() {
+    updateHubClock();
+    setInterval(updateHubClock, 1000);
+  }
+
   function fmtTime(ts) {
     if (!ts) return "-";
     try {
@@ -1170,6 +1193,7 @@
   });
   window.addEventListener("online", rebuildHub);
 
+  startHubClock();
   refresh();   // one-time initial load; thereafter the hub pushes via /ws/hub
   connect();
 })();

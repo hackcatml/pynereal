@@ -19,10 +19,12 @@ body {
 }
 
 .topbar {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 16px;
   padding: 14px 20px;
+  padding-right: 70px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
 }
@@ -36,6 +38,66 @@ body {
   border-radius: 10px;
 }
 .conn.ok { color: #28a745; border-color: #28a745; }
+
+.hub-clock {
+  --clock-hour: 0deg;
+  --clock-minute: 0deg;
+  --clock-second: 0deg;
+  position: absolute;
+  right: 20px;
+  top: 50%;
+  width: 34px;
+  height: 34px;
+  border: 1px solid #3a4350;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at center, #151a21 0 52%, transparent 53%),
+    repeating-conic-gradient(from 0deg, rgba(215, 221, 229, 0.84) 0 2deg, transparent 2deg 30deg),
+    #0b0e13;
+  box-shadow:
+    inset 0 0 0 2px rgba(255, 255, 255, 0.03),
+    0 4px 12px rgba(0, 0, 0, 0.25);
+  transform: translateY(-50%);
+}
+.clock-hand {
+  position: absolute;
+  left: 50%;
+  bottom: 50%;
+  border-radius: 999px;
+  transform-origin: 50% 100%;
+}
+.clock-hour {
+  width: 3px;
+  height: 9px;
+  margin-left: -1.5px;
+  background: #d7dde5;
+  transform: rotate(var(--clock-hour));
+}
+.clock-minute {
+  width: 2px;
+  height: 12px;
+  margin-left: -1px;
+  background: #aeb7c2;
+  transform: rotate(var(--clock-minute));
+}
+.clock-second {
+  width: 1px;
+  height: 14px;
+  margin-left: -0.5px;
+  background: #e5484d;
+  transform: rotate(var(--clock-second));
+}
+.clock-center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 5px;
+  height: 5px;
+  margin: -2.5px 0 0 -2.5px;
+  border-radius: 50%;
+  background: #d7dde5;
+  box-shadow: 0 0 0 2px #151a21;
+}
 
 .card {
   margin: 18px 20px;
@@ -460,7 +522,18 @@ tr:last-child td { border-bottom: none; }
 
 /* ---- mobile: stack form, turn the wide table into cards ---- */
 @media (max-width: 720px) {
-  .topbar { padding: 12px 14px; }
+  .topbar {
+    padding: 12px 14px;
+    padding-right: 58px;
+  }
+  .hub-clock {
+    right: 14px;
+    width: 30px;
+    height: 30px;
+  }
+  .clock-hour { height: 8px; }
+  .clock-minute { height: 11px; }
+  .clock-second { height: 13px; }
   .card { margin: 12px; padding: 12px; }
 
   .add-form { flex-direction: column; align-items: stretch; }
