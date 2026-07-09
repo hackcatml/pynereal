@@ -65,6 +65,7 @@ async def file_update_loop(
     exchange = config.exchange
     symbol = config.symbol
     timeframe = config.timeframe
+    market_type = config.market_type
     cache_path = make_cache_path()
     init_cache(cache_path)
     # print(f"[data_service] sqlite cache path: {cache_path}")
@@ -296,7 +297,13 @@ async def file_update_loop(
                 if not first_fetch_after_download_done:
                     res = await _retry_ohlcv_update(
                         "pre_run initial OHLCV refresh",
-                        lambda: fetch_and_update_ohlcv_data(exchange, symbol, timeframe, str(ohlcv_path)),
+                        lambda: fetch_and_update_ohlcv_data(
+                            exchange,
+                            symbol,
+                            timeframe,
+                            str(ohlcv_path),
+                            market_type=market_type,
+                        ),
                     )
                     if res:
                         # print(f"[data_service] pre_run fetch updated {len(res)} bars")
@@ -322,6 +329,7 @@ async def file_update_loop(
                             str(ohlcv_path),
                             current_bar_ts_ms=current_bar_ts_ms,
                             bar_count=10,
+                            market_type=market_type,
                         ),
                     )
                     if res:
@@ -337,6 +345,7 @@ async def file_update_loop(
                         exchange=exchange,
                         symbol=symbol,
                         timeframe=timeframe,
+                        market_type=market_type,
                     )
                     if fixed_open_price > 0.0:
                         # Fix the last bar stored in the ohlcv cache

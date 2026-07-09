@@ -82,6 +82,10 @@ def hyperliquid_logo_url(coin_id: str | None) -> str:
 
 
 def exchange_logo_url(exchange: str) -> str:
+    # TradingView 의 hyperliquid 프로바이더 아이콘이 2026-07 부터 브랜드 마크가 아닌
+    # [X] 아이콘으로 교체되어, Hyperliquid 공식 마크(HYPE 코인 로고)를 대신 사용한다.
+    if is_hyperliquid_exchange(exchange):
+        return hyperliquid_logo_url("HYPE")
     slug = _provider_logo_slug(exchange)
     if not slug:
         return ""

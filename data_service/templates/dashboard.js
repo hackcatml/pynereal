@@ -531,6 +531,7 @@
       el("add-error").textContent = "입력값을 확인하세요 — 잘못된 exchange/symbol 입니다.";
       return;
     }
+    if (validatedMarketType) payload.market_type = validatedMarketType;
     try {
       await api("/api/sessions", {
         method: "POST",
@@ -875,6 +876,7 @@
   const exchangeInput = addForm.querySelector('[name="exchange"]');
   const symbolInput = addForm.querySelector('[name="symbol"]');
   const providerInput = addForm.querySelector('[name="provider"]');
+  let validatedMarketType = "";
 
   function setFieldError(id, msg, kind) {
     const node = el(id);
@@ -894,6 +896,7 @@
     const provider = (providerInput.value || "ccxt").trim();
     const exchange = exchangeInput.value.trim();
     setFieldError("symbol-error", "");  // exchange change invalidates the prior symbol check
+    validatedMarketType = "";
     if (!exchange) { setFieldError("exchange-error", ""); return true; }
     setFieldError("exchange-error", "checking…", "checking");
     try {
@@ -909,6 +912,7 @@
   }
 
   async function checkSymbol() {
+    validatedMarketType = "";
     symbolInput.value = symbolInput.value.toUpperCase();  // canonical-uppercase symbols
     const provider = (providerInput.value || "ccxt").trim();
     const exchange = exchangeInput.value.trim();
@@ -920,7 +924,11 @@
       const q = `provider=${encodeURIComponent(provider)}&exchange=${encodeURIComponent(exchange)}` +
         `&symbol=${encodeURIComponent(symbol)}`;
       const data = await api(`/api/validate/symbol?${q}`);
-      if (data.skipped || data.exists === true) { setFieldError("symbol-error", ""); return true; }
+      if (data.skipped || data.exists === true) {
+        validatedMarketType = data.market_type || "";
+        setFieldError("symbol-error", "");
+        return true;
+      }
       if (data.exists === false) {
         setFieldError("symbol-error", `symbol '${symbol}' not found on ${exchange}`);
         return false;

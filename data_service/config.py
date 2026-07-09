@@ -103,6 +103,13 @@ def sanitize_manual_alert_triggers(raw: object) -> list[dict]:
     return triggers
 
 
+def sanitize_market_type(raw: object) -> str:
+    value = str(raw or "").strip().lower()
+    if value in {"spot", "linear", "inverse"}:
+        return value
+    return ""
+
+
 @dataclass(frozen=True)
 class SessionSpec:
     """Immutable per-session definition loaded from config / sessions.json."""
@@ -115,6 +122,7 @@ class SessionSpec:
     script_name: str
     webhook: dict  # {"enabled": bool, "telegram_notification": bool}  (decision 8-1)
     autostart_runner: bool = False  # start the runner automatically on hub boot
+    market_type: str = ""
     manual_alert_templates: list[dict] = field(default_factory=list)
     manual_alert_triggers: list[dict] = field(default_factory=list)
 
@@ -147,6 +155,7 @@ class SessionSpec:
                 "telegram_chat_id": (webhook.get("telegram_chat_id") or ""),
             },
             autostart_runner=bool(d.get("autostart_runner", False)),
+            market_type=sanitize_market_type(d.get("market_type")),
             manual_alert_templates=sanitize_manual_alert_templates(d.get("manual_alert_templates")),
             manual_alert_triggers=sanitize_manual_alert_triggers(d.get("manual_alert_triggers")),
         )
@@ -172,6 +181,7 @@ class SessionSpec:
             symbol=self.symbol, timeframe=self.timeframe,
             history_since=self.history_since, script_name=self.script_name,
             webhook=wh, autostart_runner=self.autostart_runner,
+            market_type=self.market_type,
             manual_alert_templates=[dict(t) for t in self.manual_alert_templates],
             manual_alert_triggers=[dict(t) for t in self.manual_alert_triggers],
         )
@@ -182,6 +192,7 @@ class SessionSpec:
             symbol=self.symbol, timeframe=self.timeframe,
             history_since=self.history_since, script_name=self.script_name,
             webhook=dict(self.webhook), autostart_runner=self.autostart_runner,
+            market_type=self.market_type,
             manual_alert_templates=sanitize_manual_alert_templates(templates),
             manual_alert_triggers=[dict(t) for t in self.manual_alert_triggers],
         )
@@ -192,12 +203,13 @@ class SessionSpec:
             symbol=self.symbol, timeframe=self.timeframe,
             history_since=self.history_since, script_name=self.script_name,
             webhook=dict(self.webhook), autostart_runner=self.autostart_runner,
+            market_type=self.market_type,
             manual_alert_templates=[dict(t) for t in self.manual_alert_templates],
             manual_alert_triggers=sanitize_manual_alert_triggers(triggers),
         )
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "id": self.id,
             "provider": self.provider,
             "exchange": self.exchange,
@@ -210,6 +222,9 @@ class SessionSpec:
             "manual_alert_templates": [dict(t) for t in self.manual_alert_templates],
             "manual_alert_triggers": [dict(t) for t in self.manual_alert_triggers],
         }
+        if self.market_type:
+            data["market_type"] = self.market_type
+        return data
 
     @property
     def feed_id(self) -> str:
@@ -226,6 +241,7 @@ class FeedSpec:
     symbol: str
     timeframe: str
     history_since: str
+    market_type: str = ""
 
     @classmethod
     def from_session(cls, s: SessionSpec) -> "FeedSpec":
@@ -233,6 +249,7 @@ class FeedSpec:
             id=feed_key(s.provider, s.exchange, s.symbol, s.timeframe),
             provider=s.provider, exchange=s.exchange, symbol=s.symbol,
             timeframe=s.timeframe, history_since=s.history_since,
+            market_type=s.market_type,
         )
 
 

@@ -23,8 +23,9 @@ async def watch_trades_loop(
     timeframe: str,
     state: DataState,
     on_bar: Callable[[list], Awaitable[None]],
+    market_type: str = "",
 ) -> None:
-    ex = make_ccxt_pro_client(ccxt, exchange_name)
+    ex = make_ccxt_pro_client(ccxt, exchange_name, market_type=market_type, symbol=symbol)
 
     tf = timeframe
     tf_modifier = tf[-1]
@@ -67,7 +68,7 @@ async def watch_trades_loop(
                 raise
             except Exception:
                 await _safe_close(ex)
-                ex = make_ccxt_pro_client(ccxt, exchange_name)
+                ex = make_ccxt_pro_client(ccxt, exchange_name, market_type=market_type, symbol=symbol)
     finally:
         await _safe_close(ex)
 

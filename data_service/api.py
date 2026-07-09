@@ -28,9 +28,9 @@ from config import (
 from manual_alerts import send_manual_alert_payload
 from ohlcv_io import make_ccxt_pro_client
 
-# Cache of exchange -> set(symbols) so symbol validation hits the network at most
+# Cache of exchange -> ccxt markets so symbol validation hits the network at most
 # once per exchange for the hub's lifetime.
-_markets_cache: dict[str, set] = {}
+_markets_cache: dict[tuple[str, str], dict] = {}
 
 
 def _tail_log_text(log_path: Path, lines: int) -> tuple[str, int]:
@@ -45,21 +45,49 @@ def _sse_event(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {data}\n\n"
 
 
-async def _load_exchange_symbols(exchange: str) -> set:
-    cached = _markets_cache.get(exchange)
+def _market_type_from_market(market: dict) -> str:
+    if market.get("spot"):
+        return "spot"
+    if market.get("linear"):
+        return "linear"
+    if market.get("inverse"):
+        return "inverse"
+    return ""
+
+
+def _market_scope_from_symbol(exchange: str, symbol: str) -> str:
+    if exchange != "binance":
+        return "all"
+    if ":" not in symbol:
+        return "spot"
+    settle = symbol.rsplit(":", 1)[-1]
+    if settle in {"USDT", "USDC"}:
+        return "linear"
+    return "inverse"
+
+
+async def _load_exchange_markets(exchange: str, symbol: str) -> dict:
+    scope = _market_scope_from_symbol(exchange, symbol)
+    cache_key = (exchange, scope)
+    cached = _markets_cache.get(cache_key)
     if cached is not None:
         return cached
-    ex = make_ccxt_pro_client(ccxtpro, exchange)
+    ex = make_ccxt_pro_client(
+        ccxtpro,
+        exchange,
+        market_type=scope if scope != "all" else "",
+        symbol=symbol,
+    )
     try:
         await ex.load_markets()
-        symbols = set(ex.symbols or [])
+        markets = dict(ex.markets or {})
     finally:
         try:
             await ex.close()
         except Exception:
             pass
-    _markets_cache[exchange] = symbols
-    return symbols
+    _markets_cache[cache_key] = markets
+    return markets
 
 
 # Cache of script path -> (mtime, is_strategy) so we only AST-parse on change.
@@ -638,11 +666,14 @@ def build_validation_router() -> APIRouter:
         if exchange not in ccxtpro.exchanges:
             return JSONResponse({"exists": False, "error": f"unknown exchange: {exchange}"})
         try:
-            symbols = await _load_exchange_symbols(exchange)
+            markets = await _load_exchange_markets(exchange, symbol)
         except Exception as e:
             # Network/market-load failure: don't claim the symbol is invalid.
             return JSONResponse({"exists": None, "error": f"could not load markets: {e}"})
-        return JSONResponse({"exists": symbol in symbols})
+        market = markets.get(symbol)
+        if not market:
+            return JSONResponse({"exists": False})
+        return JSONResponse({"exists": True, "market_type": _market_type_from_market(market)})
 
     @r.get("/api/scripts")
     def list_scripts() -> JSONResponse:

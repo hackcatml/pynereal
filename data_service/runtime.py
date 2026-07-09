@@ -159,6 +159,7 @@ class Session:
         self.chart_info: Dict[str, Any] = {
             "exchange": spec.exchange,
             "symbol": spec.symbol,
+            "market_type": spec.market_type,
             "timeframe": spec.timeframe,
             "provider": spec.provider,
             "script_title": None,
@@ -504,6 +505,7 @@ class Session:
             "provider": self.spec.provider,
             "exchange": self.spec.exchange,
             "symbol": self.spec.symbol,
+            "market_type": self.spec.market_type,
             "timeframe": self.spec.timeframe,
             "history_since": self.spec.history_since,
             "script_name": self.spec.script_name,
