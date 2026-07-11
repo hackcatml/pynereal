@@ -6,7 +6,12 @@
   let scriptsLoading = false;
   let scriptOptions = [];
   let scriptActiveIndex = -1;
+  let draggedSessionId = null;
+  let pendingSessionOrder = null;
   const priceFormatters = new Map();
+  const desktopReorderQuery = window.matchMedia(
+    "(min-width: 721px) and (hover: hover) and (pointer: fine)",
+  );
 
   const el = (id) => document.getElementById(id);
 
@@ -113,9 +118,29 @@
       `</span>`;
   }
 
+  function reorderSessionList(items, sessionIds) {
+    const byId = new Map((items || []).map((item) => [sessionId(item), item]));
+    if (byId.size !== sessionIds.length || sessionIds.some((id) => !byId.has(id))) return null;
+    return sessionIds.map((id) => byId.get(id));
+  }
+
   function applySessions(nextSessions) {
-    sessions = nextSessions || [];
-    render();
+    const incoming = nextSessions || [];
+    if (pendingSessionOrder) {
+      const pending = reorderSessionList(incoming, pendingSessionOrder);
+      if (!pending) {
+        pendingSessionOrder = null;
+        sessions = incoming;
+      } else {
+        const incomingIds = incoming.map(sessionId);
+        const confirmed = incomingIds.every((id, index) => id === pendingSessionOrder[index]);
+        sessions = confirmed ? incoming : pending;
+        if (confirmed) pendingSessionOrder = null;
+      }
+    } else {
+      sessions = incoming;
+    }
+    if (!draggedSessionId) render();
   }
 
   function runnerButtons(s) {
@@ -293,7 +318,21 @@
     const tr = document.createElement("tr");
     tr.dataset.sessionId = id;
     tr.innerHTML =
-      `<td data-label="Status"><span data-field="runner-led" class="led"></span></td>` +
+      `<td data-label="Status" class="status-cell">` +
+        `<span class="status-cell-content">` +
+          `<button type="button" class="session-drag-handle" draggable="true" ` +
+          `title="Drag to reorder" aria-label="Drag to reorder session">` +
+            `<svg viewBox="0 0 24 24" aria-hidden="true">` +
+              `<circle cx="9" cy="5" r="1.5"></circle>` +
+              `<circle cx="15" cy="5" r="1.5"></circle>` +
+              `<circle cx="9" cy="12" r="1.5"></circle>` +
+              `<circle cx="15" cy="12" r="1.5"></circle>` +
+              `<circle cx="9" cy="19" r="1.5"></circle>` +
+              `<circle cx="15" cy="19" r="1.5"></circle>` +
+            `</svg>` +
+          `</button>` +
+          `<span data-field="runner-led" class="led"></span>` +
+        `</span></td>` +
       `<td data-label="Symbol" class="mono"><span data-field="symbol-cell" class="symbol-cell"></span></td>` +
       `<td data-label="TF" data-field="timeframe"></td>` +
       `<td data-label="Exchange"><span data-field="exchange-cell" class="exchange-cell"></span></td>` +
@@ -450,6 +489,111 @@
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     return data;
+  }
+
+  function sessionOrderFromRows() {
+    return Array.from(el("sessions-body").querySelectorAll("tr[data-session-id]"))
+      .map((row) => row.dataset.sessionId)
+      .filter(Boolean);
+  }
+
+  async function persistSessionOrder(sessionIds) {
+    const currentIds = sessions.map(sessionId);
+    if (sessionIds.length !== currentIds.length ||
+        sessionIds.every((id, index) => id === currentIds[index])) return;
+
+    const ordered = reorderSessionList(sessions, sessionIds);
+    if (!ordered) {
+      render();
+      return;
+    }
+
+    pendingSessionOrder = sessionIds.slice();
+    sessions = ordered;
+    render();
+    const body = el("sessions-body");
+    body.classList.add("session-order-saving");
+    body.setAttribute("aria-busy", "true");
+    try {
+      const result = await api("/api/sessions/order", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_ids: sessionIds }),
+      });
+      applySessions(result.sessions || []);
+    } catch (e) {
+      pendingSessionOrder = null;
+      alert(`session reorder failed: ${e.message}`);
+      await refresh();
+    } finally {
+      body.classList.remove("session-order-saving");
+      body.removeAttribute("aria-busy");
+    }
+  }
+
+  function clearSessionDragClasses() {
+    const body = el("sessions-body");
+    body.querySelectorAll(".session-dragging").forEach((row) => {
+      row.classList.remove("session-dragging");
+    });
+  }
+
+  function dragAfterRow(pointerY) {
+    const rows = Array.from(
+      el("sessions-body").querySelectorAll("tr[data-session-id]:not(.session-dragging)"),
+    );
+    return rows.reduce((closest, row) => {
+      const box = row.getBoundingClientRect();
+      const offset = pointerY - box.top - box.height / 2;
+      if (offset < 0 && offset > closest.offset) return { offset, row };
+      return closest;
+    }, { offset: Number.NEGATIVE_INFINITY, row: null }).row;
+  }
+
+  function initSessionReordering() {
+    const body = el("sessions-body");
+
+    body.addEventListener("dragstart", (e) => {
+      const handle = e.target && e.target.closest
+        ? e.target.closest(".session-drag-handle")
+        : null;
+      const row = handle && handle.closest("tr[data-session-id]");
+      if (!row || !desktopReorderQuery.matches || pendingSessionOrder) {
+        e.preventDefault();
+        return;
+      }
+      draggedSessionId = row.dataset.sessionId;
+      row.classList.add("session-dragging");
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", draggedSessionId);
+    });
+
+    body.addEventListener("dragover", (e) => {
+      if (!draggedSessionId || !desktopReorderQuery.matches) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      const dragging = body.querySelector(".session-dragging");
+      if (!dragging) return;
+      const after = dragAfterRow(e.clientY);
+      if (after) body.insertBefore(dragging, after);
+      else body.appendChild(dragging);
+    });
+
+    body.addEventListener("drop", (e) => {
+      if (!draggedSessionId) return;
+      e.preventDefault();
+      const order = sessionOrderFromRows();
+      draggedSessionId = null;
+      clearSessionDragClasses();
+      persistSessionOrder(order);
+    });
+
+    body.addEventListener("dragend", () => {
+      if (!draggedSessionId) return;
+      draggedSessionId = null;
+      clearSessionDragClasses();
+      render();
+    });
   }
 
   async function runnerAction(id, action) {
@@ -1201,6 +1345,7 @@
   });
   window.addEventListener("online", rebuildHub);
 
+  initSessionReordering();
   startHubClock();
   refresh();   // one-time initial load; thereafter the hub pushes via /ws/hub
   connect();

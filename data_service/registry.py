@@ -26,6 +26,10 @@ class SessionNotFoundError(Exception):
     pass
 
 
+class SessionOrderError(Exception):
+    pass
+
+
 class SessionRegistry:
     """Owns Feeds (one per market, shared) and Sessions (one per strategy), their
     background tasks, the runner supervisor, and the dashboard (/ws/hub) push.
@@ -187,6 +191,23 @@ class SessionRegistry:
         if persist:
             self._persist()
         await self.notify_hub()
+
+    async def reorder_sessions(self, session_ids: list[str]) -> List[dict]:
+        current_ids = list(self.sessions)
+        if len(session_ids) != len(current_ids) or len(set(session_ids)) != len(session_ids):
+            raise SessionOrderError("session order must contain every session exactly once")
+        if set(session_ids) != set(current_ids):
+            raise SessionOrderError("session order contains unknown or missing session ids")
+
+        previous_sessions = self.sessions
+        self.sessions = {session_id: previous_sessions[session_id] for session_id in session_ids}
+        try:
+            self._persist()
+        except Exception:
+            self.sessions = previous_sessions
+            raise
+        await self.notify_hub()
+        return self.snapshots()
 
     async def update_webhook(self, session_id: str, *, enabled: bool | None = None,
                              telegram_notification: bool | None = None,

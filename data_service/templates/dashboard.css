@@ -295,6 +295,56 @@ th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--bor
 th { color: var(--muted); font-weight: 600; font-size: 12px; }
 tr:last-child td { border-bottom: none; }
 
+.status-cell { white-space: nowrap; }
+.status-cell-content {
+  display: inline-flex;
+  height: 20px;
+  align-items: center;
+  vertical-align: middle;
+}
+.session-drag-handle {
+  display: none;
+  width: 16px;
+  height: 20px;
+  margin: 0 4px 0 -4px;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  cursor: grab;
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease, background 120ms ease;
+}
+.session-drag-handle svg {
+  display: block;
+  width: 16px;
+  height: 18px;
+  fill: currentColor;
+}
+
+@media (min-width: 721px) and (hover: hover) and (pointer: fine) {
+  .session-drag-handle { display: inline-flex; }
+  #sessions tbody tr:hover .session-drag-handle,
+  .session-drag-handle:focus-visible,
+  #sessions tbody tr.session-dragging .session-drag-handle {
+    color: var(--text);
+    opacity: 1;
+  }
+  .session-drag-handle:hover,
+  .session-drag-handle:focus-visible { background: #2a313c; outline: none; }
+  .session-drag-handle:active,
+  #sessions tbody tr.session-dragging .session-drag-handle { cursor: grabbing; }
+  #sessions tbody tr.session-dragging {
+    opacity: 0.48;
+    background: rgba(41, 98, 255, 0.08);
+  }
+  #sessions tbody.session-order-saving .session-drag-handle { cursor: wait; }
+}
+
 .runner-actions {
   display: inline-flex;
   align-items: center;

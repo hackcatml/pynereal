@@ -17,7 +17,13 @@ from pynecore.core.csv_file import CSVReader
 
 import ccxt.pro as ccxtpro
 
-from registry import SessionNotFoundError, SessionExistsError, SessionLimitError, SessionRegistry
+from registry import (
+    SessionExistsError,
+    SessionLimitError,
+    SessionNotFoundError,
+    SessionOrderError,
+    SessionRegistry,
+)
 from runtime import Session
 from config import (
     SessionSpec,
@@ -494,6 +500,19 @@ def build_control_router(registry: SessionRegistry) -> APIRouter:
     @r.get("/api/sessions")
     def list_sessions() -> JSONResponse:
         return JSONResponse({"sessions": registry.snapshots()})
+
+    @r.put("/api/sessions/order")
+    async def reorder_sessions(payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        session_ids = payload.get("session_ids")
+        if not isinstance(session_ids, list) or not all(isinstance(item, str) for item in session_ids):
+            return JSONResponse({"error": "session_ids must be an array of strings"}, status_code=400)
+        try:
+            ordered = await registry.reorder_sessions(session_ids)
+        except SessionOrderError as e:
+            return JSONResponse({"error": str(e)}, status_code=409)
+        except Exception as e:
+            return JSONResponse({"error": f"failed to reorder sessions: {e}"}, status_code=500)
+        return JSONResponse({"sessions": ordered})
 
     @r.post("/api/sessions")
     async def create_session(payload: dict = Body(default_factory=dict)) -> JSONResponse:
