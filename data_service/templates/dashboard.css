@@ -352,6 +352,15 @@ tr:last-child td { border-bottom: none; }
   white-space: nowrap;
 }
 
+@media (min-width: 721px) {
+  #sessions th:nth-child(10) { width: 1%; }
+  #sessions td.runner-cell {
+    width: 1%;
+    padding-right: 36px;
+  }
+  .runner-actions { min-width: 190px; }
+}
+
 .symbol-cell,
 .exchange-cell {
   display: inline-flex;
@@ -377,9 +386,11 @@ tr:last-child td { border-bottom: none; }
 .last-bar-value {
   display: inline-flex;
   flex-direction: column;
+  min-width: 9ch;
   gap: 2px;
   align-items: flex-start;
   line-height: 1.25;
+  font-variant-numeric: tabular-nums;
 }
 .last-bar-time {
   color: var(--muted);
