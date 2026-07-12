@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import shutil
 import tomllib
 import uuid
 from dataclasses import dataclass, field
@@ -258,6 +259,25 @@ class HubConfig:
     host: str
     port: int
     pyne_section: dict
+
+
+def ensure_provider_config(config_dir: Path | None = None) -> Path:
+    config_dir = config_dir or app_state.config_dir
+    providers_path = config_dir / "providers.toml"
+    if providers_path.exists():
+        return providers_path
+
+    example_path = config_dir / "providers.example.toml"
+    if not example_path.is_file():
+        raise FileNotFoundError(
+            f"provider config not found: {providers_path} "
+            f"(example also missing: {example_path})"
+        )
+
+    config_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(example_path, providers_path)
+    print(f"[config] created {providers_path.name} from {example_path.name}")
+    return providers_path
 
 
 def _toml_path() -> Path:

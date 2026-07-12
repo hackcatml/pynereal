@@ -6,6 +6,7 @@ __pycache__
 test*.py
 .env
 workdir/scripts/*.toml
+workdir/config/providers.toml
 
 # Ignore runtime session state and per-session output (hub)
 workdir/config/sessions.json

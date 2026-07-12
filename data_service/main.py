@@ -5,7 +5,7 @@ import asyncio
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from config import load_hub_config, load_initial_sessions
+from config import ensure_provider_config, load_hub_config, load_initial_sessions
 from registry import SessionRegistry
 from api import build_session_api_router, build_control_router, build_validation_router
 from ui import build_ui_router
@@ -105,6 +105,7 @@ async def main() -> None:
     # Required by PyneCore's NOTICE file (Apache-2.0, Section 4d)
     print("Powered by PyneSys (https://pynesys.io)\n")
 
+    ensure_provider_config()
     cfg = load_hub_config()
     specs = load_initial_sessions()
     registry = SessionRegistry(port=cfg.port)
