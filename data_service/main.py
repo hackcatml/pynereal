@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from config import ensure_provider_config, load_hub_config, load_initial_sessions
+from codex_service import CodexService
 from registry import SessionRegistry
 from api import build_session_api_router, build_control_router, build_validation_router
 from ui import build_ui_router
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 _BANNER = r"""
     ____                   ____             __
@@ -20,10 +24,10 @@ _BANNER = r"""
 """
 
 
-def build_app(registry: SessionRegistry) -> FastAPI:
+def build_app(registry: SessionRegistry, codex_service: CodexService) -> FastAPI:
     app = FastAPI()
     app.include_router(build_ui_router())
-    app.include_router(build_control_router(registry))
+    app.include_router(build_control_router(registry, codex_service))
     app.include_router(build_validation_router())
     app.include_router(build_session_api_router(registry))
 
@@ -109,7 +113,12 @@ async def main() -> None:
     cfg = load_hub_config()
     specs = load_initial_sessions()
     registry = SessionRegistry(port=cfg.port)
-    app = build_app(registry)
+    codex_service = CodexService(project_root=_PROJECT_ROOT)
+    try:
+        await codex_service.start()
+    except Exception as e:
+        print(f"[ai] Codex app-server startup failed: {e}")
+    app = build_app(registry, codex_service)
 
     await registry.start_all(specs)
     heartbeat = asyncio.create_task(_hub_status_heartbeat(registry))
@@ -122,7 +131,10 @@ async def main() -> None:
         await server.serve()
     finally:
         heartbeat.cancel()
-        await registry.shutdown()
+        try:
+            await registry.shutdown()
+        finally:
+            await codex_service.close()
 
 
 if __name__ == "__main__":

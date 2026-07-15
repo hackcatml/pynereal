@@ -10,6 +10,7 @@ workdir/config/providers.toml
 
 # Ignore runtime session state and per-session output (hub)
 workdir/config/sessions.json
+workdir/config/ai_chat.json
 workdir/output/realtime/
 
 # Ignore SQLite cache files but keep the directory
