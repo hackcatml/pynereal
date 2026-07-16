@@ -729,6 +729,7 @@
   const AI_CHAT_CONVERSATION_KEY = "aiChatConversationId";
   const AI_CHAT_FAB_POS_KEY = "aiChatFabPos";
   const AI_CHAT_MAX_HISTORY = 12;
+  let aiEnabled = false;
   let aiMessages = [];
   let aiConversationId = "";
   let aiPending = false;
@@ -737,6 +738,13 @@
   let aiRenderFrame = null;
   let aiChatLockedScroll = false;
   let aiStateSyncPromise = null;
+
+  function applyAiAvailability(enabled) {
+    if (typeof enabled !== "boolean") return;
+    aiEnabled = enabled;
+    el("ai-chat-fab").classList.toggle("hidden", !aiEnabled);
+    if (!aiEnabled && isAiChatOpen()) closeAiChat();
+  }
 
   function loadPersistentAiValue(key) {
     try {
@@ -1985,6 +1993,7 @@
   async function refresh() {
     try {
       const data = await api("/api/sessions");
+      applyAiAvailability(data.ai_enabled);
       applySessions(data.sessions || []);
       return true;
     } catch (e) {
@@ -2126,6 +2135,7 @@
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === "sessions") {
+          applyAiAvailability(msg.ai_enabled);
           applySessions(msg.sessions || []);
         } else if (msg.type === "ai_chat_updated" && !aiPending) {
           syncAiChatState({ allowImport: false });

@@ -38,7 +38,11 @@ def build_app(registry: SessionRegistry, codex_service: CodexService) -> FastAPI
     async def hub_ws(ws: WebSocket):
         await registry.hub_ws.connect(ws)
         registry.retry_missing_symbol_logos()
-        await registry.hub_ws.send(ws, {"type": "sessions", "sessions": registry.snapshots()})
+        await registry.hub_ws.send(ws, {
+            "type": "sessions",
+            "sessions": registry.snapshots(),
+            "ai_enabled": codex_service.enabled,
+        })
         try:
             while True:
                 # Dashboard clients only receive pushes; ignore inbound keepalive.

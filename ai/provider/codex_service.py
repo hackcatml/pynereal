@@ -150,6 +150,10 @@ class CodexService:
         self._chat_conversation_id: str | None = None
         self._load_chat_state()
 
+    @property
+    def enabled(self) -> bool:
+        return not self._disabled
+
     async def start(self) -> None:
         async with self._lifecycle_lock:
             if self._codex is not None or self._disabled:

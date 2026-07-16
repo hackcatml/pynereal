@@ -689,7 +689,10 @@ def build_control_router(registry: SessionRegistry, codex_service: CodexService)
 
     @r.get("/api/sessions")
     def list_sessions() -> JSONResponse:
-        return JSONResponse({"sessions": registry.snapshots()})
+        return JSONResponse({
+            "sessions": registry.snapshots(),
+            "ai_enabled": codex_service.enabled,
+        })
 
     @r.put("/api/sessions/order")
     async def reorder_sessions(payload: dict = Body(default_factory=dict)) -> JSONResponse:
