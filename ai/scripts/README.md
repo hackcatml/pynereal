@@ -1,7 +1,20 @@
-# AI Data Scripts
+# AI Scripts And Tools
 
-Scripts in this directory collect deterministic, read-only evidence for the
-workflows under `ai/workflows/`.
+This directory contains deterministic data collectors and the server-controlled
+tools used by Dashboard AI workflows under `ai/workflows/`.
+
+## Dashboard AI Runtime
+
+- `dynamic_tools.py` routes app-server tool calls.
+- `file_tools.py` restricts explicit file edits to approved repository paths.
+- `manual_alert_tool.py` manages persisted Manual Alert templates and triggers.
+- `telegram_tool.py` sends explicitly requested results through server-held
+  credentials.
+
+These shared modules are imported by provider implementations under
+`ai/provider/`; they are not standalone command-line scripts. Their
+corresponding `*_test.py` files keep tool behavior isolated from live accounts
+and destinations.
 
 ## Interface
 
@@ -15,8 +28,11 @@ New scripts should:
 - load credentials through the project's local provider configuration
 - redact sensitive values from all output
 
-State-changing tools must use a separate filename and require both `--execute`
-and an explicit confirmation value.
+Standalone command-line tools that change external state must use a separate
+filename and require both `--execute` and an explicit confirmation value.
+Server-controlled dynamic tools instead enforce explicit user intent and
+validate every mutation inside the data-service process; they do not expose a
+command-line execution switch.
 
 ## Asset balances
 

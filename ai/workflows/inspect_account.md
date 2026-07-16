@@ -45,3 +45,8 @@ as the account currently being queried or a partial failure. Do not mention
 instruction files, repository inspection, workflow selection, script option
 review, or plans to organize the result. Start the final response with the
 observation time and account scope, then present the balances directly.
+
+When the user explicitly asks to send the result to Telegram, first complete
+the account lookup, convert the result to concise plain text, and call
+`send_telegram_message`. Do not claim delivery unless the tool succeeds. Without
+an explicit Telegram instruction, return the result only in browser chat.

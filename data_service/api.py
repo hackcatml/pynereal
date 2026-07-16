@@ -19,6 +19,7 @@ from pynecore.core.csv_file import CSVReader
 
 import ccxt.pro as ccxtpro
 
+from ai.provider.codex_service import CodexService
 from registry import (
     SessionExistsError,
     SessionLimitError,
@@ -33,7 +34,6 @@ from config import (
     sanitize_manual_alert_templates,
     sanitize_manual_alert_triggers,
 )
-from codex_service import CodexService
 from manual_alerts import send_manual_alert_payload
 from ohlcv_io import make_ccxt_pro_client
 
@@ -618,16 +618,22 @@ def build_control_router(registry: SessionRegistry, codex_service: CodexService)
         if conversation_id is not None and not isinstance(conversation_id, str):
             return JSONResponse({"error": "conversation_id must be a string"}, status_code=400)
         history = _sanitize_ai_chat_history(payload.get("history"))
+        async def notify_chat_updated() -> None:
+            await registry.hub_ws.broadcast_json({"type": "ai_chat_updated"})
+
+        run = codex_service.start_shared_chat(
+            message,
+            client_conversation_id=(conversation_id or "").strip() or None,
+            client_history=history,
+            on_state_changed=notify_chat_updated,
+        )
+
         async def stream() -> AsyncIterator[str]:
             streamed_answer = ""
             pending_delta = ""
             last_delta_emit = 0.0
             try:
-                async for event in codex_service.stream_shared_chat(
-                    message,
-                    client_conversation_id=(conversation_id or "").strip() or None,
-                    client_history=history,
-                ):
+                async for event in run.events():
                     if event.event == "delta":
                         delta = str(event.payload.get("text") or "")
                         streamed_answer += delta
@@ -648,14 +654,16 @@ def build_control_router(registry: SessionRegistry, codex_service: CodexService)
                             {"text": pending_delta, "html": _render_ai_markdown(streamed_answer)},
                         )
                         pending_delta = ""
-                    if event.event in ("conversation", "done"):
-                        await registry.hub_ws.broadcast_json({"type": "ai_chat_updated"})
                     event_payload = event.payload
                     if event.event == "done":
                         answer = str(event.payload.get("answer") or "")
                         event_payload = {**event.payload, "html": _render_ai_markdown(answer)}
                     yield _sse_event(event.event, event_payload)
             except asyncio.CancelledError:
+                print(
+                    f"[ai] stream={run.id} client disconnected; "
+                    "background turn continues"
+                )
                 raise
             except Exception as e:
                 await registry.hub_ws.broadcast_json({"type": "ai_chat_updated"})

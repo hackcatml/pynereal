@@ -853,15 +853,6 @@ tr:last-child td { border-bottom: none; }
   0%, 80%, 100% { opacity: 0.25; }
   40% { opacity: 1; }
 }
-/* temporary: live viewport numbers for debugging the iOS keyboard layout */
-.ai-chat-debug {
-  display: none;
-  padding: 2px 10px;
-  font-size: 10px;
-  color: var(--muted);
-  white-space: nowrap;
-  overflow-x: auto;
-}
 .ai-chat-form {
   display: flex;
   align-items: flex-end;
@@ -1050,7 +1041,6 @@ tr:last-child td { border-bottom: none; }
   /* the header doubles as the drag-to-close handle; without touch-action:none
      the browser turns the downward drag into page scroll / pull-to-refresh */
   .ai-chat-header { padding-top: 16px; touch-action: none; }
-  .ai-chat-debug { display: block; }
   .ai-msg-markdown { overflow-x: visible; }
   .ai-msg-markdown table {
     display: table;

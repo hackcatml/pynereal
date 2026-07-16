@@ -5,12 +5,12 @@ import json
 import shutil
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from openai_codex import ApprovalMode, AsyncCodex, AsyncThread, CodexConfig, Sandbox
+from openai_codex import ApprovalMode, AsyncCodex, AsyncThread, CodexConfig
 from openai_codex.errors import TransportClosedError
 from openai_codex.generated.v2_all import (
     AgentMessageDeltaNotification,
@@ -27,20 +27,46 @@ from openai_codex.generated.v2_all import (
     WebSearchThreadItem,
 )
 
+from ai.scripts.dynamic_tools import AIDynamicTools
+
 DEFAULT_DEVELOPER_INSTRUCTIONS = (
-    "너는 PyneReal 대시보드의 AI 어시스턴트야. "
-    "조회만 수행하고 주문, 취소, 레버리지 변경 등 계정 상태를 변경하는 작업과 파일 수정은 하지 마. "
-    "계정이나 거래소를 지정하지 않은 자산 또는 포지션 조회 요청은 providers.toml에 등록된 "
-    "모든 계정을 대상으로 전용 스크립트를 실행해. "
-    "DB 접속정보와 API key, secret 등 비밀값은 응답에 포함하지 마. "
-    "자산 또는 포지션 조회의 중간 진행 설명에는 실제 조회 대상, 조회 진행, 부분 실패처럼 "
-    "사용자에게 의미 있는 상태만 포함해. 지침 파일 확인, 저장소 탐색, 워크플로 선택, 실행 옵션 "
-    "검토 같은 내부 준비 과정이나 결과를 나중에 정리하겠다는 설명은 출력하지 마. "
-    "최종 답변도 작업 절차를 나열하지 말고 조회 결과부터 바로 제시해."
+    "You are the AI assistant for the PyneReal dashboard. "
+    "Treat exchanges and accounts as read-only. Do not place or cancel orders, "
+    "change leverage, or perform any other account state mutation. "
+    "You may change session state only through the dedicated tools when the user "
+    "explicitly requests setting or deleting Manual Alert price triggers. For any Manual Alert request, "
+    "first call get_manual_alert_context to inspect the active sessions and templates. "
+    "If the session, price, alert template, deletion target, or deletion scope is unclear or "
+    "could match more than one option, do not call a mutation tool. Ask for a human-readable distinction "
+    "such as the exchange, timeframe, or strategy name. Never ask the user to provide a "
+    "session_id. Resolve the user's symbol, company or asset name, or strategy description "
+    "to a session from the context and use its ID internally. If the requested alert "
+    "template does not exist in that session, ask the user for both the alert title and "
+    "message format, then pass the custom template fields to set_manual_alert_trigger so "
+    "the template and trigger are added together. Do not tell the user to add the template "
+    "through the dashboard, and never guess or invent missing values. For an explicit trigger "
+    "deletion request, map the user's description to active trigger IDs and call "
+    "delete_manual_alert_triggers. If the user explicitly asks to delete all triggers in one "
+    "session and then set a new trigger in that same session, call set_manual_alert_trigger once "
+    "with replace_existing_triggers=true instead of performing separate delete and set calls. "
+    "Deleting or replacing triggers must always preserve configured alert templates. Never delete "
+    "a template unless the user explicitly requests template deletion through a dedicated tool. "
+    "When an asset or position request does not specify an account or exchange, run the "
+    "dedicated script for every account configured in providers.toml. Never include database "
+    "connection details, API keys, secrets, or other credentials in a response. Intermediate "
+    "progress for asset or position lookups must contain only user-relevant information such "
+    "as the actual lookup target, meaningful progress, partial failures, or retries. Do not "
+    "describe internal preparation such as reading instruction files, exploring the repository, "
+    "selecting a workflow, reviewing execution options, or planning how to summarize the result. "
+    "In the final response, do not list the procedure; present the lookup result immediately. "
+    "Only when the user explicitly asks to send the result to Telegram, complete the lookup and "
+    "then call send_telegram_message with a concise plain-text result. Report successful Telegram "
+    "delivery only when the tool returns success."
 )
 _MAX_PERSISTED_MESSAGES = 200
 _MAX_CONTEXT_MESSAGES = 12
 _MAX_PERSISTED_CONTENT_CHARS = 40_000
+_AI_PERMISSION_PROFILE = "pynereal-ai-read-only"
 
 
 @dataclass(frozen=True)
@@ -49,18 +75,59 @@ class CodexStreamEvent:
     payload: dict[str, Any]
 
 
+_CHAT_STREAM_END = object()
+ChatStateCallback = Callable[[], Awaitable[None]]
+
+
+class CodexChatRun:
+    """One server-owned chat turn with an optional live SSE subscriber."""
+
+    def __init__(self) -> None:
+        self.id = uuid.uuid4().hex[:8]
+        self._events: asyncio.Queue[CodexStreamEvent | object] = asyncio.Queue()
+        self._subscribed = True
+
+    def publish(self, event: CodexStreamEvent) -> None:
+        if self._subscribed:
+            self._events.put_nowait(event)
+
+    def finish(self) -> None:
+        if self._subscribed:
+            self._events.put_nowait(_CHAT_STREAM_END)
+
+    async def events(self) -> AsyncIterator[CodexStreamEvent]:
+        try:
+            while True:
+                event = await self._events.get()
+                if event is _CHAT_STREAM_END:
+                    return
+                yield event
+        finally:
+            self._subscribed = False
+            while not self._events.empty():
+                self._events.get_nowait()
+
+
 class CodexService:
     """Own one long-running Codex app-server and its dashboard chat threads."""
 
     def __init__(
         self,
         project_root: Path,
+        session_registry: Any,
         developer_instructions: str = DEFAULT_DEVELOPER_INSTRUCTIONS,
         timeout_seconds: float = 180,
         chat_state_path: Path | None = None,
     ) -> None:
         self.project_root = project_root.resolve()
-        self.developer_instructions = developer_instructions
+        self.dynamic_tools = AIDynamicTools(
+            self.project_root,
+            session_registry=session_registry,
+        )
+        self.file_tools = self.dynamic_tools.file_tools
+        self.developer_instructions = (
+            developer_instructions.rstrip() + " " + self._file_access_instructions()
+        )
         self.timeout_seconds = timeout_seconds
         self.chat_state_path = (
             chat_state_path or self.project_root / "workdir" / "config" / "ai_chat.json"
@@ -72,6 +139,8 @@ class CodexService:
         self._chat_state_lock = asyncio.Lock()
         self._conversations: dict[str, AsyncThread] = {}
         self._turn_locks: dict[str, asyncio.Lock] = {}
+        self._shared_chat_tasks: set[asyncio.Task[None]] = set()
+        self._pending_shared_chats = 0
         self._warm_thread_task: asyncio.Task[AsyncThread | None] | None = None
         self._chat_messages: list[dict[str, Any]] = []
         self._chat_conversation_id: str | None = None
@@ -82,23 +151,29 @@ class CodexService:
             if self._codex is not None:
                 return
 
+            self.dynamic_tools.bind_loop(asyncio.get_running_loop())
             started_at = time.perf_counter()
             codex_bin = shutil.which("codex")
-            codex = AsyncCodex(CodexConfig(
-                codex_bin=codex_bin,
-                cwd=str(self.project_root),
-                config_overrides=(
-                    "sandbox_workspace_write.network_access=true",
-                    'web_search="live"',
-                ),
-            ))
+            codex: AsyncCodex | None = None
             try:
+                codex = AsyncCodex(CodexConfig(
+                    codex_bin=codex_bin,
+                    cwd=str(self.project_root),
+                    config_overrides=(
+                        'web_search="live"',
+                    ),
+                ))
+                self._install_dynamic_tool_handler(codex)
                 await codex.__aenter__()
                 account = await codex.account()
                 if account.account is None:
                     raise RuntimeError("Codex is not authenticated; run `codex login` first")
             except Exception:
-                await codex.close()
+                try:
+                    if codex is not None:
+                        await codex.close()
+                finally:
+                    self.dynamic_tools.unbind_loop()
                 raise
 
             self._codex = codex
@@ -115,14 +190,27 @@ class CodexService:
             self._codex = None
             warm_thread_task = self._warm_thread_task
             self._warm_thread_task = None
+            current_task = asyncio.current_task()
+            shared_chat_tasks = [
+                task
+                for task in self._shared_chat_tasks
+                if task is not current_task and not task.done()
+            ]
+            for task in shared_chat_tasks:
+                task.cancel()
+            if shared_chat_tasks:
+                await asyncio.gather(*shared_chat_tasks, return_exceptions=True)
             self._conversations.clear()
             self._turn_locks.clear()
             if warm_thread_task is not None:
                 warm_thread_task.cancel()
                 await asyncio.gather(warm_thread_task, return_exceptions=True)
-            if codex is not None:
-                await codex.close()
-                print("[ai] Codex app-server stopped")
+            try:
+                if codex is not None:
+                    await codex.close()
+                    print("[ai] Codex app-server stopped")
+            finally:
+                self.dynamic_tools.unbind_loop()
 
     async def stream_chat(
         self,
@@ -153,44 +241,102 @@ class CodexService:
             ):
                 yield event
 
+    def start_shared_chat(
+        self,
+        message: str,
+        *,
+        client_history: list[dict[str, Any]] | None = None,
+        client_conversation_id: str | None = None,
+        on_state_changed: ChatStateCallback | None = None,
+    ) -> CodexChatRun:
+        run = CodexChatRun()
+        self._pending_shared_chats += 1
+        task = asyncio.create_task(
+            self._run_shared_chat(
+                run,
+                message,
+                client_history=client_history,
+                client_conversation_id=client_conversation_id,
+                on_state_changed=on_state_changed,
+            ),
+            name=f"codex-shared-chat-{run.id}",
+        )
+        self._shared_chat_tasks.add(task)
+        task.add_done_callback(self._shared_chat_tasks.discard)
+        return run
+
     async def stream_shared_chat(
         self,
         message: str,
         *,
         client_history: list[dict[str, Any]] | None = None,
         client_conversation_id: str | None = None,
+        on_state_changed: ChatStateCallback | None = None,
     ) -> AsyncIterator[CodexStreamEvent]:
-        async with self._shared_chat_lock:
-            history, conversation_id = await self._begin_shared_chat(
-                message,
-                client_history=client_history,
-                client_conversation_id=client_conversation_id,
-            )
-            try:
-                async for event in self.stream_chat(
-                    message,
-                    conversation_id=conversation_id,
-                    initial_context=self._build_initial_context(message, history),
-                    history_messages=len(history),
-                ):
-                    if event.event == "conversation":
-                        await self._set_chat_conversation_id(
-                            str(event.payload.get("conversation_id") or "") or None
-                        )
-                    elif event.event == "done":
-                        answer = str(event.payload.get("answer") or "").strip()
-                        if answer:
-                            await self._append_chat_message("assistant", answer)
-                    yield event
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                await self._append_chat_message(
-                    "assistant",
-                    f"AI call failed: {e}",
-                    error=True,
-                )
-                raise
+        run = self.start_shared_chat(
+            message,
+            client_history=client_history,
+            client_conversation_id=client_conversation_id,
+            on_state_changed=on_state_changed,
+        )
+        async for event in run.events():
+            yield event
+
+    async def _run_shared_chat(
+        self,
+        run: CodexChatRun,
+        message: str,
+        *,
+        client_history: list[dict[str, Any]] | None,
+        client_conversation_id: str | None,
+        on_state_changed: ChatStateCallback | None,
+    ) -> None:
+        try:
+            async with self._shared_chat_lock:
+                try:
+                    history, conversation_id = await self._begin_shared_chat(
+                        message,
+                        client_history=client_history,
+                        client_conversation_id=client_conversation_id,
+                    )
+                    await self._notify_chat_state_changed(on_state_changed)
+                    async for event in self.stream_chat(
+                        message,
+                        conversation_id=conversation_id,
+                        initial_context=self._build_initial_context(message, history),
+                        history_messages=len(history),
+                    ):
+                        if event.event == "conversation":
+                            await self._set_chat_conversation_id(
+                                str(event.payload.get("conversation_id") or "") or None
+                            )
+                        elif event.event == "done":
+                            answer = str(event.payload.get("answer") or "").strip()
+                            if answer:
+                                await self._append_chat_message("assistant", answer)
+                        run.publish(event)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    await self._append_chat_message(
+                        "assistant",
+                        f"AI call failed: {e}",
+                        error=True,
+                    )
+                    run.publish(CodexStreamEvent("stream_error", {"error": str(e)}))
+        finally:
+            self._pending_shared_chats = max(0, self._pending_shared_chats - 1)
+            await self._notify_chat_state_changed(on_state_changed)
+            run.finish()
+
+    @staticmethod
+    async def _notify_chat_state_changed(callback: ChatStateCallback | None) -> None:
+        if callback is None:
+            return
+        try:
+            await callback()
+        except Exception as e:
+            print(f"[ai] chat state notification failed: {e}")
 
     async def chat_state(self) -> dict[str, Any]:
         async with self._chat_state_lock:
@@ -283,8 +429,10 @@ class CodexService:
     def _save_chat_state(self) -> None:
         self.chat_state_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.chat_state_path.with_name(self.chat_state_path.name + ".tmp")
+        payload = self._chat_state_payload()
+        payload.pop("pending", None)
         tmp.write_text(
-            json.dumps(self._chat_state_payload(), ensure_ascii=False, indent=2),
+            json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         tmp.replace(self.chat_state_path)
@@ -293,6 +441,7 @@ class CodexService:
         return {
             "conversation_id": self._chat_conversation_id,
             "messages": [dict(item) for item in self._chat_messages],
+            "pending": self._pending_shared_chats > 0,
         }
 
     @staticmethod
@@ -323,12 +472,12 @@ class CodexService:
     def _build_initial_context(message: str, history: list[dict[str, str]]) -> str:
         lines: list[str] = []
         if history:
-            lines.append("서버에 저장된 이전 대화:")
+            lines.append("Previous conversation saved on the server:")
             for item in history:
-                role = "사용자" if item["role"] == "user" else "AI"
+                role = "User" if item["role"] == "user" else "Assistant"
                 lines.append(f"[{role}] {item['content']}")
             lines.append("")
-        lines.append(f"[현재 사용자 질문] {message}")
+        lines.append(f"[Current user request] {message}")
         return "\n".join(lines)
 
     async def _get_codex(self) -> AsyncCodex:
@@ -379,12 +528,51 @@ class CodexService:
         return thread
 
     async def _start_thread(self, codex: AsyncCodex) -> AsyncThread:
-        return await codex.thread_start(
-            approval_mode=ApprovalMode.deny_all,
-            cwd=str(self.project_root),
-            developer_instructions=self.developer_instructions,
-            ephemeral=True,
-            sandbox=Sandbox.workspace_write,
+        # openai-codex 0.1.0b3 generates dynamic tool models but does not yet
+        # expose dynamicTools on its high-level thread_start wrapper.
+        client = getattr(codex, "_client", None)
+        if client is None:
+            raise RuntimeError("Installed openai-codex SDK cannot register dynamic tools")
+        started = await client.thread_start({
+            "approvalPolicy": "never",
+            "config": self._permission_profile_config(),
+            "cwd": str(self.project_root),
+            "developerInstructions": self.developer_instructions,
+            "dynamicTools": self.dynamic_tools.specs,
+            "ephemeral": True,
+        })
+        return AsyncThread(codex, started.thread.id)
+
+    def _install_dynamic_tool_handler(self, codex: AsyncCodex) -> None:
+        client = getattr(codex, "_client", None)
+        sync_client = getattr(client, "_sync", None)
+        if sync_client is None or not hasattr(sync_client, "_approval_handler"):
+            raise RuntimeError("Installed openai-codex SDK cannot handle dynamic tools")
+        sync_client._approval_handler = self.dynamic_tools.handle_server_request
+
+    def _permission_profile_config(self) -> dict[str, Any]:
+        return {
+            "default_permissions": _AI_PERMISSION_PROFILE,
+            "permissions": {
+                _AI_PERMISSION_PROFILE: {
+                    "filesystem": {":root": "read"},
+                    "network": {"enabled": True},
+                },
+            },
+        }
+
+    def _file_access_instructions(self) -> str:
+        editable = ", ".join(str(path) for path in self.file_tools.edit_roots)
+        return (
+            "You may read files outside this repository only when required to fulfill the "
+            "user's request. Modify files only when the user explicitly requests a file change. "
+            f"You may modify only existing regular files under these paths: {editable}. "
+            f"Create new files and directories only under {self.file_tools.tmp_root}. "
+            "Use only edit_existing_file to modify an existing file and write_tmp_file to create "
+            "a file under tmp. Do not write files through shell commands, apply_patch, Python "
+            "scripts, or any other tool. Outside tmp, do not create, delete, rename, or move files "
+            "or directories. After completing a file change, identify the paths actually changed "
+            "in the final response."
         )
 
     @staticmethod

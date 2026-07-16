@@ -245,6 +245,92 @@ class SessionRegistry:
         await self.notify_hub()
         return [dict(t) for t in session.spec.manual_alert_triggers]
 
+    async def update_manual_alert_configuration(
+        self,
+        session_id: str,
+        *,
+        templates: list[dict],
+        triggers: object,
+    ) -> dict[str, list[dict]]:
+        """Persist templates and triggers together for one AI-driven alert setup."""
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise SessionNotFoundError(session_id)
+
+        previous_spec = session.spec
+        session.spec = (
+            session.spec
+            .with_manual_alert_templates(templates)
+            .with_manual_alert_triggers(triggers)
+        )
+        try:
+            self._persist()
+        except Exception:
+            session.spec = previous_spec
+            raise
+
+        session.reset_manual_alert_trigger_gate()
+        await session.push_manual_alert_trigger()
+        await self.notify_hub()
+        return {
+            "templates": [dict(t) for t in session.spec.manual_alert_templates],
+            "triggers": [dict(t) for t in session.spec.manual_alert_triggers],
+        }
+
+    async def delete_manual_alert_triggers(
+        self,
+        selections: dict[str, set[str] | None],
+    ) -> list[dict]:
+        """Delete selected or all triggers from multiple sessions in one save."""
+        unknown = [session_id for session_id in selections if session_id not in self.sessions]
+        if unknown:
+            raise SessionNotFoundError(unknown[0])
+
+        changes: list[tuple[Session, object, list[dict]]] = []
+        deleted: list[dict] = []
+        for session_id, trigger_ids in selections.items():
+            session = self.sessions[session_id]
+            current = [dict(trigger) for trigger in session.spec.manual_alert_triggers]
+            if trigger_ids is None:
+                removed = current
+                remaining: list[dict] = []
+            else:
+                removed = [
+                    trigger for trigger in current
+                    if str(trigger.get("id") or "") in trigger_ids
+                ]
+                remaining = [
+                    trigger for trigger in current
+                    if str(trigger.get("id") or "") not in trigger_ids
+                ]
+            if not removed:
+                continue
+            changes.append((session, session.spec, removed))
+            session.spec = session.spec.with_manual_alert_triggers(remaining)
+
+        if not changes:
+            return []
+
+        try:
+            self._persist()
+        except Exception:
+            for session, previous_spec, _ in changes:
+                session.spec = previous_spec
+            raise
+
+        for session, _, removed in changes:
+            session.reset_manual_alert_trigger_gate()
+            await session.push_manual_alert_trigger()
+            deleted.extend({
+                "session_id": session.spec.id,
+                "exchange": session.spec.exchange,
+                "symbol": session.spec.symbol,
+                "timeframe": session.spec.timeframe,
+                "trigger": dict(trigger),
+            } for trigger in removed)
+        await self.notify_hub()
+        return deleted
+
     # ------------------------------------------------------------------
     # Runner control
     # ------------------------------------------------------------------

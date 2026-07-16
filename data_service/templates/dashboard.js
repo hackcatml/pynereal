@@ -732,6 +732,7 @@
   let aiMessages = [];
   let aiConversationId = "";
   let aiPending = false;
+  let aiRemotePending = false;
   let aiStreamingResponse = false;
   let aiRenderFrame = null;
   let aiChatLockedScroll = false;
@@ -789,8 +790,10 @@
     aiConversationId = state && typeof state.conversation_id === "string"
       ? state.conversation_id
       : "";
+    aiRemotePending = Boolean(state && state.pending);
     saveAiMessages();
     saveAiConversationId();
+    el("ai-chat-send").disabled = aiPending || aiRemotePending;
     renderAiMessages();
   }
 
@@ -828,7 +831,7 @@
   function renderAiMessages() {
     const box = el("ai-chat-messages");
     box.textContent = "";
-    if (!aiMessages.length && !aiPending) {
+    if (!aiMessages.length && !aiPending && !aiRemotePending) {
       const empty = document.createElement("div");
       empty.className = "ai-chat-empty";
       empty.textContent = "Ask anything about your sessions.";
@@ -857,7 +860,7 @@
         box.appendChild(work);
       }
     }
-    if (aiPending && !aiStreamingResponse) {
+    if ((aiPending || aiRemotePending) && !aiStreamingResponse) {
       const div = document.createElement("div");
       div.className = "ai-msg ai-msg-assistant ai-msg-pending";
       div.innerHTML = '<span class="ai-dot">&#9679;</span><span class="ai-dot">&#9679;</span><span class="ai-dot">&#9679;</span>';
@@ -954,23 +957,6 @@
       panel.style.bottom = "";
       panel.style.paddingBottom = "";
     }
-    updateAiChatDebug(keyboard);
-  }
-
-  // temporary: live viewport numbers so the iOS keyboard layout can be
-  // debugged on-device — remove once the sheet behaves
-  function updateAiChatDebug(keyboard) {
-    const dbg = el("ai-chat-debug");
-    if (!dbg) return;
-    const vv = window.visualViewport;
-    const panel = el("ai-chat-panel");
-    dbg.textContent =
-      `ih:${window.innerHeight}` +
-      ` vvh:${vv ? Math.round(vv.height) : "-"}` +
-      ` ot:${vv ? Math.round(vv.offsetTop) : "-"}` +
-      ` sy:${Math.round(window.scrollY || 0)}` +
-      ` kb:${Math.round(keyboard)}` +
-      ` top:${panel.style.top || "-"} h:${panel.style.height || "-"}`;
   }
 
   function openAiChat() {
@@ -1019,9 +1005,9 @@
   }
 
   async function sendAiChatMessage() {
-    if (aiPending) return;
+    if (aiPending || aiRemotePending) return;
     await syncAiChatState();
-    if (aiPending) return;
+    if (aiPending || aiRemotePending) return;
     const input = el("ai-chat-input");
     const message = input.value.trim();
     if (!message) return;
@@ -1126,9 +1112,10 @@
     } finally {
       aiPending = false;
       aiStreamingResponse = false;
-      el("ai-chat-send").disabled = false;
+      el("ai-chat-send").disabled = aiRemotePending;
       saveAiMessages();
       renderAiMessages();
+      await syncAiChatState({ allowImport: false });
     }
   }
 

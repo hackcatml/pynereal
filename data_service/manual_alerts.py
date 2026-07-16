@@ -7,7 +7,20 @@ from typing import Any
 
 import requests
 
-from config import SessionSpec, default_telegram_chat_id, default_telegram_token, default_webhook_url
+try:
+    from .config import (
+        SessionSpec,
+        default_telegram_chat_id,
+        default_telegram_token,
+        default_webhook_url,
+    )
+except ImportError:
+    from config import (
+        SessionSpec,
+        default_telegram_chat_id,
+        default_telegram_token,
+        default_webhook_url,
+    )
 from pynecore.core.exchange_policy import normalize_exchange_name
 
 

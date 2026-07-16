@@ -4,7 +4,9 @@ tests
 __pycache__
 .claude
 test*.py
+ai/scripts/*_test.py
 .env
+/tmp/
 workdir/scripts/*.toml
 workdir/config/providers.toml
 

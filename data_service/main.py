@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from ai.provider.codex_service import CodexService
 from config import ensure_provider_config, load_hub_config, load_initial_sessions
-from codex_service import CodexService
 from registry import SessionRegistry
 from api import build_session_api_router, build_control_router, build_validation_router
 from ui import build_ui_router
-
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 _BANNER = r"""
     ____                   ____             __
@@ -113,7 +116,10 @@ async def main() -> None:
     cfg = load_hub_config()
     specs = load_initial_sessions()
     registry = SessionRegistry(port=cfg.port)
-    codex_service = CodexService(project_root=_PROJECT_ROOT)
+    codex_service = CodexService(
+        project_root=_PROJECT_ROOT,
+        session_registry=registry,
+    )
     try:
         await codex_service.start()
     except Exception as e:

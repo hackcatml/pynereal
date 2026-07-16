@@ -36,7 +36,71 @@ internals when an existing script already provides the required data.
   separate from read-only scripts and require explicit execution confirmation.
 - Do not execute a state-changing script unless the user explicitly requests
   that exact action.
+- Manual Alert trigger changes must use the dedicated dynamic tools and follow
+  the confirmation rules below; do not edit session configuration files.
 - Redact sensitive fields if an upstream API unexpectedly returns them.
+
+## File Access And Editing
+
+- Read files outside this repository only when required by the user's request.
+- Do not modify files unless the user explicitly requests a file change.
+- Modify only existing regular files under `workdir/`, `modules/`, or
+  `data_service/templates/`.
+- Create new files and directories only under the repository's `tmp/` directory.
+- Use `edit_existing_file` for existing-file changes and `write_tmp_file` for
+  files under `tmp/`. Do not write files through shell commands, `apply_patch`,
+  Python scripts, or any other tool.
+- Do not create files in the editable source directories, and do not delete,
+  rename, or move files or directories outside `tmp/`.
+- After an edit, report the paths that were actually changed.
+
+## Telegram Delivery
+
+- Call `send_telegram_message` only when the user explicitly asks to send the
+  current result to Telegram.
+- Complete the requested lookup first, then send a concise plain-text version
+  of the result. Avoid Markdown tables because Telegram receives plain text.
+- Never read, pass, print, or report `BOT_TOKEN` or `CHAT_ID`; the server loads
+  both values and fixes the destination.
+- Report Telegram delivery as successful only when the tool returns success.
+- A normal asset, position, or analysis request without an explicit Telegram
+  instruction must remain a browser-chat response only.
+
+## Manual Alert Triggers
+
+- Change Manual Alert state only when the user explicitly asks to set or delete
+  price triggers.
+- Call `get_manual_alert_context` first and use only the exact active session ID,
+  template index, and current state returned by the tool.
+- The user identifies a session with a symbol, company or asset name, exchange,
+  timeframe, or strategy name. Resolve that description to the internal session
+  ID yourself. Never ask the user to type a session ID.
+- If the requested session, price, or alert template is missing or can match
+  more than one option, ask about a human-readable distinction such as exchange,
+  timeframe, or strategy name. Do not select one by guessing.
+- When the requested Manual Alert template is not configured in the selected
+  session, ask the user for both its title and message format. Then pass both
+  custom template fields so the tool adds the template and trigger together.
+  Do not tell the user to add it in the dashboard, and do not invent either
+  value.
+- For a session that has configured templates, use the exact selected template
+  index when the requested template already exists.
+- Call `set_manual_alert_trigger` only after all required values are explicit.
+  Report success only when the tool returns `set: true`.
+- For selected deletion, resolve the user's description to exact active trigger
+  IDs and call `delete_manual_alert_triggers`. If multiple triggers match and the
+  user did not say all, ask for a human-readable distinction.
+- Set `delete_all=true` with one session ID only when the user explicitly asks to
+  delete every trigger in that session. Omit the session ID only when the user
+  explicitly asks to delete every Manual Alert across all sessions.
+- When one instruction says to delete every trigger in a session and then set a
+  new trigger in that same session, call `set_manual_alert_trigger` once with
+  `replace_existing_triggers=true`. Do not perform separate delete and set calls.
+- Trigger deletion and replacement must preserve every configured Manual Alert
+  template. Never delete a template without a separate, explicit template
+  deletion request and dedicated tool.
+- Setting a trigger does not send an alert immediately. The existing data
+  service fires and removes it when market price touches the persisted line.
 
 ## Script Contract
 
