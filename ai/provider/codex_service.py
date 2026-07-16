@@ -9,7 +9,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from openai_codex import ApprovalMode, AsyncCodex, AsyncThread, CodexConfig
 from openai_codex.errors import TransportClosedError
@@ -79,6 +79,7 @@ class CodexStreamEvent:
 
 _CHAT_STREAM_END = object()
 ChatStateCallback = Callable[[], Awaitable[None]]
+CodexAuthenticationResult = Literal["ready", "login_completed", "disabled"]
 
 
 class CodexChatRun:
@@ -135,6 +136,7 @@ class CodexService:
             chat_state_path or self.project_root / "workdir" / "config" / "ai_chat.json"
         ).resolve()
         self._codex: AsyncCodex | None = None
+        self._disabled = False
         self._lifecycle_lock = asyncio.Lock()
         self._conversations_lock = asyncio.Lock()
         self._shared_chat_lock = asyncio.Lock()
@@ -150,7 +152,7 @@ class CodexService:
 
     async def start(self) -> None:
         async with self._lifecycle_lock:
-            if self._codex is not None:
+            if self._codex is not None or self._disabled:
                 return
 
             self.dynamic_tools.bind_loop(asyncio.get_running_loop())
@@ -167,7 +169,32 @@ class CodexService:
                 ))
                 self._install_dynamic_tool_handler(codex)
                 await codex.__aenter__()
-                await self._ensure_authenticated(codex)
+                authentication = await self._ensure_authenticated(codex)
+                if authentication == "disabled":
+                    await codex.close()
+                    codex = None
+                    self._disabled = True
+                    self.dynamic_tools.unbind_loop()
+                    print("[ai] Codex AI service disabled")
+                    return
+                if authentication == "login_completed":
+                    print("[ai] Reloading Codex app-server after login...")
+                    await codex.close()
+                    codex = AsyncCodex(CodexConfig(
+                        codex_bin=codex_bin,
+                        cwd=str(self.project_root),
+                        config_overrides=(
+                            'web_search="live"',
+                        ),
+                    ))
+                    self._install_dynamic_tool_handler(codex)
+                    await codex.__aenter__()
+                    account = await codex.account(refresh_token=True)
+                    if account.account is None:
+                        raise RuntimeError(
+                            "Codex login was saved but the restarted app-server "
+                            "did not load an authenticated account"
+                        )
             except Exception:
                 try:
                     if codex is not None:
@@ -184,16 +211,19 @@ class CodexService:
                 f"in {elapsed_ms:.0f}ms"
             )
 
-    async def _ensure_authenticated(self, codex: AsyncCodex) -> None:
+    async def _ensure_authenticated(self, codex: AsyncCodex) -> CodexAuthenticationResult:
         account = await codex.account()
         if account.account is not None:
-            return
+            return "ready"
 
         if not self._interactive_terminal_available():
-            raise RuntimeError(
-                "Codex is not authenticated and interactive login is unavailable; "
-                "start data_service/main.py from a terminal or run `codex login` first"
+            print(
+                "[ai] Codex is not authenticated and no interactive terminal is available"
             )
+            return "disabled"
+
+        if not self._confirm_ai_service_use():
+            return "disabled"
 
         print("[ai] Codex login is required. Starting device-code login...")
         login = await codex.login_chatgpt_device_code()
@@ -202,22 +232,97 @@ class CodexService:
         print("[ai] Waiting for Codex login to complete...")
         try:
             async with asyncio.timeout(_CODEX_LOGIN_TIMEOUT_SECONDS):
-                await login.wait()
+                completion = await login.wait()
         except TimeoutError:
-            await login.cancel()
+            await self._cancel_login(login)
             raise RuntimeError("Codex interactive login timed out") from None
         except asyncio.CancelledError:
-            await login.cancel()
+            await self._cancel_login(login)
             raise
 
-        account = await codex.account(refresh_token=True)
-        if account.account is None:
-            raise RuntimeError("Codex login completed without an authenticated account")
+        if not completion.success:
+            detail = completion.error or "unknown authentication error"
+            raise RuntimeError(f"Codex interactive login failed: {detail}")
         print("[ai] Codex login completed")
+        return "login_completed"
+
+    @staticmethod
+    async def _cancel_login(login: Any) -> None:
+        try:
+            await login.cancel()
+        except Exception:
+            pass
 
     @staticmethod
     def _interactive_terminal_available() -> bool:
         return sys.stdin.isatty() and sys.stdout.isatty()
+
+    @staticmethod
+    def _confirm_ai_service_use() -> bool:
+        try:
+            import termios
+            import tty
+
+            fd = sys.stdin.fileno()
+            previous_settings = termios.tcgetattr(fd)
+        except (ImportError, OSError, AttributeError):
+            return CodexService._confirm_ai_service_use_with_text()
+
+        selected_yes = False
+        rendered = False
+
+        def render() -> None:
+            nonlocal rendered
+            if rendered:
+                sys.stdout.write("\x1b[4A")
+            lines = (
+                "[ai] Enable Codex AI service?",
+                f"  {'>' if selected_yes else ' '} Yes",
+                f"  {' ' if selected_yes else '>'} No",
+                "  Use Up/Down and Enter.",
+            )
+            for line in lines:
+                sys.stdout.write(f"\r\x1b[2K{line}\n")
+            sys.stdout.flush()
+            rendered = True
+
+        try:
+            tty.setraw(fd)
+            sys.stdout.write("\x1b[?25l")
+            render()
+            while True:
+                key = sys.stdin.read(1)
+                if key == "\x1b":
+                    sequence = sys.stdin.read(2)
+                    if sequence in ("[A", "[B", "OA", "OB"):
+                        selected_yes = not selected_yes
+                        render()
+                    continue
+                if key in ("\r", "\n"):
+                    return selected_yes
+                if key.lower() == "y":
+                    return True
+                if key.lower() in ("n", "q") or key == "\x04":
+                    return False
+                if key == "\x03":
+                    raise KeyboardInterrupt
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, previous_settings)
+            sys.stdout.write("\x1b[?25h")
+            sys.stdout.flush()
+
+    @staticmethod
+    def _confirm_ai_service_use_with_text() -> bool:
+        while True:
+            try:
+                answer = input("[ai] Enable Codex AI service? [y/N]: ").strip().lower()
+            except EOFError:
+                return False
+            if answer in ("y", "yes"):
+                return True
+            if answer in ("", "n", "no"):
+                return False
+            print("[ai] Please enter yes or no")
 
     async def close(self) -> None:
         async with self._lifecycle_lock:
@@ -519,6 +624,8 @@ class CodexService:
         if self._codex is None:
             await self.start()
         if self._codex is None:
+            if self._disabled:
+                raise RuntimeError("Codex AI service was disabled at data-service startup")
             raise RuntimeError("Codex app-server is unavailable")
         return self._codex
 

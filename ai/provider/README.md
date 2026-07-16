@@ -10,6 +10,9 @@ Future providers should remain separate modules rather than adding
 provider-specific branches to the Codex implementation.
 
 When the data service starts without a saved Codex login in an interactive
-terminal, the Codex provider starts device-code authentication and waits for it
-to complete. Non-interactive services must authenticate with `codex login`
-before startup.
+terminal, it asks whether to enable the Codex AI service with an Up/Down and
+Enter selector. Selecting `Yes` starts device-code authentication and waits for
+it to complete. Selecting `No` disables AI for that data-service process
+without affecting the remaining services. Unsupported terminals fall back to a
+text prompt. An unauthenticated non-interactive process also leaves AI
+disabled; run `codex login` before startup to enable it there.
