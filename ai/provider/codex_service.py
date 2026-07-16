@@ -274,12 +274,11 @@ class CodexService:
         def render() -> None:
             nonlocal rendered
             if rendered:
-                sys.stdout.write("\x1b[4A")
+                sys.stdout.write("\x1b[3A")
             lines = (
                 "[ai] Enable Codex AI service?",
-                f"  {'>' if selected_yes else ' '} Yes",
-                f"  {' ' if selected_yes else '>'} No",
-                "  Use Up/Down and Enter.",
+                f"  ({'●' if selected_yes else ' '}) Yes",
+                f"  ({' ' if selected_yes else '●'}) No",
             )
             for line in lines:
                 sys.stdout.write(f"\r\x1b[2K{line}\n")
@@ -308,7 +307,9 @@ class CodexService:
                     raise KeyboardInterrupt
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, previous_settings)
-            sys.stdout.write("\x1b[?25h")
+            # Raw-mode newlines leave the cursor mid-column; return to column 0
+            # so the caller's next print starts at the line beginning.
+            sys.stdout.write("\r\x1b[?25h")
             sys.stdout.flush()
 
     @staticmethod
