@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import sys
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -67,6 +68,7 @@ _MAX_PERSISTED_MESSAGES = 200
 _MAX_CONTEXT_MESSAGES = 12
 _MAX_PERSISTED_CONTENT_CHARS = 40_000
 _AI_PERMISSION_PROFILE = "pynereal-ai-read-only"
+_CODEX_LOGIN_TIMEOUT_SECONDS = 10 * 60
 
 
 @dataclass(frozen=True)
@@ -165,9 +167,7 @@ class CodexService:
                 ))
                 self._install_dynamic_tool_handler(codex)
                 await codex.__aenter__()
-                account = await codex.account()
-                if account.account is None:
-                    raise RuntimeError("Codex is not authenticated; run `codex login` first")
+                await self._ensure_authenticated(codex)
             except Exception:
                 try:
                     if codex is not None:
@@ -183,6 +183,41 @@ class CodexService:
                 "[ai] Codex app-server started with the current local login "
                 f"in {elapsed_ms:.0f}ms"
             )
+
+    async def _ensure_authenticated(self, codex: AsyncCodex) -> None:
+        account = await codex.account()
+        if account.account is not None:
+            return
+
+        if not self._interactive_terminal_available():
+            raise RuntimeError(
+                "Codex is not authenticated and interactive login is unavailable; "
+                "start data_service/main.py from a terminal or run `codex login` first"
+            )
+
+        print("[ai] Codex login is required. Starting device-code login...")
+        login = await codex.login_chatgpt_device_code()
+        print(f"[ai] Open {login.verification_url}")
+        print(f"[ai] Enter code: {login.user_code}")
+        print("[ai] Waiting for Codex login to complete...")
+        try:
+            async with asyncio.timeout(_CODEX_LOGIN_TIMEOUT_SECONDS):
+                await login.wait()
+        except TimeoutError:
+            await login.cancel()
+            raise RuntimeError("Codex interactive login timed out") from None
+        except asyncio.CancelledError:
+            await login.cancel()
+            raise
+
+        account = await codex.account(refresh_token=True)
+        if account.account is None:
+            raise RuntimeError("Codex login completed without an authenticated account")
+        print("[ai] Codex login completed")
+
+    @staticmethod
+    def _interactive_terminal_available() -> bool:
+        return sys.stdin.isatty() and sys.stdout.isatty()
 
     async def close(self) -> None:
         async with self._lifecycle_lock:

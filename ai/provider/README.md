@@ -8,3 +8,8 @@ while reusing shared tools from `ai/scripts/`.
 
 Future providers should remain separate modules rather than adding
 provider-specific branches to the Codex implementation.
+
+When the data service starts without a saved Codex login in an interactive
+terminal, the Codex provider starts device-code authentication and waits for it
+to complete. Non-interactive services must authenticate with `codex login`
+before startup.
