@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -299,6 +300,37 @@ def on_alert_event(message: str, runner: ScriptRunner):
     )
 
 
+def on_ai_event(instruction: str, order, bar_time: int, runner: ScriptRunner):
+    """Queue one deterministic AI instruction event for a realtime order fill."""
+    instruction = str(instruction or "").strip()
+    if not instruction or getattr(runner.script, "pre_run", False):
+        return
+
+    action = "close" if getattr(order, "exit_id", None) else "entry"
+    identity = {
+        "session_id": SESSION_ID,
+        "action": action,
+        "bar_time": int(bar_time),
+        "bar_index": int(getattr(order, "bar_index", -1)),
+        "order_id": str(getattr(order, "order_id", "") or ""),
+        "exit_id": str(getattr(order, "exit_id", "") or ""),
+        "instruction": instruction,
+    }
+    event_id = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    trade_event_queue.append({
+        "type": "ai_instruction",
+        "event_id": event_id,
+        "instruction": instruction,
+        "action": action,
+        "time": int(bar_time / 1000),
+        "bar_index": identity["bar_index"],
+        "order_id": identity["order_id"],
+        "comment": str(getattr(order, "comment", "") or ""),
+    })
+
+
 def hide_zero_volume_bars(exchange: str | None) -> bool:
     # TradingView policy differs by exchange:
     # - OKX/Binance/Bybit: zero-volume candles are hidden and excluded from calculations.
@@ -403,6 +435,7 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
             runner.script.position.on_entry_callback = partial(on_entry_event, runner=runner)
             runner.script.position.on_close_callback = partial(on_close_event, runner=runner)
             runner.script.position.on_alert_callback = partial(on_alert_event, runner=runner)
+            runner.script.position.on_ai_callback = partial(on_ai_event, runner=runner)
             # Register plot event callback
             runner.script.on_plot_callback = on_plot_event
             # Register plotchar event callback

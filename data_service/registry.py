@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import traceback
-from typing import Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional
 
 from config import MAX_SESSIONS, FeedSpec, SessionSpec, save_sessions
 from collector_loop import fix_missing_bars_loop, watch_trades_loop
@@ -44,6 +44,9 @@ class SessionRegistry:
         self.supervisor = RunnerSupervisor(port=port, on_change=self.notify_hub)
         self.logo_resolver = TradingViewLogoResolver()
         self.logo_tasks: Dict[str, asyncio.Task] = {}
+        self.ai_instruction_handler: Optional[
+            Callable[[Session, dict], Awaitable[None]]
+        ] = None
 
     # ------------------------------------------------------------------
     # Queries
@@ -79,6 +82,14 @@ class SessionRegistry:
             if task is not None and not task.done():
                 continue
             self._schedule_logo_resolution(session)
+
+    def set_ai_instruction_handler(
+        self,
+        handler: Callable[[Session, dict], Awaitable[None]],
+    ) -> None:
+        self.ai_instruction_handler = handler
+        for session in self.sessions.values():
+            session.on_ai_instruction = handler
 
     def _schedule_logo_resolution(self, session: Session) -> None:
         task = self.logo_tasks.pop(session.spec.id, None)
@@ -162,6 +173,7 @@ class SessionRegistry:
         session = Session(spec, feed)
         session.on_status_change = self.notify_hub
         session.on_spec_change = self._persist_and_notify
+        session.on_ai_instruction = self.ai_instruction_handler
         feed.subscribers[spec.id] = session
         self.sessions[spec.id] = session
         self._schedule_logo_resolution(session)

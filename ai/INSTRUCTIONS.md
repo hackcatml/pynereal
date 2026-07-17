@@ -70,6 +70,13 @@ internals when an existing script already provides the required data.
 
 - Change Manual Alert state only when the user explicitly asks to set or delete
   price triggers.
+- A server-verified instruction generated from the `ai` parameter of
+  `strategy.entry` or `strategy.close` is an explicit user request authored in
+  the strategy. Execute only its stated scope and use the exact session ID
+  supplied by the server.
+- Do not ask the user to identify the session for an automated strategy
+  instruction. If another required value or template is missing, report the
+  missing requirement instead of guessing.
 - Call `get_manual_alert_context` first and use only the exact active session ID,
   template index, and current state returned by the tool.
 - The user identifies a session with a symbol, company or asset name, exchange,

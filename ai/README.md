@@ -51,3 +51,13 @@ trigger. When the requested template is missing, a user-supplied title and
 message format are persisted as a new session template together with the price
 trigger. A combined "delete all in this session, then set this trigger" request
 uses the setting tool's atomic replacement option.
+
+## Strategy Instructions
+
+Realtime `strategy.entry` and `strategy.close` orders can provide an `ai`
+instruction. PyneReal sends it to the enabled AI service only when that order
+fills on the latest confirmed bar. The runner queues the event without waiting
+for the AI response; data-service executes it for the exact originating session
+and records the instruction and result in shared dashboard chat history.
+Strategy instructions run independently from dashboard chat and from other
+sessions, while instructions from the same session run in event order.

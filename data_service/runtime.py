@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -15,6 +16,10 @@ from ohlcv_paths import make_ohlcv_paths, runtime_output_dir
 from state import DataState
 from tv_logos import static_logo_info
 from ws_manager import WSManager
+
+
+_MAX_AI_INSTRUCTION_CHARS = 4_000
+_MAX_PROCESSED_AI_INSTRUCTION_EVENTS = 500
 
 
 # ======================================================================
@@ -170,6 +175,9 @@ class Session:
         # registry wires this to push /ws/hub status when runner connect/disconnect.
         self.on_status_change: Optional[Callable[[], Awaitable[None]]] = None
         self.on_spec_change: Optional[Callable[[], Awaitable[None]]] = None
+        self.on_ai_instruction: Optional[Callable[["Session", dict], Awaitable[None]]] = None
+        self._processed_ai_instruction_ids: set[str] = set()
+        self._processed_ai_instruction_order: deque[str] = deque()
         self._manual_alert_trigger_sending_ids: set[str] = set()
         self._manual_alert_trigger_last_bar_time: dict[str, int] = {}
 
@@ -287,6 +295,37 @@ class Session:
                         reader.close()
                 except Exception as e:
                     print(f"[{self.spec.id}] Failed to send confirmed bar: {e}")
+
+        elif msg_type == "ai_instruction":
+            if self.client_roles.get(ws) != "runner":
+                return
+            event_id = str(event.get("event_id") or "").strip()
+            instruction = str(event.get("instruction") or "").strip()
+            if not event_id or len(event_id) > 128:
+                log_with_time(f"[{self.spec.id}] ignored AI instruction with invalid event ID")
+                return
+            if not instruction or len(instruction) > _MAX_AI_INSTRUCTION_CHARS:
+                log_with_time(f"[{self.spec.id}] ignored invalid AI instruction")
+                return
+            if event_id in self._processed_ai_instruction_ids:
+                return
+
+            self._processed_ai_instruction_ids.add(event_id)
+            self._processed_ai_instruction_order.append(event_id)
+            while len(self._processed_ai_instruction_order) > _MAX_PROCESSED_AI_INSTRUCTION_EVENTS:
+                expired_id = self._processed_ai_instruction_order.popleft()
+                self._processed_ai_instruction_ids.discard(expired_id)
+
+            if self.on_ai_instruction is None:
+                log_with_time(f"[{self.spec.id}] AI instruction skipped: no handler")
+                return
+            normalized_event = dict(event)
+            normalized_event["event_id"] = event_id
+            normalized_event["instruction"] = instruction
+            try:
+                await self.on_ai_instruction(self, normalized_event)
+            except Exception as e:
+                log_with_time(f"[{self.spec.id}] AI instruction dispatch failed: {e}")
 
         elif msg_type in ("trade_entry", "trade_close"):
             if event not in self.trades_history:

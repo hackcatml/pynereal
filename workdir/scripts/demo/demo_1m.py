@@ -36,7 +36,12 @@ def main():
         avgEntry = close
         # If the record option is true, it will write entry and close records to a file in the records directory.
         strategy.entry("Long 1", strategy.long, alert_message=f'{{"signal": "Long 1", "price": {close}}}',
-                       comment=f"Long 1 at rsi: {rsi}", record=False)
+                       comment=f"Long 1 at rsi: {rsi}", record=False,
+                       ai=(
+                           f"Remove all existing Manual Alert triggers and set a close all trigger "
+                           f"at {close * 1.002}. If the close all template does not exist, create it "
+                           'with {"signal": "CLOSE TP3"}. Send the result to Telegram.'
+                       ))
 
     if entered1 and (time - entered1Time) >= 1 * 60 * 1000 * 2:
         entered1 = False

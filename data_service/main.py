@@ -124,6 +124,7 @@ async def main() -> None:
         project_root=_PROJECT_ROOT,
         session_registry=registry,
     )
+    registry.set_ai_instruction_handler(codex_service.handle_strategy_instruction)
     try:
         await codex_service.start()
     except Exception as e:

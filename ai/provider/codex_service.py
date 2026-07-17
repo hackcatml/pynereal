@@ -36,6 +36,9 @@ DEFAULT_DEVELOPER_INSTRUCTIONS = (
     "change leverage, or perform any other account state mutation. "
     "You may change session state only through the dedicated tools when the user "
     "explicitly requests setting or deleting Manual Alert price triggers. For any Manual Alert request, "
+    "A server-verified automated strategy instruction configured through the ai parameter of "
+    "strategy.entry or strategy.close is an explicit user request. Execute only its stated scope "
+    "and use the exact session context supplied by the server. "
     "first call get_manual_alert_context to inspect the active sessions and templates. "
     "If the session, price, alert template, deletion target, or deletion scope is unclear or "
     "could match more than one option, do not call a mutation tool. Ask for a human-readable distinction "
@@ -123,6 +126,7 @@ class CodexService:
         chat_state_path: Path | None = None,
     ) -> None:
         self.project_root = project_root.resolve()
+        self.session_registry = session_registry
         self.dynamic_tools = AIDynamicTools(
             self.project_root,
             session_registry=session_registry,
@@ -140,6 +144,7 @@ class CodexService:
         self._lifecycle_lock = asyncio.Lock()
         self._conversations_lock = asyncio.Lock()
         self._shared_chat_lock = asyncio.Lock()
+        self._strategy_instruction_locks: dict[str, asyncio.Lock] = {}
         self._chat_state_lock = asyncio.Lock()
         self._conversations: dict[str, AsyncThread] = {}
         self._turn_locks: dict[str, asyncio.Lock] = {}
@@ -347,6 +352,7 @@ class CodexService:
                 await asyncio.gather(*shared_chat_tasks, return_exceptions=True)
             self._conversations.clear()
             self._turn_locks.clear()
+            self._strategy_instruction_locks.clear()
             if warm_thread_task is not None:
                 warm_thread_task.cancel()
                 await asyncio.gather(warm_thread_task, return_exceptions=True)
@@ -409,6 +415,126 @@ class CodexService:
         self._shared_chat_tasks.add(task)
         task.add_done_callback(self._shared_chat_tasks.discard)
         return run
+
+    async def handle_strategy_instruction(self, session: Any, event: dict[str, Any]) -> None:
+        instruction = str(event.get("instruction") or "").strip()
+        event_id = str(event.get("event_id") or "").strip()
+        if not instruction or not event_id:
+            return
+        if self._disabled:
+            print(
+                f"[ai] strategy instruction skipped session={session.spec.id} "
+                "reason=AI service disabled"
+            )
+            return
+
+        self._pending_shared_chats += 1
+        task = asyncio.create_task(
+            self._run_strategy_instruction(session, event),
+            name=f"codex-strategy-{event_id[:8]}",
+        )
+        self._shared_chat_tasks.add(task)
+        task.add_done_callback(self._shared_chat_tasks.discard)
+        await self._notify_strategy_chat_changed()
+        print(
+            f"[ai] strategy instruction queued session={session.spec.id} "
+            f"event={event_id[:8]} action={event.get('action') or 'order'}"
+        )
+
+    async def _run_strategy_instruction(self, session: Any, event: dict[str, Any]) -> None:
+        conversation_id: str | None = None
+        instruction = str(event.get("instruction") or "").strip()
+        label = self._strategy_instruction_label(session, event)
+        session_lock = self._strategy_instruction_locks.setdefault(
+            str(session.spec.id),
+            asyncio.Lock(),
+        )
+        try:
+            async with session_lock:
+                await self._append_chat_message("user", f"[Strategy AI] {label}\n{instruction}")
+                await self._notify_strategy_chat_changed()
+
+                answer = ""
+                async for stream_event in self.stream_chat(
+                    instruction,
+                    conversation_id=None,
+                    initial_context=self._build_strategy_instruction_prompt(
+                        session,
+                        event,
+                    ),
+                ):
+                    if stream_event.event == "conversation":
+                        conversation_id = (
+                            str(stream_event.payload.get("conversation_id") or "") or None
+                        )
+                    elif stream_event.event == "done":
+                        answer = str(stream_event.payload.get("answer") or "").strip()
+                if answer:
+                    await self._append_chat_message(
+                        "assistant",
+                        f"[Strategy AI] {label}\n{answer}",
+                    )
+                print(
+                    f"[ai] strategy instruction completed session={session.spec.id} "
+                    f"event={str(event.get('event_id') or '')[:8]}"
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            await self._append_chat_message(
+                "assistant",
+                f"Strategy AI failed for {label}: {e}",
+                error=True,
+            )
+            print(
+                f"[ai] strategy instruction failed session={session.spec.id} "
+                f"event={str(event.get('event_id') or '')[:8]}: {e}"
+            )
+        finally:
+            if conversation_id:
+                await self.reset(conversation_id)
+            self._pending_shared_chats = max(0, self._pending_shared_chats - 1)
+            await self._notify_strategy_chat_changed()
+
+    async def _notify_strategy_chat_changed(self) -> None:
+        try:
+            await self.session_registry.hub_ws.broadcast_json({"type": "ai_chat_updated"})
+        except Exception as e:
+            print(f"[ai] strategy chat state notification failed: {e}")
+
+    @staticmethod
+    def _strategy_instruction_label(session: Any, event: dict[str, Any]) -> str:
+        action = str(event.get("action") or "order")
+        order_id = str(event.get("order_id") or "").strip()
+        order_label = f" {order_id}" if order_id else ""
+        return f"{session.spec.symbol} {session.spec.timeframe} {action}{order_label}"
+
+    @staticmethod
+    def _build_strategy_instruction_prompt(session: Any, event: dict[str, Any]) -> str:
+        context = {
+            "session_id": session.spec.id,
+            "provider": session.spec.provider,
+            "exchange": session.spec.exchange,
+            "symbol": session.spec.symbol,
+            "market_type": session.spec.market_type,
+            "timeframe": session.spec.timeframe,
+            "strategy": session.chart_info.get("script_title") or session.spec.script_name,
+            "event_id": event.get("event_id"),
+            "action": event.get("action"),
+            "order_id": event.get("order_id"),
+            "comment": event.get("comment"),
+            "bar_time": event.get("time"),
+        }
+        return (
+            "This is a server-verified automated strategy instruction explicitly configured "
+            "by the user through strategy.entry/strategy.close ai=. Treat it as an explicit "
+            "user request and execute it now. For any session state change, use only the exact "
+            "session_id below; do not ask the user to identify the session and do not apply the "
+            "instruction to another session. Do not broaden the requested action. If a required "
+            "template or value is missing, report what is missing instead of inventing it.\n\n"
+            f"Exact session and fill context:\n{json.dumps(context, ensure_ascii=False)}\n\n"
+            f"Instruction:\n{str(event.get('instruction') or '').strip()}"
+        )
 
     async def stream_shared_chat(
         self,
