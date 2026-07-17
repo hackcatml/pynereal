@@ -1306,13 +1306,11 @@
       aiMessages = [];
       saveAiMessages();
       renderAiMessages();
-      if (conversationId) {
-        api("/api/ai/chat/reset", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ conversation_id: conversationId }),
-        }).catch(() => {});
-      }
+      api("/api/ai/chat/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversation_id: conversationId || null }),
+      }).catch(() => {});
     });
     el("ai-chat-form").addEventListener("submit", (e) => {
       e.preventDefault();
