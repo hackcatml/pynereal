@@ -531,7 +531,10 @@ class CodexService:
             "user request and execute it now. For any session state change, use only the exact "
             "session_id below; do not ask the user to identify the session and do not apply the "
             "instruction to another session. Do not broaden the requested action. If a required "
-            "template or value is missing, report what is missing instead of inventing it.\n\n"
+            "template or value is missing, report what is missing instead of inventing it. "
+            "Respond in the same language as the instruction unless the instruction explicitly "
+            "requests another language. Use that same language for any requested Telegram "
+            "delivery.\n\n"
             f"Exact session and fill context:\n{json.dumps(context, ensure_ascii=False)}\n\n"
             f"Instruction:\n{str(event.get('instruction') or '').strip()}"
         )
