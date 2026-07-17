@@ -66,6 +66,7 @@ See [AI Setup & Details](#ai-setup--details) for configuration.
 
 - Python 3.11+ (3.14+ recommended)
 - **[PyneCore](https://github.com/PyneSys/pynecore)** strategy file under `workdir/scripts`
+- Optional AI Copilot: an OpenAI account with Codex access
 
 ## Supported Exchanges
 
@@ -342,10 +343,12 @@ values:
 
 PyneReal currently integrates OpenAI Codex through a local Codex app-server and
 the dashboard AI chat. It uses the current local Codex login rather than an
-OpenAI API key. The `codex` executable must be available on the host. When no
-authenticated account is found in an interactive terminal, data-service asks
-whether to enable AI and can start device-code login. Run `codex login` before
-starting data-service on a non-interactive server.
+OpenAI API key. The Codex runtime is installed automatically by `setup.sh`
+through the `openai-codex` dependency, so no separate Codex CLI installation is
+required. When no authenticated account is found in an interactive terminal,
+data-service asks whether to enable AI and can start device-code login. Before
+running data-service non-interactively, start it once in an interactive terminal
+and complete that login.
 
 Dashboard AI can:
 
