@@ -20,6 +20,37 @@ password = ""
 # password = "your_okex_password"
 # isTestnet = true    # Add any custom parameter required by the exchange
 
+# Multiple accounts for the same exchange can be named under ccxt_accounts.
+# Each account must declare its own credentials. Account names may contain
+# lowercase letters, numbers, underscores, and hyphens.
+# [ccxt_accounts.binance_main]
+# exchange = "binance"
+# apiKey = "your_main_account_api_key"
+# secret = "your_main_account_secret"
+#
+# [ccxt_accounts.binance_sub1]
+# exchange = "binance"
+# apiKey = "your_subaccount_api_key"
+# secret = "your_subaccount_secret"
+#
+# [ccxt_accounts.bitget_sub1]
+# exchange = "bitget"
+# apiKey = "your_subaccount_api_key"
+# secret = "your_subaccount_secret"
+# password = "your_subaccount_passphrase"
+
+# Exchange-nested account tables are also supported. Their command-line account
+# names are prefixed with the exchange ID: bitget_main and bitget_sub1 below.
+# [ccxt.bitget.main]
+# apiKey = "your_main_account_api_key"
+# secret = "your_main_account_secret"
+# password = "your_main_account_passphrase"
+#
+# [ccxt.bitget.sub1]
+# apiKey = "your_subaccount_api_key"
+# secret = "your_subaccount_secret"
+# password = "your_subaccount_passphrase"
+
 [capitalcom]
 # If it is a demo account
 demo = false
@@ -27,4 +58,3 @@ demo = false
 user_email = ""
 api_key = ""
 api_password = ""
-

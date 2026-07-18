@@ -39,7 +39,18 @@ dependencies = []
 optional-dependencies.cli = ["typer", "rich", "tzdata"]
 
 # All optional dependencies for cli and all built-in providers
-optional-dependencies.all = ["typer", "rich", "httpx", "ccxt", "pycryptodome", "tzdata"]
+optional-dependencies.all = [
+    "typer",
+    "rich",
+    "markdown-it-py",
+    "httpx",
+    "ccxt",
+    "pycryptodome",
+    "tzdata",
+    "openai-codex==0.1.0b3",
+    "websockets>=15,<17",
+    "certifi",
+]
 
 #Optional dependencies for development
 optional-dependencies.dev = ["pytest", "pytest-spec"]
@@ -47,10 +58,16 @@ optional-dependencies.dev = ["pytest", "pytest-spec"]
 ### Providers
 
 # For all providers to work (CCXT, Capital.com)
-optional-dependencies.providers = ["httpx", "ccxt", "pycryptodome"]
+optional-dependencies.providers = [
+    "httpx",
+    "ccxt",
+    "pycryptodome",
+    "websockets>=15,<17",
+    "certifi",
+]
 
 # For CCXT provider to work
-optional-dependencies.ccxt = ["ccxt"]
+optional-dependencies.ccxt = ["ccxt", "websockets>=15,<17", "certifi"]
 
 # For Capital.com provider to work
 optional-dependencies.capitalcom = ["httpx", "pycryptodome"]

@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import ast
 import json
+import time
 from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from markdown_it import MarkdownIt
 
 from pynecore.cli.app import app_state
 from pynecore.core.exchange_policy import tradingview_hides_zero_volume
@@ -17,6 +19,7 @@ from pynecore.core.csv_file import CSVReader
 
 import ccxt.pro as ccxtpro
 
+from ai.provider.codex_service import CodexService
 from registry import (
     SessionExistsError,
     SessionLimitError,
@@ -37,6 +40,14 @@ from ohlcv_io import make_ccxt_pro_client
 # Cache of exchange -> ccxt markets so symbol validation hits the network at most
 # once per exchange for the hub's lifetime.
 _markets_cache: dict[tuple[str, str], dict] = {}
+_AI_CHAT_MAX_MESSAGE_CHARS = 4000
+_AI_CHAT_MAX_HISTORY_MESSAGES = 12
+_AI_MARKDOWN_STREAM_INTERVAL_SECONDS = 0.05
+_AI_MARKDOWN = MarkdownIt(
+    "commonmark",
+    {"html": False, "linkify": False, "typographer": False},
+).enable("table")
+_AI_STRONG_WORD_BOUNDARY_TOKEN = "AI_MD_STRONG_WORD_BOUNDARY_7F1C"
 
 
 def _tail_log_text(log_path: Path, lines: int) -> tuple[str, int]:
@@ -49,6 +60,70 @@ def _tail_log_text(log_path: Path, lines: int) -> tuple[str, int]:
 def _sse_event(event: str, payload: dict[str, Any]) -> str:
     data = json.dumps(payload, ensure_ascii=False)
     return f"event: {event}\ndata: {data}\n\n"
+
+
+def _normalize_ai_strong_word_boundaries(content: str) -> str:
+    normalized: list[str] = []
+    strong_open = False
+    index = 0
+    while index < len(content):
+        if content.startswith("**", index):
+            normalized.append("**")
+            index += 2
+            if strong_open:
+                if index < len(content) and (content[index].isalnum() or content[index] == "_"):
+                    normalized.append(f" {_AI_STRONG_WORD_BOUNDARY_TOKEN}")
+                strong_open = False
+            else:
+                strong_open = True
+            continue
+        char = content[index]
+        normalized.append(char)
+        index += 1
+        if char == "\n":
+            strong_open = False
+    return "".join(normalized)
+
+
+def _render_ai_markdown(content: str) -> str:
+    normalized = _normalize_ai_strong_word_boundaries(content)
+    return _AI_MARKDOWN.render(normalized).replace(
+        f" {_AI_STRONG_WORD_BOUNDARY_TOKEN}",
+        "",
+    )
+
+
+def _present_ai_chat_state(state: dict[str, Any]) -> dict[str, Any]:
+    presented = dict(state)
+    messages: list[dict[str, Any]] = []
+    for raw in state.get("messages", []):
+        if not isinstance(raw, dict):
+            continue
+        message = dict(raw)
+        content = message.get("content")
+        if message.get("role") == "assistant" and not message.get("error") and isinstance(content, str):
+            message["html"] = _render_ai_markdown(content)
+        messages.append(message)
+    presented["messages"] = messages
+    return presented
+
+
+def _sanitize_ai_chat_history(raw: Any) -> list[dict[str, str]]:
+    if not isinstance(raw, list):
+        return []
+    items: list[dict[str, str]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        role = entry.get("role")
+        content = entry.get("content")
+        if role not in ("user", "assistant") or not isinstance(content, str):
+            continue
+        content = content.strip()
+        if not content:
+            continue
+        items.append({"role": role, "content": content[:_AI_CHAT_MAX_MESSAGE_CHARS]})
+    return items[-_AI_CHAT_MAX_HISTORY_MESSAGES:]
 
 
 def _market_type_from_market(market: dict) -> str:
@@ -72,12 +147,18 @@ def _market_scope_from_symbol(exchange: str, symbol: str) -> str:
     return "inverse"
 
 
-async def _load_exchange_markets(exchange: str, symbol: str) -> dict:
+async def _load_exchange_markets(
+    exchange: str,
+    symbol: str,
+    *,
+    force_refresh: bool = False,
+) -> tuple[dict, bool]:
     scope = _market_scope_from_symbol(exchange, symbol)
     cache_key = (exchange, scope)
-    cached = _markets_cache.get(cache_key)
-    if cached is not None:
-        return cached
+    if not force_refresh:
+        cached = _markets_cache.get(cache_key)
+        if cached is not None:
+            return cached, True
     ex = make_ccxt_pro_client(
         ccxtpro,
         exchange,
@@ -93,7 +174,16 @@ async def _load_exchange_markets(exchange: str, symbol: str) -> dict:
         except Exception:
             pass
     _markets_cache[cache_key] = markets
-    return markets
+    return markets, False
+
+
+async def _find_exchange_market(exchange: str, symbol: str) -> dict | None:
+    markets, from_cache = await _load_exchange_markets(exchange, symbol)
+    market = markets.get(symbol)
+    if market is None and from_cache:
+        markets, _ = await _load_exchange_markets(exchange, symbol, force_refresh=True)
+        market = markets.get(symbol)
+    return market
 
 
 # Cache of script path -> (mtime, is_strategy) so we only AST-parse on change.
@@ -494,12 +584,174 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
 # ----------------------------------------------------------------------
 # Control-plane router:  /api/sessions ...
 # ----------------------------------------------------------------------
-def build_control_router(registry: SessionRegistry) -> APIRouter:
+def build_control_router(registry: SessionRegistry, codex_service: CodexService) -> APIRouter:
     r = APIRouter()
+
+    @r.get("/api/ai/chat")
+    async def get_ai_chat() -> JSONResponse:
+        return JSONResponse(_present_ai_chat_state(await codex_service.chat_state()))
+
+    @r.get("/api/ai/models")
+    async def get_ai_models() -> JSONResponse:
+        try:
+            models = await codex_service.model_options()
+            prefs = await codex_service.chat_preferences()
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=503)
+        return JSONResponse({
+            "models": models,
+            "selected_model": prefs["model"],
+            "selected_effort": prefs["effort"],
+        })
+
+    @r.put("/api/ai/chat/preferences")
+    async def set_ai_chat_preferences(payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        model = payload.get("model")
+        if model is not None and not isinstance(model, str):
+            return JSONResponse({"error": "model must be a string"}, status_code=400)
+        effort = payload.get("effort")
+        if effort is not None and not isinstance(effort, str):
+            return JSONResponse({"error": "effort must be a string"}, status_code=400)
+        try:
+            prefs = await codex_service.set_chat_preferences(model, effort)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=503)
+        # other connected browsers switch to the same selection
+        await registry.hub_ws.broadcast_json({
+            "type": "ai_prefs_updated",
+            "model": prefs["model"],
+            "effort": prefs["effort"],
+        })
+        return JSONResponse(prefs)
+
+    @r.put("/api/ai/chat/state")
+    async def import_ai_chat_state(payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        conversation_id = payload.get("conversation_id")
+        if conversation_id is not None and not isinstance(conversation_id, str):
+            return JSONResponse({"error": "conversation_id must be a string"}, status_code=400)
+        state = await codex_service.import_chat_state(
+            payload.get("messages"),
+            (conversation_id or "").strip() or None,
+        )
+        await registry.hub_ws.broadcast_json({"type": "ai_chat_updated"})
+        return JSONResponse(_present_ai_chat_state(state))
+
+    @r.post("/api/ai/chat")
+    async def ai_chat(payload: dict = Body(default_factory=dict)):
+        message = payload.get("message")
+        if not isinstance(message, str) or not message.strip():
+            return JSONResponse({"error": "message must be a non-empty string"}, status_code=400)
+        message = message.strip()
+        if len(message) > _AI_CHAT_MAX_MESSAGE_CHARS:
+            return JSONResponse(
+                {"error": f"message is too long (max {_AI_CHAT_MAX_MESSAGE_CHARS} chars)"},
+                status_code=400,
+            )
+        conversation_id = payload.get("conversation_id")
+        if conversation_id is not None and not isinstance(conversation_id, str):
+            return JSONResponse({"error": "conversation_id must be a string"}, status_code=400)
+        model = payload.get("model")
+        if model is not None and not isinstance(model, str):
+            return JSONResponse({"error": "model must be a string"}, status_code=400)
+        effort = payload.get("effort")
+        if effort is not None and not isinstance(effort, str):
+            return JSONResponse({"error": "effort must be a string"}, status_code=400)
+        try:
+            model = await codex_service.validate_model(model)
+            effort = await codex_service.validate_effort(effort, model)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        if model is None or effort is None:
+            # fall back to the shared dashboard selection (or its defaults)
+            try:
+                prefs = await codex_service.chat_preferences()
+            except Exception:
+                prefs = None
+            if prefs:
+                if model is None:
+                    model = prefs["model"]
+                if effort is None and model == prefs["model"]:
+                    effort = prefs["effort"]
+        history = _sanitize_ai_chat_history(payload.get("history"))
+        async def notify_chat_updated() -> None:
+            await registry.hub_ws.broadcast_json({"type": "ai_chat_updated"})
+
+        run = codex_service.start_shared_chat(
+            message,
+            client_conversation_id=(conversation_id or "").strip() or None,
+            client_history=history,
+            on_state_changed=notify_chat_updated,
+            model=model,
+            effort=effort,
+        )
+
+        async def stream() -> AsyncIterator[str]:
+            streamed_answer = ""
+            pending_delta = ""
+            last_delta_emit = 0.0
+            try:
+                async for event in run.events():
+                    if event.event == "delta":
+                        delta = str(event.payload.get("text") or "")
+                        streamed_answer += delta
+                        pending_delta += delta
+                        now = time.monotonic()
+                        if last_delta_emit and now - last_delta_emit < _AI_MARKDOWN_STREAM_INTERVAL_SECONDS:
+                            continue
+                        yield _sse_event(
+                            "delta",
+                            {"text": pending_delta, "html": _render_ai_markdown(streamed_answer)},
+                        )
+                        pending_delta = ""
+                        last_delta_emit = now
+                        continue
+                    if event.event == "done" and pending_delta:
+                        yield _sse_event(
+                            "delta",
+                            {"text": pending_delta, "html": _render_ai_markdown(streamed_answer)},
+                        )
+                        pending_delta = ""
+                    event_payload = event.payload
+                    if event.event == "done":
+                        answer = str(event.payload.get("answer") or "")
+                        event_payload = {**event.payload, "html": _render_ai_markdown(answer)}
+                    yield _sse_event(event.event, event_payload)
+            except asyncio.CancelledError:
+                print(
+                    f"[ai] stream={run.id} client disconnected; "
+                    "background turn continues"
+                )
+                raise
+            except Exception as e:
+                await registry.hub_ws.broadcast_json({"type": "ai_chat_updated"})
+                yield _sse_event("stream_error", {"error": str(e)})
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @r.post("/api/ai/chat/reset")
+    async def reset_ai_chat(payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        conversation_id = payload.get("conversation_id")
+        await codex_service.clear_shared_chat(
+            conversation_id.strip() if isinstance(conversation_id, str) else None
+        )
+        await registry.hub_ws.broadcast_json({"type": "ai_chat_updated"})
+        return JSONResponse({"ok": True})
 
     @r.get("/api/sessions")
     def list_sessions() -> JSONResponse:
-        return JSONResponse({"sessions": registry.snapshots()})
+        return JSONResponse({
+            "sessions": registry.snapshots(),
+            "ai_enabled": codex_service.enabled,
+        })
 
     @r.put("/api/sessions/order")
     async def reorder_sessions(payload: dict = Body(default_factory=dict)) -> JSONResponse:
@@ -685,11 +937,10 @@ def build_validation_router() -> APIRouter:
         if exchange not in ccxtpro.exchanges:
             return JSONResponse({"exists": False, "error": f"unknown exchange: {exchange}"})
         try:
-            markets = await _load_exchange_markets(exchange, symbol)
+            market = await _find_exchange_market(exchange, symbol)
         except Exception as e:
             # Network/market-load failure: don't claim the symbol is invalid.
             return JSONResponse({"exists": None, "error": f"could not load markets: {e}"})
-        market = markets.get(symbol)
         if not market:
             return JSONResponse({"exists": False})
         return JSONResponse({"exists": True, "market_type": _market_type_from_market(market)})

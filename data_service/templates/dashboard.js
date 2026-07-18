@@ -12,6 +12,10 @@
   const desktopReorderQuery = window.matchMedia(
     "(min-width: 721px) and (hover: hover) and (pointer: fine)",
   );
+  const desktopCardCarouselQuery = window.matchMedia(
+    "(max-width: 720px) and (hover: hover) and (pointer: fine)",
+  );
+  const mobileAiQuery = window.matchMedia("(max-width: 720px)");
 
   const el = (id) => document.getElementById(id);
 
@@ -491,6 +495,56 @@
     return data;
   }
 
+  async function streamSse(path, opts, onEvent) {
+    const resp = await fetch(path, opts);
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      throw new Error(data.error || `HTTP ${resp.status}`);
+    }
+    if (!resp.body) throw new Error("Streaming response is unavailable");
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    function dispatch(block) {
+      let eventName = "message";
+      const dataLines = [];
+      for (const line of block.split("\n")) {
+        if (!line || line.startsWith(":")) continue;
+        const colon = line.indexOf(":");
+        const field = colon < 0 ? line : line.slice(0, colon);
+        let value = colon < 0 ? "" : line.slice(colon + 1);
+        if (value.startsWith(" ")) value = value.slice(1);
+        if (field === "event") eventName = value;
+        else if (field === "data") dataLines.push(value);
+      }
+      if (!dataLines.length) return;
+      const raw = dataLines.join("\n");
+      let data;
+      try { data = JSON.parse(raw); }
+      catch { data = { text: raw }; }
+      onEvent(eventName, data);
+    }
+
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        buffer = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+        let boundary;
+        while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+          dispatch(buffer.slice(0, boundary));
+          buffer = buffer.slice(boundary + 2);
+        }
+        if (done) break;
+      }
+      if (buffer.trim()) dispatch(buffer);
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
   function sessionOrderFromRows() {
     return Array.from(el("sessions-body").querySelectorAll("tr[data-session-id]"))
       .map((row) => row.dataset.sessionId)
@@ -594,6 +648,1038 @@
       clearSessionDragClasses();
       render();
     });
+  }
+
+  function initDesktopCardCarousel() {
+    const body = el("sessions-body");
+    const dragThreshold = 6;
+    let drag = null;
+    let suppressClick = false;
+
+    function rowScrollLeft(row) {
+      const bodyBox = body.getBoundingClientRect();
+      const rowBox = row.getBoundingClientRect();
+      return body.scrollLeft + rowBox.left - bodyBox.left;
+    }
+
+    function snapToNearestCard() {
+      const rows = Array.from(body.querySelectorAll("tr[data-session-id]"));
+      if (!rows.length) return;
+      const nearest = rows.reduce((best, row) => {
+        const distance = Math.abs(rowScrollLeft(row) - body.scrollLeft);
+        return !best || distance < best.distance ? { row, distance } : best;
+      }, null);
+      if (nearest) {
+        body.scrollTo({ left: rowScrollLeft(nearest.row), behavior: "smooth" });
+      }
+    }
+
+    function endDrag(e) {
+      if (!drag || (e && e.pointerId !== drag.pointerId)) return;
+      const moved = drag.moved;
+      drag = null;
+      body.classList.remove("session-carousel-dragging");
+      if (!moved) return;
+      suppressClick = true;
+      window.setTimeout(() => { suppressClick = false; }, 0);
+      window.requestAnimationFrame(snapToNearestCard);
+    }
+
+    body.addEventListener("pointerdown", (e) => {
+      if (!desktopCardCarouselQuery.matches || e.pointerType === "touch" || e.button !== 0) {
+        return;
+      }
+      drag = {
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        scrollLeft: body.scrollLeft,
+        moved: false,
+      };
+    });
+
+    window.addEventListener("pointermove", (e) => {
+      if (!drag || e.pointerId !== drag.pointerId) return;
+      const dx = e.clientX - drag.startX;
+      const dy = e.clientY - drag.startY;
+      if (!drag.moved) {
+        if (Math.abs(dx) < dragThreshold || Math.abs(dx) <= Math.abs(dy)) return;
+        drag.moved = true;
+        body.classList.add("session-carousel-dragging");
+      }
+      e.preventDefault();
+      body.scrollLeft = drag.scrollLeft - dx;
+    }, { passive: false });
+
+    window.addEventListener("pointerup", endDrag);
+    window.addEventListener("pointercancel", endDrag);
+    window.addEventListener("blur", () => endDrag());
+    desktopCardCarouselQuery.addEventListener("change", () => {
+      if (!desktopCardCarouselQuery.matches) endDrag();
+    });
+    body.addEventListener("click", (e) => {
+      if (!suppressClick) return;
+      suppressClick = false;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }, true);
+  }
+
+  // ---- AI chat (floating 🐸 button + panel) --------------------------------
+  const AI_CHAT_HISTORY_KEY = "aiChatMessages";
+  const AI_CHAT_CONVERSATION_KEY = "aiChatConversationId";
+  const AI_CHAT_FAB_POS_KEY = "aiChatFabPos";
+  const AI_CHAT_MAX_HISTORY = 12;
+  const AI_EFFORT_LABELS = {
+    none: "None",
+    minimal: "Minimal",
+    low: "Low",
+    medium: "Medium",
+    high: "High",
+    xhigh: "Extra High",
+  };
+  let aiEnabled = false;
+  let aiMessages = [];
+  let aiConversationId = "";
+  let aiPending = false;
+  let aiRemotePending = false;
+  let aiStreamingResponse = false;
+  let aiRenderFrame = null;
+  let aiChatLockedScroll = false;
+  let aiStateSyncPromise = null;
+  let aiModelsPromise = null;
+  let aiModels = [];
+  let aiSelectedModel = "";
+  let aiSelectedEffort = "";
+  let aiModelMenuAnchor = null;
+  let reclampAiFab = null; // set by initAiChat; re-clamps the saved FAB spot
+
+  function applyAiAvailability(enabled) {
+    if (typeof enabled !== "boolean") return;
+    aiEnabled = enabled;
+    el("ai-chat-fab").classList.toggle("hidden", !aiEnabled);
+    // the FAB was display:none until now, so any earlier clamp math ran with
+    // zero dimensions — redo it against the real size
+    if (aiEnabled && reclampAiFab) reclampAiFab();
+    if (aiEnabled) loadAiModels();
+    if (!aiEnabled && isAiChatOpen()) closeAiChat();
+  }
+
+  function aiEffortLabel(value) {
+    return AI_EFFORT_LABELS[value] || value.charAt(0).toUpperCase() + value.slice(1);
+  }
+
+  function aiSupportedEfforts() {
+    const selected = aiModels.find((item) => item.value === aiSelectedModel);
+    return selected && Array.isArray(selected.efforts) ? selected.efforts : [];
+  }
+
+  // keep the effort valid for the selected model; an empty supported list means
+  // the server does not know the model's efforts, so keep the current pick
+  function clampAiEffort() {
+    const efforts = aiSupportedEfforts();
+    if (!efforts.length || efforts.includes(aiSelectedEffort)) return;
+    aiSelectedEffort = efforts.includes("medium") ? "medium" : efforts[efforts.length - 1];
+  }
+
+  // the selection lives on the server so every browser shares it; the
+  // ai_prefs_updated broadcast brings other clients in line
+  function pushAiPrefs() {
+    api("/api/ai/chat/preferences", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: aiSelectedModel || null,
+        effort: aiSelectedEffort || null,
+      }),
+    }).catch(() => {});
+  }
+
+  function applyAiPrefs(model, effort) {
+    let changed = false;
+    if (
+      typeof model === "string" && model && model !== aiSelectedModel
+      && aiModels.some((item) => item.value === model)
+    ) {
+      aiSelectedModel = model;
+      changed = true;
+    }
+    if (typeof effort === "string" && effort && effort !== aiSelectedEffort) {
+      aiSelectedEffort = effort;
+      changed = true;
+    }
+    if (!changed) return;
+    clampAiEffort();
+    renderAiModelMenu();
+    updateAiModelControls();
+    if (aiModelMenuAnchor) positionAiModelMenu(aiModelMenuAnchor);
+  }
+
+  function updateAiModelControls() {
+    const selected = aiModels.find((item) => item.value === aiSelectedModel);
+    let label = selected ? selected.label : "Default model";
+    if (selected && aiSelectedEffort) label += ` · ${aiEffortLabel(aiSelectedEffort)}`;
+    el("ai-model-label").textContent = label;
+    el("ai-model-selector").disabled = aiModels.length === 0;
+    for (const option of el("ai-model-menu").querySelectorAll(".ai-model-option")) {
+      const selectedValue = option.dataset.kind === "effort" ? aiSelectedEffort : aiSelectedModel;
+      option.setAttribute("aria-selected", String(option.dataset.value === selectedValue));
+    }
+  }
+
+  function selectAiModel(value) {
+    if (!aiModels.some((item) => item.value === value)) return;
+    aiSelectedModel = value;
+    clampAiEffort();
+    pushAiPrefs();
+    // the reasoning section follows the model, so rebuild and keep the menu
+    // open for the follow-up effort pick
+    renderAiModelMenu();
+    updateAiModelControls();
+    if (aiModelMenuAnchor) positionAiModelMenu(aiModelMenuAnchor);
+  }
+
+  function selectAiEffort(value) {
+    if (!aiSupportedEfforts().includes(value)) return;
+    aiSelectedEffort = value;
+    pushAiPrefs();
+    updateAiModelControls();
+    closeAiModelMenu();
+  }
+
+  function renderAiModelMenu() {
+    const menu = el("ai-model-menu");
+    menu.textContent = "";
+    const addHeading = (text) => {
+      const heading = document.createElement("div");
+      heading.className = "ai-model-menu-heading";
+      heading.textContent = text;
+      menu.appendChild(heading);
+    };
+    const addOption = (kind, value, labelText, descriptionText, selected, onSelect) => {
+      const option = document.createElement("button");
+      option.className = "ai-model-option";
+      option.type = "button";
+      option.dataset.value = value;
+      option.dataset.kind = kind;
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", String(selected));
+
+      const label = document.createElement("span");
+      label.className = "ai-model-option-label";
+      label.textContent = labelText;
+      option.appendChild(label);
+      if (descriptionText) {
+        const description = document.createElement("span");
+        description.className = "ai-model-option-description";
+        description.textContent = descriptionText;
+        option.appendChild(description);
+      }
+      option.addEventListener("click", onSelect);
+      menu.appendChild(option);
+    };
+    addHeading("Model");
+    for (const item of aiModels) {
+      addOption(
+        "model",
+        item.value,
+        item.label,
+        item.description,
+        item.value === aiSelectedModel,
+        () => selectAiModel(item.value),
+      );
+    }
+    const efforts = aiSupportedEfforts();
+    if (efforts.length) {
+      addHeading("Reasoning");
+      for (const value of efforts) {
+        addOption(
+          "effort",
+          value,
+          aiEffortLabel(value),
+          "",
+          value === aiSelectedEffort,
+          () => selectAiEffort(value),
+        );
+      }
+    }
+  }
+
+  async function loadAiModels() {
+    if (aiModelsPromise) return aiModelsPromise;
+    aiModelsPromise = (async () => {
+      const response = await api("/api/ai/models");
+      aiModels = Array.isArray(response.models)
+        ? response.models.filter((item) =>
+          item && typeof item.value === "string" && typeof item.label === "string")
+        : [];
+      // the server owns the shared selection; is_default/first are only a
+      // safety net if it did not resolve one
+      const serverModel = typeof response.selected_model === "string"
+        ? response.selected_model : "";
+      const selected = aiModels.find((item) => item.value === serverModel)
+        || aiModels.find((item) => item.is_default)
+        || aiModels[0];
+      aiSelectedModel = selected ? selected.value : "";
+      aiSelectedEffort = typeof response.selected_effort === "string"
+        ? response.selected_effort : "";
+      clampAiEffort();
+      renderAiModelMenu();
+      updateAiModelControls();
+    })().catch(() => {
+      el("ai-model-label").textContent = "Models unavailable";
+      el("ai-model-selector").disabled = true;
+    });
+    return aiModelsPromise;
+  }
+
+  function positionAiModelMenu(anchor) {
+    const panel = el("ai-chat-panel");
+    const menu = el("ai-model-menu");
+    const panelRect = panel.getBoundingClientRect();
+    const anchorRect = anchor.getBoundingClientRect();
+    const margin = 8;
+    let left = mobileAiQuery.matches
+      ? 12
+      : anchorRect.right - panelRect.left - menu.offsetWidth;
+    let top = mobileAiQuery.matches
+      ? anchorRect.bottom - panelRect.top + 7
+      : anchorRect.top - panelRect.top - menu.offsetHeight - 7;
+    left = Math.min(Math.max(left, margin), panel.clientWidth - menu.offsetWidth - margin);
+    top = Math.min(Math.max(top, margin), panel.clientHeight - menu.offsetHeight - margin);
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+  }
+
+  function openAiModelMenu(anchor) {
+    if (!aiModels.length) return;
+    const menu = el("ai-model-menu");
+    if (!menu.classList.contains("hidden") && aiModelMenuAnchor === anchor) {
+      closeAiModelMenu();
+      return;
+    }
+    aiModelMenuAnchor = anchor;
+    menu.classList.remove("hidden");
+    el("ai-model-selector").setAttribute("aria-expanded", String(anchor === el("ai-model-selector")));
+    el("ai-chat-title").setAttribute("aria-expanded", String(anchor === el("ai-chat-title")));
+    positionAiModelMenu(anchor);
+  }
+
+  function closeAiModelMenu() {
+    aiModelMenuAnchor = null;
+    el("ai-model-menu").classList.add("hidden");
+    el("ai-model-selector").setAttribute("aria-expanded", "false");
+    el("ai-chat-title").setAttribute("aria-expanded", "false");
+  }
+
+  function loadPersistentAiValue(key) {
+    try {
+      const saved = localStorage.getItem(key);
+      if (saved != null) return saved;
+      const legacy = sessionStorage.getItem(key);
+      if (legacy != null) {
+        localStorage.setItem(key, legacy);
+        sessionStorage.removeItem(key);
+        return legacy;
+      }
+    } catch {}
+    return null;
+  }
+
+  function loadAiMessages() {
+    try {
+      const parsed = JSON.parse(loadPersistentAiValue(AI_CHAT_HISTORY_KEY) || "[]");
+      if (Array.isArray(parsed)) {
+        aiMessages = parsed.filter((m) =>
+          m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
+          .map((m) => ({
+            role: m.role,
+            content: m.content,
+            ...(m.error ? { error: true } : {}),
+          }));
+      }
+    } catch { aiMessages = []; }
+  }
+
+  function saveAiMessages() {
+    try { localStorage.setItem(AI_CHAT_HISTORY_KEY, JSON.stringify(aiMessages)); } catch {}
+  }
+
+  function loadAiConversationId() {
+    try { aiConversationId = loadPersistentAiValue(AI_CHAT_CONVERSATION_KEY) || ""; }
+    catch { aiConversationId = ""; }
+  }
+
+  function saveAiConversationId() {
+    try {
+      if (aiConversationId) localStorage.setItem(AI_CHAT_CONVERSATION_KEY, aiConversationId);
+      else localStorage.removeItem(AI_CHAT_CONVERSATION_KEY);
+    } catch {}
+  }
+
+  function applyAiChatState(state) {
+    const messages = Array.isArray(state && state.messages) ? state.messages : [];
+    aiMessages = messages.filter((m) =>
+      m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string");
+    aiConversationId = state && typeof state.conversation_id === "string"
+      ? state.conversation_id
+      : "";
+    aiRemotePending = Boolean(state && state.pending);
+    // catch up on a model/effort change whose broadcast this client missed
+    if (state) applyAiPrefs(state.model, state.effort);
+    saveAiMessages();
+    saveAiConversationId();
+    el("ai-chat-send").disabled = aiPending || aiRemotePending;
+    renderAiMessages();
+  }
+
+  async function syncAiChatState({ allowImport = true } = {}) {
+    if (aiPending) return;
+    if (aiStateSyncPromise) return aiStateSyncPromise;
+    aiStateSyncPromise = (async () => {
+      let state = await api("/api/ai/chat");
+      const serverMessages = Array.isArray(state.messages) ? state.messages : [];
+      if (allowImport && !serverMessages.length && aiMessages.length) {
+        state = await api("/api/ai/chat/state", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            messages: aiMessages,
+            conversation_id: aiConversationId || null,
+          }),
+        });
+      }
+      if (!aiPending) applyAiChatState(state);
+    })().catch(() => {}).finally(() => {
+      aiStateSyncPromise = null;
+    });
+    return aiStateSyncPromise;
+  }
+
+  function scheduleAiRender() {
+    if (aiRenderFrame != null) return;
+    aiRenderFrame = requestAnimationFrame(() => {
+      aiRenderFrame = null;
+      renderAiMessages();
+    });
+  }
+
+  function renderAiMessages() {
+    const box = el("ai-chat-messages");
+    box.textContent = "";
+    if (!aiMessages.length && !aiPending && !aiRemotePending) {
+      const empty = document.createElement("div");
+      empty.className = "ai-chat-empty";
+      empty.textContent = "Ask anything about your sessions.";
+      box.appendChild(empty);
+      return;
+    }
+    for (const msg of aiMessages) {
+      const div = document.createElement("div");
+      div.className = `ai-msg ai-msg-${msg.role === "user" ? "user" : "assistant"}`;
+      if (msg.error) div.classList.add("ai-msg-error");
+      if (msg.role === "assistant" && !msg.error && typeof msg.html === "string") {
+        div.classList.add("ai-msg-markdown");
+        div.innerHTML = msg.html;
+        for (const link of div.querySelectorAll("a")) {
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+        }
+      } else {
+        div.textContent = msg.content;
+      }
+      if (msg.content || !msg.transient || msg.error) box.appendChild(div);
+      if (msg.role === "assistant" && msg.transient && typeof msg.workStatus === "string") {
+        const work = document.createElement("div");
+        work.className = "ai-msg-work";
+        work.textContent = msg.workStatus;
+        box.appendChild(work);
+      }
+    }
+    if ((aiPending || aiRemotePending) && !aiStreamingResponse) {
+      const div = document.createElement("div");
+      div.className = "ai-msg ai-msg-assistant ai-msg-pending";
+      div.innerHTML = '<span class="ai-dot">&#9679;</span><span class="ai-dot">&#9679;</span><span class="ai-dot">&#9679;</span>';
+      box.appendChild(div);
+    }
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function isAiChatOpen() {
+    return !el("ai-chat-panel").classList.contains("hidden");
+  }
+
+  // Desktop: dock the panel to the face — right side when it fits, left side
+  // otherwise — and clamp so it never leaves the viewport. Mobile keeps the
+  // CSS bottom sheet (inline styles cleared so the stylesheet wins).
+  function positionAiChatPanel() {
+    const panel = el("ai-chat-panel");
+    if (!desktopReorderQuery.matches) {
+      panel.style.left = "";
+      panel.style.top = "";
+      panel.style.right = "";
+      panel.style.bottom = "";
+      panel.style.height = "";
+      panel.style.paddingBottom = "";
+      // iOS fires window.resize while the keyboard animates; without this
+      // re-pin, that resize handler would wipe the keyboard compensation
+      updateAiPanelForKeyboard();
+      return;
+    }
+    if (panel.classList.contains("hidden")) return;
+    const fab = el("ai-chat-fab");
+    const GAP = 10;
+    const MARGIN = 10;
+    // the face's center is invariant under the hover/drag scale transform, so
+    // rebuild its edges from the untransformed layout size
+    const rect = fab.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const half = fab.offsetWidth / 2;
+    const pw = panel.offsetWidth;
+    const ph = panel.offsetHeight;
+    let left = cx + half + GAP;
+    if (left + pw > window.innerWidth - MARGIN) left = cx - half - GAP - pw;
+    left = Math.min(Math.max(left, MARGIN), Math.max(window.innerWidth - pw - MARGIN, MARGIN));
+    let top = cy - ph / 2;
+    top = Math.min(Math.max(top, MARGIN), Math.max(window.innerHeight - ph - MARGIN, MARGIN));
+    panel.style.left = `${left}px`;
+    panel.style.top = `${top}px`;
+    panel.style.right = "auto";
+    panel.style.bottom = "auto";
+    panel.style.paddingBottom = ""; // in case a mobile keyboard pad survived a breakpoint switch
+  }
+
+  // Mobile keyboards overlay a fixed bottom sheet, and iOS additionally
+  // scrolls fixed elements out of view to reveal the focused input. While the
+  // keyboard is up, pin the sheet to the visual viewport so it spans from the
+  // top of the *visible* area down to the keyboard edge.
+  function updateAiPanelForKeyboard() {
+    const panel = el("ai-chat-panel");
+    const vv = window.visualViewport;
+    if (!vv || desktopReorderQuery.matches || panel.classList.contains("hidden")) return;
+    // iOS reveals the focused input by force-scrolling the window based on
+    // the PRE-keyboard layout, then leaves that scroll behind even after the
+    // layout viewport shrinks to fit (observed: innerHeight 844→389 with
+    // scrollY stuck at 310). While the keyboard is up, fixed elements are
+    // dragged along by that scroll, shoving the sheet off the top of the
+    // screen. The page is scroll-locked whenever the sheet is open, so ANY
+    // nonzero scroll here is that forced reveal — always undo it.
+    if (window.scrollY || window.pageYOffset) window.scrollTo(0, 0);
+    // On iOS versions where the layout viewport resizes with the keyboard,
+    // this stays 0 and the plain CSS (top + bottom:0) already fits; the
+    // pinning below only kicks in where the keyboard overlays the viewport.
+    // Don't subtract vv.offsetTop: it grows to ~the keyboard height while
+    // Safari pans, which would read as "keyboard gone" mid-pan. The 50px
+    // threshold ignores URL-bar wobble; real keyboards are far taller.
+    const keyboard = window.innerHeight - vv.height;
+    if (keyboard > 50) {
+      const gap = Math.max(10, vv.height * 0.03);
+      panel.style.top = `${vv.offsetTop + gap}px`;
+      // Stretch the sheet past the visual viewport down to the layout-viewport
+      // bottom: Safari's URL/accessory bars above the keyboard are floating
+      // and translucent, so anything shorter lets the dashboard (and the FAB)
+      // peek through the strip between the composer and the keyboard. The
+      // padding keeps the composer itself above that strip, at the bottom of
+      // the *visible* area.
+      panel.style.height = `${window.innerHeight - vv.offsetTop - gap}px`;
+      panel.style.paddingBottom = `${keyboard}px`;
+      panel.style.bottom = "auto";
+      const box = el("ai-chat-messages");
+      box.scrollTop = box.scrollHeight;
+    } else {
+      panel.style.top = "";
+      panel.style.height = "";
+      panel.style.bottom = "";
+      panel.style.paddingBottom = "";
+    }
+  }
+
+  function openAiChat() {
+    el("ai-chat-panel").classList.remove("hidden");
+    el("ai-chat-panel").setAttribute("aria-hidden", "false");
+    el("ai-chat-fab").setAttribute("aria-expanded", "true");
+    positionAiChatPanel();
+    renderAiMessages();
+    syncAiChatState();
+    if (desktopReorderQuery.matches) {
+      // desktop only: on mobile a programmatic focus doesn't raise the
+      // keyboard (no user gesture), and iOS may then ignore the tap on the
+      // pre-focused input — leave focusing to the user's tap
+      el("ai-chat-input").focus();
+    } else {
+      // modal on mobile: background scroll would fight the sheet-drag gesture
+      // and lets iOS shove the sheet off-screen when the keyboard opens
+      lockBodyScroll();
+      aiChatLockedScroll = true;
+    }
+  }
+
+  function closeAiChat() {
+    if (!isAiChatOpen()) return;
+    closeAiModelMenu();
+    const panel = el("ai-chat-panel");
+    panel.classList.add("hidden");
+    panel.setAttribute("aria-hidden", "true");
+    // drop any keyboard pin / sheet-drag offset
+    panel.style.top = "";
+    panel.style.height = "";
+    panel.style.bottom = "";
+    panel.style.paddingBottom = "";
+    panel.style.transform = "";
+    el("ai-chat-fab").setAttribute("aria-expanded", "false");
+    if (aiChatLockedScroll) {
+      unlockBodyScroll();
+      aiChatLockedScroll = false;
+    }
+  }
+
+  function autosizeAiInput() {
+    const input = el("ai-chat-input");
+    input.style.height = "auto";
+    // +2 for the top/bottom border (box-sizing: border-box); CSS max-height clamps
+    input.style.height = `${input.scrollHeight + 2}px`;
+  }
+
+  async function sendAiChatMessage() {
+    if (aiPending || aiRemotePending) return;
+    await syncAiChatState();
+    if (aiPending || aiRemotePending) return;
+    const input = el("ai-chat-input");
+    const message = input.value.trim();
+    if (!message) return;
+    const history = aiMessages
+      .filter((m) => !m.error)
+      .slice(-AI_CHAT_MAX_HISTORY)
+      .map((m) => ({ role: m.role, content: m.content }));
+    aiMessages.push({ role: "user", content: message });
+    saveAiMessages();
+    input.value = "";
+    autosizeAiInput();
+    aiPending = true;
+    aiStreamingResponse = false;
+    el("ai-chat-send").disabled = true;
+    renderAiMessages();
+    let assistantMessage = null;
+    let completed = false;
+    let finalAnswerStarted = false;
+    try {
+      await streamSse("/api/ai/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message,
+          history,
+          conversation_id: aiConversationId || null,
+          model: aiSelectedModel || null,
+          effort: aiSelectedEffort || null,
+        }),
+      }, (eventName, data) => {
+        if (eventName === "conversation") {
+          aiConversationId = data.conversation_id || aiConversationId;
+          saveAiConversationId();
+          return;
+        }
+        if (eventName === "status") {
+          if (finalAnswerStarted) return;
+          if (!assistantMessage) {
+            assistantMessage = { role: "assistant", content: "", transient: true };
+            aiMessages.push(assistantMessage);
+          }
+          assistantMessage.content = data.text || "...";
+          delete assistantMessage.html;
+          assistantMessage.transient = true;
+          aiStreamingResponse = true;
+          scheduleAiRender();
+          return;
+        }
+        if (eventName === "work_status") {
+          if (finalAnswerStarted) return;
+          if (!assistantMessage) {
+            assistantMessage = { role: "assistant", content: "", transient: true };
+            aiMessages.push(assistantMessage);
+          }
+          assistantMessage.workStatus = data.text || "Working...";
+          assistantMessage.transient = true;
+          aiStreamingResponse = true;
+          scheduleAiRender();
+          return;
+        }
+        if (eventName === "delta") {
+          if (!assistantMessage) {
+            assistantMessage = { role: "assistant", content: "" };
+            aiMessages.push(assistantMessage);
+          }
+          if (!finalAnswerStarted) {
+            assistantMessage.content = "";
+            delete assistantMessage.html;
+            delete assistantMessage.transient;
+            delete assistantMessage.workStatus;
+            finalAnswerStarted = true;
+          }
+          aiStreamingResponse = true;
+          assistantMessage.content += data.text || "";
+          if (typeof data.html === "string") assistantMessage.html = data.html;
+          scheduleAiRender();
+          return;
+        }
+        if (eventName === "done") {
+          if (!assistantMessage) {
+            assistantMessage = { role: "assistant", content: "" };
+            aiMessages.push(assistantMessage);
+          }
+          delete assistantMessage.transient;
+          delete assistantMessage.workStatus;
+          assistantMessage.content = data.answer || assistantMessage.content || "(empty response)";
+          if (typeof data.html === "string") assistantMessage.html = data.html;
+          else delete assistantMessage.html;
+          finalAnswerStarted = true;
+          completed = true;
+          return;
+        }
+        if (eventName === "stream_error") {
+          throw new Error(data.error || "AI stream failed");
+        }
+      });
+      if (!completed) throw new Error("AI stream ended before completion");
+    } catch (e) {
+      if (assistantMessage && assistantMessage.transient) {
+        assistantMessage.content = `AI call failed: ${e.message}`;
+        assistantMessage.error = true;
+        delete assistantMessage.html;
+        delete assistantMessage.transient;
+        delete assistantMessage.workStatus;
+      } else {
+        aiMessages.push({ role: "assistant", content: `AI call failed: ${e.message}`, error: true });
+      }
+    } finally {
+      aiPending = false;
+      aiStreamingResponse = false;
+      el("ai-chat-send").disabled = aiRemotePending;
+      saveAiMessages();
+      renderAiMessages();
+      await syncAiChatState({ allowImport: false });
+    }
+  }
+
+  function initAiChat() {
+    const fab = el("ai-chat-fab");
+    const FAB_MARGIN = 8;
+    const DRAG_THRESHOLD = 6; // px of travel before a tap becomes a drag
+    let drag = null;
+    let suppressClick = false;
+
+    // the FAB is display:none until the AI availability check lands, and a
+    // hidden element measures 0 — clamping with that width let a saved spot
+    // land almost entirely off-screen (only FAB_MARGIN px stayed visible)
+    const fabSize = () => fab.offsetWidth || 52;
+
+    function applyFabPos(left, top) {
+      const maxLeft = window.innerWidth - fabSize() - FAB_MARGIN;
+      const maxTop = window.innerHeight - fabSize() - FAB_MARGIN;
+      fab.style.left = `${Math.min(Math.max(left, FAB_MARGIN), Math.max(maxLeft, FAB_MARGIN))}px`;
+      fab.style.top = `${Math.min(Math.max(top, FAB_MARGIN), Math.max(maxTop, FAB_MARGIN))}px`;
+      fab.style.right = "auto";
+      fab.style.bottom = "auto";
+      positionAiChatPanel(); // keep an open panel docked to the face
+    }
+
+    function resetFabPos() {
+      fab.style.left = "";
+      fab.style.top = "";
+      fab.style.right = "";
+      fab.style.bottom = "";
+    }
+
+    function currentFabPos() {
+      // prefer the inline style: getBoundingClientRect() is skewed while the
+      // hover/drag scale transform is active
+      if (fab.style.left) {
+        return { left: parseFloat(fab.style.left), top: parseFloat(fab.style.top) };
+      }
+      const rect = fab.getBoundingClientRect();
+      return { left: rect.left, top: rect.top };
+    }
+
+    // mobile: the face always rests against the nearest side edge
+    function snappedFabLeft(left) {
+      const maxLeft = Math.max(window.innerWidth - fabSize() - FAB_MARGIN, FAB_MARGIN);
+      return left + fabSize() / 2 < window.innerWidth / 2 ? FAB_MARGIN : maxLeft;
+    }
+
+    let snapTimer = null;
+    function snapFabToSide() {
+      const pos = currentFabPos();
+      // inline style jumps straight to the resting spot (so currentFabPos()
+      // and persistence see the final value); .snapping animates the visual
+      fab.classList.add("snapping");
+      applyFabPos(snappedFabLeft(pos.left), pos.top);
+      clearTimeout(snapTimer);
+      snapTimer = setTimeout(() => fab.classList.remove("snapping"), 250);
+    }
+
+    function restoreFabPos() {
+      try {
+        const pos = JSON.parse(localStorage.getItem(AI_CHAT_FAB_POS_KEY) || "null");
+        if (pos && typeof pos.left === "number" && typeof pos.top === "number") {
+          // a spot saved on desktop may be mid-screen; mobile pulls it aside
+          const left = desktopReorderQuery.matches ? pos.left : snappedFabLeft(pos.left);
+          applyFabPos(left, pos.top);
+          return;
+        }
+      } catch {}
+      resetFabPos(); // no saved spot: fall back to the per-breakpoint CSS default
+    }
+    reclampAiFab = restoreFabPos;
+
+    fab.addEventListener("pointerdown", (e) => {
+      if (!e.isPrimary) return;
+      // a fresh press starts a new tap/drag decision; without this, a drag
+      // whose trailing click never fired (touch) would swallow the next tap
+      suppressClick = false;
+      const pos = currentFabPos();
+      drag = {
+        id: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        left: pos.left,
+        top: pos.top,
+        moved: false,
+      };
+      try { fab.setPointerCapture(e.pointerId); } catch {}
+    });
+    fab.addEventListener("pointermove", (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      const dx = e.clientX - drag.startX;
+      const dy = e.clientY - drag.startY;
+      if (!drag.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+      drag.moved = true;
+      fab.classList.add("dragging");
+      applyFabPos(drag.left + dx, drag.top + dy);
+    });
+    function endFabDrag(e) {
+      if (!drag || e.pointerId !== drag.id) return;
+      if (drag.moved) {
+        suppressClick = true; // the click right after a drag must not toggle the panel
+        if (!desktopReorderQuery.matches) snapFabToSide();
+        try {
+          localStorage.setItem(AI_CHAT_FAB_POS_KEY, JSON.stringify(currentFabPos()));
+        } catch {}
+      }
+      drag = null;
+      fab.classList.remove("dragging");
+    }
+    fab.addEventListener("pointerup", endFabDrag);
+    fab.addEventListener("pointercancel", endFabDrag);
+
+    fab.addEventListener("click", () => {
+      if (suppressClick) { suppressClick = false; return; }
+      if (isAiChatOpen()) closeAiChat();
+      else openAiChat();
+    });
+
+    window.addEventListener("resize", () => {
+      if (fab.style.left) {
+        const left = parseFloat(fab.style.left);
+        // orientation change etc.: mobile re-docks to the nearest side
+        applyFabPos(
+          desktopReorderQuery.matches ? left : snappedFabLeft(left),
+          parseFloat(fab.style.top),
+        );
+      }
+      positionAiChatPanel();
+    });
+    // breakpoint change: re-clamp the saved spot (or fall back to that
+    // breakpoint's CSS default), then re-dock or reset the panel
+    if (desktopReorderQuery.addEventListener) {
+      desktopReorderQuery.addEventListener("change", () => {
+        closeAiModelMenu();
+        restoreFabPos();
+        positionAiChatPanel();
+      });
+    }
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", updateAiPanelForKeyboard);
+      window.visualViewport.addEventListener("scroll", updateAiPanelForKeyboard);
+    }
+    // Safari's focus-reveal scroll doesn't always emit visualViewport events
+    window.addEventListener("scroll", updateAiPanelForKeyboard);
+    el("ai-chat-input").addEventListener("focus", () => {
+      setTimeout(updateAiPanelForKeyboard, 100);
+      setTimeout(updateAiPanelForKeyboard, 400); // after the keyboard animation settles
+    });
+    // last-resort self-heal: re-pin every 500ms while the sheet is open, so a
+    // missed/reordered viewport event can knock the sheet out for at most half
+    // a second (no-op on desktop or while closed)
+    setInterval(() => {
+      if (!desktopReorderQuery.matches && isAiChatOpen()) updateAiPanelForKeyboard();
+    }, 500);
+
+    // mobile: dragging the sheet down from the grabber/header closes it
+    const panel = el("ai-chat-panel");
+    const sheetHeader = panel.querySelector(".ai-chat-header");
+    let sheetDrag = null;
+    sheetHeader.addEventListener("pointerdown", (e) => {
+      if (desktopReorderQuery.matches || !e.isPrimary) return;
+      if (e.target && e.target.closest && e.target.closest("button")) return;
+      sheetDrag = { id: e.pointerId, startY: e.clientY, dy: 0 };
+      try { sheetHeader.setPointerCapture(e.pointerId); } catch {}
+    });
+    sheetHeader.addEventListener("pointermove", (e) => {
+      if (!sheetDrag || e.pointerId !== sheetDrag.id) return;
+      sheetDrag.dy = Math.max(0, e.clientY - sheetDrag.startY);
+      panel.style.transform = sheetDrag.dy > 0 ? `translateY(${sheetDrag.dy}px)` : "";
+    });
+    function endSheetDrag(e) {
+      if (!sheetDrag || e.pointerId !== sheetDrag.id) return;
+      const dy = sheetDrag.dy;
+      sheetDrag = null;
+      panel.style.transform = "";
+      if (dy > 100) closeAiChat();
+    }
+    sheetHeader.addEventListener("pointerup", endSheetDrag);
+    sheetHeader.addEventListener("pointercancel", endSheetDrag);
+
+    el("ai-model-selector").addEventListener("click", () => {
+      if (!mobileAiQuery.matches) openAiModelMenu(el("ai-model-selector"));
+    });
+    el("ai-chat-title").addEventListener("click", () => {
+      if (mobileAiQuery.matches) openAiModelMenu(el("ai-chat-title"));
+    });
+    document.addEventListener("pointerdown", (e) => {
+      if (el("ai-model-menu").classList.contains("hidden")) return;
+      if (e.target.closest("#ai-model-menu, #ai-model-selector, #ai-chat-title")) return;
+      closeAiModelMenu();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeAiModelMenu();
+    });
+
+    el("ai-chat-close").addEventListener("click", closeAiChat);
+    el("ai-chat-clear").addEventListener("click", () => {
+      const conversationId = aiConversationId;
+      aiConversationId = "";
+      saveAiConversationId();
+      aiMessages = [];
+      saveAiMessages();
+      renderAiMessages();
+      api("/api/ai/chat/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversation_id: conversationId || null }),
+      }).catch(() => {});
+    });
+    el("ai-chat-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      sendAiChatMessage();
+    });
+    const input = el("ai-chat-input");
+    let inputComposing = false;
+    let sendAfterComposition = false;
+    input.addEventListener("input", autosizeAiInput);
+    input.addEventListener("compositionstart", () => {
+      inputComposing = true;
+      sendAfterComposition = false;
+    });
+    input.addEventListener("compositionend", () => {
+      inputComposing = false;
+      if (!sendAfterComposition) return;
+      sendAfterComposition = false;
+      setTimeout(sendAiChatMessage, 0);
+    });
+    input.addEventListener("keydown", (e) => {
+      // Enter sends on desktop (Shift+Enter for a newline); mobile keyboards
+      // keep Enter as newline and send via the button.
+      if (e.key === "Enter" && !e.shiftKey && desktopReorderQuery.matches) {
+        if (e.isComposing || inputComposing || e.keyCode === 229) {
+          sendAfterComposition = true;
+          return;
+        }
+        e.preventDefault();
+        sendAiChatMessage();
+      }
+    });
+
+    loadAiMessages();
+    loadAiConversationId();
+    syncAiChatState();
+    restoreFabPos();
+  }
+
+  // ---- Pepe faces: random blink + pupils that follow the pointer -----------
+  function initPepeFaces() {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const faces = Array.from(document.querySelectorAll("svg.pepe")).map((svg) => ({
+      svg,
+      pupils: Array.from(svg.querySelectorAll(".pepe-pupil")).map((node) => ({
+        node,
+        cx: parseFloat(node.getAttribute("cx")),
+        cy: parseFloat(node.getAttribute("cy")),
+      })),
+    }));
+    if (!faces.length) return;
+
+    function blinkOnce(svg, done) {
+      svg.classList.add("pepe-blink");
+      setTimeout(() => {
+        svg.classList.remove("pepe-blink");
+        done();
+      }, 130);
+    }
+    function scheduleBlink(svg) {
+      setTimeout(() => {
+        blinkOnce(svg, () => {
+          // occasional quick double blink reads more lifelike than a fixed beat
+          if (Math.random() < 0.2) {
+            setTimeout(() => blinkOnce(svg, () => scheduleBlink(svg)), 150);
+          } else {
+            scheduleBlink(svg);
+          }
+        });
+      }, 2200 + Math.random() * 4300);
+    }
+    faces.forEach((f) => scheduleBlink(f.svg));
+
+    const PEPE_VIEWBOX = 64;
+    // pupil travel in viewBox units, asymmetric so it stays on the eye white
+    // (less headroom up: the half-closed lid sits right above the pupil)
+    const RANGE_X = 3;
+    const RANGE_Y_UP = 1;
+    const RANGE_Y_DOWN = 1.2;
+    function lookAt(clientX, clientY) {
+      for (const face of faces) {
+        const rect = face.svg.getBoundingClientRect();
+        if (!rect.width) continue; // hidden (chat panel closed)
+        const scale = rect.width / PEPE_VIEWBOX;
+        for (const pupil of face.pupils) {
+          let dx = (clientX - (rect.left + pupil.cx * scale)) / scale;
+          let dy = (clientY - (rect.top + pupil.cy * scale)) / scale;
+          const ry = dy < 0 ? RANGE_Y_UP : RANGE_Y_DOWN;
+          const d = Math.hypot(dx / RANGE_X, dy / ry);
+          if (d > 1) {
+            dx /= d;
+            dy /= d;
+          }
+          pupil.node.setAttribute("transform", `translate(${dx.toFixed(2)} ${dy.toFixed(2)})`);
+        }
+      }
+    }
+    let lookFrame = null;
+    let lastX = 0;
+    let lastY = 0;
+    window.addEventListener(
+      "pointermove",
+      (e) => {
+        lastX = e.clientX;
+        lastY = e.clientY;
+        if (lookFrame !== null) return;
+        lookFrame = requestAnimationFrame(() => {
+          lookFrame = null;
+          lookAt(lastX, lastY);
+        });
+      },
+      { passive: true }
+    );
   }
 
   async function runnerAction(id, action) {
@@ -988,6 +2074,7 @@
     if (!el("log-modal").classList.contains("hidden")) closeLogs();
     if (!el("settings-modal").classList.contains("hidden")) closeSettings();
     if (!el("remove-modal").classList.contains("hidden")) closeRemoveConfirm();
+    closeAiChat();
   });
   document.addEventListener("click", (e) => {
     const scriptControl = el("script-select-control");
@@ -1161,6 +2248,7 @@
   async function refresh() {
     try {
       const data = await api("/api/sessions");
+      applyAiAvailability(data.ai_enabled);
       applySessions(data.sessions || []);
       return true;
     } catch (e) {
@@ -1281,6 +2369,7 @@
       if (ws !== hubWs || generation !== hubGeneration) return;
       clearTimeout(connectGuard);
       setHubStatus("syncing…");
+      if (!aiPending) syncAiChatState({ allowImport: false });
       refresh().then((ok) => {
         if (ws !== hubWs || generation !== hubGeneration || hubLive) return;
         if (ok) {
@@ -1301,7 +2390,12 @@
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === "sessions") {
+          applyAiAvailability(msg.ai_enabled);
           applySessions(msg.sessions || []);
+        } else if (msg.type === "ai_chat_updated" && !aiPending) {
+          syncAiChatState({ allowImport: false });
+        } else if (msg.type === "ai_prefs_updated") {
+          applyAiPrefs(msg.model, msg.effort);
         }
       } catch {}
     };
@@ -1346,6 +2440,9 @@
   window.addEventListener("online", rebuildHub);
 
   initSessionReordering();
+  initDesktopCardCarousel();
+  initAiChat();
+  initPepeFaces();
   startHubClock();
   refresh();   // one-time initial load; thereafter the hub pushes via /ws/hub
   connect();

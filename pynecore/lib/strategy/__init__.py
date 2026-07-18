@@ -82,7 +82,7 @@ class Order:
 
     __slots__ = (
         "order_id", "size", "sign", "order_type", "limit", "stop", "exit_id", "oca_name", "oca_type",
-        "comment", "alert_message",
+        "comment", "alert_message", "ai_instruction",
         "trail_price", "trail_offset",
         "trail_triggered",
         "profit_ticks", "loss_ticks", "trail_points_ticks",  # Store tick values for later calculation
@@ -104,6 +104,7 @@ class Order:
             oca_type: _oca.Oca = _oca.none,
             comment: str | None = None,
             alert_message: str | None = None,
+            ai_instruction: str | None = None,
             trail_price: float | None = None,
             trail_offset: float | None = None,
             profit_ticks: float | None = None,
@@ -124,6 +125,7 @@ class Order:
 
         self.comment = comment
         self.alert_message = alert_message
+        self.ai_instruction = ai_instruction
 
         self.trail_price = trail_price
         self.trail_offset = trail_offset or 0  # in ticks
@@ -381,7 +383,7 @@ class Position:
         'risk_max_position_size',
         'risk_cons_loss_days', 'risk_last_day_index', 'risk_last_day_equity',
         'risk_intraday_filled_orders', 'risk_intraday_start_equity', 'risk_halt_trading',
-        'on_entry_callback', 'on_close_callback', 'on_alert_callback'
+        'on_entry_callback', 'on_close_callback', 'on_alert_callback', 'on_ai_callback'
     )
 
     def __init__(self):
@@ -453,6 +455,7 @@ class Position:
         self.on_entry_callback = None
         self.on_close_callback = None
         self.on_alert_callback = None
+        self.on_ai_callback = None
 
     @property
     def equity(self) -> float | NA[float]:
@@ -826,18 +829,28 @@ class Position:
                 # Use the saved original filled_size from the beginning of this method
                 self._reduce_oca_group(order.oca_name, filled_size)
 
+        self._dispatch_order_notifications(order)
+
+    def _dispatch_order_notifications(self, order: Order) -> None:
         if not realtime_trade() and order.alert_message:
             alert(order.alert_message)
-        elif realtime_trade() and not pre_run() and order.alert_message:
+        elif realtime_trade() and not pre_run():
             # print(f"order.bar_index: {order.bar_index}, last_bar_index: {last_bar_index()}")
-            # Real time trade 에서는 최종 봉이 확정되고 새로운 봉이 생길때에만 alert 이 울리도록 함
+            # Real time trade 에서는 최종 봉이 확정되고 새로운 봉이 생길때에만
+            # alert 및 AI instruction을 전달함.
             if order.bar_index == last_bar_index() - 1:
-                alert(order.alert_message)
-                if self.on_alert_callback:
+                if order.alert_message:
+                    alert(order.alert_message)
+                if order.alert_message and self.on_alert_callback:
                     try:
                         self.on_alert_callback(order.alert_message)
                     except Exception as e:
                         print(f"Error in on_alert_callback: {e}")
+                if order.ai_instruction and self.on_ai_callback:
+                    try:
+                        self.on_ai_callback(order.ai_instruction, order, lib._time)
+                    except Exception as e:
+                        print(f"Error in on_ai_callback: {e}")
 
     def fill_order(self, order: Order, price: float, h: float, l: float) -> bool:
         """
@@ -914,6 +927,9 @@ class Position:
             # Create a copy for closing existing position
             order1 = copy(order)
             order1.order_type = _order_type_close
+            # The AI instruction belongs to the requested entry, not the
+            # internal close leg used to reverse an existing position.
+            order1.ai_instruction = None
             order1.size = -self.size
             # Set order_id to None so it will close any open trades
             order1.order_id = None
@@ -1383,7 +1399,8 @@ def cancel_all():
 def close(id: str, comment: str | NA[str] = na_str, qty: float | NA[float] = na_float,
           qty_percent: float | NA[float] = na_float, alert_message: str | NA[str] = na_str,
           immediately: bool = False,
-          record: bool = False, record_data: str | None = None):
+          record: bool = False, record_data: str | None = None,
+          ai: str | NA[str] = na_str):
     """
     Creates an order to exit from the part of a position opened by entry orders with a specific identifier.
 
@@ -1394,6 +1411,7 @@ def close(id: str, comment: str | NA[str] = na_str, qty: float | NA[float] = na_
                         quantity to close when an exit order fills
     :param alert_message: Custom text for the alert that fires when an order fills.
     :param immediately: If true, the closing order executes on the same tick when the strategy places it
+    :param ai: Instruction sent to the configured AI service when the order fills
     """
     if lib._lib_semaphore:
         return
@@ -1419,9 +1437,11 @@ def close(id: str, comment: str | NA[str] = na_str, qty: float | NA[float] = na_
     exit_id = f"Close entry(s) order {id}"
     bar_time = lib._time
     alert_message = f'{{"timestamp": {bar_time}, "message": {alert_message}}}' if alert_message else None
+    ai_instruction = None if isinstance(ai, NA) else str(ai).strip() or None
     order = Order(id, size, exit_id=exit_id, order_type=_order_type_close,
                   comment=None if isinstance(comment, NA) else comment,
-                  alert_message=None if isinstance(alert_message, NA) else alert_message)
+                  alert_message=None if isinstance(alert_message, NA) else alert_message,
+                  ai_instruction=ai_instruction)
 
     # Add order to position (this will handle orderbook and exit_orders)
     position._add_order(order)
@@ -1469,7 +1489,8 @@ def entry(id: str, direction: direction.Direction, qty: int | float | NA[float] 
           limit: int | float | None = None, stop: int | float | None = None,
           oca_name: str | None = None, oca_type: _oca.Oca | None = None,
           comment: str | None = None, alert_message: str | None = None,
-          record: bool = False, record_data: str | None = None):
+          record: bool = False, record_data: str | None = None,
+          ai: str | None = None):
     """
     Creates a new order to open or add to a position. If an order with the same id already exists
     and is unfilled, this command will modify that order.
@@ -1485,6 +1506,7 @@ def entry(id: str, direction: direction.Direction, qty: int | float | NA[float] 
     :param alert_message: Custom text for the alert that fires when an order fills
     :param record: Whether to record the entry data or not
     :param record_data: Extra data to record
+    :param ai: Instruction sent to the configured AI service when the order fills
     """
     if lib._lib_semaphore:
         return
@@ -1587,10 +1609,12 @@ def entry(id: str, direction: direction.Direction, qty: int | float | NA[float] 
 
     bar_time = lib._time
     alert_message = f'{{"timestamp": {bar_time}, "message": {alert_message}}}' if alert_message else None
+    ai_instruction = str(ai).strip() if ai is not None else None
     order = Order(id, size, order_type=_order_type_entry, limit=limit, stop=stop,
                   oca_name=oca_name, oca_type=oca_type,
                   comment=None if isinstance(comment, NA) else comment,
-                  alert_message=None if isinstance(alert_message, NA) else alert_message)
+                  alert_message=None if isinstance(alert_message, NA) else alert_message,
+                  ai_instruction=ai_instruction or None)
     # Store in entry_orders dict
     position._add_order(order)
 
