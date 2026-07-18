@@ -15,6 +15,7 @@
   const desktopCardCarouselQuery = window.matchMedia(
     "(max-width: 720px) and (hover: hover) and (pointer: fine)",
   );
+  const mobileAiQuery = window.matchMedia("(max-width: 720px)");
 
   const el = (id) => document.getElementById(id);
 
@@ -729,6 +730,14 @@
   const AI_CHAT_CONVERSATION_KEY = "aiChatConversationId";
   const AI_CHAT_FAB_POS_KEY = "aiChatFabPos";
   const AI_CHAT_MAX_HISTORY = 12;
+  const AI_EFFORT_LABELS = {
+    none: "None",
+    minimal: "Minimal",
+    low: "Low",
+    medium: "Medium",
+    high: "High",
+    xhigh: "Extra High",
+  };
   let aiEnabled = false;
   let aiMessages = [];
   let aiConversationId = "";
@@ -738,12 +747,229 @@
   let aiRenderFrame = null;
   let aiChatLockedScroll = false;
   let aiStateSyncPromise = null;
+  let aiModelsPromise = null;
+  let aiModels = [];
+  let aiSelectedModel = "";
+  let aiSelectedEffort = "";
+  let aiModelMenuAnchor = null;
+  let reclampAiFab = null; // set by initAiChat; re-clamps the saved FAB spot
 
   function applyAiAvailability(enabled) {
     if (typeof enabled !== "boolean") return;
     aiEnabled = enabled;
     el("ai-chat-fab").classList.toggle("hidden", !aiEnabled);
+    // the FAB was display:none until now, so any earlier clamp math ran with
+    // zero dimensions — redo it against the real size
+    if (aiEnabled && reclampAiFab) reclampAiFab();
+    if (aiEnabled) loadAiModels();
     if (!aiEnabled && isAiChatOpen()) closeAiChat();
+  }
+
+  function aiEffortLabel(value) {
+    return AI_EFFORT_LABELS[value] || value.charAt(0).toUpperCase() + value.slice(1);
+  }
+
+  function aiSupportedEfforts() {
+    const selected = aiModels.find((item) => item.value === aiSelectedModel);
+    return selected && Array.isArray(selected.efforts) ? selected.efforts : [];
+  }
+
+  // keep the effort valid for the selected model; an empty supported list means
+  // the server does not know the model's efforts, so keep the current pick
+  function clampAiEffort() {
+    const efforts = aiSupportedEfforts();
+    if (!efforts.length || efforts.includes(aiSelectedEffort)) return;
+    aiSelectedEffort = efforts.includes("medium") ? "medium" : efforts[efforts.length - 1];
+  }
+
+  // the selection lives on the server so every browser shares it; the
+  // ai_prefs_updated broadcast brings other clients in line
+  function pushAiPrefs() {
+    api("/api/ai/chat/preferences", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: aiSelectedModel || null,
+        effort: aiSelectedEffort || null,
+      }),
+    }).catch(() => {});
+  }
+
+  function applyAiPrefs(model, effort) {
+    let changed = false;
+    if (
+      typeof model === "string" && model && model !== aiSelectedModel
+      && aiModels.some((item) => item.value === model)
+    ) {
+      aiSelectedModel = model;
+      changed = true;
+    }
+    if (typeof effort === "string" && effort && effort !== aiSelectedEffort) {
+      aiSelectedEffort = effort;
+      changed = true;
+    }
+    if (!changed) return;
+    clampAiEffort();
+    renderAiModelMenu();
+    updateAiModelControls();
+    if (aiModelMenuAnchor) positionAiModelMenu(aiModelMenuAnchor);
+  }
+
+  function updateAiModelControls() {
+    const selected = aiModels.find((item) => item.value === aiSelectedModel);
+    let label = selected ? selected.label : "Default model";
+    if (selected && aiSelectedEffort) label += ` · ${aiEffortLabel(aiSelectedEffort)}`;
+    el("ai-model-label").textContent = label;
+    el("ai-model-selector").disabled = aiModels.length === 0;
+    for (const option of el("ai-model-menu").querySelectorAll(".ai-model-option")) {
+      const selectedValue = option.dataset.kind === "effort" ? aiSelectedEffort : aiSelectedModel;
+      option.setAttribute("aria-selected", String(option.dataset.value === selectedValue));
+    }
+  }
+
+  function selectAiModel(value) {
+    if (!aiModels.some((item) => item.value === value)) return;
+    aiSelectedModel = value;
+    clampAiEffort();
+    pushAiPrefs();
+    // the reasoning section follows the model, so rebuild and keep the menu
+    // open for the follow-up effort pick
+    renderAiModelMenu();
+    updateAiModelControls();
+    if (aiModelMenuAnchor) positionAiModelMenu(aiModelMenuAnchor);
+  }
+
+  function selectAiEffort(value) {
+    if (!aiSupportedEfforts().includes(value)) return;
+    aiSelectedEffort = value;
+    pushAiPrefs();
+    updateAiModelControls();
+    closeAiModelMenu();
+  }
+
+  function renderAiModelMenu() {
+    const menu = el("ai-model-menu");
+    menu.textContent = "";
+    const addHeading = (text) => {
+      const heading = document.createElement("div");
+      heading.className = "ai-model-menu-heading";
+      heading.textContent = text;
+      menu.appendChild(heading);
+    };
+    const addOption = (kind, value, labelText, descriptionText, selected, onSelect) => {
+      const option = document.createElement("button");
+      option.className = "ai-model-option";
+      option.type = "button";
+      option.dataset.value = value;
+      option.dataset.kind = kind;
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", String(selected));
+
+      const label = document.createElement("span");
+      label.className = "ai-model-option-label";
+      label.textContent = labelText;
+      option.appendChild(label);
+      if (descriptionText) {
+        const description = document.createElement("span");
+        description.className = "ai-model-option-description";
+        description.textContent = descriptionText;
+        option.appendChild(description);
+      }
+      option.addEventListener("click", onSelect);
+      menu.appendChild(option);
+    };
+    addHeading("Model");
+    for (const item of aiModels) {
+      addOption(
+        "model",
+        item.value,
+        item.label,
+        item.description,
+        item.value === aiSelectedModel,
+        () => selectAiModel(item.value),
+      );
+    }
+    const efforts = aiSupportedEfforts();
+    if (efforts.length) {
+      addHeading("Reasoning");
+      for (const value of efforts) {
+        addOption(
+          "effort",
+          value,
+          aiEffortLabel(value),
+          "",
+          value === aiSelectedEffort,
+          () => selectAiEffort(value),
+        );
+      }
+    }
+  }
+
+  async function loadAiModels() {
+    if (aiModelsPromise) return aiModelsPromise;
+    aiModelsPromise = (async () => {
+      const response = await api("/api/ai/models");
+      aiModels = Array.isArray(response.models)
+        ? response.models.filter((item) =>
+          item && typeof item.value === "string" && typeof item.label === "string")
+        : [];
+      // the server owns the shared selection; is_default/first are only a
+      // safety net if it did not resolve one
+      const serverModel = typeof response.selected_model === "string"
+        ? response.selected_model : "";
+      const selected = aiModels.find((item) => item.value === serverModel)
+        || aiModels.find((item) => item.is_default)
+        || aiModels[0];
+      aiSelectedModel = selected ? selected.value : "";
+      aiSelectedEffort = typeof response.selected_effort === "string"
+        ? response.selected_effort : "";
+      clampAiEffort();
+      renderAiModelMenu();
+      updateAiModelControls();
+    })().catch(() => {
+      el("ai-model-label").textContent = "Models unavailable";
+      el("ai-model-selector").disabled = true;
+    });
+    return aiModelsPromise;
+  }
+
+  function positionAiModelMenu(anchor) {
+    const panel = el("ai-chat-panel");
+    const menu = el("ai-model-menu");
+    const panelRect = panel.getBoundingClientRect();
+    const anchorRect = anchor.getBoundingClientRect();
+    const margin = 8;
+    let left = mobileAiQuery.matches
+      ? 12
+      : anchorRect.right - panelRect.left - menu.offsetWidth;
+    let top = mobileAiQuery.matches
+      ? anchorRect.bottom - panelRect.top + 7
+      : anchorRect.top - panelRect.top - menu.offsetHeight - 7;
+    left = Math.min(Math.max(left, margin), panel.clientWidth - menu.offsetWidth - margin);
+    top = Math.min(Math.max(top, margin), panel.clientHeight - menu.offsetHeight - margin);
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+  }
+
+  function openAiModelMenu(anchor) {
+    if (!aiModels.length) return;
+    const menu = el("ai-model-menu");
+    if (!menu.classList.contains("hidden") && aiModelMenuAnchor === anchor) {
+      closeAiModelMenu();
+      return;
+    }
+    aiModelMenuAnchor = anchor;
+    menu.classList.remove("hidden");
+    el("ai-model-selector").setAttribute("aria-expanded", String(anchor === el("ai-model-selector")));
+    el("ai-chat-title").setAttribute("aria-expanded", String(anchor === el("ai-chat-title")));
+    positionAiModelMenu(anchor);
+  }
+
+  function closeAiModelMenu() {
+    aiModelMenuAnchor = null;
+    el("ai-model-menu").classList.add("hidden");
+    el("ai-model-selector").setAttribute("aria-expanded", "false");
+    el("ai-chat-title").setAttribute("aria-expanded", "false");
   }
 
   function loadPersistentAiValue(key) {
@@ -799,6 +1025,8 @@
       ? state.conversation_id
       : "";
     aiRemotePending = Boolean(state && state.pending);
+    // catch up on a model/effort change whose broadcast this client missed
+    if (state) applyAiPrefs(state.model, state.effort);
     saveAiMessages();
     saveAiConversationId();
     el("ai-chat-send").disabled = aiPending || aiRemotePending;
@@ -989,6 +1217,7 @@
 
   function closeAiChat() {
     if (!isAiChatOpen()) return;
+    closeAiModelMenu();
     const panel = el("ai-chat-panel");
     panel.classList.add("hidden");
     panel.setAttribute("aria-hidden", "true");
@@ -1038,7 +1267,13 @@
       await streamSse("/api/ai/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, history, conversation_id: aiConversationId || null }),
+        body: JSON.stringify({
+          message,
+          history,
+          conversation_id: aiConversationId || null,
+          model: aiSelectedModel || null,
+          effort: aiSelectedEffort || null,
+        }),
       }, (eventName, data) => {
         if (eventName === "conversation") {
           aiConversationId = data.conversation_id || aiConversationId;
@@ -1134,9 +1369,14 @@
     let drag = null;
     let suppressClick = false;
 
+    // the FAB is display:none until the AI availability check lands, and a
+    // hidden element measures 0 — clamping with that width let a saved spot
+    // land almost entirely off-screen (only FAB_MARGIN px stayed visible)
+    const fabSize = () => fab.offsetWidth || 52;
+
     function applyFabPos(left, top) {
-      const maxLeft = window.innerWidth - fab.offsetWidth - FAB_MARGIN;
-      const maxTop = window.innerHeight - fab.offsetHeight - FAB_MARGIN;
+      const maxLeft = window.innerWidth - fabSize() - FAB_MARGIN;
+      const maxTop = window.innerHeight - fabSize() - FAB_MARGIN;
       fab.style.left = `${Math.min(Math.max(left, FAB_MARGIN), Math.max(maxLeft, FAB_MARGIN))}px`;
       fab.style.top = `${Math.min(Math.max(top, FAB_MARGIN), Math.max(maxTop, FAB_MARGIN))}px`;
       fab.style.right = "auto";
@@ -1163,8 +1403,8 @@
 
     // mobile: the face always rests against the nearest side edge
     function snappedFabLeft(left) {
-      const maxLeft = Math.max(window.innerWidth - fab.offsetWidth - FAB_MARGIN, FAB_MARGIN);
-      return left + fab.offsetWidth / 2 < window.innerWidth / 2 ? FAB_MARGIN : maxLeft;
+      const maxLeft = Math.max(window.innerWidth - fabSize() - FAB_MARGIN, FAB_MARGIN);
+      return left + fabSize() / 2 < window.innerWidth / 2 ? FAB_MARGIN : maxLeft;
     }
 
     let snapTimer = null;
@@ -1190,6 +1430,7 @@
       } catch {}
       resetFabPos(); // no saved spot: fall back to the per-breakpoint CSS default
     }
+    reclampAiFab = restoreFabPos;
 
     fab.addEventListener("pointerdown", (e) => {
       if (!e.isPrimary) return;
@@ -1252,6 +1493,7 @@
     // breakpoint's CSS default), then re-dock or reset the panel
     if (desktopReorderQuery.addEventListener) {
       desktopReorderQuery.addEventListener("change", () => {
+        closeAiModelMenu();
         restoreFabPos();
         positionAiChatPanel();
       });
@@ -1297,6 +1539,21 @@
     }
     sheetHeader.addEventListener("pointerup", endSheetDrag);
     sheetHeader.addEventListener("pointercancel", endSheetDrag);
+
+    el("ai-model-selector").addEventListener("click", () => {
+      if (!mobileAiQuery.matches) openAiModelMenu(el("ai-model-selector"));
+    });
+    el("ai-chat-title").addEventListener("click", () => {
+      if (mobileAiQuery.matches) openAiModelMenu(el("ai-chat-title"));
+    });
+    document.addEventListener("pointerdown", (e) => {
+      if (el("ai-model-menu").classList.contains("hidden")) return;
+      if (e.target.closest("#ai-model-menu, #ai-model-selector, #ai-chat-title")) return;
+      closeAiModelMenu();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeAiModelMenu();
+    });
 
     el("ai-chat-close").addEventListener("click", closeAiChat);
     el("ai-chat-clear").addEventListener("click", () => {
@@ -2137,6 +2394,8 @@
           applySessions(msg.sessions || []);
         } else if (msg.type === "ai_chat_updated" && !aiPending) {
           syncAiChatState({ allowImport: false });
+        } else if (msg.type === "ai_prefs_updated") {
+          applyAiPrefs(msg.model, msg.effort);
         }
       } catch {}
     };

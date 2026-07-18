@@ -17,6 +17,7 @@ from openai_codex.generated.v2_all import (
     AgentMessageDeltaNotification,
     AgentMessageThreadItem,
     CommandExecutionThreadItem,
+    ConfigReadResponse,
     DynamicToolCallThreadItem,
     ItemCompletedNotification,
     ItemStartedNotification,
@@ -27,6 +28,7 @@ from openai_codex.generated.v2_all import (
     TurnStatus,
     WebSearchThreadItem,
 )
+from pydantic import BaseModel, ConfigDict, Field
 
 from ai.scripts.dynamic_tools import AIDynamicTools
 
@@ -70,8 +72,31 @@ DEFAULT_DEVELOPER_INSTRUCTIONS = (
 _MAX_PERSISTED_MESSAGES = 200
 _MAX_CONTEXT_MESSAGES = 12
 _MAX_PERSISTED_CONTENT_CHARS = 40_000
+# dashboard chat defaults when the user has not picked anything yet
+_PREFERRED_DEFAULT_MODEL = "gpt-5.6-sol"
+_PREFERRED_DEFAULT_EFFORT = ReasoningEffort.medium.value
 _AI_PERMISSION_PROFILE = "pynereal-ai-read-only"
 _CODEX_LOGIN_TIMEOUT_SECONDS = 10 * 60
+
+
+class _CodexModelInfo(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    model: str
+    display_name: str = Field(alias="displayName")
+    description: str = ""
+    hidden: bool = False
+    is_default: bool = Field(default=False, alias="isDefault")
+    supported_reasoning_efforts: list[dict[str, Any]] = Field(
+        default_factory=list,
+        alias="supportedReasoningEfforts",
+    )
+
+
+class _CodexModelListResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    data: list[_CodexModelInfo]
 
 
 @dataclass(frozen=True)
@@ -143,16 +168,22 @@ class CodexService:
         self._disabled = False
         self._lifecycle_lock = asyncio.Lock()
         self._conversations_lock = asyncio.Lock()
+        self._models_lock = asyncio.Lock()
         self._shared_chat_lock = asyncio.Lock()
         self._strategy_instruction_locks: dict[str, asyncio.Lock] = {}
         self._chat_state_lock = asyncio.Lock()
         self._conversations: dict[str, AsyncThread] = {}
         self._turn_locks: dict[str, asyncio.Lock] = {}
+        self._model_options: list[dict[str, Any]] | None = None
         self._shared_chat_tasks: set[asyncio.Task[None]] = set()
         self._pending_shared_chats = 0
         self._warm_thread_task: asyncio.Task[AsyncThread | None] | None = None
         self._chat_messages: list[dict[str, Any]] = []
         self._chat_conversation_id: str | None = None
+        # model/effort picked in the dashboard; persisted so every browser
+        # shares the same selection
+        self._chat_model: str | None = None
+        self._chat_effort: str | None = None
         self._load_chat_state()
 
     @property
@@ -370,6 +401,8 @@ class CodexService:
         conversation_id: str | None = None,
         initial_context: str | None = None,
         history_messages: int = 0,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[CodexStreamEvent]:
         request_started_at = time.perf_counter()
         trace_id = uuid.uuid4().hex[:8]
@@ -389,6 +422,8 @@ class CodexService:
                 prompt,
                 trace_id=trace_id,
                 request_started_at=request_started_at,
+                model=model,
+                effort=effort,
             ):
                 yield event
 
@@ -399,6 +434,8 @@ class CodexService:
         client_history: list[dict[str, Any]] | None = None,
         client_conversation_id: str | None = None,
         on_state_changed: ChatStateCallback | None = None,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> CodexChatRun:
         run = CodexChatRun()
         self._pending_shared_chats += 1
@@ -409,6 +446,8 @@ class CodexService:
                 client_history=client_history,
                 client_conversation_id=client_conversation_id,
                 on_state_changed=on_state_changed,
+                model=model,
+                effort=effort,
             ),
             name=f"codex-shared-chat-{run.id}",
         )
@@ -546,12 +585,16 @@ class CodexService:
         client_history: list[dict[str, Any]] | None = None,
         client_conversation_id: str | None = None,
         on_state_changed: ChatStateCallback | None = None,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[CodexStreamEvent]:
         run = self.start_shared_chat(
             message,
             client_history=client_history,
             client_conversation_id=client_conversation_id,
             on_state_changed=on_state_changed,
+            model=model,
+            effort=effort,
         )
         async for event in run.events():
             yield event
@@ -564,6 +607,8 @@ class CodexService:
         client_history: list[dict[str, Any]] | None,
         client_conversation_id: str | None,
         on_state_changed: ChatStateCallback | None,
+        model: str | None,
+        effort: str | None,
     ) -> None:
         try:
             async with self._shared_chat_lock:
@@ -579,6 +624,8 @@ class CodexService:
                         conversation_id=conversation_id,
                         initial_context=self._build_initial_context(message, history),
                         history_messages=len(history),
+                        model=model,
+                        effort=effort,
                     ):
                         if event.event == "conversation":
                             await self._set_chat_conversation_id(
@@ -615,6 +662,166 @@ class CodexService:
     async def chat_state(self) -> dict[str, Any]:
         async with self._chat_state_lock:
             return self._chat_state_payload()
+
+    async def model_options(self) -> list[dict[str, Any]]:
+        async with self._models_lock:
+            if self._model_options is not None:
+                return [dict(item) for item in self._model_options]
+            codex = await self._get_codex()
+            client = getattr(codex, "_client", None)
+            if client is None:
+                raise RuntimeError("Installed openai-codex SDK cannot list models")
+            response = await client.request(
+                "model/list",
+                {"includeHidden": False},
+                response_model=_CodexModelListResponse,
+            )
+            options = [
+                {
+                    "value": item.model,
+                    "label": item.display_name,
+                    "description": item.description,
+                    "is_default": item.is_default,
+                    "efforts": [
+                        str(effort["reasoningEffort"])
+                        for effort in item.supported_reasoning_efforts
+                        if effort.get("reasoningEffort")
+                    ],
+                }
+                for item in response.data
+                if not item.hidden
+                and any(
+                    effort.get("reasoningEffort") == ReasoningEffort.xhigh.value
+                    for effort in item.supported_reasoning_efforts
+                )
+            ]
+            configured_model = await self._configured_model(codex)
+            if configured_model:
+                for option in options:
+                    option["is_default"] = option["value"] == configured_model
+                if configured_model not in {str(option["value"]) for option in options}:
+                    options.insert(0, {
+                        "value": configured_model,
+                        "label": self._model_display_name(configured_model),
+                        "description": "Current Codex default model.",
+                        "is_default": True,
+                        # supported efforts unknown for a model outside model/list;
+                        # an empty list means "accept any known effort"
+                        "efforts": [],
+                    })
+            self._model_options = options
+            return [dict(item) for item in self._model_options]
+
+    async def _configured_model(self, codex: AsyncCodex) -> str | None:
+        client = getattr(codex, "_client", None)
+        if client is None:
+            return None
+        try:
+            response = await client.request(
+                "config/read",
+                {"cwd": str(self.project_root), "includeLayers": False},
+                response_model=ConfigReadResponse,
+            )
+        except Exception as e:
+            print(f"[ai] configured model lookup failed: {e}")
+            return None
+        return response.config.model
+
+    @staticmethod
+    def _model_display_name(model: str) -> str:
+        parts = model.split("-")
+        if len(parts) >= 2 and parts[0].lower() == "gpt":
+            suffix = " ".join(part.capitalize() for part in parts[2:])
+            return f"GPT-{parts[1]}" + (f" {suffix}" if suffix else "")
+        return " ".join(part.upper() if len(part) <= 3 else part.capitalize() for part in parts)
+
+    async def validate_model(self, model: str | None) -> str | None:
+        if model is None:
+            return None
+        requested = model.strip()
+        if not requested:
+            return None
+        options = await self.model_options()
+        if requested not in {str(item["value"]) for item in options}:
+            raise ValueError(f"unsupported AI model: {requested}")
+        return requested
+
+    async def chat_preferences(self) -> dict[str, str | None]:
+        """Resolve the shared dashboard model/effort selection against the
+        current model options, falling back to the preferred defaults."""
+        options = await self.model_options()
+        async with self._chat_state_lock:
+            stored_model = self._chat_model
+            stored_effort = self._chat_effort
+        model = self._resolve_preferred_model(options, stored_model)
+        effort = self._resolve_preferred_effort(options, model, stored_effort)
+        return {"model": model, "effort": effort}
+
+    async def set_chat_preferences(
+        self,
+        model: str | None,
+        effort: str | None,
+    ) -> dict[str, str | None]:
+        validated_model = await self.validate_model(model)
+        target_model = validated_model or (await self.chat_preferences())["model"]
+        validated_effort = await self.validate_effort(effort, target_model)
+        async with self._chat_state_lock:
+            if validated_model:
+                self._chat_model = validated_model
+            if validated_effort:
+                self._chat_effort = validated_effort
+            self._save_chat_state()
+        return await self.chat_preferences()
+
+    @staticmethod
+    def _resolve_preferred_model(
+        options: list[dict[str, Any]],
+        stored: str | None,
+    ) -> str | None:
+        values = {str(item["value"]) for item in options}
+        if stored and stored in values:
+            return stored
+        if _PREFERRED_DEFAULT_MODEL in values:
+            return _PREFERRED_DEFAULT_MODEL
+        for item in options:
+            if item.get("is_default"):
+                return str(item["value"])
+        return str(options[0]["value"]) if options else None
+
+    @staticmethod
+    def _resolve_preferred_effort(
+        options: list[dict[str, Any]],
+        model: str | None,
+        stored: str | None,
+    ) -> str | None:
+        selected = next((item for item in options if str(item["value"]) == model), None)
+        supported = [str(value) for value in (selected or {}).get("efforts") or []]
+        # an empty supported list means the efforts are unknown; accept anything known
+        if stored and (not supported or stored in supported):
+            return stored
+        if not supported or _PREFERRED_DEFAULT_EFFORT in supported:
+            return _PREFERRED_DEFAULT_EFFORT
+        return supported[-1]
+
+    async def validate_effort(self, effort: str | None, model: str | None) -> str | None:
+        if effort is None:
+            return None
+        requested = effort.strip().lower()
+        if not requested:
+            return None
+        try:
+            ReasoningEffort(requested)
+        except ValueError:
+            raise ValueError(f"unsupported reasoning effort: {requested}") from None
+        options = await self.model_options()
+        if model:
+            selected = next((item for item in options if str(item["value"]) == model), None)
+        else:
+            selected = next((item for item in options if item.get("is_default")), None)
+        supported = [str(value) for value in (selected or {}).get("efforts") or []]
+        if supported and requested not in supported:
+            raise ValueError(f"model does not support reasoning effort: {requested}")
+        return requested
 
     async def import_chat_state(
         self,
@@ -697,6 +904,10 @@ class CodexService:
             self._chat_conversation_id = (
                 conversation_id if isinstance(conversation_id, str) and conversation_id else None
             )
+            model = payload.get("model")
+            self._chat_model = model if isinstance(model, str) and model else None
+            effort = payload.get("effort")
+            self._chat_effort = effort if isinstance(effort, str) and effort else None
         except Exception as e:
             print(f"[ai] chat state load failed: {e}")
 
@@ -716,6 +927,10 @@ class CodexService:
             "conversation_id": self._chat_conversation_id,
             "messages": [dict(item) for item in self._chat_messages],
             "pending": self._pending_shared_chats > 0,
+            # raw stored selection (unresolved): lets clients that reconnect
+            # after missing an ai_prefs_updated broadcast catch up
+            "model": self._chat_model,
+            "effort": self._chat_effort,
         }
 
     @staticmethod
@@ -896,6 +1111,8 @@ class CodexService:
         *,
         trace_id: str,
         request_started_at: float,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[CodexStreamEvent]:
         turn = None
         first_event_ms: float | None = None
@@ -905,7 +1122,8 @@ class CodexService:
             turn = await thread.turn(
                 prompt,
                 approval_mode=ApprovalMode.deny_all,
-                effort=ReasoningEffort.xhigh,
+                effort=ReasoningEffort(effort) if effort else ReasoningEffort.xhigh,
+                model=model,
             )
             turn_start_ms = (time.perf_counter() - turn_start_requested_at) * 1000
             request_to_turn_ms = (time.perf_counter() - request_started_at) * 1000

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=11" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=13" />
 </head>
 <body>
   <header class="topbar">
@@ -162,7 +162,7 @@
 
   <div id="ai-chat-panel" class="ai-chat-panel hidden" role="dialog" aria-label="AI chat" aria-hidden="true">
     <div class="ai-chat-header">
-      <span class="ai-chat-title">
+      <button id="ai-chat-title" class="ai-chat-title" type="button" aria-haspopup="listbox" aria-expanded="false">
         <svg class="pepe" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
           <path d="M32 10C18 10 9 19 9 31c0 7 3 13 8 17 4 3.2 9.3 5 15 5s11-1.8 15-5c5-4 8-10 8-17 0-12-9-21-23-21z" fill="#5B9E4D" stroke="#2f5c28" stroke-width="1.8" stroke-linejoin="round"/>
           <path d="M13 22c1-5 5.5-8 10-8s8 3 8.5 7.5" fill="#5B9E4D" stroke="#2f5c28" stroke-width="1.6"/>
@@ -182,20 +182,33 @@
           <path d="M14 38c2-2.5 6-4 11-3.5l16 1.5c5 .5 8.5 2 9.5 4.5-.5 3-4 5-9 4.7l-18-1c-5-.3-9-2.7-9.5-6.2z" fill="#B0623F" stroke="#2f5c28" stroke-width="1.6" stroke-linejoin="round"/>
           <path d="M16.5 39.5c4.5 1.8 10 2.6 16.5 2.9 6 .3 11.5-.2 15.5-1.6" stroke="#2f5c28" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
-        AI Chat
-      </span>
+        <span>PyneReal Ai</span><span class="ai-chat-title-chevron" aria-hidden="true">&gt;</span>
+      </button>
       <div class="modal-actions">
         <button id="ai-chat-clear" class="btn btn-danger" title="Clear chat">&#x1f5d1;&#xfe0f;</button>
         <button id="ai-chat-close" class="btn" title="Close">&times;</button>
       </div>
     </div>
+    <div id="ai-model-menu" class="ai-model-menu hidden" role="listbox" aria-label="AI model and reasoning effort"></div>
     <div id="ai-chat-messages" class="ai-chat-messages"></div>
     <form id="ai-chat-form" class="ai-chat-form">
-      <textarea id="ai-chat-input" class="ai-chat-input" rows="1" placeholder="Ask AI anything&#8230;" enterkeyhint="send"></textarea>
-      <button type="submit" id="ai-chat-send" class="btn btn-primary">Send</button>
+      <div class="ai-chat-composer">
+        <textarea id="ai-chat-input" class="ai-chat-input" rows="1" placeholder="Ask AI anything&#8230;" enterkeyhint="send"></textarea>
+        <div class="ai-chat-composer-actions">
+          <button id="ai-model-selector" class="ai-model-selector" type="button" aria-haspopup="listbox" aria-expanded="false" disabled>
+            <span id="ai-model-label">Default model</span>
+            <!-- inline SVG instead of the &#8964; glyph: the text arrowhead sits below
+                 the baseline and looked sunken next to the label -->
+            <svg class="ai-model-chevron" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" focusable="false">
+              <path d="M2.5 4.25 6 7.75l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <button type="submit" id="ai-chat-send" class="ai-chat-send" aria-label="Send" title="Send"><span aria-hidden="true">&#8593;</span></button>
+        </div>
+      </div>
     </form>
   </div>
 
-  <script src="/static/dashboard.js?v=18"></script>
+  <script src="/static/dashboard.js?v=21"></script>
 </body>
 </html>

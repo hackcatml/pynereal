@@ -591,6 +591,41 @@ def build_control_router(registry: SessionRegistry, codex_service: CodexService)
     async def get_ai_chat() -> JSONResponse:
         return JSONResponse(_present_ai_chat_state(await codex_service.chat_state()))
 
+    @r.get("/api/ai/models")
+    async def get_ai_models() -> JSONResponse:
+        try:
+            models = await codex_service.model_options()
+            prefs = await codex_service.chat_preferences()
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=503)
+        return JSONResponse({
+            "models": models,
+            "selected_model": prefs["model"],
+            "selected_effort": prefs["effort"],
+        })
+
+    @r.put("/api/ai/chat/preferences")
+    async def set_ai_chat_preferences(payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        model = payload.get("model")
+        if model is not None and not isinstance(model, str):
+            return JSONResponse({"error": "model must be a string"}, status_code=400)
+        effort = payload.get("effort")
+        if effort is not None and not isinstance(effort, str):
+            return JSONResponse({"error": "effort must be a string"}, status_code=400)
+        try:
+            prefs = await codex_service.set_chat_preferences(model, effort)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=503)
+        # other connected browsers switch to the same selection
+        await registry.hub_ws.broadcast_json({
+            "type": "ai_prefs_updated",
+            "model": prefs["model"],
+            "effort": prefs["effort"],
+        })
+        return JSONResponse(prefs)
+
     @r.put("/api/ai/chat/state")
     async def import_ai_chat_state(payload: dict = Body(default_factory=dict)) -> JSONResponse:
         conversation_id = payload.get("conversation_id")
@@ -617,6 +652,28 @@ def build_control_router(registry: SessionRegistry, codex_service: CodexService)
         conversation_id = payload.get("conversation_id")
         if conversation_id is not None and not isinstance(conversation_id, str):
             return JSONResponse({"error": "conversation_id must be a string"}, status_code=400)
+        model = payload.get("model")
+        if model is not None and not isinstance(model, str):
+            return JSONResponse({"error": "model must be a string"}, status_code=400)
+        effort = payload.get("effort")
+        if effort is not None and not isinstance(effort, str):
+            return JSONResponse({"error": "effort must be a string"}, status_code=400)
+        try:
+            model = await codex_service.validate_model(model)
+            effort = await codex_service.validate_effort(effort, model)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        if model is None or effort is None:
+            # fall back to the shared dashboard selection (or its defaults)
+            try:
+                prefs = await codex_service.chat_preferences()
+            except Exception:
+                prefs = None
+            if prefs:
+                if model is None:
+                    model = prefs["model"]
+                if effort is None and model == prefs["model"]:
+                    effort = prefs["effort"]
         history = _sanitize_ai_chat_history(payload.get("history"))
         async def notify_chat_updated() -> None:
             await registry.hub_ws.broadcast_json({"type": "ai_chat_updated"})
@@ -626,6 +683,8 @@ def build_control_router(registry: SessionRegistry, codex_service: CodexService)
             client_conversation_id=(conversation_id or "").strip() or None,
             client_history=history,
             on_state_changed=notify_chat_updated,
+            model=model,
+            effort=effort,
         )
 
         async def stream() -> AsyncIterator[str]:
