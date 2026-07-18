@@ -1,5 +1,5 @@
 (function () {
-  const MAX_SESSIONS = 10;
+  const MAX_SESSIONS = 20;
   let sessions = [];
   let keepaliveTimer = null;
   let removeSessionId = null;

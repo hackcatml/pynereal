@@ -13,7 +13,7 @@ from pathlib import Path
 from pynecore.cli.app import app_state
 
 # Maximum number of concurrent sessions the hub will manage (decision 8-4).
-MAX_SESSIONS = 10
+MAX_SESSIONS = 20
 
 
 def _slug(raw: str) -> str:
