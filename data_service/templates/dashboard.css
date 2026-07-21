@@ -18,6 +18,43 @@ body {
   font-size: 14px;
 }
 
+@media (hover: hover) and (pointer: fine) {
+  html,
+  body,
+  .log-content {
+    scrollbar-color: #3a4350 #0b0e13;
+    scrollbar-width: thin;
+  }
+  html::-webkit-scrollbar,
+  body::-webkit-scrollbar,
+  .log-content::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  html::-webkit-scrollbar-track,
+  body::-webkit-scrollbar-track,
+  .log-content::-webkit-scrollbar-track {
+    background: #0b0e13;
+  }
+  html::-webkit-scrollbar-thumb,
+  body::-webkit-scrollbar-thumb,
+  .log-content::-webkit-scrollbar-thumb {
+    background: #3a4350;
+    border: 2px solid #0b0e13;
+    border-radius: 999px;
+  }
+  html::-webkit-scrollbar-thumb:hover,
+  body::-webkit-scrollbar-thumb:hover,
+  .log-content::-webkit-scrollbar-thumb:hover {
+    background: #4a5565;
+  }
+  html::-webkit-scrollbar-corner,
+  body::-webkit-scrollbar-corner,
+  .log-content::-webkit-scrollbar-corner {
+    background: #0b0e13;
+  }
+}
+
 .topbar {
   position: relative;
   display: flex;
