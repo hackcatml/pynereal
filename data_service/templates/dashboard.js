@@ -88,6 +88,14 @@
       `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} UTC`;
   }
 
+  // "YYYY-MM-DD HH:MM" in UTC — the editable form the data-since input expects
+  function formatUtcInput(epochSec) {
+    const d = new Date(epochSec * 1000);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ` +
+      `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+  }
+
   function parseDateAsUtc(raw) {
     const value = String(raw || "").trim();
     if (!value) return null;
@@ -96,6 +104,15 @@
     const normalized = hasZone ? iso : (iso.length <= 10 ? `${iso}T00:00:00Z` : `${iso}Z`);
     const d = new Date(normalized);
     return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  function isSameUtcDateInput(left, right) {
+    const a = String(left || "").trim();
+    const b = String(right || "").trim();
+    if (a === b) return true;
+    const da = parseDateAsUtc(a);
+    const db = parseDateAsUtc(b);
+    return !!da && !!db && da.getTime() === db.getTime();
   }
 
   function historySinceText(s) {
@@ -149,11 +166,12 @@
 
   function runnerButtons(s) {
     const r = s.runner || "stopped";
+    const dataReady = !!s.history_ready;
     if (r === "running" || r === "starting") {
       return `<button class="btn" data-runner="stop">Stop</button>` +
-             `<button class="btn" data-runner="restart">Restart</button>`;
+             `<button class="btn" data-runner="restart"${dataReady ? "" : " disabled"}>Restart</button>`;
     }
-    return `<button class="btn btn-primary" data-runner="start">Start</button>`;
+    return `<button class="btn btn-primary" data-runner="start"${dataReady ? "" : " disabled"}>Start</button>`;
   }
 
   function esc(s) {
@@ -341,12 +359,20 @@
       `<td data-label="TF" data-field="timeframe"></td>` +
       `<td data-label="Exchange"><span data-field="exchange-cell" class="exchange-cell"></span></td>` +
       `<td data-label="Script" class="mono" data-field="script-name"></td>` +
-      `<td data-label="Data" class="data-cell"><span class="data-badge-wrap">` +
-        `<span data-field="collector-badge" class="badge data-badge" ` +
-        `data-act="data-since"></span>` +
-        `<span data-field="data-since-popover" class="data-since-popover"></span></span>` +
-        ` <span data-field="history-loading" class="muted">loading</span>` +
-        `</td>` +
+      `<td data-label="Data" class="data-cell"><span class="data-controls">` +
+        `<span class="data-badge-wrap">` +
+          `<span data-field="collector-badge" class="badge data-badge" ` +
+          `data-act="data-since"></span>` +
+          `<span data-field="data-since-popover" class="data-since-popover"></span></span>` +
+        `<button class="btn btn-icon data-edit-btn" data-act="data-edit" ` +
+        `title="Edit data start" aria-label="Edit data start">` +
+          `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">` +
+            `<path d="M12 20h9"></path>` +
+            `<path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path>` +
+          `</svg>` +
+        `</button>` +
+        `<span data-field="history-loading" class="muted">loading</span>` +
+        `</span></td>` +
       `<td data-label="Last bar" class="muted">${lastBarCell({})}</td>` +
       `<td data-label="Webhook"><span class="cell-inline">` +
         `<input type="checkbox" data-act="webhook">` +
@@ -356,7 +382,7 @@
         `<button class="btn btn-icon" data-act="telegram-settings" title="Telegram bot">&#9881;</button></span></td>` +
       `<td data-label="Runner" class="runner-cell" data-field="runner-cell"></td>` +
       `<td data-label="Chart"><a data-field="chart-link" class="btn btn-chart" target="_blank">Open</a></td>` +
-      `<td data-label="Remove"><button class="btn btn-danger" data-act="delete" title="Delete session">&times;</button></td>`;
+      `<td data-label="Remove"><button class="btn btn-danger btn-icon" data-act="delete" title="Delete session">&times;</button></td>`;
 
     tr.addEventListener("change", (e) => {
       const target = e.target;
@@ -387,7 +413,8 @@
           e.stopPropagation();
           toggleDataSinceTooltip(tr);
         }
-      } else if (act === "delete") openRemoveConfirm(id);
+      } else if (act === "data-edit") openSettings(id, "data-since");
+      else if (act === "delete") openRemoveConfirm(id);
       else if (act === "logs") openLogs(id);
       else if (act === "webhook-settings") openSettings(id, "webhook");
       else if (act === "telegram-settings") openSettings(id, "telegram");
@@ -398,6 +425,7 @@
   function patchSessionRow(tr, s) {
     const id = sessionId(s);
     const runner = s.runner || "stopped";
+    const runnerControlsKey = `${runner}:${s.history_ready ? "ready" : "preparing"}`;
     const collector = s.collector || "stopped";
     const wh = s.webhook || {};
     const exchange = (s.exchange || "").toUpperCase();
@@ -446,12 +474,12 @@
     setChecked(tr.querySelector('[data-act="webhook"]'), !!wh.enabled);
     setChecked(tr.querySelector('[data-act="telegram"]'), !!wh.telegram_notification);
 
-    if (tr.dataset.runnerControlsKey !== runner) {
+    if (tr.dataset.runnerControlsKey !== runnerControlsKey) {
       setHTML(
         tr.querySelector('[data-field="runner-cell"]'),
         `<span class="runner-actions">${runnerButtons(s)}<button class="btn" data-act="logs">Logs</button></span>`,
       );
-      tr.dataset.runnerControlsKey = runner;
+      tr.dataset.runnerControlsKey = runnerControlsKey;
     }
 
     const chart = tr.querySelector('[data-field="chart-link"]');
@@ -1750,9 +1778,6 @@
       const val = String(v).trim();
       if (val !== "") payload[k] = val;
     });
-    // Checkbox -> real boolean (absent from FormData when unchecked).
-    const autostartEl = e.target.querySelector('[name="autostart_runner"]');
-    payload.autostart_runner = !!(autostartEl && autostartEl.checked);
     if (payload.symbol) payload.symbol = payload.symbol.toUpperCase();
     // Block Add when exchange/symbol are confirmed invalid.
     const exOk = await checkExchange();
@@ -1993,16 +2018,51 @@
   // ---- per-session webhook/telegram settings modal ------------------------
   let settingsSession = null;
   let settingsMode = null; // "webhook" | "telegram"
+  let settingsOriginalHistorySince = null;
 
   async function openSettings(id, mode) {
     settingsSession = id;
     settingsMode = mode;
+    settingsOriginalHistorySince = null;
     el("settings-error").textContent = "";
     el("settings-title").textContent =
-      (mode === "webhook" ? "Webhook URL — " : "Telegram bot — ") + id;
+      (mode === "webhook" ? "Webhook URL — "
+        : mode === "telegram" ? "Telegram bot — "
+        : "Data since — ") + id;
     el("settings-fields").innerHTML = "loading…";
     el("settings-modal").classList.remove("hidden");
     lockBodyScroll();
+    if (mode === "data-since") {
+      const s = sessions.find((x) => sessionId(x) === id) || {};
+      const shared = sessions
+        .filter((x) => x.feed_id && x.feed_id === s.feed_id && sessionId(x) !== id)
+        .map((x) => sessionId(x));
+      // prefill with the current effective UTC start (from the ohlcv file); fall
+      // back to the raw history_since only if it is itself a date
+      const since = Number(s.data_since_time);
+      let initial = "";
+      if (Number.isFinite(since) && since > 0) {
+        initial = formatUtcInput(since);
+      } else if (parseDateAsUtc(s.history_since)) {
+        initial = String(s.history_since);
+      }
+      settingsOriginalHistorySince = initial;
+      el("settings-fields").innerHTML =
+        `<label class="settings-label">Data start (UTC)</label>` +
+        `<input id="settings-history-since" type="text" ` +
+        `placeholder="YYYY-MM-DD or YYYY-MM-DD HH:MM" value="${esc(initial)}">` +
+        `<div class="muted">UTC date or datetime, e.g. 2026-05-01 or 2026-06-01 07:30.</div>` +
+        `<div class="muted">Saving re-syncs market data and restarts the running strategy.</div>` +
+        (shared.length
+          ? `<div class="muted">Shares this market's data, so it changes too: ` +
+            `<span class="mono">${esc(shared.join(", "))}</span></div>`
+          : "") +
+        `<div id="settings-loading" class="settings-loading" hidden>` +
+          `<span class="settings-spinner" aria-hidden="true"></span>` +
+          `<span class="settings-loading-text">Re-syncing data…</span>` +
+        `</div>`;
+      return;
+    }
     try {
       const cfg = await api(`/api/${encodeURIComponent(id)}/webhook-config`);
       if (mode === "webhook") {
@@ -2027,12 +2087,54 @@
     if (el("settings-modal").classList.contains("hidden")) return;
     el("settings-modal").classList.add("hidden");
     unlockBodyScroll();
+    const saveBtn = el("settings-save");
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Save"; }
     settingsSession = null;
     settingsMode = null;
+    settingsOriginalHistorySince = null;
+  }
+
+  function setDataSinceLoading(on) {
+    const saveBtn = el("settings-save");
+    const inputEl = el("settings-history-since");
+    const status = el("settings-loading");
+    if (saveBtn) {
+      saveBtn.disabled = on;
+      saveBtn.textContent = on ? "Applying…" : "Save";
+    }
+    if (inputEl) inputEl.disabled = on;
+    if (status) status.hidden = !on;
   }
 
   async function saveSettings() {
     if (!settingsSession) return;
+    if (settingsMode === "data-since") {
+      const inputEl = el("settings-history-since");
+      const value = (inputEl ? inputEl.value : "").trim();
+      const sid = settingsSession;
+      if (isSameUtcDateInput(value, settingsOriginalHistorySince)) {
+        closeSettings();
+        return;
+      }
+      el("settings-error").textContent = "";
+      setDataSinceLoading(true); // feed + runner restart takes a moment; no double-submit
+      try {
+        await api(`/api/sessions/${encodeURIComponent(sid)}/history-since`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ history_since: value }),
+        });
+      } catch (e) {
+        el("settings-error").textContent = e.message;
+        setDataSinceLoading(false);
+        return;
+      }
+      if (settingsSession === sid && settingsMode === "data-since") {
+        setDataSinceLoading(false);
+        closeSettings();
+      }
+      return;
+    }
     const payload = {};
     if (settingsMode === "webhook") {
       const urlEl = el("settings-url");

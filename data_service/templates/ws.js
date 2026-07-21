@@ -25,6 +25,11 @@ App.ws = {
           }
           chart.resetChartState(false);
           App.data.loadInitialWithRetry();
+        } else if (msg.type === "chart_reset") {
+          // data window changed (history_since edit): drop stale series and
+          // reload the freshly regenerated ohlcv/plot/markers
+          chart.resetChartState(false);
+          App.data.loadInitialWithRetry();
         } else if (msg.type === "runner_disconnected") {
           state.runnerConnected = false;
           chart.resetChartState(false);

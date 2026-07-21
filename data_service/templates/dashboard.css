@@ -18,6 +18,43 @@ body {
   font-size: 14px;
 }
 
+@media (hover: hover) and (pointer: fine) {
+  html,
+  body,
+  .log-content {
+    scrollbar-color: #3a4350 #0b0e13;
+    scrollbar-width: thin;
+  }
+  html::-webkit-scrollbar,
+  body::-webkit-scrollbar,
+  .log-content::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  html::-webkit-scrollbar-track,
+  body::-webkit-scrollbar-track,
+  .log-content::-webkit-scrollbar-track {
+    background: #0b0e13;
+  }
+  html::-webkit-scrollbar-thumb,
+  body::-webkit-scrollbar-thumb,
+  .log-content::-webkit-scrollbar-thumb {
+    background: #3a4350;
+    border: 2px solid #0b0e13;
+    border-radius: 999px;
+  }
+  html::-webkit-scrollbar-thumb:hover,
+  body::-webkit-scrollbar-thumb:hover,
+  .log-content::-webkit-scrollbar-thumb:hover {
+    background: #4a5565;
+  }
+  html::-webkit-scrollbar-corner,
+  body::-webkit-scrollbar-corner,
+  .log-content::-webkit-scrollbar-corner {
+    background: #0b0e13;
+  }
+}
+
 .topbar {
   position: relative;
   display: flex;
@@ -141,13 +178,13 @@ body {
   border-radius: 6px;
   min-width: 150px;
 }
-.add-form input:not([type="checkbox"]):focus,
+.add-form input:focus,
 .add-form select:focus,
 .script-select-button:focus { outline: none; border-color: var(--accent); }
 .field-error { color: var(--danger); font-size: 12px; min-height: 12px; margin-top: 2px; }
 .field-error.checking { color: var(--muted); }
 .field-error.warn { color: #e0a300; }
-/* script_name select + autostart grouped together */
+/* script selector and refresh action */
 .script-row { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
 .script-select {
   position: relative;
@@ -255,15 +292,6 @@ body {
   font-size: 13px;
 }
 #script-refresh { flex: 0 0 auto; }
-.autostart-label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; white-space: nowrap; }
-.autostart-label input[type="checkbox"] {
-  flex: 0 0 auto;
-  width: 13px;
-  height: 13px;
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-}
 
 .btn {
   background: #21262d;
@@ -275,6 +303,7 @@ body {
   font-size: 13px;
 }
 .btn:hover { border-color: var(--accent); }
+.btn:disabled { cursor: not-allowed; opacity: 0.45; }
 .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn-danger { color: var(--danger); border-color: transparent; }
 .btn-danger:hover { border-color: var(--danger); }
@@ -419,6 +448,14 @@ tr:last-child td { border-bottom: none; }
 .data-badge {
   cursor: help;
 }
+/* badge + pencil (+ transient "loading") ride together as one group so the
+   surrounding cell layout can't spread them apart — notably the mobile card
+   layout, where the Data cell is a space-between flex row */
+.data-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
 .data-since-popover {
   position: absolute;
   z-index: 20;
@@ -533,7 +570,18 @@ tr:last-child td { border-bottom: none; }
 
 /* webhook/telegram cell: checkbox + gear button */
 .cell-inline { display: inline-flex; align-items: center; gap: 8px; }
-.btn-icon { padding: 4px 9px; line-height: 1; }
+/* icon buttons (data-edit pencil, webhook/telegram gears, remove ×) are a fixed
+   square so all three render at identical width and height, regardless of their
+   glyph vs SVG content */
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  line-height: 1;
+}
 .btn-icon .icon {
   display: block;
   width: 16px;
@@ -543,6 +591,13 @@ tr:last-child td { border-bottom: none; }
   stroke-width: 2;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+/* match the webhook/telegram gear buttons: same .btn-icon padding, and the
+   13px icon lines up with their 13px ⚙ glyph (must come after .btn-icon .icon
+   or the 16px default wins the cascade) */
+.data-edit-btn .icon {
+  width: 13px;
+  height: 13px;
 }
 #script-refresh.btn-icon {
   display: inline-flex;
@@ -562,6 +617,26 @@ tr:last-child td { border-bottom: none; }
 }
 .settings-body input:focus { outline: none; border-color: var(--accent); }
 .settings-label { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.settings-body input:disabled { opacity: 0.55; cursor: not-allowed; }
+.settings-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.settings-loading[hidden] { display: none; }
+.settings-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: settings-spin 0.7s linear infinite;
+  flex: none;
+}
+@keyframes settings-spin { to { transform: rotate(360deg); } }
 .settings-footer {
   padding: 12px 14px; border-top: 1px solid var(--border);
   display: flex; justify-content: flex-end;
@@ -1038,16 +1113,14 @@ tr:last-child td { border-bottom: none; }
 
   .add-form { flex-direction: column; align-items: stretch; }
   .add-form .field,
-  .add-form input:not([type="checkbox"]),
+  .add-form input,
   .add-form select,
   .add-form .script-select,
-  .add-form .btn,
-  .add-form .autostart-label { width: 100%; min-width: 0; }
+  .add-form .btn { width: 100%; min-width: 0; }
   .script-row { flex-wrap: wrap; }
   .script-row .script-select { flex: 1 1 calc(100% - 50px); }
   .script-select-button { min-width: 0; }
   #script-refresh { width: auto; min-width: 42px; }
-  .add-form .autostart-label input[type="checkbox"] { width: 18px; min-width: 18px; }
 
   table thead { display: none; }
   table { display: block; width: 100%; }
@@ -1119,6 +1192,18 @@ tr:last-child td { border-bottom: none; }
   }
   /* bigger touch targets on mobile */
   .btn { padding: 8px 12px; }
+  /* re-assert the square (this block's .btn padding would otherwise distort the
+     icon buttons) and enlarge them to a comfortable touch size */
+  .btn-icon { width: 34px; height: 34px; padding: 0; }
+  /* uniform width for the Chart "Open" link and runner Start/Stop/Restart/Logs
+     buttons — mobile only. On desktop the runner column is a fixed 190px and a
+     forced per-button min-width would overflow it in the running state and
+     shake the column, so this stays scoped to the mobile card layout. */
+  .btn-chart,
+  .runner-actions .btn {
+    min-width: 72px;
+    text-align: center;
+  }
   input[type="checkbox"] { width: 18px; height: 18px; }
 
   @media (hover: hover) and (pointer: fine) {

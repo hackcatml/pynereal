@@ -21,6 +21,7 @@ import ccxt.pro as ccxtpro
 
 from ai.provider.codex_service import CodexService
 from registry import (
+    HistoryNotReadyError,
     SessionExistsError,
     SessionLimitError,
     SessionNotFoundError,
@@ -33,6 +34,7 @@ from config import (
     default_webhook_url,
     sanitize_manual_alert_templates,
     sanitize_manual_alert_triggers,
+    validate_history_since,
 )
 from manual_alerts import send_manual_alert_payload
 from ohlcv_io import make_ccxt_pro_client
@@ -792,12 +794,28 @@ def build_control_router(registry: SessionRegistry, codex_service: CodexService)
             return JSONResponse({"error": f"failed to remove session: {e}"}, status_code=500)
         return JSONResponse({"ok": True})
 
+    @r.patch("/api/sessions/{session_id}/history-since")
+    async def update_history_since(session_id: str, payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        try:
+            value = validate_history_since(payload.get("history_since"))
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        try:
+            await registry.update_history_since(session_id, value)
+        except SessionNotFoundError:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        except Exception as e:
+            return JSONResponse({"error": f"failed to update history_since: {e}"}, status_code=500)
+        return JSONResponse({"ok": True, "history_since": value})
+
     @r.post("/api/sessions/{session_id}/runner/start")
     async def runner_start(session_id: str) -> JSONResponse:
         try:
             await registry.start_runner(session_id)
         except SessionNotFoundError:
             return JSONResponse({"error": "session not found"}, status_code=404)
+        except HistoryNotReadyError:
+            return JSONResponse({"error": "market data is still preparing"}, status_code=409)
         return JSONResponse({"ok": True})
 
     @r.post("/api/sessions/{session_id}/runner/stop")
@@ -814,6 +832,8 @@ def build_control_router(registry: SessionRegistry, codex_service: CodexService)
             await registry.restart_runner(session_id)
         except SessionNotFoundError:
             return JSONResponse({"error": "session not found"}, status_code=404)
+        except HistoryNotReadyError:
+            return JSONResponse({"error": "market data is still preparing"}, status_code=409)
         return JSONResponse({"ok": True})
 
     @r.get("/api/sessions/{session_id}/runner/logs")
