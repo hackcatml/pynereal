@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Iterable, Sequence
 
 from pynecore.core.ohlcv_file import OHLCVReader, OHLCVWriter
 from pynecore.types.ohlcv import OHLCV
+
+
+_CACHE_WRITE_LOCK = threading.RLock()
 
 
 def init_cache(db_path: Path) -> None:
@@ -110,21 +114,22 @@ def upsert_bars(
     ]
     if not rows:
         return
-    with sqlite3.connect(db_path) as conn:
-        conn.executemany(
-            """
-            INSERT INTO bars (provider, exchange, symbol, timeframe, ts, open, high, low, close, volume)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(provider, exchange, symbol, timeframe, ts)
-            DO UPDATE SET
-                open = excluded.open,
-                high = excluded.high,
-                low = excluded.low,
-                close = excluded.close,
-                volume = excluded.volume
-            """,
-            rows,
-        )
+    with _CACHE_WRITE_LOCK:
+        with sqlite3.connect(db_path, timeout=30.0) as conn:
+            conn.executemany(
+                """
+                INSERT INTO bars (provider, exchange, symbol, timeframe, ts, open, high, low, close, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(provider, exchange, symbol, timeframe, ts)
+                DO UPDATE SET
+                    open = excluded.open,
+                    high = excluded.high,
+                    low = excluded.low,
+                    close = excluded.close,
+                    volume = excluded.volume
+                """,
+                rows,
+            )
 
 
 def import_from_ohlcv(
