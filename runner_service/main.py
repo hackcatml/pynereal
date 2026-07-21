@@ -40,6 +40,7 @@ TELEGRAM_ENABLED: bool = False
 WEBHOOK_URL: str = ""
 TELEGRAM_TOKEN: str = ""
 TELEGRAM_CHAT_ID: str = ""
+SUPPRESS_EXTERNAL_NOTIFICATIONS: bool = False
 DEFAULT_WEBHOOK_REQUEST_TIMEOUT = (5, 10)
 HYPERLIQUID_WEBHOOK_REQUEST_TIMEOUT = (5, 30)
 TELEGRAM_REQUEST_TIMEOUT = (5, 10)
@@ -270,6 +271,8 @@ def on_plotchar_event(plotchar_data):
 
 def on_alert_event(message: str, runner: ScriptRunner):
     """Callback for alert events - webhook/telegram notifications"""
+    if SUPPRESS_EXTERNAL_NOTIFICATIONS:
+        return
     script = runner.script
 
     # Per-session overrides (from the hub's webhook_config WS message) take
@@ -302,6 +305,8 @@ def on_alert_event(message: str, runner: ScriptRunner):
 
 def on_ai_event(instruction: str, order, bar_time: int, runner: ScriptRunner):
     """Queue one deterministic AI instruction event for a realtime order fill."""
+    if SUPPRESS_EXTERNAL_NOTIFICATIONS:
+        return
     instruction = str(instruction or "").strip()
     if not instruction or getattr(runner.script, "pre_run", False):
         return
@@ -643,6 +648,7 @@ async def main():
 
     global SCRIPT_PATH, SCRIPT_HASH_PATH, DATA_WS, PLOT_PATH, SESSION_ID
     global WEBHOOK_ENABLED, TELEGRAM_ENABLED, WEBHOOK_URL, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+    global SUPPRESS_EXTERNAL_NOTIFICATIONS
     SCRIPT_PATH = script_path
     SESSION_ID = _resolve(args.session_id, "PYNEREAL_SESSION_ID", None, default="default")
 
@@ -751,8 +757,17 @@ async def main():
                     await ws.send(json.dumps({"type": "script_modified"}))
                     clear_local_state()
                     write_script_hashes(SCRIPT_HASH_PATH, current_hashes)
+                elif (
+                    mtype == "prerun_ready_after_history_download"
+                    and msg.get("history_resync")
+                ):
+                    # The data window changed with an unchanged script. Drop the
+                    # hub's cached markers so this full replay rebuilds only the
+                    # markers inside the new window.
+                    await ws.send(json.dumps({"type": "reset_history"}))
+                    clear_local_state()
             except Exception as e:
-                print(f"[runner] Failed to send script_modified (prerun): {e}")
+                print(f"[runner] Failed to prepare chart refresh (prerun): {e}")
 
             # Ready runner + stream
             result = ready_scrip_runner(script_path, ohlcv_path, toml_path)
@@ -790,8 +805,26 @@ async def main():
                 # markers. prerun_range stays size-1: the last open bar is still left for
                 # run_ready, so no spurious last-bar alert fires (its fill bar isn't stepped).
                 runner.script.pre_run = False
-            await asyncio.to_thread(run_prerun_steps, runner, prerun_range)
+            SUPPRESS_EXTERNAL_NOTIFICATIONS = bool(
+                mtype == "prerun_ready_after_history_download"
+                and msg.get("history_resync")
+            )
+            try:
+                await asyncio.to_thread(run_prerun_steps, runner, prerun_range)
+            finally:
+                SUPPRESS_EXTERNAL_NOTIFICATIONS = False
             pending_full_reemit = False
+
+            # The re-sync plot.csv and historical markers are complete. Reload chart
+            # pages now so an earlier runner-connected reload cannot leave stale data.
+            if (
+                mtype == "prerun_ready_after_history_download"
+                and msg.get("history_resync")
+            ):
+                try:
+                    await ws.send(json.dumps({"type": "chart_reset"}))
+                except Exception as e:
+                    print(f"[runner] Failed to send chart_reset: {e}")
 
             # First pre_run done -> tell the hub the chart plots are ready (LED green).
             if not ready_sent:

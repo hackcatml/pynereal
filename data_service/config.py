@@ -8,6 +8,7 @@ import shutil
 import tomllib
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from pynecore.cli.app import app_state
@@ -104,6 +105,25 @@ def sanitize_manual_alert_triggers(raw: object) -> list[dict]:
     return triggers
 
 
+def validate_history_since(raw: object) -> str:
+    """Validate a history_since value for the dashboard edit endpoint: a UTC
+    date or datetime only, e.g. '2026-05-01' or '2026-06-01 07:30'. Raises
+    ValueError otherwise.
+
+    The looser forms Add session accepts (a number of days back, 'continue',
+    empty) are intentionally rejected here — the edit UI is date-only. A naive
+    value is treated as UTC downstream (see file_update_loop)."""
+    value = str(raw or "").strip()
+    if not value:
+        raise ValueError("history_since is required (e.g. 2026-05-01 or 2026-06-01 07:30, UTC)")
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        raise ValueError(
+            "history_since must be a UTC date like 2026-05-01 or 2026-06-01 07:30")
+    return value
+
+
 def sanitize_market_type(raw: object) -> str:
     value = str(raw or "").strip().lower()
     if value in {"spot", "linear", "inverse"}:
@@ -122,7 +142,6 @@ class SessionSpec:
     history_since: str
     script_name: str
     webhook: dict  # {"enabled": bool, "telegram_notification": bool}  (decision 8-1)
-    autostart_runner: bool = False  # start the runner automatically on hub boot
     market_type: str = ""
     manual_alert_templates: list[dict] = field(default_factory=list)
     manual_alert_triggers: list[dict] = field(default_factory=list)
@@ -155,7 +174,6 @@ class SessionSpec:
                 "telegram_token": (webhook.get("telegram_token") or ""),
                 "telegram_chat_id": (webhook.get("telegram_chat_id") or ""),
             },
-            autostart_runner=bool(d.get("autostart_runner", False)),
             market_type=sanitize_market_type(d.get("market_type")),
             manual_alert_templates=sanitize_manual_alert_templates(d.get("manual_alert_templates")),
             manual_alert_triggers=sanitize_manual_alert_triggers(d.get("manual_alert_triggers")),
@@ -181,7 +199,18 @@ class SessionSpec:
             id=self.id, provider=self.provider, exchange=self.exchange,
             symbol=self.symbol, timeframe=self.timeframe,
             history_since=self.history_since, script_name=self.script_name,
-            webhook=wh, autostart_runner=self.autostart_runner,
+            webhook=wh,
+            market_type=self.market_type,
+            manual_alert_templates=[dict(t) for t in self.manual_alert_templates],
+            manual_alert_triggers=[dict(t) for t in self.manual_alert_triggers],
+        )
+
+    def with_history_since(self, history_since: str) -> "SessionSpec":
+        return SessionSpec(
+            id=self.id, provider=self.provider, exchange=self.exchange,
+            symbol=self.symbol, timeframe=self.timeframe,
+            history_since=history_since, script_name=self.script_name,
+            webhook=dict(self.webhook),
             market_type=self.market_type,
             manual_alert_templates=[dict(t) for t in self.manual_alert_templates],
             manual_alert_triggers=[dict(t) for t in self.manual_alert_triggers],
@@ -192,7 +221,7 @@ class SessionSpec:
             id=self.id, provider=self.provider, exchange=self.exchange,
             symbol=self.symbol, timeframe=self.timeframe,
             history_since=self.history_since, script_name=self.script_name,
-            webhook=dict(self.webhook), autostart_runner=self.autostart_runner,
+            webhook=dict(self.webhook),
             market_type=self.market_type,
             manual_alert_templates=sanitize_manual_alert_templates(templates),
             manual_alert_triggers=[dict(t) for t in self.manual_alert_triggers],
@@ -203,7 +232,7 @@ class SessionSpec:
             id=self.id, provider=self.provider, exchange=self.exchange,
             symbol=self.symbol, timeframe=self.timeframe,
             history_since=self.history_since, script_name=self.script_name,
-            webhook=dict(self.webhook), autostart_runner=self.autostart_runner,
+            webhook=dict(self.webhook),
             market_type=self.market_type,
             manual_alert_templates=[dict(t) for t in self.manual_alert_templates],
             manual_alert_triggers=sanitize_manual_alert_triggers(triggers),
@@ -219,7 +248,6 @@ class SessionSpec:
             "history_since": self.history_since,
             "script_name": self.script_name,
             "webhook": dict(self.webhook),
-            "autostart_runner": self.autostart_runner,
             "manual_alert_templates": [dict(t) for t in self.manual_alert_templates],
             "manual_alert_triggers": [dict(t) for t in self.manual_alert_triggers],
         }

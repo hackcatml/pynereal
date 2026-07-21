@@ -189,7 +189,6 @@ symbol = "BTC/USDT:USDT"
 timeframe = "1m"
 history_since = "2026-06-10"
 script_name = "demo/demo_1m.py"
-autostart_runner = false
 
 [session.webhook]
 enabled = false

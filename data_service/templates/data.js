@@ -181,21 +181,22 @@ App.data = {
     controller.activeSeries.update(linePoint);
     controller.lastHadValue = true;
   },
-  async loadTradeHistory() {
+  async loadTradeHistory(generation = App.state.loadGeneration) {
     const state = App.state;
     const collections = App.collections;
     const chart = App.chart;
-    if (!state.runnerConnected) return;
+    if (!state.runnerConnected || generation !== state.loadGeneration) return;
     try {
+      const resp = await fetch(`${App.config.apiBase}/trades`);
+      const trades = await resp.json();
+      if (generation !== state.loadGeneration) return;
+
       collections.markers.length = 0;
       collections.markerKeys.clear();
       collections.entryMarkerData.length = 0;
       collections.closeMarkerData.length = 0;
       collections.entryPriceKeys.clear();
       collections.closePriceKeys.clear();
-
-      const resp = await fetch(`${App.config.apiBase}/trades`);
-      const trades = await resp.json();
 
       trades.forEach(msg => {
         if (state.firstBarTime !== null && msg.time < state.firstBarTime) {
@@ -261,17 +262,18 @@ App.data = {
       console.error("Failed to load trade history:", e);
     }
   },
-  async loadPlotcharHistory() {
+  async loadPlotcharHistory(generation = App.state.loadGeneration) {
     const state = App.state;
     const collections = App.collections;
     const chart = App.chart;
-    if (!state.runnerConnected) return;
+    if (!state.runnerConnected || generation !== state.loadGeneration) return;
     try {
-      collections.plotcharMarkers.length = 0;
-      collections.plotcharMarkerKeys.clear();
-
       const resp = await fetch(`${App.config.apiBase}/plotchar`);
       const plotchars = await resp.json();
+      if (generation !== state.loadGeneration) return;
+
+      collections.plotcharMarkers.length = 0;
+      collections.plotcharMarkerKeys.clear();
 
       plotchars.forEach(msg => {
         if (state.firstBarTime !== null && msg.time < state.firstBarTime) {
@@ -309,15 +311,17 @@ App.data = {
       console.error("Failed to load plotchar history:", e);
     }
   },
-  async loadPlotData() {
+  async loadPlotData(generation = App.state.loadGeneration) {
     const state = App.state;
     const collections = App.collections;
     const chart = App.chart;
-    if (!state.runnerConnected) return;
+    if (!state.runnerConnected || generation !== state.loadGeneration) return;
     for (let i = 0; i < 30; i++) {
+      if (generation !== state.loadGeneration) return;
       try {
         const resp = await fetch(`${App.config.apiBase}/plot?limit=100000`);
         const plots = await resp.json();
+        if (generation !== state.loadGeneration) return;
 
         if (Array.isArray(plots) && plots.length > 0) {
           const pendingSeriesData = [];
@@ -354,10 +358,19 @@ App.data = {
       return;
     }
     state.initialLoadInProgress = true;
+    // snapshot the generation; a resetChartState (e.g. chart_reset) bumps it and
+    // this loop bails so only the newest loader touches the chart
+    const gen = state.loadGeneration;
     for (let i = 0; i < 30; i++) {
+      if (gen !== state.loadGeneration) {
+        return;
+      }
       try {
         const resp = await fetch(`${App.config.apiBase}/ohlcv?limit=100000`);
         const data = await resp.json();
+        if (gen !== state.loadGeneration) {
+          return;
+        }
         if (Array.isArray(data) && data.length > 0) {
           const cleanData = data.filter(d => d && d.time != null && d.open != null && d.high != null &&
             d.low != null && d.close != null);
@@ -414,9 +427,17 @@ App.data = {
             state.lastOhlcv = data[data.length - 1];
           }
 
-          await this.loadTradeHistory();
-          await this.loadPlotcharHistory();
-          await this.loadPlotData();
+          if (gen !== state.loadGeneration) {
+            return;
+          }
+          await this.loadTradeHistory(gen);
+          if (gen !== state.loadGeneration) return;
+          await this.loadPlotcharHistory(gen);
+          if (gen !== state.loadGeneration) return;
+          await this.loadPlotData(gen);
+          if (gen !== state.loadGeneration) {
+            return;
+          }
           if (App.ui && App.ui.applyManualAlertTriggerState) {
             App.ui.applyManualAlertTriggerState(App.state.manualAlertTriggers || []);
           }

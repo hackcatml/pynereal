@@ -64,7 +64,8 @@ class Feed:
         self.spec = spec
         self.paths = FeedPaths.build(spec)
         self.state = DataState()
-        self.tasks: List[Any] = []
+        self.tasks: Dict[str, Any] = {}
+        self.history_ready_event = asyncio.Event()
         self.collector_error: Optional[str] = None
         self._history_start_mtime: Optional[float] = None
         self._history_start_time: Optional[int] = None
@@ -96,7 +97,7 @@ class Feed:
             await session.send_to_runners(payload)
 
     def history_ready(self) -> bool:
-        return self.paths.ohlcv_path.exists()
+        return self.history_ready_event.is_set()
 
     def history_start_time(self) -> Optional[int]:
         path = self.paths.ohlcv_path
@@ -134,7 +135,7 @@ class Feed:
     def collector_status(self) -> str:
         if self.collector_error:
             return "error"
-        if self.tasks and any(not t.done() for t in self.tasks):
+        if self.tasks and any(not t.done() for t in self.tasks.values()):
             return "running"
         return "stopped"
 
@@ -161,6 +162,7 @@ class Session:
         # Drives the dashboard LED: connected-but-prerunning = "starting" (amber),
         # ready = "running" (green).
         self.runner_ready = False
+        self.history_resync_pending = False
         self.chart_info: Dict[str, Any] = {
             "exchange": spec.exchange,
             "symbol": spec.symbol,
@@ -245,6 +247,9 @@ class Session:
                 async with self.feed.state.lock:
                     pending_prerun_event = self.feed.state.pending_prerun_event
                 if pending_prerun_event is not None:
+                    pending_prerun_event = dict(pending_prerun_event)
+                    if self.history_resync_pending:
+                        pending_prerun_event["history_resync"] = True
                     await ws_manager.send(ws, pending_prerun_event)
 
                 self.client_roles[ws] = role
@@ -269,6 +274,7 @@ class Session:
         elif msg_type == "runner_ready":
             # Runner finished its first pre_run -> flip the LED to green.
             self.runner_ready = True
+            self.history_resync_pending = False
             await self._notify_status()
 
         elif msg_type == "last_bar_open_fix":
@@ -396,6 +402,13 @@ class Session:
                 self.chart_info["script_source_name"] = None
                 self.chart_info["script_source"] = ""
                 await self.send_to_charts({"type": "script_modified"})
+
+        elif msg_type == "chart_reset":
+            # Data window changed (history_since edit): the runner has finished
+            # regenerating plot.csv and re-emitting markers, so tell chart pages to
+            # drop stale series and reload from the fresh files. Caches were already
+            # cleared via the reset_history above.
+            await self.send_to_charts({"type": "chart_reset"})
 
         elif msg_type == "ack_prerun_ready_after_history_download":
             # No-op: with a shared feed the pending event must reach every session's

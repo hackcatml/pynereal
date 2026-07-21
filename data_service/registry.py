@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import traceback
+from dataclasses import replace
 from typing import Awaitable, Callable, Dict, List, Optional
 
 from config import MAX_SESSIONS, FeedSpec, SessionSpec, save_sessions
@@ -23,6 +24,10 @@ class SessionExistsError(Exception):
 
 
 class SessionNotFoundError(Exception):
+    pass
+
+
+class HistoryNotReadyError(Exception):
     pass
 
 
@@ -117,18 +122,32 @@ class SessionRegistry:
     # ------------------------------------------------------------------
     # Feed lifecycle (shared data layer)
     # ------------------------------------------------------------------
+    def _start_file_update_task(
+        self,
+        feed: Feed,
+        *,
+        history_ready_event: asyncio.Event | None = None,
+    ) -> asyncio.Task:
+        spec = feed.spec
+        history_ready_event = history_ready_event or feed.history_ready_event
+        task = asyncio.create_task(self._guard_feed(feed, "file_update_loop", file_update_loop(
+            config=spec, ohlcv_path=feed.paths.ohlcv_path, toml_path=feed.paths.toml_path,
+            state=feed.state, emit_event=feed.emit_event,
+            history_ready_event=history_ready_event,
+        )))
+        feed.tasks["file_update_loop"] = task
+        return task
+
     def _start_feed_tasks(self, feed: Feed) -> None:
         spec = feed.spec
-        feed.tasks = [
-            asyncio.create_task(self._guard_feed(feed, "watch_trades_loop", watch_trades_loop(
+        feed.tasks = {
+            "watch_trades_loop": asyncio.create_task(self._guard_feed(feed, "watch_trades_loop", watch_trades_loop(
                 spec.exchange, spec.symbol, spec.timeframe, feed.state, feed.broadcast_bar,
                 market_type=spec.market_type))),
-            asyncio.create_task(self._guard_feed(feed, "fix_missing_bars_loop", fix_missing_bars_loop(
+            "fix_missing_bars_loop": asyncio.create_task(self._guard_feed(feed, "fix_missing_bars_loop", fix_missing_bars_loop(
                 spec.exchange, spec.timeframe, feed.state))),
-            asyncio.create_task(self._guard_feed(feed, "file_update_loop", file_update_loop(
-                config=spec, ohlcv_path=feed.paths.ohlcv_path, toml_path=feed.paths.toml_path,
-                state=feed.state, emit_event=feed.emit_event))),
-        ]
+        }
+        self._start_file_update_task(feed)
 
     async def _guard_feed(self, feed: Feed, name: str, coro) -> None:
         try:
@@ -154,12 +173,44 @@ class SessionRegistry:
     async def _teardown_feed_if_idle(self, feed: Feed) -> None:
         if feed.subscribers:
             return
-        for t in feed.tasks:
+        tasks = list(feed.tasks.values())
+        for t in tasks:
             t.cancel()
-        if feed.tasks:
-            await asyncio.gather(*feed.tasks, return_exceptions=True)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        feed.tasks.clear()
         self.feeds.pop(feed.spec.id, None)
         print(f"[registry] feed torn down (idle): {feed.spec.id}")
+
+    async def _restart_file_update(self, feed: Feed) -> None:
+        task = feed.tasks.pop("file_update_loop", None)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        if (feed.collector_error or "").startswith("file_update_loop:"):
+            feed.collector_error = None
+        async with feed.state.lock:
+            feed.state.pending_prerun_event = None
+
+        feed.history_ready_event.clear()
+        task = self._start_file_update_task(
+            feed,
+            history_ready_event=feed.history_ready_event,
+        )
+        ready_wait = asyncio.create_task(feed.history_ready_event.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {task, ready_wait},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if ready_wait not in done:
+                raise RuntimeError(feed.collector_error or "file update stopped before history was ready")
+        finally:
+            if not ready_wait.done():
+                ready_wait.cancel()
+            await asyncio.gather(ready_wait, return_exceptions=True)
+        print(f"[registry] file updater restarted: {feed.spec.id}")
 
     # ------------------------------------------------------------------
     # Session lifecycle
@@ -237,6 +288,45 @@ class SessionRegistry:
         await session.push_webhook_config()
         await self.notify_hub()
         return dict(session.spec.webhook)
+
+    async def update_history_since(self, session_id: str, history_since: str) -> None:
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise SessionNotFoundError(session_id)
+        feed = session.feed
+        # The ohlcv file is shared per feed, so every session on this market
+        # has to move to the new start together.
+        targets = list(feed.subscribers.values())
+        if all(s.spec.history_since == history_since for s in targets):
+            return
+
+        previous = [(s, s.spec) for s in targets]
+        for s in targets:
+            s.spec = s.spec.with_history_since(history_since)
+        try:
+            self._persist()
+        except Exception:
+            for s, spec in previous:
+                s.spec = spec
+            raise
+
+        # Runners must not hold the ohlcv file while file_update_loop
+        # regenerates it, and the strategies have to recompute over the new
+        # window anyway — stop them, restart only the file updater, bring them back.
+        running = [
+            s for s in targets
+            if self.supervisor.status(s.spec.id) in ("running", "starting")
+        ]
+        for s in running:
+            await self.supervisor.stop(s.spec.id)
+
+        feed.spec = replace(feed.spec, history_since=history_since)
+        await self._restart_file_update(feed)
+
+        for s in running:
+            s.history_resync_pending = True
+            await self.supervisor.start(s.spec, s.paths)
+        await self.notify_hub()
 
     async def update_manual_alert_templates(self, session_id: str, templates: list[dict]) -> list[dict]:
         session = self.sessions.get(session_id)
@@ -350,6 +440,8 @@ class SessionRegistry:
         session = self.sessions.get(session_id)
         if session is None:
             raise SessionNotFoundError(session_id)
+        if not session.feed.history_ready():
+            raise HistoryNotReadyError(session_id)
         await self.supervisor.start(session.spec, session.paths)
 
     async def stop_runner(self, session_id: str) -> None:
@@ -363,6 +455,8 @@ class SessionRegistry:
         session = self.sessions.get(session_id)
         if session is None:
             raise SessionNotFoundError(session_id)
+        if not session.feed.history_ready():
+            raise HistoryNotReadyError(session_id)
         await self.supervisor.restart(session.spec, session.paths)
 
     # ------------------------------------------------------------------
@@ -379,13 +473,6 @@ class SessionRegistry:
             self._persist()
         except Exception as e:
             print(f"[registry] initial persist failed: {e}")
-        # Autostart runners for sessions flagged autostart_runner (decision: boot restore).
-        for s in list(self.sessions.values()):
-            if s.spec.autostart_runner:
-                try:
-                    await self.start_runner(s.spec.id)
-                except Exception as e:
-                    print(f"[registry] autostart runner failed for {s.spec.id}: {e}")
 
     async def shutdown(self) -> None:
         await self.supervisor.shutdown()
@@ -395,7 +482,7 @@ class SessionRegistry:
             t.cancel()
         if logo_tasks:
             await asyncio.gather(*logo_tasks, return_exceptions=True)
-        all_tasks = [t for feed in self.feeds.values() for t in feed.tasks]
+        all_tasks = [t for feed in self.feeds.values() for t in feed.tasks.values()]
         for t in all_tasks:
             t.cancel()
         if all_tasks:

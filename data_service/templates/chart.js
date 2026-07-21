@@ -876,6 +876,9 @@ App.chart = {
     const collections = App.collections;
     state.initialLoadDone = false;
     state.initialLoadInProgress = false;
+    // invalidate any loadInitialWithRetry still in flight so it won't append to
+    // (or race with) the reload that typically follows this reset
+    state.loadGeneration++;
     if (resetCandles) {
       this.candleSeries.setData([]);
       this.volumeSeries.setData([]);
