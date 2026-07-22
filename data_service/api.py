@@ -20,6 +20,7 @@ from pynecore.core.csv_file import CSVReader
 import ccxt.pro as ccxtpro
 
 from ai.provider.codex_service import CodexService
+from calendar_store import CalendarEventStore, CalendarStoreError
 from registry import (
     HistoryNotReadyError,
     SessionExistsError,
@@ -586,7 +587,11 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
 # ----------------------------------------------------------------------
 # Control-plane router:  /api/sessions ...
 # ----------------------------------------------------------------------
-def build_control_router(registry: SessionRegistry, codex_service: CodexService) -> APIRouter:
+def build_control_router(
+    registry: SessionRegistry,
+    codex_service: CodexService,
+    calendar_store: CalendarEventStore,
+) -> APIRouter:
     r = APIRouter()
 
     @r.get("/api/ai/chat")
@@ -747,6 +752,39 @@ def build_control_router(registry: SessionRegistry, codex_service: CodexService)
         )
         await registry.hub_ws.broadcast_json({"type": "ai_chat_updated"})
         return JSONResponse({"ok": True})
+
+    @r.get("/api/calendar/events")
+    async def list_calendar_events(
+        start: str | None = None,
+        end: str | None = None,
+    ) -> JSONResponse:
+        try:
+            events = calendar_store.list_events(
+                active_session_ids=registry.sessions,
+                start=start,
+                end=end,
+            )
+        except CalendarStoreError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+        result = []
+        for event in events:
+            session = registry.get(event["session_id"])
+            if session is None:
+                continue
+            item = dict(event)
+            item.update({
+                "exchange": session.spec.exchange,
+                "symbol": session.spec.symbol,
+                "timeframe": session.spec.timeframe,
+                "script_name": session.spec.script_name,
+                "script_title": str(session.chart_info.get("script_title") or ""),
+            })
+            result.append(item)
+        return JSONResponse({
+            "events": result,
+            "updated_at": calendar_store.updated_at,
+        })
 
     @r.get("/api/sessions")
     def list_sessions() -> JSONResponse:

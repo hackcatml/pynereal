@@ -12,6 +12,7 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from ai.provider.codex_service import CodexService
+from calendar_store import CalendarEventStore
 from config import ensure_provider_config, load_hub_config, load_initial_sessions
 from registry import SessionRegistry
 from api import build_session_api_router, build_control_router, build_validation_router
@@ -27,10 +28,14 @@ _BANNER = r"""
 """
 
 
-def build_app(registry: SessionRegistry, codex_service: CodexService) -> FastAPI:
+def build_app(
+    registry: SessionRegistry,
+    codex_service: CodexService,
+    calendar_store: CalendarEventStore,
+) -> FastAPI:
     app = FastAPI()
     app.include_router(build_ui_router())
-    app.include_router(build_control_router(registry, codex_service))
+    app.include_router(build_control_router(registry, codex_service, calendar_store))
     app.include_router(build_validation_router())
     app.include_router(build_session_api_router(registry))
 
@@ -120,16 +125,20 @@ async def main() -> None:
     cfg = load_hub_config()
     specs = load_initial_sessions()
     registry = SessionRegistry(port=cfg.port)
+    calendar_store = CalendarEventStore(
+        _PROJECT_ROOT / "workdir" / "config" / "calendar_events.json"
+    )
     codex_service = CodexService(
         project_root=_PROJECT_ROOT,
         session_registry=registry,
+        calendar_store=calendar_store,
     )
     registry.set_ai_instruction_handler(codex_service.handle_strategy_instruction)
     try:
         await codex_service.start()
     except Exception as e:
         print(f"[ai] Codex app-server startup failed: {e}")
-    app = build_app(registry, codex_service)
+    app = build_app(registry, codex_service, calendar_store)
 
     await registry.start_all(specs)
     heartbeat = asyncio.create_task(_hub_status_heartbeat(registry))

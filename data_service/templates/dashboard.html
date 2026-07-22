@@ -4,10 +4,16 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=24" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=28" />
 </head>
 <body>
   <header class="topbar">
+    <button id="hub-menu-button" class="hub-menu-button" type="button"
+            aria-label="Open menu" aria-expanded="false" aria-controls="hub-menu">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 6h16M4 12h16M4 18h16" />
+      </svg>
+    </button>
     <h1>PyneReal&nbsp;Hub</h1>
     <span id="conn-status" class="conn">connecting…</span>
     <div id="hub-clock" class="hub-clock" aria-label="Local time">
@@ -17,6 +23,20 @@
       <span class="clock-center" aria-hidden="true"></span>
     </div>
   </header>
+
+  <div id="hub-menu-backdrop" class="hub-menu-backdrop" aria-hidden="true"></div>
+  <aside id="hub-menu" class="hub-menu" aria-hidden="true">
+    <div class="hub-menu-header">
+      <span>PyneReal Hub</span>
+      <button id="hub-menu-close" class="hub-menu-close" type="button" aria-label="Close menu">&times;</button>
+    </div>
+    <nav class="hub-menu-nav" aria-label="Hub menu">
+      <button id="hub-calendar-open" class="hub-menu-item" type="button">
+        <span class="hub-menu-emoji" aria-hidden="true">&#x1f4c5;</span>
+        <span>Calendar</span>
+      </button>
+    </nav>
+  </aside>
 
   <section class="card collapsible collapsed" id="add-card">
     <h2 class="card-toggle" id="add-toggle" role="button" tabindex="0" aria-expanded="false" aria-controls="add-body">
@@ -88,6 +108,35 @@
     </table>
     <div id="empty" class="muted">No sessions yet. Add one above.</div>
   </section>
+
+  <div id="calendar-modal" class="modal calendar-modal hidden" aria-hidden="true">
+    <div class="modal-box calendar-modal-box" role="dialog" aria-modal="true" aria-labelledby="calendar-title">
+      <div class="modal-header calendar-modal-header">
+        <span id="calendar-title">Calendar</span>
+        <button id="calendar-close" class="btn" type="button" title="Close" aria-label="Close">&times;</button>
+      </div>
+      <div class="calendar-body">
+        <div class="calendar-toolbar">
+          <div class="calendar-month-nav">
+            <button id="calendar-prev" class="btn btn-icon" type="button" title="Previous month" aria-label="Previous month">&#8249;</button>
+            <button id="calendar-today" class="btn" type="button">Today</button>
+            <button id="calendar-next" class="btn btn-icon" type="button" title="Next month" aria-label="Next month">&#8250;</button>
+          </div>
+          <h2 id="calendar-month-title"></h2>
+          <span id="calendar-updated" class="calendar-updated"></span>
+        </div>
+        <div class="calendar-weekdays" aria-hidden="true">
+          <span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span>
+          <span>Thu</span><span>Fri</span><span>Sat</span>
+        </div>
+        <div id="calendar-grid" class="calendar-grid"></div>
+        <section id="calendar-details" class="calendar-details hidden" aria-live="polite">
+          <h3 id="calendar-detail-date"></h3>
+          <div id="calendar-detail-events" class="calendar-detail-events"></div>
+        </section>
+      </div>
+    </div>
+  </div>
 
   <div id="log-modal" class="modal hidden" aria-hidden="true">
     <div class="modal-box">
@@ -208,6 +257,6 @@
     </form>
   </div>
 
-  <script src="/static/dashboard.js?v=28"></script>
+  <script src="/static/dashboard.js?v=32"></script>
 </body>
 </html>

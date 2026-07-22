@@ -109,6 +109,26 @@ internals when an existing script already provides the required data.
 - Setting a trigger does not send an alert immediately. The existing data
   service fires and removes it when market price touches the persisted line.
 
+## Session Calendar
+
+- For every calendar or schedule request, call `get_calendar_context` first.
+- Resolve company, asset, symbol, exchange, timeframe, or strategy descriptions
+  to active sessions yourself. Never ask the user to provide a session ID.
+- If the user asks to check schedules without naming a target, research every
+  active session. Unless a period is specified, use today through 90 days ahead.
+- Start with `https://www.saveticker.com/calendar` as a discovery source. A
+  logged-out title is only a lead: verify the date and details through public web
+  search or an authoritative company IR, filing, exchange, or economic-calendar
+  source before saving it.
+- If SaveTicker has no relevant event for a session, search the web directly.
+- Never invent an event, date, time, or source. Omit uncertain events and state
+  uncertainty in the chat response when it matters.
+- Save researched results with `replace_calendar_events`. Include an empty
+  `events` array for a researched session with no relevant event so stale entries
+  in that date range are removed. Events outside the requested range are kept.
+- Calendar changes are allowed only when the user asks to check, refresh, add,
+  update, or remove schedules. Report success only from the tool result.
+
 ## Script Contract
 
 - Put reusable Python tools in `ai/scripts/`.

@@ -43,6 +43,7 @@ The AI copilot can:
 - inspect exchange assets and derivative positions — every configured account
   at once when you don't name one;
 - set or remove persisted Manual Alert price triggers straight from chat;
+- research and maintain a shared calendar for every active trading session;
 - analyze repository files, running sessions, and public market information;
 - send a finished result to Telegram when you ask for it.
 
@@ -338,6 +339,19 @@ values:
 {"signal":"CLOSE TP3","ticker":"{{ticker}}","timeframe":"{{timeframe}}"}
 ```
 
+## Session Calendar
+
+Open the Hub menu beside the PyneReal Hub title and select **Calendar**. The
+monthly view marks dates that have schedules for active sessions; select a date
+to see the related symbol, title, details, time, and source.
+
+Calendar events are stored by data-service and shared across desktop and mobile
+browsers. Ask Dashboard AI to check or refresh schedules to populate it. A
+request without a named session covers every active session and defaults to the
+next 90 days. The AI uses SaveTicker calendar titles as discovery leads, searches
+the web when no matching title exists, and stores only events whose dates and
+details can be supported by a public source.
+
 ## AI Setup & Details
 
 PyneReal currently integrates OpenAI Codex through a local Codex app-server and
@@ -358,6 +372,8 @@ Dashboard AI can:
   information;
 - set or remove persisted Manual Alert price triggers, including adding a
   missing template when its title and JSON message are explicitly supplied;
+- research verified schedules for active sessions and persist them in the
+  shared Hub calendar;
 - send a completed result to the fixed Telegram destination when explicitly
   requested; and
 - edit existing files only under `workdir/`, `modules/`, and

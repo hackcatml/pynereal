@@ -16,8 +16,504 @@
     "(max-width: 720px) and (hover: hover) and (pointer: fine)",
   );
   const mobileAiQuery = window.matchMedia("(max-width: 720px)");
+  const mobileHubQuery = window.matchMedia("(max-width: 720px)");
+  const calendarColors = [
+    "#58a6ff", "#3fb950", "#f2cc60", "#f778ba", "#bc8cff",
+    "#ff7b72", "#56d4dd", "#d29922", "#a5d6ff", "#7ee787",
+  ];
+  let calendarMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+  let calendarEvents = [];
+  let calendarSelectedDate = null;
+  let calendarRequestSeq = 0;
+  let lastCalendarTouchAt = 0;
+  let calendarSuppressTapUntil = 0;
+  let calendarOpenTimer = null;
+  let calendarCloseTimer = null;
 
   const el = (id) => document.getElementById(id);
+
+  function calendarDateKey(value) {
+    const d = value instanceof Date ? value : new Date(value);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }
+
+  function calendarDateFromKey(key) {
+    const parts = String(key || "").split("-").map(Number);
+    if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part))) return null;
+    return new Date(parts[0], parts[1] - 1, parts[2]);
+  }
+
+  function calendarGridRange() {
+    const start = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), 1);
+    start.setDate(start.getDate() - start.getDay());
+    const end = new Date(start);
+    end.setDate(end.getDate() + 41);
+    return { start, end };
+  }
+
+  function calendarSessionColor(sessionId) {
+    let hash = 0;
+    const value = String(sessionId || "");
+    for (let i = 0; i < value.length; i++) hash = ((hash << 5) - hash + value.charCodeAt(i)) | 0;
+    return calendarColors[Math.abs(hash) % calendarColors.length];
+  }
+
+  function isCalendarOpen() {
+    return !el("calendar-modal").classList.contains("hidden");
+  }
+
+  function openHubMenu() {
+    const menu = el("hub-menu");
+    const backdrop = el("hub-menu-backdrop");
+    menu.classList.remove("dragging");
+    menu.style.transform = "";
+    backdrop.classList.remove("dragging");
+    backdrop.style.opacity = "";
+    menu.classList.add("open");
+    backdrop.classList.add("open");
+    menu.setAttribute("aria-hidden", "false");
+    backdrop.setAttribute("aria-hidden", "false");
+    el("hub-menu-button").setAttribute("aria-expanded", "true");
+  }
+
+  function closeHubMenu() {
+    const menu = el("hub-menu");
+    const backdrop = el("hub-menu-backdrop");
+    menu.classList.remove("dragging", "open");
+    menu.style.transform = "";
+    backdrop.classList.remove("dragging", "open");
+    backdrop.style.opacity = "";
+    menu.setAttribute("aria-hidden", "true");
+    backdrop.setAttribute("aria-hidden", "true");
+    el("hub-menu-button").setAttribute("aria-expanded", "false");
+  }
+
+  async function openCalendar() {
+    closeHubMenu();
+    closeAiChat();
+    if (calendarCloseTimer !== null) {
+      clearTimeout(calendarCloseTimer);
+      calendarCloseTimer = null;
+    }
+    if (calendarOpenTimer !== null) {
+      clearTimeout(calendarOpenTimer);
+      calendarOpenTimer = null;
+    }
+    calendarSelectedDate = null;
+    const modal = el("calendar-modal");
+    const box = modal.querySelector(".calendar-modal-box");
+    modal.classList.remove(
+      "calendar-closing",
+      "calendar-dragging",
+      "calendar-swipe-closing",
+      "calendar-opening",
+      "hidden",
+    );
+    modal.classList.add("calendar-opening");
+    calendarOpenTimer = window.setTimeout(finishCalendarOpening, 230);
+    modal.style.background = "";
+    box.style.transform = "";
+    box.style.transition = "";
+    el("calendar-details").classList.add("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    lockBodyScroll();
+    renderCalendar();
+    await loadCalendarEvents();
+  }
+
+  function finishCalendarOpening() {
+    if (calendarOpenTimer !== null) {
+      clearTimeout(calendarOpenTimer);
+      calendarOpenTimer = null;
+    }
+    el("calendar-modal").classList.remove("calendar-opening");
+  }
+
+  function finishCalendarClose() {
+    const modal = el("calendar-modal");
+    const box = modal.querySelector(".calendar-modal-box");
+    modal.classList.remove(
+      "calendar-closing",
+      "calendar-dragging",
+      "calendar-swipe-closing",
+      "calendar-opening",
+    );
+    modal.classList.add("hidden");
+    modal.style.background = "";
+    box.style.transform = "";
+    box.style.transition = "";
+    modal.setAttribute("aria-hidden", "true");
+    calendarCloseTimer = null;
+    calendarOpenTimer = null;
+    unlockBodyScroll();
+  }
+
+  function closeCalendar(options = {}) {
+    if (!isCalendarOpen()) return;
+    const modal = el("calendar-modal");
+    if (modal.classList.contains("calendar-closing")) return;
+    const fromDrag = options && options.fromDrag === true;
+    finishCalendarOpening();
+    calendarRequestSeq += 1;
+    if (!mobileHubQuery.matches) {
+      finishCalendarClose();
+      return;
+    }
+    const box = modal.querySelector(".calendar-modal-box");
+    modal.classList.remove("calendar-dragging");
+    if (fromDrag) {
+      modal.classList.add("calendar-swipe-closing");
+      box.style.transition = "transform 220ms cubic-bezier(0.55, 0, 1, 0.45)";
+      window.requestAnimationFrame(() => {
+        box.style.transform = "translateY(100dvh)";
+      });
+    } else {
+      box.style.transform = "";
+      box.style.transition = "";
+    }
+    modal.classList.add("calendar-closing");
+    calendarCloseTimer = window.setTimeout(finishCalendarClose, 220);
+  }
+
+  async function loadCalendarEvents() {
+    const seq = ++calendarRequestSeq;
+    const range = calendarGridRange();
+    const query = new URLSearchParams({
+      start: calendarDateKey(range.start),
+      end: calendarDateKey(range.end),
+    });
+    try {
+      const payload = await api(`/api/calendar/events?${query}`);
+      if (seq !== calendarRequestSeq) return;
+      calendarEvents = Array.isArray(payload.events) ? payload.events : [];
+      const updated = String(payload.updated_at || "").trim();
+      el("calendar-updated").textContent = updated
+        ? `Updated ${new Date(updated).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`
+        : "";
+      renderCalendar();
+    } catch (error) {
+      if (seq !== calendarRequestSeq) return;
+      calendarEvents = [];
+      el("calendar-updated").textContent = "Unavailable";
+      renderCalendar();
+    }
+  }
+
+  function renderCalendar() {
+    const title = calendarMonth.toLocaleDateString([], { year: "numeric", month: "long" });
+    el("calendar-month-title").textContent = title;
+
+    const byDate = new Map();
+    calendarEvents.forEach((event) => {
+      const key = String(event.date || "");
+      if (!byDate.has(key)) byDate.set(key, []);
+      byDate.get(key).push(event);
+    });
+
+    const range = calendarGridRange();
+    const todayKey = calendarDateKey(new Date());
+    const cells = [];
+    for (let offset = 0; offset < 42; offset++) {
+      const day = new Date(range.start);
+      day.setDate(day.getDate() + offset);
+      const key = calendarDateKey(day);
+      const events = byDate.get(key) || [];
+      const outside = day.getMonth() !== calendarMonth.getMonth();
+      const classes = [
+        "calendar-day",
+        outside ? "outside" : "",
+        key === todayKey ? "today" : "",
+        key === calendarSelectedDate ? "selected" : "",
+      ].filter(Boolean).join(" ");
+      const sessionIds = [...new Set(events.map((event) => String(event.session_id || "")))];
+      const dots = sessionIds.slice(0, 4).map((sessionId) => (
+        `<span class="calendar-event-dot" style="--event-color:${calendarSessionColor(sessionId)}"></span>`
+      )).join("");
+      const eventRow = events.length
+        ? `<span class="calendar-day-event-row">${dots}<span class="calendar-event-count">${events.length}</span></span>`
+        : "";
+      cells.push(
+        `<button class="${classes}" type="button" data-calendar-date="${key}" ` +
+        `aria-label="${esc(day.toLocaleDateString())}, ${events.length} events">` +
+        `<span class="calendar-day-number">${day.getDate()}</span>${eventRow}</button>`,
+      );
+    }
+    el("calendar-grid").innerHTML = cells.join("");
+    renderCalendarDetails();
+  }
+
+  function renderCalendarDetails() {
+    const section = el("calendar-details");
+    if (!calendarSelectedDate) {
+      section.classList.add("hidden");
+      return;
+    }
+    const selected = calendarDateFromKey(calendarSelectedDate);
+    el("calendar-detail-date").textContent = selected
+      ? selected.toLocaleDateString([], { weekday: "long", year: "numeric", month: "long", day: "numeric" })
+      : calendarSelectedDate;
+    const events = calendarEvents.filter((event) => event.date === calendarSelectedDate);
+    if (!events.length) {
+      el("calendar-detail-events").innerHTML = `<div class="calendar-empty-day">No events</div>`;
+      section.classList.remove("hidden");
+      return;
+    }
+    el("calendar-detail-events").innerHTML = events.map((event) => {
+      const sessionLabel = [
+        event.symbol || event.session_id,
+        String(event.exchange || "").toUpperCase(),
+        event.timeframe || "",
+      ].filter(Boolean).join(" · ");
+      const time = event.time
+        ? `<span class="calendar-event-time">${esc(event.time)}${event.timezone ? ` ${esc(event.timezone)}` : ""}</span>`
+        : "";
+      const details = event.details
+        ? `<div class="calendar-event-details">${esc(event.details)}</div>`
+        : "";
+      const source = event.source_url
+        ? `<a class="calendar-event-source" href="${esc(event.source_url)}" target="_blank" rel="noopener noreferrer">${esc(event.source_name || "Source")}</a>`
+        : "";
+      return `<article class="calendar-event-card" style="--event-color:${calendarSessionColor(event.session_id)}">` +
+        `<div class="calendar-event-session">${esc(sessionLabel)}</div>` +
+        `<div class="calendar-event-title">${esc(event.title || "Schedule")}${time}</div>` +
+        `${details}${source}</article>`;
+    }).join("");
+    section.classList.remove("hidden");
+  }
+
+  function moveCalendarMonth(delta, animate = false) {
+    calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + delta, 1);
+    calendarSelectedDate = null;
+    calendarEvents = [];
+    renderCalendar();
+    if (animate) {
+      const grid = el("calendar-grid");
+      const className = delta > 0 ? "calendar-month-next" : "calendar-month-prev";
+      grid.classList.remove("calendar-month-next", "calendar-month-prev");
+      void grid.offsetWidth;
+      grid.classList.add(className);
+      window.setTimeout(() => grid.classList.remove(className), 190);
+    }
+    loadCalendarEvents();
+  }
+
+  function initMobileHubMenuSwipe() {
+    const menu = el("hub-menu");
+    const backdrop = el("hub-menu-backdrop");
+    let drag = null;
+    let suppressClickUntil = 0;
+
+    menu.addEventListener("pointerdown", (event) => {
+      if (!mobileHubQuery.matches || !menu.classList.contains("open") || !event.isPrimary) return;
+      drag = {
+        id: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        dx: 0,
+        axis: null,
+      };
+      try { menu.setPointerCapture(event.pointerId); } catch {}
+    });
+    menu.addEventListener("pointermove", (event) => {
+      if (!drag || event.pointerId !== drag.id) return;
+      const dx = event.clientX - drag.startX;
+      const dy = event.clientY - drag.startY;
+      if (!drag.axis) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < 8) return;
+        drag.axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+      }
+      if (drag.axis !== "x") return;
+      event.preventDefault();
+      drag.dx = Math.min(0, dx);
+      if (Math.abs(drag.dx) > 8) suppressClickUntil = Date.now() + 400;
+      const width = Math.max(1, menu.getBoundingClientRect().width);
+      menu.classList.add("dragging");
+      backdrop.classList.add("dragging");
+      menu.style.transform = `translateX(${drag.dx}px)`;
+      backdrop.style.opacity = String(Math.max(0, 1 - Math.abs(drag.dx) / width));
+    }, { passive: false });
+    function endMenuDrag(event, cancelled = false) {
+      if (!drag || (event && event.pointerId !== drag.id)) return;
+      const current = drag;
+      drag = null;
+      try { menu.releasePointerCapture(current.id); } catch {}
+      menu.classList.remove("dragging");
+      backdrop.classList.remove("dragging");
+      const shouldClose = !cancelled && current.axis === "x" && current.dx < -64;
+      if (shouldClose) {
+        closeHubMenu();
+        return;
+      }
+      menu.style.transform = current.axis === "x" ? "translateX(0)" : "";
+      backdrop.style.opacity = "";
+      window.setTimeout(() => {
+        if (!menu.classList.contains("open")) return;
+        menu.style.transform = "";
+      }, 190);
+    }
+    menu.addEventListener("pointerup", (event) => endMenuDrag(event));
+    menu.addEventListener("pointercancel", (event) => endMenuDrag(event, true));
+    menu.addEventListener("click", (event) => {
+      if (Date.now() >= suppressClickUntil) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, true);
+  }
+
+  function initMobileCalendarGestures() {
+    const modal = el("calendar-modal");
+    const box = modal.querySelector(".calendar-modal-box");
+    const header = modal.querySelector(".calendar-modal-header");
+    const grid = el("calendar-grid");
+    let closeDrag = null;
+    let monthDrag = null;
+
+    header.addEventListener("pointerdown", (event) => {
+      if (!mobileHubQuery.matches || !event.isPrimary) return;
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      closeDrag = {
+        id: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        dy: 0,
+        active: false,
+      };
+      try { header.setPointerCapture(event.pointerId); } catch {}
+    });
+    header.addEventListener("pointermove", (event) => {
+      if (!closeDrag || event.pointerId !== closeDrag.id) return;
+      const dx = event.clientX - closeDrag.startX;
+      const dy = event.clientY - closeDrag.startY;
+      if (!closeDrag.active) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < 8) return;
+        if (dy <= 0 || Math.abs(dy) <= Math.abs(dx)) {
+          closeDrag = null;
+          return;
+        }
+        closeDrag.active = true;
+        finishCalendarOpening();
+        modal.classList.add("calendar-dragging");
+      }
+      event.preventDefault();
+      closeDrag.dy = Math.max(0, dy);
+      box.style.transform = `translateY(${closeDrag.dy}px)`;
+    }, { passive: false });
+    function endCalendarCloseDrag(event, cancelled = false) {
+      if (!closeDrag || (event && event.pointerId !== closeDrag.id)) return;
+      const current = closeDrag;
+      closeDrag = null;
+      try { header.releasePointerCapture(current.id); } catch {}
+      modal.classList.remove("calendar-dragging");
+      if (!cancelled && current.active && current.dy > 100) {
+        closeCalendar({ fromDrag: true });
+        return;
+      }
+      if (!current.active) return;
+      box.style.transition = "transform 180ms ease";
+      box.style.transform = "translateY(0)";
+      window.setTimeout(() => {
+        if (!isCalendarOpen() || modal.classList.contains("calendar-closing")) return;
+        box.style.transition = "";
+        box.style.transform = "";
+      }, 190);
+    }
+    header.addEventListener("pointerup", (event) => endCalendarCloseDrag(event));
+    header.addEventListener("pointercancel", (event) => endCalendarCloseDrag(event, true));
+
+    grid.addEventListener("pointerdown", (event) => {
+      if (!mobileHubQuery.matches || !event.isPrimary) return;
+      monthDrag = {
+        id: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        dx: 0,
+        axis: null,
+      };
+    });
+    window.addEventListener("pointermove", (event) => {
+      if (!monthDrag || event.pointerId !== monthDrag.id) return;
+      const dx = event.clientX - monthDrag.startX;
+      const dy = event.clientY - monthDrag.startY;
+      if (!monthDrag.axis) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < 8) return;
+        monthDrag.axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+        if (monthDrag.axis === "x") {
+          try { grid.setPointerCapture(event.pointerId); } catch {}
+        }
+      }
+      if (monthDrag.axis !== "x") return;
+      event.preventDefault();
+      monthDrag.dx = dx;
+      calendarSuppressTapUntil = Date.now() + 500;
+    }, { passive: false });
+    function endMonthDrag(event) {
+      if (!monthDrag || (event && event.pointerId !== monthDrag.id)) return;
+      const current = monthDrag;
+      monthDrag = null;
+      try { grid.releasePointerCapture(current.id); } catch {}
+      if (current.axis !== "x" || Math.abs(current.dx) < 48) return;
+      moveCalendarMonth(current.dx < 0 ? 1 : -1, true);
+    }
+    window.addEventListener("pointerup", endMonthDrag);
+    window.addEventListener("pointercancel", endMonthDrag);
+    grid.addEventListener("click", (event) => {
+      if (Date.now() >= calendarSuppressTapUntil) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, true);
+  }
+
+  function initHubMenuCalendar() {
+    const calendarModal = el("calendar-modal");
+    calendarModal.addEventListener("touchend", (event) => {
+      if (Date.now() < calendarSuppressTapUntil) {
+        lastCalendarTouchAt = 0;
+        event.preventDefault();
+        return;
+      }
+      const button = event.target && event.target.closest
+        ? event.target.closest("button")
+        : null;
+      if (!button || !calendarModal.contains(button)) return;
+
+      const now = Date.now();
+      const isDoubleTap = now - lastCalendarTouchAt < 360;
+      lastCalendarTouchAt = now;
+      if (!isDoubleTap) return;
+      event.preventDefault();
+      button.click();
+    }, { passive: false });
+
+    el("hub-menu-button").addEventListener("click", openHubMenu);
+    el("hub-menu-close").addEventListener("click", closeHubMenu);
+    el("hub-menu-backdrop").addEventListener("click", closeHubMenu);
+    el("hub-calendar-open").addEventListener("click", openCalendar);
+    el("calendar-close").addEventListener("click", closeCalendar);
+    calendarModal.addEventListener("click", (event) => {
+      if (event.target === calendarModal) closeCalendar();
+    });
+    el("calendar-prev").addEventListener("click", () => moveCalendarMonth(-1));
+    el("calendar-next").addEventListener("click", () => moveCalendarMonth(1));
+    el("calendar-today").addEventListener("click", () => {
+      const now = new Date();
+      calendarMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+      calendarSelectedDate = null;
+      calendarEvents = [];
+      renderCalendar();
+      loadCalendarEvents();
+    });
+    el("calendar-grid").addEventListener("click", (event) => {
+      const day = event.target && event.target.closest
+        ? event.target.closest("[data-calendar-date]")
+        : null;
+      if (!day) return;
+      calendarSelectedDate = day.dataset.calendarDate || null;
+      renderCalendar();
+    });
+    initMobileHubMenuSwipe();
+    initMobileCalendarGestures();
+  }
 
   function updateHubClock() {
     const clock = el("hub-clock");
@@ -2171,6 +2667,8 @@
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
+    closeHubMenu();
+    if (isCalendarOpen()) closeCalendar();
     closeScriptDropdown();
     closeDataSinceTooltips();
     if (!el("log-modal").classList.contains("hidden")) closeLogs();
@@ -2498,6 +2996,8 @@
           syncAiChatState({ allowImport: false });
         } else if (msg.type === "ai_prefs_updated") {
           applyAiPrefs(msg.model, msg.effort);
+        } else if (msg.type === "calendar_updated") {
+          if (isCalendarOpen()) loadCalendarEvents();
         }
       } catch {}
     };
@@ -2541,6 +3041,7 @@
   });
   window.addEventListener("online", rebuildHub);
 
+  initHubMenuCalendar();
   initSessionReordering();
   initDesktopCardCarousel();
   initAiChat();
