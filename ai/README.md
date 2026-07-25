@@ -65,6 +65,11 @@ filing, exchange, or economic-calendar sources and records the supporting URL
 with every event. A general schedule request covers all active sessions and uses
 today through 90 days ahead unless the user specifies another range.
 
+Calendar event cards can start isolated read-only forecast turns. These turns
+use the shared dashboard model and effort selection but do not append messages
+to the main chat. Completed Markdown answers are persisted by event ID and
+removed automatically when the associated event no longer exists.
+
 ## Strategy Instructions
 
 Realtime `strategy.entry` and `strategy.close` orders can provide an `ai`

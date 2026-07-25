@@ -345,6 +345,12 @@ Open the Hub menu beside the PyneReal Hub title and select **Calendar**. The
 monthly view marks dates that have schedules for active sessions; select a date
 to see the related symbol, title, details, time, and source.
 
+Each event card includes a Pepe forecast control. Select it to run a read-only
+AI outlook for that event without opening or modifying the main chat. Pepe's
+eyes move while the analysis is running and the face shakes when a new result
+is ready. Select the face again to open the Markdown response, or use the
+refresh control in the response bubble to run a new outlook.
+
 Calendar events are stored by data-service and shared across desktop and mobile
 browsers. Ask Dashboard AI to check or refresh schedules to populate it. A
 request without a named session covers every active session and defaults to the

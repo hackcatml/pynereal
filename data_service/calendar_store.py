@@ -14,6 +14,7 @@ _TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 _EVENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 _CATEGORIES = {"earnings", "economic", "company", "market", "dividend", "other"}
 _MAX_EVENTS = 2000
+_MAX_FORECAST_CHARS = 40_000
 
 
 class CalendarStoreError(ValueError):
@@ -22,6 +23,10 @@ class CalendarStoreError(ValueError):
 
 def _utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _utc_now_precise() -> str:
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _date_value(raw: object, field: str) -> str:
@@ -98,10 +103,36 @@ def _sanitize_event(raw: object, *, session_id: str | None = None) -> dict[str, 
     return event
 
 
+def _sanitize_forecast(raw: object) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        raise CalendarStoreError("forecast must be an object")
+    return {
+        "answer": _text(
+            raw.get("answer"),
+            "forecast answer",
+            required=True,
+            max_length=_MAX_FORECAST_CHARS,
+        ),
+        "updated_at": _text(
+            raw.get("updated_at"),
+            "forecast updated_at",
+            required=False,
+            max_length=40,
+        ) or _utc_now_precise(),
+        "viewed_at": _text(
+            raw.get("viewed_at"),
+            "forecast viewed_at",
+            required=False,
+            max_length=40,
+        ),
+    }
+
+
 class CalendarEventStore:
     def __init__(self, path: Path) -> None:
         self.path = path.resolve()
         self._events: list[dict[str, Any]] = []
+        self._forecasts: dict[str, dict[str, str]] = {}
         self.updated_at = ""
         self._load()
 
@@ -125,6 +156,74 @@ class CalendarEventStore:
             and (start_date is None or event["date"] >= start_date)
             and (end_date is None or event["date"] <= end_date)
         ]
+
+    def get_event(
+        self,
+        event_id: str,
+        *,
+        active_session_ids: Iterable[str] | None = None,
+    ) -> dict[str, Any] | None:
+        allowed = set(active_session_ids) if active_session_ids is not None else None
+        for event in self._events:
+            if event["id"] != event_id:
+                continue
+            if allowed is not None and event["session_id"] not in allowed:
+                return None
+            return dict(event)
+        return None
+
+    def get_forecast(self, event_id: str) -> dict[str, str] | None:
+        forecast = self._forecasts.get(event_id)
+        return dict(forecast) if forecast is not None else None
+
+    def set_forecast(
+        self,
+        event_id: str,
+        answer: str,
+        *,
+        active_session_ids: Iterable[str],
+    ) -> dict[str, str]:
+        event = self.get_event(event_id, active_session_ids=active_session_ids)
+        if event is None:
+            raise CalendarStoreError("calendar event is not active or no longer exists")
+        forecast = _sanitize_forecast({"answer": answer})
+        previous_forecasts = self._forecasts
+        previous_updated_at = self.updated_at
+        self._forecasts = {**self._forecasts, event_id: forecast}
+        self.updated_at = _utc_now()
+        try:
+            self._save()
+        except Exception:
+            self._forecasts = previous_forecasts
+            self.updated_at = previous_updated_at
+            raise
+        return dict(forecast)
+
+    def mark_forecast_viewed(
+        self,
+        event_id: str,
+        *,
+        active_session_ids: Iterable[str],
+    ) -> dict[str, str]:
+        event = self.get_event(event_id, active_session_ids=active_session_ids)
+        forecast = self._forecasts.get(event_id)
+        if event is None or forecast is None:
+            raise CalendarStoreError("calendar forecast is not active or no longer exists")
+        if forecast.get("viewed_at"):
+            return dict(forecast)
+
+        viewed_forecast = {**forecast, "viewed_at": _utc_now_precise()}
+        previous_forecasts = self._forecasts
+        previous_updated_at = self.updated_at
+        self._forecasts = {**self._forecasts, event_id: viewed_forecast}
+        self.updated_at = _utc_now()
+        try:
+            self._save()
+        except Exception:
+            self._forecasts = previous_forecasts
+            self.updated_at = previous_updated_at
+            raise
+        return dict(viewed_forecast)
 
     def replace_range(
         self,
@@ -183,15 +282,23 @@ class CalendarEventStore:
                 event["date"], event.get("time") or "", event["session_id"], event["title"]
             ),
         )
+        next_forecasts = {
+            event_id: forecast
+            for event_id, forecast in self._forecasts.items()
+            if event_id in unique
+        }
         next_updated_at = _utc_now()
         previous_events = self._events
+        previous_forecasts = self._forecasts
         previous_updated_at = self.updated_at
         self._events = next_events
+        self._forecasts = next_forecasts
         self.updated_at = next_updated_at
         try:
             self._save()
         except Exception:
             self._events = previous_events
+            self._forecasts = previous_forecasts
             self.updated_at = previous_updated_at
             raise
         return {
@@ -222,6 +329,18 @@ class CalendarEventStore:
                     event["date"], event.get("time") or "", event["session_id"], event["title"]
                 ),
             )
+            valid_event_ids = {event["id"] for event in self._events}
+            raw_forecasts = payload.get("forecasts", {}) if isinstance(payload, dict) else {}
+            forecasts: dict[str, dict[str, str]] = {}
+            if isinstance(raw_forecasts, dict):
+                for event_id, raw_forecast in raw_forecasts.items():
+                    if event_id not in valid_event_ids:
+                        continue
+                    try:
+                        forecasts[event_id] = _sanitize_forecast(raw_forecast)
+                    except CalendarStoreError as exc:
+                        print(f"[calendar] skipped invalid stored forecast: {exc}")
+            self._forecasts = forecasts
             self.updated_at = str(payload.get("updated_at") or "") if isinstance(payload, dict) else ""
         except Exception as exc:
             print(f"[calendar] failed to load {self.path.name}: {exc}")
@@ -229,9 +348,10 @@ class CalendarEventStore:
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "schema_version": 1,
+            "schema_version": 3,
             "updated_at": self.updated_at,
             "events": self._events,
+            "forecasts": self._forecasts,
         }
         tmp = self.path.with_name(self.path.name + ".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

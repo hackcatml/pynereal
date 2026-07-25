@@ -22,27 +22,35 @@ body {
   html,
   body,
   .log-content,
-  .calendar-body {
+  .calendar-body,
+  .calendar-forecast-content,
+  .calendar-forecast-error {
     scrollbar-color: #3a4350 #0b0e13;
     scrollbar-width: thin;
   }
   html::-webkit-scrollbar,
   body::-webkit-scrollbar,
   .log-content::-webkit-scrollbar,
-  .calendar-body::-webkit-scrollbar {
+  .calendar-body::-webkit-scrollbar,
+  .calendar-forecast-content::-webkit-scrollbar,
+  .calendar-forecast-error::-webkit-scrollbar {
     width: 10px;
     height: 10px;
   }
   html::-webkit-scrollbar-track,
   body::-webkit-scrollbar-track,
   .log-content::-webkit-scrollbar-track,
-  .calendar-body::-webkit-scrollbar-track {
+  .calendar-body::-webkit-scrollbar-track,
+  .calendar-forecast-content::-webkit-scrollbar-track,
+  .calendar-forecast-error::-webkit-scrollbar-track {
     background: #0b0e13;
   }
   html::-webkit-scrollbar-thumb,
   body::-webkit-scrollbar-thumb,
   .log-content::-webkit-scrollbar-thumb,
-  .calendar-body::-webkit-scrollbar-thumb {
+  .calendar-body::-webkit-scrollbar-thumb,
+  .calendar-forecast-content::-webkit-scrollbar-thumb,
+  .calendar-forecast-error::-webkit-scrollbar-thumb {
     background: #3a4350;
     border: 2px solid #0b0e13;
     border-radius: 999px;
@@ -50,7 +58,9 @@ body {
   html::-webkit-scrollbar-thumb:hover,
   body::-webkit-scrollbar-thumb:hover,
   .log-content::-webkit-scrollbar-thumb:hover,
-  .calendar-body::-webkit-scrollbar-thumb:hover {
+  .calendar-body::-webkit-scrollbar-thumb:hover,
+  .calendar-forecast-content::-webkit-scrollbar-thumb:hover,
+  .calendar-forecast-error::-webkit-scrollbar-thumb:hover {
     background: #4a5565;
   }
   html::-webkit-scrollbar-corner,
@@ -804,12 +814,175 @@ tr:last-child td { border-bottom: none; }
   gap: 8px;
 }
 .calendar-event-card {
+  position: relative;
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-left: 3px solid var(--event-color, #58a6ff);
   border-radius: 6px;
   background: #11161d;
 }
+.calendar-event-card.has-forecast { padding-right: 54px; }
+.calendar-forecast-pepe {
+  position: absolute;
+  top: 7px;
+  right: 8px;
+  z-index: 2;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.45));
+  -webkit-tap-highlight-color: transparent;
+}
+.calendar-forecast-pepe:disabled {
+  cursor: default;
+  filter: grayscale(0.7) opacity(0.45);
+}
+.calendar-forecast-pepe .pepe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.calendar-forecast-pepe.forecast-running .pepe-pupil {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: calendar-pepe-eye-roll 600ms linear infinite;
+}
+.calendar-forecast-pepe.forecast-unread {
+  animation: calendar-pepe-ready-shake 480ms ease-in-out infinite;
+}
+@keyframes calendar-pepe-eye-roll {
+  0%, 100% { transform: translate(0, 0); }
+  25% { transform: translate(2.5px, -0.7px); }
+  50% { transform: translate(0, 1.1px); }
+  75% { transform: translate(-2.5px, -0.7px); }
+}
+@keyframes calendar-pepe-ready-shake {
+  0%, 100% { transform: rotate(0deg); }
+  20% { transform: rotate(-7deg); }
+  40% { transform: rotate(7deg); }
+  60% { transform: rotate(-5deg); }
+  80% { transform: rotate(5deg); }
+}
+/* tiny "alien speech" bubble floating above a ready Pepe — signals he has a
+   forecast to say. Lives inside the button, so it shakes along while unread
+   and sits still once viewed. Green ties it to Pepe; tail points down at him. */
+.pepe-say {
+  position: absolute;
+  bottom: calc(100% - 8px);
+  right: 1px;
+  z-index: 3;
+  padding: 1px 6px 2px;
+  border: 1px solid #2f5c28;
+  border-radius: 9px 9px 9px 3px;
+  background: #5b9e4d;
+  color: #f2fbec;
+  font-size: 10px;
+  line-height: 1.35;
+  letter-spacing: 1.5px;
+  white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+.pepe-say::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  bottom: -4px;
+  width: 9px;
+  height: 7px;
+  background: #5b9e4d;
+  /* straight edge on the right, slanted edge on the left (apex bottom-right) */
+  clip-path: polygon(0 0, 100% 0, 100% 100%);
+}
+.calendar-forecast-bubble {
+  position: absolute;
+  right: 50px;
+  bottom: calc(100% - 20px);
+  z-index: 12;
+  width: min(430px, calc(100% - 16px));
+  padding: 11px 12px;
+  overflow: visible;
+  border: 1px solid #3a4350;
+  border-radius: 6px;
+  background: #1b222c;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+/* tail leaning toward the Pepe button, which sits below-right of the bubble.
+   An asymmetric right-triangle (vertical right edge, slanted left edge) reads
+   as a directional lean toward the face — a rotated square only ever looks
+   like a symmetric nub, however much it is turned. */
+.calendar-forecast-bubble::before {
+  content: "";
+  position: absolute;
+  right: 10px;
+  bottom: -11px;
+  width: 22px;
+  height: 14px;
+  background: #1b222c;
+  clip-path: polygon(0 0, 100% 0, 100% 100%);
+}
+.calendar-forecast-bubble-header {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 9px;
+  padding-bottom: 8px;
+  /* divider separating the title from the forecast body */
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+  color: #f2f5f8;
+  font-size: 11px;
+  font-weight: 600;
+}
+.calendar-forecast-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease;
+}
+.calendar-forecast-refresh svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.calendar-forecast-refresh:hover {
+  color: #f2f5f8;
+  background: rgba(255, 255, 255, 0.07);
+}
+.calendar-forecast-bubble .calendar-forecast-content,
+.calendar-forecast-bubble .calendar-forecast-error {
+  max-height: min(350px, 48vh);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+.calendar-forecast-content { min-width: 0; }
+.calendar-forecast-error { color: #ff7b72; line-height: 1.45; }
 .calendar-event-session {
   color: var(--muted);
   font-size: 11px;
@@ -1463,6 +1636,10 @@ tr:last-child td { border-bottom: none; }
   .calendar-day-event-row { left: 5px; right: 5px; bottom: 6px; gap: 3px; }
   .calendar-event-dot { width: 5px; height: 5px; }
   .calendar-event-count { font-size: 9px; }
+  .calendar-forecast-bubble {
+    right: 44px;
+    width: calc(100% - 62px);
+  }
   .clock-hour { height: 8px; }
   .clock-minute { height: 11px; }
   .clock-second { height: 13px; }

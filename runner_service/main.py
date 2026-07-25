@@ -44,6 +44,8 @@ SUPPRESS_EXTERNAL_NOTIFICATIONS: bool = False
 DEFAULT_WEBHOOK_REQUEST_TIMEOUT = (5, 10)
 HYPERLIQUID_WEBHOOK_REQUEST_TIMEOUT = (5, 30)
 TELEGRAM_REQUEST_TIMEOUT = (5, 10)
+TELEGRAM_CONNECT_ATTEMPTS = 3
+TELEGRAM_CONNECT_RETRY_DELAYS = (1, 2)
 
 # Event queue for trade events
 trade_event_queue = deque()
@@ -132,7 +134,34 @@ def send_webhook_message(webhook_url: str, message: str, *, script_title: str | 
     import json
     import re
     import datetime
+    import time
     import requests
+
+    def is_connection_stage_error(error: BaseException) -> bool:
+        pending: list[BaseException] = [error]
+        seen: set[int] = set()
+        while pending:
+            current = pending.pop()
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            if isinstance(current, requests.exceptions.ConnectTimeout):
+                return True
+            if type(current).__name__ in {
+                "ConnectTimeoutError",
+                "NameResolutionError",
+                "NewConnectionError",
+            }:
+                return True
+            for related in (
+                current.__cause__,
+                current.__context__,
+                getattr(current, "reason", None),
+            ):
+                if isinstance(related, BaseException):
+                    pending.append(related)
+            pending.extend(arg for arg in current.args if isinstance(arg, BaseException))
+        return False
 
     # Wrap unquoted message fields so JSON parsing succeeds.
     s = re.sub(r'"message"\s*:\s*(?![{["0-9])([A-Za-z][A-Za-z0-9 ]*)',
@@ -183,12 +212,22 @@ def send_webhook_message(webhook_url: str, message: str, *, script_title: str | 
             ),
             # "parse_mode": "Markdown"  # 굵게/이탤릭 등 쓰고 싶으면 선택
         }
-        try:
-            response = requests.get(url, params=payload, timeout=TELEGRAM_REQUEST_TIMEOUT)
-            response.raise_for_status()
-            print("Telegram response:", response.json())
-        except Exception as e:
-            print(f"Telegram notification error: {e}")
+        for attempt in range(1, TELEGRAM_CONNECT_ATTEMPTS + 1):
+            try:
+                response = requests.get(url, params=payload, timeout=TELEGRAM_REQUEST_TIMEOUT)
+                response.raise_for_status()
+                print("Telegram response:", response.json())
+                break
+            except Exception as e:
+                if not is_connection_stage_error(e) or attempt == TELEGRAM_CONNECT_ATTEMPTS:
+                    print(f"Telegram notification error: {e}")
+                    break
+                delay = TELEGRAM_CONNECT_RETRY_DELAYS[attempt - 1]
+                print(
+                    f"Telegram connection error: {e}; "
+                    f"retrying in {delay}s ({attempt}/{TELEGRAM_CONNECT_ATTEMPTS})"
+                )
+                time.sleep(delay)
 
 
 def clear_local_state() -> None:

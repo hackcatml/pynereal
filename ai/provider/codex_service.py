@@ -67,8 +67,9 @@ DEFAULT_DEVELOPER_INSTRUCTIONS = (
     "In the final response, do not list the procedure; present the lookup result immediately. "
     "Only when the user explicitly asks to send the result to Telegram, complete the lookup and "
     "then call send_telegram_message with a concise plain-text result. Report successful Telegram "
-    "delivery only when the tool returns success. For every calendar or schedule request, first "
-    "call get_calendar_context. If the user does not name a session, research every active session. "
+    "delivery only when the tool returns success. For requests to check, refresh, add, update, or "
+    "remove calendar schedules, first call get_calendar_context. If the user does not name a "
+    "session, research every active session. "
     "Resolve company, asset, symbol, exchange, timeframe, or strategy descriptions to the exact "
     "session IDs returned by the tool and never ask the user for a session ID. Treat "
     "https://www.saveticker.com/calendar as a discovery source for event titles, then verify dates "
@@ -76,7 +77,9 @@ DEFAULT_DEVELOPER_INSTRUCTIONS = (
     "calendar sources. If SaveTicker has no relevant item, search the web directly. Never invent an "
     "event or date. Unless the user specifies a period, refresh today through 90 days ahead. After "
     "research, call replace_calendar_events for every requested session, including an empty event "
-    "array for a researched session with no relevant schedule, and report only tool-confirmed saves."
+    "array for a researched session with no relevant schedule, and report only tool-confirmed saves. "
+    "A server-provided calendar event forecast request is analysis-only: research and assess the "
+    "specified event without calling calendar mutation tools or changing any account or repository state."
 )
 _MAX_PERSISTED_MESSAGES = 200
 _MAX_CONTEXT_MESSAGES = 12
