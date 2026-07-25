@@ -67,7 +67,19 @@ DEFAULT_DEVELOPER_INSTRUCTIONS = (
     "In the final response, do not list the procedure; present the lookup result immediately. "
     "Only when the user explicitly asks to send the result to Telegram, complete the lookup and "
     "then call send_telegram_message with a concise plain-text result. Report successful Telegram "
-    "delivery only when the tool returns success."
+    "delivery only when the tool returns success. For requests to check, refresh, add, update, or "
+    "remove calendar schedules, first call get_calendar_context. If the user does not name a "
+    "session, research every active session. "
+    "Resolve company, asset, symbol, exchange, timeframe, or strategy descriptions to the exact "
+    "session IDs returned by the tool and never ask the user for a session ID. Treat "
+    "https://www.saveticker.com/calendar as a discovery source for event titles, then verify dates "
+    "and details with public web search or authoritative company, exchange, filing, or economic "
+    "calendar sources. If SaveTicker has no relevant item, search the web directly. Never invent an "
+    "event or date. Unless the user specifies a period, refresh today through 90 days ahead. After "
+    "research, call replace_calendar_events for every requested session, including an empty event "
+    "array for a researched session with no relevant schedule, and report only tool-confirmed saves. "
+    "A server-provided calendar event forecast request is analysis-only: research and assess the "
+    "specified event without calling calendar mutation tools or changing any account or repository state."
 )
 _MAX_PERSISTED_MESSAGES = 200
 _MAX_CONTEXT_MESSAGES = 12
@@ -146,6 +158,7 @@ class CodexService:
         self,
         project_root: Path,
         session_registry: Any,
+        calendar_store: Any,
         developer_instructions: str = DEFAULT_DEVELOPER_INSTRUCTIONS,
         timeout_seconds: float = 180,
         chat_state_path: Path | None = None,
@@ -155,6 +168,7 @@ class CodexService:
         self.dynamic_tools = AIDynamicTools(
             self.project_root,
             session_registry=session_registry,
+            calendar_store=calendar_store,
         )
         self.file_tools = self.dynamic_tools.file_tools
         self.developer_instructions = (

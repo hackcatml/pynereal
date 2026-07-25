@@ -8,6 +8,7 @@ tools used by Dashboard AI workflows under `ai/workflows/`.
 - `dynamic_tools.py` routes app-server tool calls.
 - `file_tools.py` restricts explicit file edits to approved repository paths.
 - `manual_alert_tool.py` manages persisted Manual Alert templates and triggers.
+- `calendar_tool.py` manages verified, persisted session calendar events.
 - `telegram_tool.py` sends explicitly requested results through server-held
   credentials.
 

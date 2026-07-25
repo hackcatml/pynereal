@@ -20,6 +20,7 @@ from pynecore.core.csv_file import CSVReader
 import ccxt.pro as ccxtpro
 
 from ai.provider.codex_service import CodexService
+from calendar_store import CalendarEventStore, CalendarStoreError
 from registry import (
     HistoryNotReadyError,
     SessionExistsError,
@@ -92,6 +93,36 @@ def _render_ai_markdown(content: str) -> str:
     return _AI_MARKDOWN.render(normalized).replace(
         f" {_AI_STRONG_WORD_BOUNDARY_TOKEN}",
         "",
+    )
+
+
+def _calendar_forecast_prompt(event: dict[str, Any], session: Session) -> str:
+    context = {
+        "event_id": event["id"],
+        "date": event["date"],
+        "time": event.get("time"),
+        "timezone": event.get("timezone"),
+        "title": event["title"],
+        "details": event.get("details"),
+        "category": event.get("category"),
+        "source_name": event.get("source_name"),
+        "source_url": event.get("source_url"),
+        "session_id": session.spec.id,
+        "exchange": session.spec.exchange,
+        "symbol": session.spec.symbol,
+        "timeframe": session.spec.timeframe,
+        "strategy": session.chart_info.get("script_title") or session.spec.script_name,
+    }
+    return (
+        "This is a read-only forecast request launched from a verified PyneReal calendar event. "
+        "Do not add, update, or remove calendar events, do not call calendar mutation tools, and "
+        "do not change any account, file, or strategy state. Use current public information and "
+        "authoritative sources to assess the most likely outcome, meaningful upside/downside "
+        "scenarios, uncertainty, and the potential impact on the exact session symbol below. "
+        "Distinguish confirmed facts from inference. Respond in Korean Markdown and include concise "
+        "source links. Do not describe your internal procedure.\n\n"
+        f"Calendar event and session context:\n{json.dumps(context, ensure_ascii=False)}\n\n"
+        f"User request:\n{event['title']} 전망을 분석해줘."
     )
 
 
@@ -586,8 +617,13 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
 # ----------------------------------------------------------------------
 # Control-plane router:  /api/sessions ...
 # ----------------------------------------------------------------------
-def build_control_router(registry: SessionRegistry, codex_service: CodexService) -> APIRouter:
+def build_control_router(
+    registry: SessionRegistry,
+    codex_service: CodexService,
+    calendar_store: CalendarEventStore,
+) -> APIRouter:
     r = APIRouter()
+    calendar_forecast_runs: dict[str, int] = {}
 
     @r.get("/api/ai/chat")
     async def get_ai_chat() -> JSONResponse:
@@ -747,6 +783,161 @@ def build_control_router(registry: SessionRegistry, codex_service: CodexService)
         )
         await registry.hub_ws.broadcast_json({"type": "ai_chat_updated"})
         return JSONResponse({"ok": True})
+
+    @r.get("/api/calendar/events")
+    async def list_calendar_events(
+        start: str | None = None,
+        end: str | None = None,
+    ) -> JSONResponse:
+        try:
+            events = calendar_store.list_events(
+                active_session_ids=registry.sessions,
+                start=start,
+                end=end,
+            )
+        except CalendarStoreError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+        result = []
+        for event in events:
+            session = registry.get(event["session_id"])
+            if session is None:
+                continue
+            item = dict(event)
+            item["forecast_running"] = calendar_forecast_runs.get(event["id"], 0) > 0
+            forecast = calendar_store.get_forecast(event["id"])
+            if forecast is not None:
+                item["forecast"] = {
+                    **forecast,
+                    "html": _render_ai_markdown(forecast["answer"]),
+                }
+            item.update({
+                "exchange": session.spec.exchange,
+                "symbol": session.spec.symbol,
+                "timeframe": session.spec.timeframe,
+                "script_name": session.spec.script_name,
+                "script_title": str(session.chart_info.get("script_title") or ""),
+            })
+            result.append(item)
+        return JSONResponse({
+            "events": result,
+            "updated_at": calendar_store.updated_at,
+        })
+
+    @r.post("/api/calendar/events/{event_id}/forecast")
+    async def forecast_calendar_event(event_id: str):
+        if not codex_service.enabled:
+            return JSONResponse({"error": "AI service is disabled"}, status_code=503)
+        event = calendar_store.get_event(
+            event_id,
+            active_session_ids=registry.sessions,
+        )
+        if event is None:
+            return JSONResponse({"error": "calendar event not found"}, status_code=404)
+        session = registry.get(event["session_id"])
+        if session is None:
+            return JSONResponse({"error": "calendar session is not active"}, status_code=409)
+
+        try:
+            preferences = await codex_service.chat_preferences()
+        except Exception:
+            preferences = {}
+        if not isinstance(preferences, dict):
+            preferences = {}
+        model = preferences.get("model")
+        effort = preferences.get("effort")
+        message = f"{event['title']} 전망을 분석해줘."
+        prompt = _calendar_forecast_prompt(event, session)
+
+        async def stream() -> AsyncIterator[str]:
+            conversation_id: str | None = None
+            calendar_forecast_runs[event_id] = calendar_forecast_runs.get(event_id, 0) + 1
+            try:
+                # Tell open dashboards immediately; dashboards opened later read
+                # the same state from GET /api/calendar/events.
+                await registry.hub_ws.broadcast_json({
+                    "type": "calendar_forecast_running",
+                    "event_id": event_id,
+                })
+                async for stream_event in codex_service.stream_chat(
+                    message,
+                    conversation_id=None,
+                    initial_context=prompt,
+                    model=model,
+                    effort=effort,
+                ):
+                    payload = stream_event.payload
+                    if stream_event.event == "conversation":
+                        conversation_id = str(payload.get("conversation_id") or "") or None
+                    elif stream_event.event == "done":
+                        answer = str(payload.get("answer") or "").strip()
+                        if not answer:
+                            yield _sse_event("stream_error", {"error": "AI returned an empty forecast"})
+                            return
+                        try:
+                            forecast = calendar_store.set_forecast(
+                                event_id,
+                                answer,
+                                active_session_ids=registry.sessions,
+                            )
+                        except CalendarStoreError as exc:
+                            yield _sse_event("stream_error", {"error": str(exc)})
+                            return
+                        payload = {
+                            **payload,
+                            "event_id": event_id,
+                            "answer": answer,
+                            "html": _render_ai_markdown(answer),
+                            "updated_at": forecast["updated_at"],
+                        }
+                    yield _sse_event(stream_event.event, payload)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"[calendar] forecast failed event={event_id[:8]}: {type(exc).__name__}")
+                yield _sse_event(
+                    "stream_error",
+                    {"error": f"Calendar forecast failed ({type(exc).__name__})"},
+                )
+            finally:
+                remaining = calendar_forecast_runs.get(event_id, 1) - 1
+                if remaining > 0:
+                    calendar_forecast_runs[event_id] = remaining
+                else:
+                    calendar_forecast_runs.pop(event_id, None)
+                try:
+                    await registry.hub_ws.broadcast_json({
+                        "type": "calendar_forecast_updated",
+                        "event_id": event_id,
+                    })
+                except Exception:
+                    pass
+                if conversation_id:
+                    await codex_service.reset(conversation_id)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @r.post("/api/calendar/events/{event_id}/forecast/viewed")
+    async def mark_calendar_forecast_viewed(event_id: str) -> JSONResponse:
+        try:
+            forecast = calendar_store.mark_forecast_viewed(
+                event_id,
+                active_session_ids=registry.sessions,
+            )
+        except CalendarStoreError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        await registry.hub_ws.broadcast_json({
+            "type": "calendar_forecast_updated",
+            "event_id": event_id,
+        })
+        return JSONResponse({"event_id": event_id, "viewed_at": forecast["viewed_at"]})
 
     @r.get("/api/sessions")
     def list_sessions() -> JSONResponse:

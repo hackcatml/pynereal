@@ -16,8 +16,780 @@
     "(max-width: 720px) and (hover: hover) and (pointer: fine)",
   );
   const mobileAiQuery = window.matchMedia("(max-width: 720px)");
+  const mobileHubQuery = window.matchMedia("(max-width: 720px)");
+  const calendarColors = [
+    "#58a6ff", "#3fb950", "#f2cc60", "#f778ba", "#bc8cff",
+    "#ff7b72", "#56d4dd", "#d29922", "#a5d6ff", "#7ee787",
+  ];
+  let calendarMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+  let calendarEvents = [];
+  const calendarForecastStates = new Map();
+  let calendarSelectedDate = null;
+  let calendarRequestSeq = 0;
+  let lastCalendarTouchAt = 0;
+  let calendarSuppressTapUntil = 0;
+  let calendarOpenTimer = null;
+  let calendarCloseTimer = null;
+  let registerAnimatedPepeFace = () => {};
 
   const el = (id) => document.getElementById(id);
+
+  function calendarForecastState(event) {
+    const eventId = String(event && event.id || "");
+    let state = calendarForecastStates.get(eventId);
+    if (!state) {
+      state = {
+        status: "idle",
+        answer: "",
+        html: "",
+        updatedAt: "",
+        error: "",
+        open: false,
+        viewed: false,
+      };
+      calendarForecastStates.set(eventId, state);
+    }
+    return state;
+  }
+
+  function reconcileCalendarForecasts(events) {
+    for (const event of events) {
+      const state = calendarForecastState(event);
+      // Protect only THIS client's in-flight regeneration; a "running" state
+      // set from a peer's broadcast must still be updated once the peer is done.
+      if (state.localStream) continue;
+      if (event && event.forecast_running) {
+        state.status = "running";
+        state.open = false;
+        state.viewed = false;
+        continue;
+      }
+      const forecast = event && event.forecast;
+      if (!forecast || typeof forecast !== "object") {
+        // no server forecast: clear a stale remote "running" back to idle so a
+        // failed peer regeneration doesn't leave Pepe spinning forever
+        if (state.status === "running") {
+          state.status = "idle";
+          state.open = false;
+        }
+        continue;
+      }
+      const updatedAt = String(forecast.updated_at || "");
+      const changed = state.updatedAt !== updatedAt;
+      state.status = "ready";
+      state.answer = String(forecast.answer || "");
+      state.html = String(forecast.html || "");
+      state.updatedAt = updatedAt;
+      state.error = "";
+      state.viewed = Boolean(forecast.viewed_at);
+      if (changed) state.open = false;
+    }
+  }
+
+  function calendarDateKey(value) {
+    const d = value instanceof Date ? value : new Date(value);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }
+
+  function calendarDateFromKey(key) {
+    const parts = String(key || "").split("-").map(Number);
+    if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part))) return null;
+    return new Date(parts[0], parts[1] - 1, parts[2]);
+  }
+
+  function calendarGridRange() {
+    const start = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), 1);
+    start.setDate(start.getDate() - start.getDay());
+    const end = new Date(start);
+    end.setDate(end.getDate() + 41);
+    return { start, end };
+  }
+
+  function calendarSessionColor(sessionId) {
+    let hash = 0;
+    const value = String(sessionId || "");
+    for (let i = 0; i < value.length; i++) hash = ((hash << 5) - hash + value.charCodeAt(i)) | 0;
+    return calendarColors[Math.abs(hash) % calendarColors.length];
+  }
+
+  function isCalendarOpen() {
+    return !el("calendar-modal").classList.contains("hidden");
+  }
+
+  function openHubMenu() {
+    const menu = el("hub-menu");
+    const backdrop = el("hub-menu-backdrop");
+    menu.classList.remove("dragging");
+    menu.style.transform = "";
+    backdrop.classList.remove("dragging");
+    backdrop.style.opacity = "";
+    menu.classList.add("open");
+    backdrop.classList.add("open");
+    menu.setAttribute("aria-hidden", "false");
+    backdrop.setAttribute("aria-hidden", "false");
+    el("hub-menu-button").setAttribute("aria-expanded", "true");
+  }
+
+  function closeHubMenu() {
+    const menu = el("hub-menu");
+    const backdrop = el("hub-menu-backdrop");
+    menu.classList.remove("dragging", "open");
+    menu.style.transform = "";
+    backdrop.classList.remove("dragging", "open");
+    backdrop.style.opacity = "";
+    menu.setAttribute("aria-hidden", "true");
+    backdrop.setAttribute("aria-hidden", "true");
+    el("hub-menu-button").setAttribute("aria-expanded", "false");
+  }
+
+  async function openCalendar() {
+    closeHubMenu();
+    closeAiChat();
+    if (calendarCloseTimer !== null) {
+      clearTimeout(calendarCloseTimer);
+      calendarCloseTimer = null;
+    }
+    if (calendarOpenTimer !== null) {
+      clearTimeout(calendarOpenTimer);
+      calendarOpenTimer = null;
+    }
+    calendarSelectedDate = null;
+    const modal = el("calendar-modal");
+    const box = modal.querySelector(".calendar-modal-box");
+    modal.classList.remove(
+      "calendar-closing",
+      "calendar-dragging",
+      "calendar-swipe-closing",
+      "calendar-opening",
+      "hidden",
+    );
+    modal.classList.add("calendar-opening");
+    calendarOpenTimer = window.setTimeout(finishCalendarOpening, 230);
+    modal.style.background = "";
+    box.style.transform = "";
+    box.style.transition = "";
+    el("calendar-details").classList.add("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    lockBodyScroll();
+    renderCalendar();
+    await loadCalendarEvents();
+  }
+
+  function finishCalendarOpening() {
+    if (calendarOpenTimer !== null) {
+      clearTimeout(calendarOpenTimer);
+      calendarOpenTimer = null;
+    }
+    el("calendar-modal").classList.remove("calendar-opening");
+  }
+
+  function finishCalendarClose() {
+    const modal = el("calendar-modal");
+    const box = modal.querySelector(".calendar-modal-box");
+    modal.classList.remove(
+      "calendar-closing",
+      "calendar-dragging",
+      "calendar-swipe-closing",
+      "calendar-opening",
+    );
+    modal.classList.add("hidden");
+    modal.style.background = "";
+    box.style.transform = "";
+    box.style.transition = "";
+    modal.setAttribute("aria-hidden", "true");
+    calendarCloseTimer = null;
+    calendarOpenTimer = null;
+    unlockBodyScroll();
+  }
+
+  function closeCalendar(options = {}) {
+    if (!isCalendarOpen()) return;
+    const modal = el("calendar-modal");
+    if (modal.classList.contains("calendar-closing")) return;
+    const fromDrag = options && options.fromDrag === true;
+    finishCalendarOpening();
+    calendarRequestSeq += 1;
+    if (!mobileHubQuery.matches) {
+      finishCalendarClose();
+      return;
+    }
+    const box = modal.querySelector(".calendar-modal-box");
+    modal.classList.remove("calendar-dragging");
+    if (fromDrag) {
+      modal.classList.add("calendar-swipe-closing");
+      box.style.transition = "transform 220ms cubic-bezier(0.55, 0, 1, 0.45)";
+      window.requestAnimationFrame(() => {
+        box.style.transform = "translateY(100dvh)";
+      });
+    } else {
+      box.style.transform = "";
+      box.style.transition = "";
+    }
+    modal.classList.add("calendar-closing");
+    calendarCloseTimer = window.setTimeout(finishCalendarClose, 220);
+  }
+
+  async function loadCalendarEvents() {
+    const seq = ++calendarRequestSeq;
+    const range = calendarGridRange();
+    const query = new URLSearchParams({
+      start: calendarDateKey(range.start),
+      end: calendarDateKey(range.end),
+    });
+    try {
+      const payload = await api(`/api/calendar/events?${query}`);
+      if (seq !== calendarRequestSeq) return;
+      calendarEvents = Array.isArray(payload.events) ? payload.events : [];
+      reconcileCalendarForecasts(calendarEvents);
+      const updated = String(payload.updated_at || "").trim();
+      el("calendar-updated").textContent = updated
+        ? `Updated ${new Date(updated).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`
+        : "";
+      renderCalendar();
+    } catch (error) {
+      if (seq !== calendarRequestSeq) return;
+      calendarEvents = [];
+      el("calendar-updated").textContent = "Unavailable";
+      renderCalendar();
+    }
+  }
+
+  function renderCalendar() {
+    const title = calendarMonth.toLocaleDateString([], { year: "numeric", month: "long" });
+    el("calendar-month-title").textContent = title;
+
+    const byDate = new Map();
+    calendarEvents.forEach((event) => {
+      const key = String(event.date || "");
+      if (!byDate.has(key)) byDate.set(key, []);
+      byDate.get(key).push(event);
+    });
+
+    const range = calendarGridRange();
+    const todayKey = calendarDateKey(new Date());
+    const cells = [];
+    for (let offset = 0; offset < 42; offset++) {
+      const day = new Date(range.start);
+      day.setDate(day.getDate() + offset);
+      const key = calendarDateKey(day);
+      const events = byDate.get(key) || [];
+      const outside = day.getMonth() !== calendarMonth.getMonth();
+      const classes = [
+        "calendar-day",
+        outside ? "outside" : "",
+        key === todayKey ? "today" : "",
+        key === calendarSelectedDate ? "selected" : "",
+      ].filter(Boolean).join(" ");
+      const sessionIds = [...new Set(events.map((event) => String(event.session_id || "")))];
+      const dots = sessionIds.slice(0, 4).map((sessionId) => (
+        `<span class="calendar-event-dot" style="--event-color:${calendarSessionColor(sessionId)}"></span>`
+      )).join("");
+      const eventRow = events.length
+        ? `<span class="calendar-day-event-row">${dots}<span class="calendar-event-count">${events.length}</span></span>`
+        : "";
+      cells.push(
+        `<button class="${classes}" type="button" data-calendar-date="${key}" ` +
+        `aria-label="${esc(day.toLocaleDateString())}, ${events.length} events">` +
+        `<span class="calendar-day-number">${day.getDate()}</span>${eventRow}</button>`,
+      );
+    }
+    el("calendar-grid").innerHTML = cells.join("");
+    renderCalendarDetails();
+  }
+
+  function renderCalendarDetails() {
+    const section = el("calendar-details");
+    if (!calendarSelectedDate) {
+      section.classList.add("hidden");
+      return;
+    }
+    const selected = calendarDateFromKey(calendarSelectedDate);
+    el("calendar-detail-date").textContent = selected
+      ? selected.toLocaleDateString([], { weekday: "long", year: "numeric", month: "long", day: "numeric" })
+      : calendarSelectedDate;
+    const events = calendarEvents.filter((event) => event.date === calendarSelectedDate);
+    if (!events.length) {
+      el("calendar-detail-events").innerHTML = `<div class="calendar-empty-day">No events</div>`;
+      section.classList.remove("hidden");
+      return;
+    }
+    el("calendar-detail-events").innerHTML = events.map((event) => {
+      const forecastState = calendarForecastState(event);
+      const sessionLabel = [
+        event.symbol || event.session_id,
+        String(event.exchange || "").toUpperCase(),
+        event.timeframe || "",
+      ].filter(Boolean).join(" · ");
+      const time = event.time
+        ? `<span class="calendar-event-time">${esc(event.time)}${event.timezone ? ` ${esc(event.timezone)}` : ""}</span>`
+        : "";
+      const details = event.details
+        ? `<div class="calendar-event-details">${esc(event.details)}</div>`
+        : "";
+      const source = event.source_url
+        ? `<a class="calendar-event-source" href="${esc(event.source_url)}" target="_blank" rel="noopener noreferrer">${esc(event.source_name || "Source")}</a>`
+        : "";
+      const forecastClasses = [
+        "calendar-forecast-pepe",
+        forecastState.status === "running" ? "forecast-running" : "",
+        forecastState.status === "ready" && !forecastState.viewed ? "forecast-unread" : "",
+      ].filter(Boolean).join(" ");
+      const forecastLabel = forecastState.status === "running"
+        ? `${event.title} forecast in progress`
+        : forecastState.status === "ready"
+          ? `Open ${event.title} forecast`
+          : `Forecast ${event.title}`;
+      // ready-but-not-open: a tiny "alien speech" bubble signals Pepe has a
+      // forecast to say. It shakes with the button while unread and stays put
+      // (no shake) once viewed; hidden while the full bubble is open.
+      const forecastSay = (forecastState.status === "ready" && !forecastState.open)
+        ? `<span class="pepe-say" aria-hidden="true">&#x2827;&#x2837;&#x282e;</span>`
+        : "";
+      const forecastButton = `<button class="${forecastClasses}" type="button" ` +
+        `data-calendar-forecast-event="${esc(event.id)}" aria-label="${esc(forecastLabel)}" ` +
+        `title="${esc(forecastLabel)}" ` +
+        `${forecastState.status === "running" ? 'aria-busy="true"' : ""} ` +
+        `${aiEnabled ? "" : "disabled"}>${forecastSay}</button>`;
+      let forecastBubble = "";
+      if (forecastState.open && ["ready", "error"].includes(forecastState.status)) {
+        const content = forecastState.status === "error"
+          ? `<div class="calendar-forecast-error">${esc(forecastState.error)}</div>`
+          : `<div class="calendar-forecast-content ai-msg-markdown">` +
+            `${forecastState.html || `<p>${esc(forecastState.answer)}</p>`}</div>`;
+        forecastBubble = `<aside class="calendar-forecast-bubble" role="status">` +
+          `<div class="calendar-forecast-bubble-header"><span>AI Forecast</span>` +
+          `<button class="calendar-forecast-refresh" type="button" ` +
+          `data-calendar-forecast-refresh="${esc(event.id)}" title="Refresh forecast" ` +
+          `aria-label="Refresh ${esc(event.title)} forecast">` +
+          `<svg viewBox="0 0 24 24" aria-hidden="true">` +
+          `<path d="M3 12a9 9 0 0 1 15.7-6L21 8"></path><path d="M21 3v5h-5"></path>` +
+          `<path d="M21 12a9 9 0 0 1-15.7 6L3 16"></path><path d="M3 21v-5h5"></path>` +
+          `</svg></button></div>` +
+          `${content}</aside>`;
+      }
+      return `<article class="calendar-event-card has-forecast" style="--event-color:${calendarSessionColor(event.session_id)}">` +
+        `${forecastButton}` +
+        `<div class="calendar-event-session">${esc(sessionLabel)}</div>` +
+        `<div class="calendar-event-title">${esc(event.title || "Schedule")}${time}</div>` +
+        `${details}${source}${forecastBubble}</article>`;
+    }).join("");
+    hydrateCalendarForecastCards();
+    section.classList.remove("hidden");
+  }
+
+  function hydrateCalendarForecastCards() {
+    const template = el("ai-chat-fab").querySelector("svg.pepe");
+    if (!template) return;
+    for (const button of el("calendar-detail-events").querySelectorAll(".calendar-forecast-pepe")) {
+      if (button.querySelector("svg.pepe")) continue;
+      const face = template.cloneNode(true);
+      face.classList.remove("pepe-blink");
+      for (const pupil of face.querySelectorAll(".pepe-pupil")) {
+        pupil.removeAttribute("transform");
+      }
+      button.appendChild(face);
+      registerAnimatedPepeFace(face);
+    }
+    for (const link of el("calendar-detail-events").querySelectorAll(".calendar-forecast-content a")) {
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+    }
+    fitCalendarForecastBubbles();
+  }
+
+  function fitCalendarForecastBubbles() {
+    const bubbles = document.querySelectorAll(".calendar-forecast-bubble");
+    for (const bubble of bubbles) {
+      const content = bubble.querySelector(".calendar-forecast-content, .calendar-forecast-error");
+      if (content) content.style.maxHeight = "";
+    }
+    if (!mobileHubQuery.matches || !bubbles.length) return;
+
+    const header = el("calendar-modal").querySelector(".calendar-modal-header");
+    if (!header) return;
+    const safeTop = header.getBoundingClientRect().bottom + 8;
+    const viewportHeight = window.visualViewport
+      ? window.visualViewport.height
+      : window.innerHeight;
+    const cssLimit = Math.min(350, viewportHeight * 0.48);
+
+    for (const bubble of bubbles) {
+      const content = bubble.querySelector(".calendar-forecast-content, .calendar-forecast-error");
+      if (!content) continue;
+      const bubbleRect = bubble.getBoundingClientRect();
+      const contentRect = content.getBoundingClientRect();
+      const bubbleChrome = bubbleRect.height - contentRect.height;
+      const available = Math.floor(bubbleRect.bottom - safeTop - bubbleChrome);
+      content.style.maxHeight = `${Math.max(60, Math.min(cssLimit, available))}px`;
+    }
+  }
+
+  function markCalendarForecastViewed(eventId, state) {
+    state.viewed = true;
+    const updatedAt = state.updatedAt;
+    api(`/api/calendar/events/${encodeURIComponent(eventId)}/forecast/viewed`, {
+      method: "POST",
+    }).catch(() => {
+      if (state.updatedAt !== updatedAt) return;
+      state.viewed = false;
+      if (isCalendarOpen() && calendarSelectedDate) renderCalendarDetails();
+    });
+  }
+
+  async function requestCalendarForecast(event) {
+    const state = calendarForecastState(event);
+    if (!aiEnabled || state.status === "running") return;
+    state.status = "running";
+    state.localStream = true; // this client owns the stream; reconcile must not clobber it
+    state.error = "";
+    state.open = false;
+    state.viewed = false;
+    renderCalendarDetails();
+
+    let completed = false;
+    let streamError = "";
+    try {
+      await streamSse(`/api/calendar/events/${encodeURIComponent(event.id)}/forecast`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      }, (eventName, data) => {
+        if (eventName === "stream_error") {
+          streamError = String(data.error || "Calendar forecast failed");
+          return;
+        }
+        if (eventName !== "done") return;
+        completed = true;
+        state.status = "ready";
+        state.answer = String(data.answer || "");
+        state.html = String(data.html || "");
+        state.updatedAt = String(data.updated_at || "");
+        state.error = "";
+        state.open = false;
+        state.viewed = false;
+        renderCalendarDetails();
+      });
+      if (streamError) throw new Error(streamError);
+      if (!completed) throw new Error("AI forecast ended without a response");
+    } catch (error) {
+      state.status = "error";
+      state.error = error && error.message ? error.message : "Calendar forecast failed";
+      state.open = true;
+      state.viewed = true;
+      renderCalendarDetails();
+    } finally {
+      state.localStream = false;
+      if (isCalendarOpen()) loadCalendarEvents();
+    }
+  }
+
+  // A peer started regenerating this event's forecast: mirror the running
+  // (eye-roll) state so every open dashboard shows it, not the stale answer.
+  function applyCalendarForecastRunning(eventId) {
+    const state = calendarForecastState({ id: eventId });
+    if (state.localStream || state.status === "running") return;
+    state.status = "running";
+    state.open = false;
+    if (isCalendarOpen() && calendarSelectedDate) renderCalendarDetails();
+  }
+
+  function toggleCalendarForecast(event) {
+    const state = calendarForecastState(event);
+    if (state.status === "running") return;
+    if (state.status === "idle") {
+      requestCalendarForecast(event);
+      return;
+    }
+    const shouldOpen = !state.open;
+    for (const other of calendarForecastStates.values()) other.open = false;
+    state.open = shouldOpen;
+    if (shouldOpen && state.status === "ready") {
+      markCalendarForecastViewed(event.id, state);
+    }
+    renderCalendarDetails();
+  }
+
+  function closeCalendarForecastBubbles() {
+    let changed = false;
+    for (const state of calendarForecastStates.values()) {
+      if (!state.open) continue;
+      state.open = false;
+      changed = true;
+    }
+    if (!changed) return;
+    // re-render so the small "say" bubble returns on the now-closed cards; just
+    // removing the big-bubble DOM would leave pepe-say missing until the next
+    // full render (that mismatch is the toggle-vs-outside-click difference)
+    if (isCalendarOpen() && calendarSelectedDate) {
+      renderCalendarDetails();
+    } else {
+      for (const bubble of document.querySelectorAll(".calendar-forecast-bubble")) {
+        bubble.remove();
+      }
+    }
+  }
+
+  function moveCalendarMonth(delta, animate = false) {
+    calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + delta, 1);
+    calendarSelectedDate = null;
+    calendarEvents = [];
+    renderCalendar();
+    if (animate) {
+      const grid = el("calendar-grid");
+      const className = delta > 0 ? "calendar-month-next" : "calendar-month-prev";
+      grid.classList.remove("calendar-month-next", "calendar-month-prev");
+      void grid.offsetWidth;
+      grid.classList.add(className);
+      window.setTimeout(() => grid.classList.remove(className), 190);
+    }
+    loadCalendarEvents();
+  }
+
+  function initMobileHubMenuSwipe() {
+    const menu = el("hub-menu");
+    const backdrop = el("hub-menu-backdrop");
+    let drag = null;
+    let suppressClickUntil = 0;
+
+    menu.addEventListener("pointerdown", (event) => {
+      if (!mobileHubQuery.matches || !menu.classList.contains("open") || !event.isPrimary) return;
+      drag = {
+        id: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        dx: 0,
+        axis: null,
+      };
+      try { menu.setPointerCapture(event.pointerId); } catch {}
+    });
+    menu.addEventListener("pointermove", (event) => {
+      if (!drag || event.pointerId !== drag.id) return;
+      const dx = event.clientX - drag.startX;
+      const dy = event.clientY - drag.startY;
+      if (!drag.axis) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < 8) return;
+        drag.axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+      }
+      if (drag.axis !== "x") return;
+      event.preventDefault();
+      drag.dx = Math.min(0, dx);
+      if (Math.abs(drag.dx) > 8) suppressClickUntil = Date.now() + 400;
+      const width = Math.max(1, menu.getBoundingClientRect().width);
+      menu.classList.add("dragging");
+      backdrop.classList.add("dragging");
+      menu.style.transform = `translateX(${drag.dx}px)`;
+      backdrop.style.opacity = String(Math.max(0, 1 - Math.abs(drag.dx) / width));
+    }, { passive: false });
+    function endMenuDrag(event, cancelled = false) {
+      if (!drag || (event && event.pointerId !== drag.id)) return;
+      const current = drag;
+      drag = null;
+      try { menu.releasePointerCapture(current.id); } catch {}
+      menu.classList.remove("dragging");
+      backdrop.classList.remove("dragging");
+      const shouldClose = !cancelled && current.axis === "x" && current.dx < -64;
+      if (shouldClose) {
+        closeHubMenu();
+        return;
+      }
+      menu.style.transform = current.axis === "x" ? "translateX(0)" : "";
+      backdrop.style.opacity = "";
+      window.setTimeout(() => {
+        if (!menu.classList.contains("open")) return;
+        menu.style.transform = "";
+      }, 190);
+    }
+    menu.addEventListener("pointerup", (event) => endMenuDrag(event));
+    menu.addEventListener("pointercancel", (event) => endMenuDrag(event, true));
+    menu.addEventListener("click", (event) => {
+      if (Date.now() >= suppressClickUntil) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, true);
+  }
+
+  function initMobileCalendarGestures() {
+    const modal = el("calendar-modal");
+    const box = modal.querySelector(".calendar-modal-box");
+    const header = modal.querySelector(".calendar-modal-header");
+    const grid = el("calendar-grid");
+    let closeDrag = null;
+    let monthDrag = null;
+
+    header.addEventListener("pointerdown", (event) => {
+      if (!mobileHubQuery.matches || !event.isPrimary) return;
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      closeDrag = {
+        id: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        dy: 0,
+        active: false,
+      };
+      try { header.setPointerCapture(event.pointerId); } catch {}
+    });
+    header.addEventListener("pointermove", (event) => {
+      if (!closeDrag || event.pointerId !== closeDrag.id) return;
+      const dx = event.clientX - closeDrag.startX;
+      const dy = event.clientY - closeDrag.startY;
+      if (!closeDrag.active) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < 8) return;
+        if (dy <= 0 || Math.abs(dy) <= Math.abs(dx)) {
+          closeDrag = null;
+          return;
+        }
+        closeDrag.active = true;
+        finishCalendarOpening();
+        modal.classList.add("calendar-dragging");
+      }
+      event.preventDefault();
+      closeDrag.dy = Math.max(0, dy);
+      box.style.transform = `translateY(${closeDrag.dy}px)`;
+    }, { passive: false });
+    function endCalendarCloseDrag(event, cancelled = false) {
+      if (!closeDrag || (event && event.pointerId !== closeDrag.id)) return;
+      const current = closeDrag;
+      closeDrag = null;
+      try { header.releasePointerCapture(current.id); } catch {}
+      modal.classList.remove("calendar-dragging");
+      if (!cancelled && current.active && current.dy > 100) {
+        closeCalendar({ fromDrag: true });
+        return;
+      }
+      if (!current.active) return;
+      box.style.transition = "transform 180ms ease";
+      box.style.transform = "translateY(0)";
+      window.setTimeout(() => {
+        if (!isCalendarOpen() || modal.classList.contains("calendar-closing")) return;
+        box.style.transition = "";
+        box.style.transform = "";
+      }, 190);
+    }
+    header.addEventListener("pointerup", (event) => endCalendarCloseDrag(event));
+    header.addEventListener("pointercancel", (event) => endCalendarCloseDrag(event, true));
+
+    grid.addEventListener("pointerdown", (event) => {
+      if (!mobileHubQuery.matches || !event.isPrimary) return;
+      monthDrag = {
+        id: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        dx: 0,
+        axis: null,
+      };
+    });
+    window.addEventListener("pointermove", (event) => {
+      if (!monthDrag || event.pointerId !== monthDrag.id) return;
+      const dx = event.clientX - monthDrag.startX;
+      const dy = event.clientY - monthDrag.startY;
+      if (!monthDrag.axis) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < 8) return;
+        monthDrag.axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+        if (monthDrag.axis === "x") {
+          try { grid.setPointerCapture(event.pointerId); } catch {}
+        }
+      }
+      if (monthDrag.axis !== "x") return;
+      event.preventDefault();
+      monthDrag.dx = dx;
+      calendarSuppressTapUntil = Date.now() + 500;
+    }, { passive: false });
+    function endMonthDrag(event) {
+      if (!monthDrag || (event && event.pointerId !== monthDrag.id)) return;
+      const current = monthDrag;
+      monthDrag = null;
+      try { grid.releasePointerCapture(current.id); } catch {}
+      if (current.axis !== "x" || Math.abs(current.dx) < 48) return;
+      moveCalendarMonth(current.dx < 0 ? 1 : -1, true);
+    }
+    window.addEventListener("pointerup", endMonthDrag);
+    window.addEventListener("pointercancel", endMonthDrag);
+    grid.addEventListener("click", (event) => {
+      if (Date.now() >= calendarSuppressTapUntil) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, true);
+  }
+
+  function initHubMenuCalendar() {
+    const calendarModal = el("calendar-modal");
+    calendarModal.addEventListener("touchend", (event) => {
+      if (Date.now() < calendarSuppressTapUntil) {
+        lastCalendarTouchAt = 0;
+        event.preventDefault();
+        return;
+      }
+      const button = event.target && event.target.closest
+        ? event.target.closest("button")
+        : null;
+      if (!button || !calendarModal.contains(button)) return;
+
+      const now = Date.now();
+      const isDoubleTap = now - lastCalendarTouchAt < 360;
+      lastCalendarTouchAt = now;
+      if (!isDoubleTap) return;
+      event.preventDefault();
+      button.click();
+    }, { passive: false });
+
+    el("hub-menu-button").addEventListener("click", openHubMenu);
+    el("hub-menu-close").addEventListener("click", closeHubMenu);
+    el("hub-menu-backdrop").addEventListener("click", closeHubMenu);
+    el("hub-calendar-open").addEventListener("click", openCalendar);
+    el("calendar-close").addEventListener("click", closeCalendar);
+    calendarModal.addEventListener("click", (event) => {
+      if (event.target === calendarModal) closeCalendar();
+    });
+    el("calendar-prev").addEventListener("click", () => moveCalendarMonth(-1));
+    el("calendar-next").addEventListener("click", () => moveCalendarMonth(1));
+    el("calendar-today").addEventListener("click", () => {
+      const now = new Date();
+      calendarMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+      calendarSelectedDate = null;
+      calendarEvents = [];
+      renderCalendar();
+      loadCalendarEvents();
+    });
+    el("calendar-grid").addEventListener("click", (event) => {
+      const day = event.target && event.target.closest
+        ? event.target.closest("[data-calendar-date]")
+        : null;
+      if (!day) return;
+      calendarSelectedDate = day.dataset.calendarDate || null;
+      renderCalendar();
+    });
+    el("calendar-detail-events").addEventListener("click", (event) => {
+      const refresh = event.target && event.target.closest
+        ? event.target.closest("[data-calendar-forecast-refresh]")
+        : null;
+      const forecastButton = event.target && event.target.closest
+        ? event.target.closest("[data-calendar-forecast-event]")
+        : null;
+      const eventId = refresh
+        ? refresh.dataset.calendarForecastRefresh
+        : forecastButton && forecastButton.dataset.calendarForecastEvent;
+      if (!eventId) return;
+      const calendarEvent = calendarEvents.find((item) => item.id === eventId);
+      if (!calendarEvent) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (refresh) requestCalendarForecast(calendarEvent);
+      else toggleCalendarForecast(calendarEvent);
+    });
+    document.addEventListener("pointerdown", (event) => {
+      if (!isCalendarOpen()) return;
+      const target = event.target && event.target.closest ? event.target : null;
+      if (target && target.closest(".calendar-forecast-bubble, [data-calendar-forecast-event]")) return;
+      closeCalendarForecastBubbles();
+    }, { passive: true });
+    window.addEventListener("resize", fitCalendarForecastBubbles, { passive: true });
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", fitCalendarForecastBubbles, { passive: true });
+    }
+    initMobileHubMenuSwipe();
+    initMobileCalendarGestures();
+  }
 
   function updateHubClock() {
     const clock = el("hub-clock");
@@ -791,6 +1563,7 @@
     if (aiEnabled && reclampAiFab) reclampAiFab();
     if (aiEnabled) loadAiModels();
     if (!aiEnabled && isAiChatOpen()) closeAiChat();
+    if (isCalendarOpen() && calendarSelectedDate) renderCalendarDetails();
   }
 
   function aiEffortLabel(value) {
@@ -1637,36 +2410,51 @@
   // ---- Pepe faces: random blink + pupils that follow the pointer -----------
   function initPepeFaces() {
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    const faces = Array.from(document.querySelectorAll("svg.pepe")).map((svg) => ({
-      svg,
-      pupils: Array.from(svg.querySelectorAll(".pepe-pupil")).map((node) => ({
-        node,
-        cx: parseFloat(node.getAttribute("cx")),
-        cy: parseFloat(node.getAttribute("cy")),
-      })),
-    }));
-    if (!faces.length) return;
+    const faces = new Map();
 
-    function blinkOnce(svg, done) {
-      svg.classList.add("pepe-blink");
+    function registerFace(svg) {
+      if (!svg || faces.has(svg)) return;
+      const face = {
+        svg,
+        pupils: Array.from(svg.querySelectorAll(".pepe-pupil")).map((node) => ({
+          node,
+          cx: parseFloat(node.getAttribute("cx")),
+          cy: parseFloat(node.getAttribute("cy")),
+        })),
+      };
+      faces.set(svg, face);
+      scheduleBlink(face);
+    }
+    registerAnimatedPepeFace = registerFace;
+
+    function blinkOnce(face, done) {
+      if (!face.svg.isConnected || face.svg.closest(".forecast-running")) {
+        done();
+        return;
+      }
+      face.svg.classList.add("pepe-blink");
       setTimeout(() => {
-        svg.classList.remove("pepe-blink");
+        face.svg.classList.remove("pepe-blink");
         done();
       }, 130);
     }
-    function scheduleBlink(svg) {
+    function scheduleBlink(face) {
       setTimeout(() => {
-        blinkOnce(svg, () => {
+        if (!face.svg.isConnected) {
+          faces.delete(face.svg);
+          return;
+        }
+        blinkOnce(face, () => {
           // occasional quick double blink reads more lifelike than a fixed beat
           if (Math.random() < 0.2) {
-            setTimeout(() => blinkOnce(svg, () => scheduleBlink(svg)), 150);
+            setTimeout(() => blinkOnce(face, () => scheduleBlink(face)), 150);
           } else {
-            scheduleBlink(svg);
+            scheduleBlink(face);
           }
         });
       }, 2200 + Math.random() * 4300);
     }
-    faces.forEach((f) => scheduleBlink(f.svg));
+    document.querySelectorAll("svg.pepe").forEach(registerFace);
 
     const PEPE_VIEWBOX = 64;
     // pupil travel in viewBox units, asymmetric so it stays on the eye white
@@ -1675,7 +2463,12 @@
     const RANGE_Y_UP = 1;
     const RANGE_Y_DOWN = 1.2;
     function lookAt(clientX, clientY) {
-      for (const face of faces) {
+      for (const [svg, face] of faces) {
+        if (!svg.isConnected) {
+          faces.delete(svg);
+          continue;
+        }
+        if (svg.closest(".forecast-running")) continue;
         const rect = face.svg.getBoundingClientRect();
         if (!rect.width) continue; // hidden (chat panel closed)
         const scale = rect.width / PEPE_VIEWBOX;
@@ -2171,6 +2964,8 @@
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
+    closeHubMenu();
+    if (isCalendarOpen()) closeCalendar();
     closeScriptDropdown();
     closeDataSinceTooltips();
     if (!el("log-modal").classList.contains("hidden")) closeLogs();
@@ -2498,6 +3293,12 @@
           syncAiChatState({ allowImport: false });
         } else if (msg.type === "ai_prefs_updated") {
           applyAiPrefs(msg.model, msg.effort);
+        } else if (msg.type === "calendar_updated") {
+          if (isCalendarOpen()) loadCalendarEvents();
+        } else if (msg.type === "calendar_forecast_running") {
+          if (isCalendarOpen()) applyCalendarForecastRunning(String(msg.event_id || ""));
+        } else if (msg.type === "calendar_forecast_updated") {
+          if (isCalendarOpen()) loadCalendarEvents();
         }
       } catch {}
     };
@@ -2541,6 +3342,7 @@
   });
   window.addEventListener("online", rebuildHub);
 
+  initHubMenuCalendar();
   initSessionReordering();
   initDesktopCardCarousel();
   initAiChat();

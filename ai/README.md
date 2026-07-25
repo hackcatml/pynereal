@@ -52,6 +52,24 @@ message format are persisted as a new session template together with the price
 trigger. A combined "delete all in this session, then set this trigger" request
 uses the setting tool's atomic replacement option.
 
+## Session Calendar
+
+Dashboard Codex threads use `get_calendar_context` to resolve natural-language
+symbols and company names to active sessions. `replace_calendar_events` then
+replaces only the researched date range for those sessions and broadcasts the
+new state to every open dashboard.
+
+SaveTicker calendar titles are discovery leads rather than sufficient evidence.
+The AI verifies dates and details through public search or authoritative company,
+filing, exchange, or economic-calendar sources and records the supporting URL
+with every event. A general schedule request covers all active sessions and uses
+today through 90 days ahead unless the user specifies another range.
+
+Calendar event cards can start isolated read-only forecast turns. These turns
+use the shared dashboard model and effort selection but do not append messages
+to the main chat. Completed Markdown answers are persisted by event ID and
+removed automatically when the associated event no longer exists.
+
 ## Strategy Instructions
 
 Realtime `strategy.entry` and `strategy.close` orders can provide an `ai`
