@@ -683,10 +683,6 @@ def collect_account_type(
     secrets: list[str],
     args: argparse.Namespace,
 ) -> dict[str, Any]:
-    eprint(
-        f"[asset] collecting account={account_name} exchange={exchange_id} "
-        f"account_type={account_type}"
-    )
     try:
         balance, source = fetch_account_type_balance(
             exchange,

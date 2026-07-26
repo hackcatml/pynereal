@@ -619,7 +619,6 @@ class AssetPortfolioService:
             return
 
         ordered_ids = sorted(exchange_ids)
-        started_at = time.monotonic()
         results = await asyncio.gather(*(
             asyncio.to_thread(self._market_cache.refresh, exchange_id)
             for exchange_id in ordered_ids
@@ -631,12 +630,6 @@ class AssetPortfolioService:
                     f"[asset] market cache refresh failed exchange={exchange_id}: "
                     f"{message[:300] or type(result).__name__}"
                 )
-        elapsed_ms = int((time.monotonic() - started_at) * 1000)
-        succeeded = sum(not isinstance(result, Exception) for result in results)
-        print(
-            f"[asset] market cache refreshed exchanges={succeeded}/{len(results)} "
-            f"in {elapsed_ms}ms"
-        )
 
     async def _market_refresh_loop(self) -> None:
         first_refresh = True
