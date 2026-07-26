@@ -12,6 +12,7 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from ai.provider.codex_service import CodexService
+from asset_portfolio import AssetPortfolioService
 from calendar_store import CalendarEventStore
 from config import ensure_provider_config, load_hub_config, load_initial_sessions
 from registry import SessionRegistry
@@ -32,10 +33,18 @@ def build_app(
     registry: SessionRegistry,
     codex_service: CodexService,
     calendar_store: CalendarEventStore,
+    asset_portfolio_service: AssetPortfolioService,
 ) -> FastAPI:
     app = FastAPI()
     app.include_router(build_ui_router())
-    app.include_router(build_control_router(registry, codex_service, calendar_store))
+    app.include_router(
+        build_control_router(
+            registry,
+            codex_service,
+            calendar_store,
+            asset_portfolio_service,
+        )
+    )
     app.include_router(build_validation_router())
     app.include_router(build_session_api_router(registry))
 
@@ -128,6 +137,9 @@ async def main() -> None:
     calendar_store = CalendarEventStore(
         _PROJECT_ROOT / "workdir" / "config" / "calendar_events.json"
     )
+    asset_portfolio_service = AssetPortfolioService(
+        _PROJECT_ROOT / "workdir" / "config" / "providers.toml"
+    )
     codex_service = CodexService(
         project_root=_PROJECT_ROOT,
         session_registry=registry,
@@ -138,9 +150,15 @@ async def main() -> None:
         await codex_service.start()
     except Exception as e:
         print(f"[ai] Codex app-server startup failed: {e}")
-    app = build_app(registry, codex_service, calendar_store)
+    app = build_app(
+        registry,
+        codex_service,
+        calendar_store,
+        asset_portfolio_service,
+    )
 
     await registry.start_all(specs)
+    await asset_portfolio_service.start()
     heartbeat = asyncio.create_task(_hub_status_heartbeat(registry))
 
     server = uvicorn.Server(
@@ -154,7 +172,10 @@ async def main() -> None:
         try:
             await registry.shutdown()
         finally:
-            await codex_service.close()
+            try:
+                await asset_portfolio_service.close()
+            finally:
+                await codex_service.close()
 
 
 if __name__ == "__main__":

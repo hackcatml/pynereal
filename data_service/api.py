@@ -20,6 +20,7 @@ from pynecore.core.csv_file import CSVReader
 import ccxt.pro as ccxtpro
 
 from ai.provider.codex_service import CodexService
+from asset_portfolio import AssetPortfolioError, AssetPortfolioService
 from calendar_store import CalendarEventStore, CalendarStoreError
 from registry import (
     HistoryNotReadyError,
@@ -621,9 +622,18 @@ def build_control_router(
     registry: SessionRegistry,
     codex_service: CodexService,
     calendar_store: CalendarEventStore,
+    asset_portfolio_service: AssetPortfolioService,
 ) -> APIRouter:
     r = APIRouter()
     calendar_forecast_runs: dict[str, int] = {}
+
+    @r.get("/api/assets")
+    async def get_assets(refresh: bool = False) -> JSONResponse:
+        try:
+            result = await asset_portfolio_service.snapshot(force=refresh)
+        except AssetPortfolioError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+        return JSONResponse(result)
 
     @r.get("/api/ai/chat")
     async def get_ai_chat() -> JSONResponse:

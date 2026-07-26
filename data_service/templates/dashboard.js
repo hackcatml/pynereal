@@ -31,6 +31,16 @@
   let calendarOpenTimer = null;
   let calendarCloseTimer = null;
   let registerAnimatedPepeFace = () => {};
+  const assetColors = [
+    "#3b82f6", "#f59e0b", "#10b981", "#ef4444",
+    "#a78bfa", "#22d3ee", "#f472b6", "#94a3b8",
+  ];
+  let assetsRequestSeq = 0;
+  let assetsOpenTimer = null;
+  let assetsCloseTimer = null;
+  let assetsHaveData = false;
+  let assetsPayload = null;
+  let selectedAssetExchange = null;
 
   const el = (id) => document.getElementById(id);
 
@@ -228,6 +238,526 @@
     }
     modal.classList.add("calendar-closing");
     calendarCloseTimer = window.setTimeout(finishCalendarClose, 220);
+  }
+
+  function isAssetsOpen() {
+    return !el("assets-modal").classList.contains("hidden");
+  }
+
+  function finishAssetsOpening() {
+    if (assetsOpenTimer !== null) {
+      clearTimeout(assetsOpenTimer);
+      assetsOpenTimer = null;
+    }
+    el("assets-modal").classList.remove("assets-opening");
+  }
+
+  function finishAssetsClose() {
+    const modal = el("assets-modal");
+    const box = modal.querySelector(".assets-modal-box");
+    modal.classList.remove(
+      "assets-closing",
+      "assets-dragging",
+      "assets-swipe-closing",
+      "assets-opening",
+    );
+    modal.classList.add("hidden");
+    modal.style.background = "";
+    box.style.transform = "";
+    box.style.transition = "";
+    modal.setAttribute("aria-hidden", "true");
+    assetsCloseTimer = null;
+    assetsOpenTimer = null;
+    unlockBodyScroll();
+  }
+
+  async function openAssets() {
+    closeHubMenu();
+    closeAiChat();
+    selectedAssetExchange = null;
+    el("assets-title").textContent = "Assets";
+    el("assets-back").classList.add("hidden");
+    if (assetsCloseTimer !== null) {
+      clearTimeout(assetsCloseTimer);
+      assetsCloseTimer = null;
+    }
+    if (assetsOpenTimer !== null) {
+      clearTimeout(assetsOpenTimer);
+      assetsOpenTimer = null;
+    }
+    const modal = el("assets-modal");
+    const box = modal.querySelector(".assets-modal-box");
+    modal.classList.remove(
+      "assets-closing",
+      "assets-dragging",
+      "assets-swipe-closing",
+      "assets-opening",
+      "hidden",
+    );
+    modal.classList.add("assets-opening");
+    assetsOpenTimer = window.setTimeout(finishAssetsOpening, 230);
+    modal.style.background = "";
+    box.style.transform = "";
+    box.style.transition = "";
+    modal.setAttribute("aria-hidden", "false");
+    lockBodyScroll();
+    await loadAssets(false);
+  }
+
+  function closeAssets(options = {}) {
+    if (!isAssetsOpen()) return;
+    const modal = el("assets-modal");
+    if (modal.classList.contains("assets-closing")) return;
+    const fromDrag = options && options.fromDrag === true;
+    finishAssetsOpening();
+    assetsRequestSeq += 1;
+    if (!mobileHubQuery.matches) {
+      finishAssetsClose();
+      return;
+    }
+    const box = modal.querySelector(".assets-modal-box");
+    modal.classList.remove("assets-dragging");
+    if (fromDrag) {
+      modal.classList.add("assets-swipe-closing");
+      box.style.transition = "transform 220ms cubic-bezier(0.55, 0, 1, 0.45)";
+      window.requestAnimationFrame(() => {
+        box.style.transform = "translateY(100dvh)";
+      });
+    } else {
+      box.style.transform = "";
+      box.style.transition = "";
+    }
+    modal.classList.add("assets-closing");
+    assetsCloseTimer = window.setTimeout(finishAssetsClose, 220);
+  }
+
+  function formatAssetValue(value, currency, compact = false) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "—";
+    let maximumFractionDigits = currency === "KRW" ? 0 : 2;
+    if (!compact && Math.abs(number) > 0 && Math.abs(number) < 1) {
+      maximumFractionDigits = 6;
+    }
+    return `${number.toLocaleString(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits,
+    })} ${currency}`;
+  }
+
+  function formatAssetAmount(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "—";
+    return number.toLocaleString(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 8,
+    });
+  }
+
+  function assetExchangeLabel(exchange) {
+    const value = String(exchange || "Exchange");
+    const labels = {
+      binance: "Binance",
+      bitget: "Bitget",
+      bybit: "Bybit",
+      hyperliquid: "Hyperliquid",
+      okx: "OKX",
+      upbit: "Upbit",
+    };
+    return labels[value.toLowerCase()]
+      || `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
+  }
+
+  function assetExchangeKey(exchange, quoteCurrency) {
+    return `${String(exchange || "")}:${String(quoteCurrency || "")}`;
+  }
+
+  function groupAssetPortfolios(portfolios) {
+    const groups = new Map();
+    portfolios.forEach((portfolio) => {
+      const exchange = String(portfolio.exchange || "exchange");
+      const quoteCurrency = String(portfolio.quote_currency || "");
+      const key = assetExchangeKey(exchange, quoteCurrency);
+      let group = groups.get(key);
+      if (!group) {
+        group = {
+          key,
+          account: assetExchangeLabel(exchange),
+          exchange,
+          quote_currency: quoteCurrency,
+          total_value: 0,
+          account_names: [],
+        };
+        groups.set(key, group);
+      }
+
+      const accountName = String(portfolio.account || exchange);
+      group.account_names.push(accountName);
+      group.total_value += Number(portfolio.total_value || 0);
+    });
+
+    return Array.from(groups.values()).map((group) => ({
+      ...group,
+      account_count: group.account_names.length,
+    }));
+  }
+
+  function assetSlices(portfolio) {
+    const priced = (Array.isArray(portfolio.assets) ? portfolio.assets : [])
+      .filter((asset) => Number(asset.value) > 0)
+      .sort((left, right) => Number(right.value) - Number(left.value));
+    const isBinance = String(portfolio.exchange || "").toLowerCase() === "binance";
+    const visible = isBinance
+      ? priced.filter((asset) => Number(asset.value) >= 1)
+      : priced.slice();
+    const remaining = isBinance
+      ? priced.filter((asset) => Number(asset.value) < 1)
+      : [];
+    if (!isBinance && visible.length > 7) {
+      remaining.push(...visible.splice(7));
+    }
+    if (remaining.length) {
+      visible.push({
+        currency: "Other",
+        value: remaining.reduce((sum, asset) => sum + Number(asset.value || 0), 0),
+        weight: remaining.reduce((sum, asset) => sum + Number(asset.weight || 0), 0),
+        grouped: true,
+      });
+    }
+    return visible;
+  }
+
+  function accountTypeSlices(portfolio) {
+    const breakdown = Array.isArray(portfolio.account_type_breakdown)
+      ? portfolio.account_type_breakdown
+      : [];
+    return breakdown.map((item) => {
+      const accountType = String(item.account_type || "unknown");
+      return {
+        currency: accountType.charAt(0).toUpperCase() + accountType.slice(1),
+        value: Number(item.total_value || 0),
+        accountType: true,
+      };
+    });
+  }
+
+  function renderAssetDonut(portfolio) {
+    const wrap = document.createElement("div");
+    wrap.className = "assets-portfolio-content";
+    const donut = document.createElement("button");
+    donut.type = "button";
+    donut.className = "assets-donut";
+    const center = document.createElement("span");
+    center.className = "assets-donut-center";
+    donut.appendChild(center);
+
+    const legend = document.createElement("div");
+    legend.className = "assets-legend";
+    let showAccountTypes = false;
+
+    function renderDonutMode() {
+      const slices = showAccountTypes
+        ? accountTypeSlices(portfolio)
+        : assetSlices(portfolio);
+      const total = slices.reduce((sum, slice) => sum + Number(slice.value || 0), 0);
+      const positiveSlices = slices
+        .map((slice, index) => ({ slice, index }))
+        .filter(({ slice }) => Number(slice.value) > 0);
+      let cursor = 0;
+      const stops = [];
+      positiveSlices.forEach(({ slice, index }, positiveIndex) => {
+        const color = assetColors[index % assetColors.length];
+        const ratio = total > 0 ? Number(slice.value || 0) / total * 100 : 0;
+        const end = positiveIndex === positiveSlices.length - 1 ? 100 : cursor + ratio;
+        stops.push(`${color} ${cursor.toFixed(3)}% ${end.toFixed(3)}%`);
+        cursor = end;
+      });
+      donut.style.background = stops.length
+        ? `conic-gradient(${stops.join(", ")})`
+        : "#29313c";
+      donut.classList.toggle("showing-account-types", showAccountTypes);
+      donut.setAttribute("aria-pressed", String(showAccountTypes));
+      donut.setAttribute(
+        "aria-label",
+        showAccountTypes
+          ? `Show asset allocation for ${portfolio.account}`
+          : `Show account type allocation for ${portfolio.account}`,
+      );
+      donut.title = showAccountTypes
+        ? "Show asset allocation"
+        : "Show account type allocation";
+      center.textContent = showAccountTypes ? "Account types (%)" : "Assets (%)";
+
+      legend.replaceChildren();
+      slices.forEach((slice, index) => {
+        const color = assetColors[index % assetColors.length];
+        const ratio = total > 0 ? Number(slice.value || 0) / total * 100 : 0;
+        const row = document.createElement("div");
+        row.className = "assets-legend-row";
+        const dot = document.createElement("span");
+        dot.className = "assets-legend-dot";
+        dot.style.setProperty("--asset-color", color);
+        const currency = document.createElement("span");
+        currency.className = "assets-legend-currency";
+        currency.textContent = slice.currency;
+        const weight = document.createElement("span");
+        weight.className = "assets-legend-weight";
+        weight.textContent = `${ratio.toFixed(ratio < 0.1 ? 2 : 1)}%`;
+        const detail = document.createElement("span");
+        detail.className = "assets-legend-value";
+        if (slice.accountType) {
+          detail.textContent =
+            formatAssetValue(slice.value, portfolio.quote_currency, true);
+        } else {
+          detail.textContent = slice.grouped
+            ? formatAssetValue(slice.value, portfolio.quote_currency, true)
+            : `${formatAssetAmount(slice.amount)} · ${formatAssetValue(
+                slice.value,
+                portfolio.quote_currency,
+                true,
+              )}`;
+        }
+        row.append(dot, currency, weight, detail);
+        legend.appendChild(row);
+      });
+    }
+    donut.addEventListener("click", () => {
+      showAccountTypes = !showAccountTypes;
+      renderDonutMode();
+    });
+    renderDonutMode();
+    wrap.append(donut, legend);
+    return wrap;
+  }
+
+  function renderAssetPortfolio(portfolio) {
+    const section = document.createElement("section");
+    section.className = "assets-portfolio";
+    const header = document.createElement("div");
+    header.className = "assets-portfolio-header";
+    const identity = document.createElement("div");
+    identity.className = "assets-account-name";
+    identity.textContent = portfolio.account || portfolio.exchange || "Account";
+    const exchange = document.createElement("span");
+    exchange.className = "assets-exchange-name";
+    const accountCount = Number(portfolio.account_count || 0);
+    exchange.textContent = accountCount
+      ? `${accountCount} account${accountCount === 1 ? "" : "s"}`
+      : portfolio.exchange || "";
+    identity.appendChild(exchange);
+    const total = document.createElement("div");
+    total.className = "assets-account-total";
+    total.textContent = Number(portfolio.total_value || 0).toLocaleString(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: portfolio.quote_currency === "KRW" ? 0 : 2,
+    });
+    const quote = document.createElement("span");
+    quote.textContent = portfolio.quote_currency || "";
+    total.appendChild(quote);
+    header.append(identity, total);
+    section.append(header, renderAssetDonut(portfolio));
+
+    const footer = document.createElement("div");
+    footer.className = "assets-portfolio-footer";
+    const statuses = Array.isArray(portfolio.account_type_statuses)
+      ? portfolio.account_type_statuses
+      : [];
+    const availableTypes = Array.from(new Set(statuses
+      .filter((item) => item.status === "ok")
+      .map((item) => item.account_type)));
+    const statusText = document.createElement("span");
+    statusText.textContent = availableTypes.length
+      ? `Included: ${availableTypes.join(", ")}`
+      : "No account balance type was available.";
+    footer.appendChild(statusText);
+
+    const accountNames = Array.isArray(portfolio.account_names)
+      ? portfolio.account_names
+      : [];
+    if (accountNames.length) {
+      const accountsText = document.createElement("span");
+      accountsText.className = "assets-account-list";
+      accountsText.textContent = `Accounts: ${accountNames.join(", ")}`;
+      accountsText.title = accountNames.join(", ");
+      footer.appendChild(accountsText);
+    }
+
+    const warnings = Array.isArray(portfolio.warnings) ? portfolio.warnings : [];
+    warnings.forEach((warning) => {
+      const warningText = document.createElement("span");
+      warningText.className = "assets-warning";
+      warningText.textContent = String(warning);
+      footer.appendChild(warningText);
+    });
+    section.appendChild(footer);
+    return section;
+  }
+
+  function renderAssetExchangeRow(portfolio) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "assets-exchange-row";
+    row.setAttribute("aria-label", `Show ${portfolio.account} asset details`);
+
+    const identity = document.createElement("span");
+    identity.className = "assets-exchange-identity";
+    const title = document.createElement("span");
+    title.className = "assets-exchange-title";
+    title.textContent = portfolio.account;
+    const accounts = document.createElement("span");
+    accounts.className = "assets-exchange-accounts";
+    const accountNames = Array.isArray(portfolio.account_names)
+      ? portfolio.account_names
+      : [];
+    accounts.textContent =
+      `${Number(portfolio.account_count || 0)} account${portfolio.account_count === 1 ? "" : "s"}`
+      + (accountNames.length ? ` · ${accountNames.join(", ")}` : "");
+    accounts.title = accountNames.join(", ");
+    identity.append(title, accounts);
+
+    const total = document.createElement("span");
+    total.className = "assets-exchange-total";
+    total.textContent = Number(portfolio.total_value || 0).toLocaleString(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: portfolio.quote_currency === "KRW" ? 0 : 2,
+    });
+    const quote = document.createElement("span");
+    quote.textContent = portfolio.quote_currency || "";
+    total.appendChild(quote);
+
+    const chevron = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    chevron.classList.add("assets-exchange-chevron");
+    chevron.setAttribute("viewBox", "0 0 24 24");
+    chevron.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", "m9 18 6-6-6-6");
+    chevron.appendChild(path);
+
+    row.append(identity, total, chevron);
+    row.addEventListener("click", () => {
+      selectedAssetExchange = portfolio.key;
+      renderAssetsView();
+      el("assets-body").scrollTop = 0;
+    });
+    return row;
+  }
+
+  function renderAssetsView() {
+    if (!assetsPayload) return;
+    const portfolios = Array.isArray(assetsPayload.exchangePortfolios)
+      ? assetsPayload.exchangePortfolios
+      : [];
+    let selected = selectedAssetExchange
+      ? portfolios.find((portfolio) => portfolio.key === selectedAssetExchange)
+      : null;
+    if (selectedAssetExchange && !selected) {
+      selectedAssetExchange = null;
+      selected = null;
+    }
+
+    const container = el("assets-portfolios");
+    container.replaceChildren();
+    container.className = selected
+      ? "assets-portfolios assets-detail"
+      : "assets-portfolios assets-overview";
+    el("assets-back").classList.toggle("hidden", !selected);
+    el("assets-title").textContent = selected
+      ? `${selected.account} Assets`
+      : "Assets";
+    el("assets-summary").classList.toggle(
+      "hidden",
+      Boolean(selected) || portfolios.length === 0,
+    );
+    el("assets-empty").classList.toggle("hidden", portfolios.length !== 0);
+
+    if (selected) {
+      const accountPortfolios = (Array.isArray(assetsPayload.portfolios)
+        ? assetsPayload.portfolios
+        : []).filter((portfolio) => (
+        assetExchangeKey(portfolio.exchange, portfolio.quote_currency) === selected.key
+      ));
+      accountPortfolios.forEach((portfolio) => {
+        container.appendChild(renderAssetPortfolio(portfolio));
+      });
+      return;
+    }
+    const list = document.createElement("div");
+    list.className = "assets-exchange-list";
+    portfolios.forEach((portfolio) => {
+      list.appendChild(renderAssetExchangeRow(portfolio));
+    });
+    container.appendChild(list);
+  }
+
+  function renderAssets(payload) {
+    const portfolios = Array.isArray(payload.portfolios) ? payload.portfolios : [];
+    const exchangePortfolios = groupAssetPortfolios(portfolios);
+    assetsPayload = { ...payload, exchangePortfolios };
+    const summary = payload.summary || {};
+    const totals = Array.isArray(payload.totals_by_quote) ? payload.totals_by_quote : [];
+
+    const totalsElement = el("assets-summary-totals");
+    totalsElement.replaceChildren();
+    totals.forEach((total) => {
+      const item = document.createElement("span");
+      item.className = "assets-summary-total-value";
+      item.textContent = Number(total.value || 0).toLocaleString(undefined, {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: total.currency === "KRW" ? 0 : 2,
+      });
+      const currency = document.createElement("span");
+      currency.className = "assets-summary-total-currency";
+      currency.textContent = total.currency || "";
+      item.appendChild(currency);
+      totalsElement.appendChild(item);
+    });
+    el("assets-summary-counts").textContent =
+      `${exchangePortfolios.length} exchanges · ${Number(summary.accounts || 0)} accounts`;
+    const collectedAt = Date.parse(payload.collected_at || "");
+    el("assets-updated").textContent = Number.isFinite(collectedAt)
+      ? `Updated ${new Date(collectedAt).toLocaleString("en-US", {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        })}${payload.cached ? " · cached" : ""}`
+      : "";
+    renderAssetsView();
+    assetsHaveData = true;
+  }
+
+  function setAssetsLoading(loading, preserveContent = false) {
+    el("assets-refresh").disabled = loading;
+    el("assets-refresh").classList.toggle("assets-refreshing", loading);
+    el("assets-loading").classList.toggle("hidden", !loading || preserveContent);
+    if (loading) el("assets-error").classList.add("hidden");
+    if (loading && !preserveContent) {
+      assetsPayload = null;
+      el("assets-summary").classList.add("hidden");
+      el("assets-empty").classList.add("hidden");
+      el("assets-portfolios").replaceChildren();
+    }
+  }
+
+  async function loadAssets(force) {
+    const seq = ++assetsRequestSeq;
+    const preserveContent = Boolean(force && assetsHaveData);
+    setAssetsLoading(true, preserveContent);
+    try {
+      const payload = await api(`/api/assets${force ? "?refresh=true" : ""}`);
+      if (seq !== assetsRequestSeq || !isAssetsOpen()) return;
+      renderAssets(payload);
+    } catch (error) {
+      if (seq !== assetsRequestSeq || !isAssetsOpen()) return;
+      const errorElement = el("assets-error");
+      errorElement.textContent = `${error.message}\nUse refresh to try again.`;
+      errorElement.classList.remove("hidden");
+      if (!preserveContent) {
+        el("assets-summary").classList.add("hidden");
+        el("assets-portfolios").replaceChildren();
+      }
+    } finally {
+      if (seq === assetsRequestSeq) setAssetsLoading(false);
+    }
   }
 
   async function loadCalendarEvents() {
@@ -712,6 +1242,65 @@
     }, true);
   }
 
+  function initMobileAssetsGestures() {
+    const modal = el("assets-modal");
+    const box = modal.querySelector(".assets-modal-box");
+    const header = modal.querySelector(".assets-modal-header");
+    let closeDrag = null;
+
+    header.addEventListener("pointerdown", (event) => {
+      if (!mobileHubQuery.matches || !event.isPrimary) return;
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      closeDrag = {
+        id: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        dy: 0,
+        active: false,
+      };
+      try { header.setPointerCapture(event.pointerId); } catch {}
+    });
+    header.addEventListener("pointermove", (event) => {
+      if (!closeDrag || event.pointerId !== closeDrag.id) return;
+      const dx = event.clientX - closeDrag.startX;
+      const dy = event.clientY - closeDrag.startY;
+      if (!closeDrag.active) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < 8) return;
+        if (dy <= 0 || Math.abs(dy) <= Math.abs(dx)) {
+          closeDrag = null;
+          return;
+        }
+        closeDrag.active = true;
+        finishAssetsOpening();
+        modal.classList.add("assets-dragging");
+      }
+      event.preventDefault();
+      closeDrag.dy = Math.max(0, dy);
+      box.style.transform = `translateY(${closeDrag.dy}px)`;
+    }, { passive: false });
+    function endAssetsCloseDrag(event, cancelled = false) {
+      if (!closeDrag || (event && event.pointerId !== closeDrag.id)) return;
+      const current = closeDrag;
+      closeDrag = null;
+      try { header.releasePointerCapture(current.id); } catch {}
+      modal.classList.remove("assets-dragging");
+      if (!cancelled && current.active && current.dy > 100) {
+        closeAssets({ fromDrag: true });
+        return;
+      }
+      if (!current.active) return;
+      box.style.transition = "transform 180ms ease";
+      box.style.transform = "translateY(0)";
+      window.setTimeout(() => {
+        if (!isAssetsOpen() || modal.classList.contains("assets-closing")) return;
+        box.style.transition = "";
+        box.style.transform = "";
+      }, 190);
+    }
+    header.addEventListener("pointerup", (event) => endAssetsCloseDrag(event));
+    header.addEventListener("pointercancel", (event) => endAssetsCloseDrag(event, true));
+  }
+
   function initHubMenuCalendar() {
     const calendarModal = el("calendar-modal");
     calendarModal.addEventListener("touchend", (event) => {
@@ -737,6 +1326,7 @@
     el("hub-menu-close").addEventListener("click", closeHubMenu);
     el("hub-menu-backdrop").addEventListener("click", closeHubMenu);
     el("hub-calendar-open").addEventListener("click", openCalendar);
+    el("hub-assets-open").addEventListener("click", openAssets);
     el("calendar-close").addEventListener("click", closeCalendar);
     calendarModal.addEventListener("click", (event) => {
       if (event.target === calendarModal) closeCalendar();
@@ -789,6 +1379,18 @@
     }
     initMobileHubMenuSwipe();
     initMobileCalendarGestures();
+    el("assets-close").addEventListener("click", closeAssets);
+    el("assets-back").addEventListener("click", () => {
+      selectedAssetExchange = null;
+      renderAssetsView();
+      el("assets-body").scrollTop = 0;
+    });
+    el("assets-refresh").addEventListener("click", () => loadAssets(true));
+    const assetsModal = el("assets-modal");
+    assetsModal.addEventListener("click", (event) => {
+      if (event.target === assetsModal) closeAssets();
+    });
+    initMobileAssetsGestures();
   }
 
   function updateHubClock() {
@@ -2966,6 +3568,7 @@
     if (e.key !== "Escape") return;
     closeHubMenu();
     if (isCalendarOpen()) closeCalendar();
+    if (isAssetsOpen()) closeAssets();
     closeScriptDropdown();
     closeDataSinceTooltips();
     if (!el("log-modal").classList.contains("hidden")) closeLogs();
