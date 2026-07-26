@@ -13,6 +13,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from ai.provider.codex_service import CodexService
 from asset_portfolio import AssetPortfolioService
+from asset_transfer import AssetTransferService
 from calendar_store import CalendarEventStore
 from config import ensure_provider_config, load_hub_config, load_initial_sessions
 from registry import SessionRegistry
@@ -34,6 +35,7 @@ def build_app(
     codex_service: CodexService,
     calendar_store: CalendarEventStore,
     asset_portfolio_service: AssetPortfolioService,
+    asset_transfer_service: AssetTransferService,
 ) -> FastAPI:
     app = FastAPI()
     app.include_router(build_ui_router())
@@ -43,6 +45,7 @@ def build_app(
             codex_service,
             calendar_store,
             asset_portfolio_service,
+            asset_transfer_service,
         )
     )
     app.include_router(build_validation_router())
@@ -140,6 +143,9 @@ async def main() -> None:
     asset_portfolio_service = AssetPortfolioService(
         _PROJECT_ROOT / "workdir" / "config" / "providers.toml"
     )
+    asset_transfer_service = AssetTransferService(
+        _PROJECT_ROOT / "workdir" / "config" / "providers.toml"
+    )
     codex_service = CodexService(
         project_root=_PROJECT_ROOT,
         session_registry=registry,
@@ -155,6 +161,7 @@ async def main() -> None:
         codex_service,
         calendar_store,
         asset_portfolio_service,
+        asset_transfer_service,
     )
 
     await registry.start_all(specs)

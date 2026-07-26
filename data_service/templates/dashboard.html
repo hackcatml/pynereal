@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=48" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=50" />
 </head>
 <body>
   <header class="topbar">
@@ -192,6 +192,99 @@
     </div>
   </div>
 
+  <div id="asset-transfer-modal" class="modal asset-transfer-modal hidden" aria-hidden="true">
+    <div class="modal-box asset-transfer-box" role="dialog" aria-modal="true"
+         aria-labelledby="asset-transfer-title">
+      <div class="modal-header asset-transfer-header">
+        <div>
+          <span id="asset-transfer-title">Internal transfer</span>
+          <small id="asset-transfer-subtitle"></small>
+        </div>
+        <button id="asset-transfer-close" class="btn" type="button"
+                title="Close" aria-label="Close">&times;</button>
+      </div>
+      <div id="asset-transfer-body" class="asset-transfer-body">
+        <div id="asset-transfer-loading" class="asset-transfer-state">
+          <span class="assets-spinner" aria-hidden="true"></span>
+          <span>Loading transferable balance...</span>
+        </div>
+        <form id="asset-transfer-form" class="asset-transfer-form hidden">
+          <div class="asset-transfer-field">
+            <span id="asset-transfer-asset-caption">Asset</span>
+            <div id="asset-transfer-asset-control" class="asset-transfer-select">
+              <select id="asset-transfer-asset" class="asset-transfer-native-select"
+                      tabindex="-1" aria-hidden="true"></select>
+              <button id="asset-transfer-asset-button" class="asset-transfer-select-button"
+                      type="button" aria-haspopup="listbox" aria-expanded="false"
+                      aria-controls="asset-transfer-asset-options"
+                      aria-labelledby="asset-transfer-asset-caption asset-transfer-asset-label">
+                <span id="asset-transfer-asset-label" class="asset-transfer-select-label">
+                  Select asset
+                </span>
+                <span class="asset-transfer-select-chevron" aria-hidden="true">&#9662;</span>
+              </button>
+              <div id="asset-transfer-asset-options"
+                   class="asset-transfer-select-options hidden" role="listbox"></div>
+            </div>
+          </div>
+          <label class="asset-transfer-field">
+            <span>Amount</span>
+            <div class="asset-transfer-amount-row">
+              <input id="asset-transfer-amount" type="text" inputmode="decimal"
+                     autocomplete="off" enterkeyhint="done" />
+              <button id="asset-transfer-max" class="btn" type="button">Max</button>
+            </div>
+            <small id="asset-transfer-available"></small>
+          </label>
+          <div class="asset-transfer-field">
+            <span id="asset-transfer-account-caption">Account</span>
+            <div id="asset-transfer-account-control" class="asset-transfer-select">
+              <select id="asset-transfer-account" class="asset-transfer-native-select"
+                      tabindex="-1" aria-hidden="true"></select>
+              <button id="asset-transfer-account-button"
+                      class="asset-transfer-select-button" type="button"
+                      aria-haspopup="listbox" aria-expanded="false"
+                      aria-controls="asset-transfer-account-options"
+                      aria-labelledby="asset-transfer-account-caption asset-transfer-account-label">
+                <span id="asset-transfer-account-label"
+                      class="asset-transfer-select-label">Select account</span>
+                <span class="asset-transfer-select-chevron" aria-hidden="true">&#9662;</span>
+              </button>
+              <div id="asset-transfer-account-options"
+                   class="asset-transfer-select-options hidden" role="listbox"></div>
+            </div>
+          </div>
+          <div class="asset-transfer-field">
+            <span id="asset-transfer-destination-caption">To</span>
+            <div id="asset-transfer-destination-control" class="asset-transfer-select">
+              <select id="asset-transfer-destination" class="asset-transfer-native-select"
+                      tabindex="-1" aria-hidden="true"></select>
+              <button id="asset-transfer-destination-button"
+                      class="asset-transfer-select-button" type="button"
+                      aria-haspopup="listbox" aria-expanded="false"
+                      aria-controls="asset-transfer-destination-options"
+                      aria-labelledby="asset-transfer-destination-caption asset-transfer-destination-label">
+                <span id="asset-transfer-destination-label"
+                      class="asset-transfer-select-label">Select destination</span>
+                <span class="asset-transfer-select-chevron" aria-hidden="true">&#9662;</span>
+              </button>
+              <div id="asset-transfer-destination-options"
+                   class="asset-transfer-select-options hidden" role="listbox"></div>
+            </div>
+          </div>
+          <p id="asset-transfer-note" class="asset-transfer-note hidden"></p>
+        </form>
+        <div id="asset-transfer-review" class="asset-transfer-review hidden"></div>
+        <div id="asset-transfer-result" class="asset-transfer-result hidden"></div>
+        <div id="asset-transfer-error" class="asset-transfer-error hidden" role="alert"></div>
+      </div>
+      <div class="asset-transfer-footer">
+        <button id="asset-transfer-back" class="btn" type="button">Cancel</button>
+        <button id="asset-transfer-submit" class="btn btn-primary" type="button" disabled>Review</button>
+      </div>
+    </div>
+  </div>
+
   <div id="log-modal" class="modal hidden" aria-hidden="true">
     <div class="modal-box">
       <div class="modal-header">
@@ -311,6 +404,6 @@
     </form>
   </div>
 
-  <script src="/static/dashboard.js?v=47"></script>
+  <script src="/static/dashboard.js?v=51"></script>
 </body>
 </html>

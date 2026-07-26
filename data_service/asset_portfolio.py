@@ -665,6 +665,11 @@ class AssetPortfolioService:
             and time.monotonic() - self._cached_at < self.cache_ttl_seconds
         )
 
+    async def invalidate(self) -> None:
+        async with self._lock:
+            self._cached = None
+            self._cached_at = 0.0
+
     async def snapshot(self, *, force: bool = False) -> dict[str, Any]:
         requested_at = time.monotonic()
         if not force and self._cache_valid():
