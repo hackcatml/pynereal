@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=38" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=50" />
 </head>
 <body>
   <header class="topbar">
@@ -31,6 +31,10 @@
       <button id="hub-menu-close" class="hub-menu-close" type="button" aria-label="Close menu">&times;</button>
     </div>
     <nav class="hub-menu-nav" aria-label="Hub menu">
+      <button id="hub-assets-open" class="hub-menu-item" type="button">
+        <span class="hub-menu-emoji" aria-hidden="true">&#x1f4b0;</span>
+        <span>Assets</span>
+      </button>
       <button id="hub-calendar-open" class="hub-menu-item" type="button">
         <span class="hub-menu-emoji" aria-hidden="true">&#x1f4c5;</span>
         <span>Calendar</span>
@@ -134,6 +138,149 @@
           <h3 id="calendar-detail-date"></h3>
           <div id="calendar-detail-events" class="calendar-detail-events"></div>
         </section>
+      </div>
+    </div>
+  </div>
+
+  <div id="assets-modal" class="modal assets-modal hidden" aria-hidden="true">
+    <div class="modal-box assets-modal-box" role="dialog" aria-modal="true" aria-labelledby="assets-title">
+      <div class="modal-header assets-modal-header">
+        <div class="assets-title-group">
+          <button id="assets-back" class="btn btn-icon hidden" type="button"
+                  title="Back to exchanges" aria-label="Back to exchanges">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M19 12H5" />
+              <path d="m12 19-7-7 7-7" />
+            </svg>
+          </button>
+          <span id="assets-title">Assets</span>
+        </div>
+        <div class="modal-actions">
+          <button id="assets-refresh" class="btn btn-icon" type="button"
+                  title="Refresh assets" aria-label="Refresh assets">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 12a9 9 0 0 1 15.7-6L21 8" />
+              <path d="M21 3v5h-5" />
+              <path d="M21 12a9 9 0 0 1-15.7 6L3 16" />
+              <path d="M3 21v-5h5" />
+            </svg>
+          </button>
+          <button id="assets-close" class="btn" type="button" title="Close" aria-label="Close">&times;</button>
+        </div>
+      </div>
+      <div class="assets-body">
+        <section id="assets-summary" class="assets-summary hidden" aria-label="Asset summary">
+          <div>
+            <span class="assets-summary-label">Total assets</span>
+            <div id="assets-summary-totals" class="assets-summary-totals"></div>
+          </div>
+          <div class="assets-summary-meta">
+            <span id="assets-summary-counts"></span>
+            <span id="assets-updated"></span>
+          </div>
+        </section>
+        <div id="assets-loading" class="assets-state">
+          <span class="assets-spinner" aria-hidden="true"></span>
+          <span>Loading account assets...</span>
+        </div>
+        <div id="assets-error" class="assets-state assets-state-error hidden" role="alert"></div>
+        <div id="assets-empty" class="assets-state hidden">
+          No exchange accounts are configured in providers.toml.
+        </div>
+        <div id="assets-portfolios" class="assets-portfolios"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="asset-transfer-modal" class="modal asset-transfer-modal hidden" aria-hidden="true">
+    <div class="modal-box asset-transfer-box" role="dialog" aria-modal="true"
+         aria-labelledby="asset-transfer-title">
+      <div class="modal-header asset-transfer-header">
+        <div>
+          <span id="asset-transfer-title">Internal transfer</span>
+          <small id="asset-transfer-subtitle"></small>
+        </div>
+        <button id="asset-transfer-close" class="btn" type="button"
+                title="Close" aria-label="Close">&times;</button>
+      </div>
+      <div id="asset-transfer-body" class="asset-transfer-body">
+        <div id="asset-transfer-loading" class="asset-transfer-state">
+          <span class="assets-spinner" aria-hidden="true"></span>
+          <span>Loading transferable balance...</span>
+        </div>
+        <form id="asset-transfer-form" class="asset-transfer-form hidden">
+          <div class="asset-transfer-field">
+            <span id="asset-transfer-asset-caption">Asset</span>
+            <div id="asset-transfer-asset-control" class="asset-transfer-select">
+              <select id="asset-transfer-asset" class="asset-transfer-native-select"
+                      tabindex="-1" aria-hidden="true"></select>
+              <button id="asset-transfer-asset-button" class="asset-transfer-select-button"
+                      type="button" aria-haspopup="listbox" aria-expanded="false"
+                      aria-controls="asset-transfer-asset-options"
+                      aria-labelledby="asset-transfer-asset-caption asset-transfer-asset-label">
+                <span id="asset-transfer-asset-label" class="asset-transfer-select-label">
+                  Select asset
+                </span>
+                <span class="asset-transfer-select-chevron" aria-hidden="true">&#9662;</span>
+              </button>
+              <div id="asset-transfer-asset-options"
+                   class="asset-transfer-select-options hidden" role="listbox"></div>
+            </div>
+          </div>
+          <label class="asset-transfer-field">
+            <span>Amount</span>
+            <div class="asset-transfer-amount-row">
+              <input id="asset-transfer-amount" type="text" inputmode="decimal"
+                     autocomplete="off" enterkeyhint="done" />
+              <button id="asset-transfer-max" class="btn" type="button">Max</button>
+            </div>
+            <small id="asset-transfer-available"></small>
+          </label>
+          <div class="asset-transfer-field">
+            <span id="asset-transfer-account-caption">Account</span>
+            <div id="asset-transfer-account-control" class="asset-transfer-select">
+              <select id="asset-transfer-account" class="asset-transfer-native-select"
+                      tabindex="-1" aria-hidden="true"></select>
+              <button id="asset-transfer-account-button"
+                      class="asset-transfer-select-button" type="button"
+                      aria-haspopup="listbox" aria-expanded="false"
+                      aria-controls="asset-transfer-account-options"
+                      aria-labelledby="asset-transfer-account-caption asset-transfer-account-label">
+                <span id="asset-transfer-account-label"
+                      class="asset-transfer-select-label">Select account</span>
+                <span class="asset-transfer-select-chevron" aria-hidden="true">&#9662;</span>
+              </button>
+              <div id="asset-transfer-account-options"
+                   class="asset-transfer-select-options hidden" role="listbox"></div>
+            </div>
+          </div>
+          <div class="asset-transfer-field">
+            <span id="asset-transfer-destination-caption">To</span>
+            <div id="asset-transfer-destination-control" class="asset-transfer-select">
+              <select id="asset-transfer-destination" class="asset-transfer-native-select"
+                      tabindex="-1" aria-hidden="true"></select>
+              <button id="asset-transfer-destination-button"
+                      class="asset-transfer-select-button" type="button"
+                      aria-haspopup="listbox" aria-expanded="false"
+                      aria-controls="asset-transfer-destination-options"
+                      aria-labelledby="asset-transfer-destination-caption asset-transfer-destination-label">
+                <span id="asset-transfer-destination-label"
+                      class="asset-transfer-select-label">Select destination</span>
+                <span class="asset-transfer-select-chevron" aria-hidden="true">&#9662;</span>
+              </button>
+              <div id="asset-transfer-destination-options"
+                   class="asset-transfer-select-options hidden" role="listbox"></div>
+            </div>
+          </div>
+          <p id="asset-transfer-note" class="asset-transfer-note hidden"></p>
+        </form>
+        <div id="asset-transfer-review" class="asset-transfer-review hidden"></div>
+        <div id="asset-transfer-result" class="asset-transfer-result hidden"></div>
+        <div id="asset-transfer-error" class="asset-transfer-error hidden" role="alert"></div>
+      </div>
+      <div class="asset-transfer-footer">
+        <button id="asset-transfer-back" class="btn" type="button">Cancel</button>
+        <button id="asset-transfer-submit" class="btn btn-primary" type="button" disabled>Review</button>
       </div>
     </div>
   </div>
@@ -257,6 +404,6 @@
     </form>
   </div>
 
-  <script src="/static/dashboard.js?v=41"></script>
+  <script src="/static/dashboard.js?v=51"></script>
 </body>
 </html>

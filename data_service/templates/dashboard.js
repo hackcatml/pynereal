@@ -31,6 +31,28 @@
   let calendarOpenTimer = null;
   let calendarCloseTimer = null;
   let registerAnimatedPepeFace = () => {};
+  const assetColors = [
+    "#3b82f6", "#f59e0b", "#10b981", "#ef4444",
+    "#a78bfa", "#22d3ee", "#f472b6", "#94a3b8",
+  ];
+  const assetTransferSources = {
+    binance: new Set(["spot", "swap", "margin", "funding", "earn"]),
+    bitget: new Set(["spot", "swap", "margin", "funding", "earn"]),
+    bybit: new Set(["spot", "swap", "margin", "funding"]),
+    okx: new Set(["spot", "funding"]),
+    hyperliquid: new Set(["spot", "swap"]),
+  };
+  let assetsRequestSeq = 0;
+  let assetsOpenTimer = null;
+  let assetsCloseTimer = null;
+  let assetsHaveData = false;
+  let assetsPayload = null;
+  let selectedAssetExchange = null;
+  let assetTransferRequestSeq = 0;
+  let assetTransferContext = null;
+  let assetTransferReview = null;
+  let assetTransferMode = "options";
+  let assetTransferSubmitting = false;
 
   const el = (id) => document.getElementById(id);
 
@@ -228,6 +250,1160 @@
     }
     modal.classList.add("calendar-closing");
     calendarCloseTimer = window.setTimeout(finishCalendarClose, 220);
+  }
+
+  function isAssetsOpen() {
+    return !el("assets-modal").classList.contains("hidden");
+  }
+
+  function finishAssetsOpening() {
+    if (assetsOpenTimer !== null) {
+      clearTimeout(assetsOpenTimer);
+      assetsOpenTimer = null;
+    }
+    el("assets-modal").classList.remove("assets-opening");
+  }
+
+  function finishAssetsClose() {
+    const modal = el("assets-modal");
+    const box = modal.querySelector(".assets-modal-box");
+    modal.classList.remove(
+      "assets-closing",
+      "assets-dragging",
+      "assets-swipe-closing",
+      "assets-opening",
+    );
+    modal.classList.add("hidden");
+    modal.style.background = "";
+    box.style.transform = "";
+    box.style.transition = "";
+    modal.setAttribute("aria-hidden", "true");
+    assetsCloseTimer = null;
+    assetsOpenTimer = null;
+    unlockBodyScroll();
+  }
+
+  async function openAssets() {
+    closeHubMenu();
+    closeAiChat();
+    selectedAssetExchange = null;
+    el("assets-title").textContent = "Assets";
+    el("assets-back").classList.add("hidden");
+    if (assetsCloseTimer !== null) {
+      clearTimeout(assetsCloseTimer);
+      assetsCloseTimer = null;
+    }
+    if (assetsOpenTimer !== null) {
+      clearTimeout(assetsOpenTimer);
+      assetsOpenTimer = null;
+    }
+    const modal = el("assets-modal");
+    const box = modal.querySelector(".assets-modal-box");
+    modal.classList.remove(
+      "assets-closing",
+      "assets-dragging",
+      "assets-swipe-closing",
+      "assets-opening",
+      "hidden",
+    );
+    modal.classList.add("assets-opening");
+    assetsOpenTimer = window.setTimeout(finishAssetsOpening, 230);
+    modal.style.background = "";
+    box.style.transform = "";
+    box.style.transition = "";
+    modal.setAttribute("aria-hidden", "false");
+    lockBodyScroll();
+    await loadAssets(false);
+  }
+
+  function closeAssets(options = {}) {
+    if (!isAssetsOpen()) return;
+    closeAssetTransfer();
+    const modal = el("assets-modal");
+    if (modal.classList.contains("assets-closing")) return;
+    const fromDrag = options && options.fromDrag === true;
+    finishAssetsOpening();
+    assetsRequestSeq += 1;
+    if (!mobileHubQuery.matches) {
+      finishAssetsClose();
+      return;
+    }
+    const box = modal.querySelector(".assets-modal-box");
+    modal.classList.remove("assets-dragging");
+    if (fromDrag) {
+      modal.classList.add("assets-swipe-closing");
+      box.style.transition = "transform 220ms cubic-bezier(0.55, 0, 1, 0.45)";
+      window.requestAnimationFrame(() => {
+        box.style.transform = "translateY(100dvh)";
+      });
+    } else {
+      box.style.transform = "";
+      box.style.transition = "";
+    }
+    modal.classList.add("assets-closing");
+    assetsCloseTimer = window.setTimeout(finishAssetsClose, 220);
+  }
+
+  function formatAssetValue(value, currency, compact = false) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "—";
+    let maximumFractionDigits = currency === "KRW" ? 0 : 2;
+    if (!compact && Math.abs(number) > 0 && Math.abs(number) < 1) {
+      maximumFractionDigits = 6;
+    }
+    return `${number.toLocaleString(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits,
+    })} ${currency}`;
+  }
+
+  function formatAssetAmount(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "—";
+    return number.toLocaleString(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 8,
+    });
+  }
+
+  function assetAccountTypeLabel(accountType, exchange = "") {
+    const account = String(accountType || "").toLowerCase();
+    const exchangeId = String(exchange || "").toLowerCase();
+    if (exchangeId === "okx" && account === "spot") return "Trading";
+    if (
+      exchangeId === "bybit"
+      && ["spot", "swap", "margin"].includes(account)
+    ) return "Unified";
+    if (exchangeId === "hyperliquid" && account === "swap") return "Perps";
+    if (exchangeId === "bitget" && account === "swap") return "USDT-M Futures";
+    const labels = {
+      spot: "Spot",
+      swap: "USD\u24c8-M Futures",
+      margin: "Cross Margin",
+      funding: "Funding",
+      earn: "Earn",
+    };
+    return labels[account]
+      || String(accountType || "Unknown");
+  }
+
+  function supportsAssetTransfer(exchange, accountType) {
+    const sources = assetTransferSources[String(exchange || "").toLowerCase()];
+    return Boolean(sources && sources.has(String(accountType || "").toLowerCase()));
+  }
+
+  function isAssetTransferOpen() {
+    return !el("asset-transfer-modal").classList.contains("hidden");
+  }
+
+  function assetTransferSelectNodes(name) {
+    const prefix = `asset-transfer-${name}`;
+    return {
+      control: el(`${prefix}-control`),
+      select: el(prefix),
+      button: el(`${prefix}-button`),
+      label: el(`${prefix}-label`),
+      options: el(`${prefix}-options`),
+    };
+  }
+
+  function closeAssetTransferDropdown(name = null) {
+    ["asset", "account", "destination"].forEach((key) => {
+      if (name && key === name) return;
+      const nodes = assetTransferSelectNodes(key);
+      if (!nodes.control) return;
+      nodes.control.classList.remove("open");
+      nodes.button.setAttribute("aria-expanded", "false");
+      nodes.options.classList.add("hidden");
+    });
+  }
+
+  function syncAssetTransferDropdown(name) {
+    const nodes = assetTransferSelectNodes(name);
+    if (!nodes.select || !nodes.options) return;
+    const options = Array.from(nodes.select.options);
+    const selected = options.find((option) => option.value === nodes.select.value)
+      || options.find((option) => option.selected)
+      || null;
+    nodes.label.textContent = selected
+      ? selected.textContent
+      : name === "asset"
+        ? "Select asset"
+        : name === "account" ? "Select account" : "Select destination";
+    nodes.button.title = selected ? selected.textContent : "";
+    nodes.button.disabled = !options.some((option) => !option.disabled);
+    nodes.options.replaceChildren();
+    options.forEach((option) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "asset-transfer-select-option";
+      item.dataset.value = option.value;
+      item.textContent = option.textContent;
+      item.disabled = option.disabled;
+      item.setAttribute("role", "option");
+      item.setAttribute(
+        "aria-selected",
+        String(option.value === nodes.select.value),
+      );
+      item.classList.toggle("selected", option.value === nodes.select.value);
+      nodes.options.appendChild(item);
+    });
+  }
+
+  function positionAssetTransferDropdown(name) {
+    const nodes = assetTransferSelectNodes(name);
+    if (!nodes.button || !nodes.options || nodes.options.classList.contains("hidden")) {
+      return;
+    }
+    const rect = nodes.button.getBoundingClientRect();
+    const viewport = window.visualViewport;
+    const viewportTop = viewport ? viewport.offsetTop : 0;
+    const viewportLeft = viewport ? viewport.offsetLeft : 0;
+    const viewportHeight = viewport ? viewport.height : window.innerHeight;
+    const viewportWidth = viewport ? viewport.width : window.innerWidth;
+    const viewportBottom = viewportTop + viewportHeight;
+    const viewportRight = viewportLeft + viewportWidth;
+    const gap = 5;
+    const edge = 8;
+    const width = Math.min(rect.width, viewportWidth - edge * 2);
+    const left = Math.min(
+      Math.max(rect.left, viewportLeft + edge),
+      viewportRight - width - edge,
+    );
+    const spaceBelow = Math.max(0, viewportBottom - rect.bottom - gap - edge);
+    const spaceAbove = Math.max(0, rect.top - viewportTop - gap - edge);
+    const desiredHeight = Math.min(nodes.options.scrollHeight, 220);
+    const openBelow = spaceBelow >= Math.min(desiredHeight, 120)
+      || spaceBelow >= spaceAbove;
+    const availableHeight = Math.max(72, openBelow ? spaceBelow : spaceAbove);
+    const menuHeight = Math.min(desiredHeight, availableHeight);
+    const top = openBelow
+      ? rect.bottom + gap
+      : rect.top - gap - menuHeight;
+
+    nodes.options.style.left = `${Math.round(left)}px`;
+    nodes.options.style.top = `${Math.round(Math.max(viewportTop + edge, top))}px`;
+    nodes.options.style.width = `${Math.round(width)}px`;
+    nodes.options.style.maxHeight = `${Math.round(availableHeight)}px`;
+  }
+
+  function openAssetTransferDropdown(name, focusOption = false) {
+    const nodes = assetTransferSelectNodes(name);
+    if (!nodes.control || nodes.button.disabled) return;
+    closeAssetTransferDropdown(name);
+    syncAssetTransferDropdown(name);
+    nodes.control.classList.add("open");
+    nodes.button.setAttribute("aria-expanded", "true");
+    nodes.options.classList.remove("hidden");
+    positionAssetTransferDropdown(name);
+    if (focusOption) {
+      const target = nodes.options.querySelector(
+        ".asset-transfer-select-option.selected:not(:disabled), "
+          + ".asset-transfer-select-option:not(:disabled)",
+      );
+      if (target) target.focus();
+    }
+  }
+
+  function toggleAssetTransferDropdown(name) {
+    const nodes = assetTransferSelectNodes(name);
+    if (!nodes.options) return;
+    if (nodes.options.classList.contains("hidden")) {
+      openAssetTransferDropdown(name);
+    } else {
+      closeAssetTransferDropdown();
+    }
+  }
+
+  function selectAssetTransferDropdownValue(name, value) {
+    const nodes = assetTransferSelectNodes(name);
+    if (!nodes.select) return;
+    nodes.select.value = String(value || "");
+    nodes.select.dispatchEvent(new Event("change", { bubbles: true }));
+    syncAssetTransferDropdown(name);
+  }
+
+  function initAssetTransferDropdown(name) {
+    const nodes = assetTransferSelectNodes(name);
+    nodes.button.addEventListener("click", (event) => {
+      event.preventDefault();
+      toggleAssetTransferDropdown(name);
+    });
+    nodes.button.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        openAssetTransferDropdown(name, true);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeAssetTransferDropdown();
+      }
+    });
+    nodes.options.addEventListener("click", (event) => {
+      const option = event.target && event.target.closest
+        ? event.target.closest(".asset-transfer-select-option")
+        : null;
+      if (!option || option.disabled) return;
+      selectAssetTransferDropdownValue(name, option.dataset.value);
+      closeAssetTransferDropdown();
+      nodes.button.focus();
+    });
+    nodes.options.addEventListener("keydown", (event) => {
+      const options = Array.from(
+        nodes.options.querySelectorAll(".asset-transfer-select-option:not(:disabled)"),
+      );
+      const index = options.indexOf(document.activeElement);
+      let next = null;
+      if (event.key === "ArrowDown") next = Math.min(index + 1, options.length - 1);
+      else if (event.key === "ArrowUp") next = Math.max(index - 1, 0);
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = options.length - 1;
+      else if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeAssetTransferDropdown();
+        nodes.button.focus();
+        return;
+      }
+      if (next !== null && options[next]) {
+        event.preventDefault();
+        options[next].focus();
+      }
+    });
+  }
+
+  function closeAssetTransfer() {
+    if (!isAssetTransferOpen() || assetTransferSubmitting) return;
+    assetTransferRequestSeq += 1;
+    assetTransferContext = null;
+    assetTransferReview = null;
+    assetTransferMode = "options";
+    assetTransferSubmitting = false;
+    closeAssetTransferDropdown();
+    const modal = el("asset-transfer-modal");
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+  }
+
+  function setAssetTransferError(message) {
+    const error = el("asset-transfer-error");
+    error.textContent = String(message || "");
+    error.classList.toggle("hidden", !message);
+  }
+
+  function setAssetTransferMode(mode) {
+    assetTransferMode = mode;
+    const loading = mode === "loading";
+    const options = mode === "options";
+    const review = mode === "review";
+    const result = mode === "result";
+    el("asset-transfer-loading").classList.toggle("hidden", !loading);
+    el("asset-transfer-form").classList.toggle("hidden", !options);
+    el("asset-transfer-review").classList.toggle("hidden", !review);
+    el("asset-transfer-result").classList.toggle("hidden", !result);
+    el("asset-transfer-back").textContent = review ? "Edit" : "Cancel";
+    el("asset-transfer-back").classList.toggle("hidden", result);
+    el("asset-transfer-submit").textContent = review
+      ? "Confirm transfer"
+      : result ? "Done" : "Review";
+    if (!options) closeAssetTransferDropdown();
+  }
+
+  function selectedAssetTransferItem() {
+    if (!assetTransferContext) return null;
+    const key = el("asset-transfer-asset").value;
+    return (Array.isArray(assetTransferContext.assets)
+      ? assetTransferContext.assets
+      : []).find((item) => item.key === key) || null;
+  }
+
+  function selectedAssetTransferAccount() {
+    if (!assetTransferContext) return null;
+    const key = el("asset-transfer-account").value;
+    return (Array.isArray(assetTransferContext.target_accounts)
+      ? assetTransferContext.target_accounts
+      : []).find((account) => account.key === key) || null;
+  }
+
+  function renderAssetTransferDestinations() {
+    const account = selectedAssetTransferAccount();
+    const destinations = account && Array.isArray(account.destinations)
+      ? account.destinations
+      : [];
+    const destinationSelect = el("asset-transfer-destination");
+    destinationSelect.replaceChildren();
+    destinations.forEach((destination) => {
+      const option = document.createElement("option");
+      option.value = destination;
+      option.textContent = assetAccountTypeLabel(
+        destination,
+        assetTransferContext && assetTransferContext.exchange,
+      );
+      destinationSelect.appendChild(option);
+    });
+    if (!destinations.length) {
+      const empty = document.createElement("option");
+      empty.value = "";
+      empty.textContent = "No supported destination";
+      empty.disabled = true;
+      empty.selected = true;
+      destinationSelect.appendChild(empty);
+    }
+    syncAssetTransferDropdown("destination");
+  }
+
+  function updateAssetTransferForm() {
+    if (!assetTransferContext || assetTransferMode !== "options") return;
+    const item = selectedAssetTransferItem();
+    const targetAccount = selectedAssetTransferAccount();
+    const destination = el("asset-transfer-destination").value;
+    const amount = Number(el("asset-transfer-amount").value);
+    const available = item ? Number(item.available) : 0;
+    const valid = Boolean(
+      item
+      && item.transferable
+      && targetAccount
+      && destination
+      && Number.isFinite(amount)
+      && amount > 0
+      && amount <= available,
+    );
+    el("asset-transfer-submit").disabled = !valid;
+    el("asset-transfer-max").disabled = !item || !item.transferable;
+    el("asset-transfer-amount").disabled = !item || !item.transferable;
+    el("asset-transfer-available").textContent = item
+      ? `Available ${formatAssetAmount(item.available)} ${item.asset}`
+      : "No transferable balance";
+
+    const notes = [];
+    if (item && item.note) notes.push(String(item.note));
+    if (
+      assetTransferContext.source === "earn"
+      && item
+      && item.source_kind === "flexible"
+      && destination !== "spot"
+    ) {
+      notes.push(
+        `This runs in two steps: redeem to Spot, then transfer to ${
+          assetAccountTypeLabel(destination, assetTransferContext.exchange)
+        }.`,
+      );
+    }
+    const note = el("asset-transfer-note");
+    note.textContent = notes.join(" ");
+    note.classList.toggle("hidden", notes.length === 0);
+  }
+
+  function renderAssetTransferOptions(context) {
+    assetTransferContext = context;
+    const assetSelect = el("asset-transfer-asset");
+    assetSelect.replaceChildren();
+    const items = Array.isArray(context.assets) ? context.assets : [];
+    items.forEach((item) => {
+      const option = document.createElement("option");
+      option.value = item.key;
+      const kind = item.source_kind === "flexible"
+        ? "Flexible"
+        : item.source_kind === "locked"
+          ? "Locked"
+          : item.source_kind === "fixed" ? "Fixed" : "";
+      option.textContent = [
+        item.asset,
+        kind,
+        formatAssetAmount(item.available),
+      ].filter(Boolean).join(" \u00b7 ");
+      option.disabled = !item.transferable;
+      assetSelect.appendChild(option);
+    });
+    const firstTransferable = items.find((item) => item.transferable);
+    if (firstTransferable) {
+      assetSelect.value = firstTransferable.key;
+    } else {
+      const empty = document.createElement("option");
+      empty.value = "";
+      empty.textContent = items.length
+        ? "No transferable balance"
+        : "No assets available";
+      empty.disabled = true;
+      empty.selected = true;
+      assetSelect.prepend(empty);
+    }
+
+    const accountSelect = el("asset-transfer-account");
+    accountSelect.replaceChildren();
+    const targetAccounts = Array.isArray(context.target_accounts)
+      ? context.target_accounts
+      : [{
+        key: context.account,
+        label: context.account,
+        role: "standalone",
+        destinations: context.destinations || [],
+      }];
+    targetAccounts.forEach((account) => {
+      const option = document.createElement("option");
+      option.value = account.key;
+      option.textContent = account.role === "main"
+        ? `${account.label} \u00b7 Main`
+        : account.role === "sub"
+          ? `${account.label} \u00b7 Sub`
+          : account.label;
+      accountSelect.appendChild(option);
+    });
+    syncAssetTransferDropdown("asset");
+    syncAssetTransferDropdown("account");
+    renderAssetTransferDestinations();
+    el("asset-transfer-amount").value = "";
+    el("asset-transfer-amount").placeholder = "0";
+    setAssetTransferMode("options");
+    setAssetTransferError("");
+    updateAssetTransferForm();
+  }
+
+  async function openAssetTransfer(portfolio, source) {
+    const exchangeId = String(portfolio.exchange || "").toLowerCase();
+    if (!supportsAssetTransfer(exchangeId, source)) return;
+    const requestId = ++assetTransferRequestSeq;
+    assetTransferContext = null;
+    assetTransferReview = null;
+    assetTransferSubmitting = false;
+    setAssetTransferError("");
+    el("asset-transfer-review").replaceChildren();
+    el("asset-transfer-result").replaceChildren();
+    el("asset-transfer-title").textContent =
+      `${assetExchangeLabel(exchangeId)} transfer`;
+    el("asset-transfer-subtitle").textContent =
+      `${portfolio.account} \u00b7 ${assetAccountTypeLabel(source, exchangeId)}`;
+    el("asset-transfer-submit").disabled = true;
+    setAssetTransferMode("loading");
+    const modal = el("asset-transfer-modal");
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    try {
+      const query = new URLSearchParams({
+        exchange: exchangeId,
+        account: String(portfolio.account || ""),
+        source: String(source || ""),
+      });
+      const context = await api(`/api/assets/transfer/options?${query}`);
+      if (requestId !== assetTransferRequestSeq || !isAssetTransferOpen()) return;
+      renderAssetTransferOptions(context);
+    } catch (error) {
+      if (requestId !== assetTransferRequestSeq || !isAssetTransferOpen()) return;
+      setAssetTransferMode("options");
+      el("asset-transfer-form").classList.add("hidden");
+      setAssetTransferError(error.message || String(error));
+    }
+  }
+
+  function appendAssetTransferReviewRow(container, label, value) {
+    const row = document.createElement("div");
+    row.className = "asset-transfer-review-row";
+    const name = document.createElement("span");
+    name.className = "asset-transfer-review-label";
+    name.textContent = label;
+    const detail = document.createElement("span");
+    detail.className = "asset-transfer-review-value";
+    detail.textContent = value;
+    row.append(name, detail);
+    container.appendChild(row);
+  }
+
+  function reviewAssetTransfer() {
+    const item = selectedAssetTransferItem();
+    const targetAccount = selectedAssetTransferAccount();
+    const amount = el("asset-transfer-amount").value.trim();
+    const amountNumber = Number(amount);
+    const available = item ? Number(item.available) : 0;
+    const destination = el("asset-transfer-destination").value;
+    if (
+      !assetTransferContext
+      || !item
+      || !item.transferable
+      || !targetAccount
+      || !destination
+      || !Number.isFinite(amountNumber)
+      || amountNumber <= 0
+      || amountNumber > available
+    ) {
+      setAssetTransferError("Enter an amount within the available balance.");
+      return;
+    }
+    assetTransferReview = {
+      exchange: assetTransferContext.exchange,
+      account: assetTransferContext.account,
+      target_account: targetAccount.key,
+      target_account_label: targetAccount.label,
+      source: assetTransferContext.source,
+      destination,
+      asset: item.asset,
+      amount,
+      product_id: item.product_id || null,
+      period_type: item.period_type || null,
+      order_id: item.order_id || null,
+    };
+    const review = el("asset-transfer-review");
+    review.replaceChildren();
+    appendAssetTransferReviewRow(
+      review,
+      "From",
+      `${assetTransferReview.account} \u00b7 ${assetAccountTypeLabel(
+        assetTransferReview.source,
+        assetTransferReview.exchange,
+      )}`,
+    );
+    appendAssetTransferReviewRow(
+      review,
+      "To",
+      `${assetTransferReview.target_account_label} \u00b7 ${assetAccountTypeLabel(
+        assetTransferReview.destination,
+        assetTransferReview.exchange,
+      )}`,
+    );
+    appendAssetTransferReviewRow(
+      review,
+      "Amount",
+      `${assetTransferReview.amount} ${assetTransferReview.asset}`,
+    );
+    const warning = document.createElement("p");
+    warning.className = "asset-transfer-warning";
+    warning.textContent = assetTransferReview.source === "earn"
+      && assetTransferReview.destination !== "spot"
+      ? "Earn redemption and the following wallet transfer are separate operations. "
+        + "If the second step fails, redeemed funds remain in Spot."
+      : `This moves real funds between the selected ${
+        assetExchangeLabel(assetTransferReview.exchange)
+      } wallets or accounts and cannot be undone here.`;
+    review.appendChild(warning);
+    setAssetTransferError("");
+    setAssetTransferMode("review");
+    el("asset-transfer-submit").disabled = false;
+  }
+
+  function renderAssetTransferResult(data) {
+    const result = el("asset-transfer-result");
+    result.replaceChildren();
+    const title = document.createElement("strong");
+    title.textContent = data.status === "pending"
+      ? "Transfer submitted"
+      : "Transfer completed";
+    const summary = document.createElement("span");
+    summary.textContent =
+      `${data.amount} ${data.asset} \u00b7 `
+      + `${data.account} ${assetAccountTypeLabel(data.source, data.exchange)} \u2192 `
+      + `${data.target_account_label || data.target_account || data.account} ${
+        assetAccountTypeLabel(data.destination, data.exchange)
+      }`;
+    result.append(title, summary);
+    (Array.isArray(data.steps) ? data.steps : []).forEach((step) => {
+      const line = document.createElement("span");
+      line.className = "asset-transfer-result-step";
+      line.textContent = step.action === "redeem"
+        ? `Earn redeemed to Spot${step.redeem_id ? ` \u00b7 ID ${step.redeem_id}` : ""}`
+        : `${step.source_account ? `${step.source_account} \u00b7 ` : ""}`
+          + `${assetAccountTypeLabel(step.source, data.exchange)} \u2192 `
+          + `${step.target_account ? `${step.target_account} \u00b7 ` : ""}`
+          + `${assetAccountTypeLabel(step.destination, data.exchange)}`
+          + (step.status === "pending" ? " \u00b7 Pending" : "")
+          + (step.transaction_id ? ` \u00b7 ID ${step.transaction_id}` : "");
+      result.appendChild(line);
+    });
+    setAssetTransferMode("result");
+    el("asset-transfer-submit").disabled = false;
+  }
+
+  async function executeAssetTransfer() {
+    if (!assetTransferReview || assetTransferSubmitting) return;
+    assetTransferSubmitting = true;
+    el("asset-transfer-submit").disabled = true;
+    el("asset-transfer-back").disabled = true;
+    el("asset-transfer-close").disabled = true;
+    el("asset-transfer-submit").textContent = "Transferring\u2026";
+    setAssetTransferError("");
+    let response;
+    let data;
+    try {
+      response = await fetch("/api/assets/transfer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...assetTransferReview,
+          confirm: "TRANSFER",
+        }),
+      });
+      data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const error = new Error(data.error || `HTTP ${response.status}`);
+        error.payload = data;
+        throw error;
+      }
+      renderAssetTransferResult(data);
+      loadAssets(true).catch(() => {});
+    } catch (error) {
+      const payload = error && error.payload ? error.payload : {};
+      setAssetTransferError(error.message || String(error));
+      if (payload.status === "partial" || payload.status === "unknown") {
+        setAssetTransferMode("result");
+        const result = el("asset-transfer-result");
+        result.replaceChildren();
+        const title = document.createElement("strong");
+        title.textContent = payload.status === "partial"
+          ? "Transfer partially completed"
+          : "Transfer status unknown";
+        result.appendChild(title);
+        loadAssets(true).catch(() => {});
+      } else {
+        setAssetTransferMode("review");
+      }
+      el("asset-transfer-submit").disabled = false;
+    } finally {
+      assetTransferSubmitting = false;
+      el("asset-transfer-back").disabled = false;
+      el("asset-transfer-close").disabled = false;
+      if (assetTransferMode === "review") {
+        el("asset-transfer-submit").textContent = "Confirm transfer";
+      } else if (assetTransferMode === "result") {
+        el("asset-transfer-submit").textContent = "Done";
+      }
+    }
+  }
+
+  function assetExchangeLabel(exchange) {
+    const value = String(exchange || "Exchange");
+    const labels = {
+      binance: "Binance",
+      bitget: "Bitget",
+      bybit: "Bybit",
+      hyperliquid: "Hyperliquid",
+      okx: "OKX",
+      upbit: "Upbit",
+    };
+    return labels[value.toLowerCase()]
+      || `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
+  }
+
+  function assetExchangeKey(exchange, quoteCurrency) {
+    return `${String(exchange || "")}:${String(quoteCurrency || "")}`;
+  }
+
+  function groupAssetPortfolios(portfolios) {
+    const groups = new Map();
+    portfolios.forEach((portfolio) => {
+      const exchange = String(portfolio.exchange || "exchange");
+      const quoteCurrency = String(portfolio.quote_currency || "");
+      const key = assetExchangeKey(exchange, quoteCurrency);
+      let group = groups.get(key);
+      if (!group) {
+        group = {
+          key,
+          account: assetExchangeLabel(exchange),
+          exchange,
+          quote_currency: quoteCurrency,
+          total_value: 0,
+          account_names: [],
+        };
+        groups.set(key, group);
+      }
+
+      const accountName = String(portfolio.account || exchange);
+      group.account_names.push(accountName);
+      group.total_value += Number(portfolio.total_value || 0);
+    });
+
+    return Array.from(groups.values()).map((group) => ({
+      ...group,
+      account_count: group.account_names.length,
+    }));
+  }
+
+  function assetSlices(portfolio) {
+    const priced = (Array.isArray(portfolio.assets) ? portfolio.assets : [])
+      .filter((asset) => Number(asset.value) > 0)
+      .sort((left, right) => Number(right.value) - Number(left.value));
+    const isBinance = String(portfolio.exchange || "").toLowerCase() === "binance";
+    const visible = isBinance
+      ? priced.filter((asset) => Number(asset.value) >= 1)
+      : priced.slice();
+    const remaining = isBinance
+      ? priced.filter((asset) => Number(asset.value) < 1)
+      : [];
+    if (!isBinance && visible.length > 7) {
+      remaining.push(...visible.splice(7));
+    }
+    if (remaining.length) {
+      visible.push({
+        currency: "Other",
+        value: remaining.reduce((sum, asset) => sum + Number(asset.value || 0), 0),
+        weight: remaining.reduce((sum, asset) => sum + Number(asset.weight || 0), 0),
+        grouped: true,
+      });
+    }
+    return visible;
+  }
+
+  function accountTypeSlices(portfolio) {
+    const breakdown = Array.isArray(portfolio.account_type_breakdown)
+      ? portfolio.account_type_breakdown
+      : [];
+    return breakdown.map((item) => {
+      const accountType = String(item.account_type || "unknown");
+      return {
+        currency: assetAccountTypeLabel(accountType, portfolio.exchange),
+        value: Number(item.total_value || 0),
+        accountType,
+      };
+    });
+  }
+
+  function renderAssetDonut(portfolio) {
+    const wrap = document.createElement("div");
+    wrap.className = "assets-portfolio-content";
+    const donut = document.createElement("button");
+    donut.type = "button";
+    donut.className = "assets-donut";
+    const center = document.createElement("span");
+    center.className = "assets-donut-center";
+    donut.appendChild(center);
+
+    const legend = document.createElement("div");
+    legend.className = "assets-legend";
+    let showAccountTypes = false;
+
+    function renderDonutMode() {
+      const slices = showAccountTypes
+        ? accountTypeSlices(portfolio)
+        : assetSlices(portfolio);
+      const total = slices.reduce((sum, slice) => sum + Number(slice.value || 0), 0);
+      const positiveSlices = slices
+        .map((slice, index) => ({ slice, index }))
+        .filter(({ slice }) => Number(slice.value) > 0);
+      let cursor = 0;
+      const stops = [];
+      positiveSlices.forEach(({ slice, index }, positiveIndex) => {
+        const color = assetColors[index % assetColors.length];
+        const ratio = total > 0 ? Number(slice.value || 0) / total * 100 : 0;
+        const end = positiveIndex === positiveSlices.length - 1 ? 100 : cursor + ratio;
+        stops.push(`${color} ${cursor.toFixed(3)}% ${end.toFixed(3)}%`);
+        cursor = end;
+      });
+      donut.style.background = stops.length
+        ? `conic-gradient(${stops.join(", ")})`
+        : "#29313c";
+      donut.classList.toggle("showing-account-types", showAccountTypes);
+      donut.setAttribute("aria-pressed", String(showAccountTypes));
+      donut.setAttribute(
+        "aria-label",
+        showAccountTypes
+          ? `Show asset allocation for ${portfolio.account}`
+          : `Show account type allocation for ${portfolio.account}`,
+      );
+      donut.title = showAccountTypes
+        ? "Show asset allocation"
+        : "Show account type allocation";
+      center.textContent = showAccountTypes ? "Account types (%)" : "Assets (%)";
+
+      legend.replaceChildren();
+      slices.forEach((slice, index) => {
+        const color = assetColors[index % assetColors.length];
+        const ratio = total > 0 ? Number(slice.value || 0) / total * 100 : 0;
+        const canTransfer = Boolean(
+          showAccountTypes
+          && slice.accountType
+          && Number(slice.value) > 0
+          && supportsAssetTransfer(portfolio.exchange, slice.accountType),
+        );
+        const row = document.createElement(canTransfer ? "button" : "div");
+        row.className = "assets-legend-row";
+        if (showAccountTypes) {
+          row.classList.add("assets-legend-account-row");
+        }
+        if (canTransfer) {
+          row.type = "button";
+          row.classList.add("assets-legend-action");
+          row.setAttribute(
+            "aria-label",
+            `Transfer from ${
+              assetAccountTypeLabel(slice.accountType, portfolio.exchange)
+            } in ${portfolio.account}`,
+          );
+          row.addEventListener("click", (event) => {
+            event.stopPropagation();
+            openAssetTransfer(portfolio, slice.accountType);
+          });
+        }
+        const dot = document.createElement("span");
+        dot.className = "assets-legend-dot";
+        dot.style.setProperty("--asset-color", color);
+        const currency = document.createElement("span");
+        currency.className = "assets-legend-currency";
+        currency.textContent = slice.currency;
+        const weight = document.createElement("span");
+        weight.className = "assets-legend-weight";
+        weight.textContent = `${ratio.toFixed(ratio < 0.1 ? 2 : 1)}%`;
+        const chevron = document.createElement("span");
+        chevron.className = "assets-legend-chevron";
+        chevron.classList.toggle("assets-legend-chevron-placeholder", !canTransfer);
+        chevron.textContent = "\u203a";
+        chevron.setAttribute("aria-hidden", "true");
+        const detail = document.createElement("span");
+        detail.className = "assets-legend-value";
+        if (slice.accountType) {
+          detail.textContent =
+            formatAssetValue(slice.value, portfolio.quote_currency, true);
+        } else {
+          detail.textContent = slice.grouped
+            ? formatAssetValue(slice.value, portfolio.quote_currency, true)
+            : `${formatAssetAmount(slice.amount)} · ${formatAssetValue(
+                slice.value,
+                portfolio.quote_currency,
+                true,
+              )}`;
+        }
+        if (showAccountTypes) {
+          row.append(dot, currency, weight, chevron, detail);
+        } else {
+          row.append(dot, currency, weight, detail);
+        }
+        legend.appendChild(row);
+      });
+    }
+    donut.addEventListener("click", () => {
+      showAccountTypes = !showAccountTypes;
+      renderDonutMode();
+    });
+    renderDonutMode();
+    wrap.append(donut, legend);
+    return wrap;
+  }
+
+  function renderAssetPortfolio(portfolio) {
+    const section = document.createElement("section");
+    section.className = "assets-portfolio";
+    const header = document.createElement("div");
+    header.className = "assets-portfolio-header";
+    const identity = document.createElement("div");
+    identity.className = "assets-account-name";
+    identity.textContent = portfolio.account || portfolio.exchange || "Account";
+    const exchange = document.createElement("span");
+    exchange.className = "assets-exchange-name";
+    const accountCount = Number(portfolio.account_count || 0);
+    exchange.textContent = accountCount
+      ? `${accountCount} account${accountCount === 1 ? "" : "s"}`
+      : portfolio.exchange || "";
+    identity.appendChild(exchange);
+    const total = document.createElement("div");
+    total.className = "assets-account-total";
+    total.textContent = Number(portfolio.total_value || 0).toLocaleString(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: portfolio.quote_currency === "KRW" ? 0 : 2,
+    });
+    const quote = document.createElement("span");
+    quote.textContent = portfolio.quote_currency || "";
+    total.appendChild(quote);
+    header.append(identity, total);
+    section.append(header, renderAssetDonut(portfolio));
+
+    const footer = document.createElement("div");
+    footer.className = "assets-portfolio-footer";
+    const statuses = Array.isArray(portfolio.account_type_statuses)
+      ? portfolio.account_type_statuses
+      : [];
+    const availableTypes = Array.from(new Set(statuses
+      .filter((item) => item.status === "ok")
+      .map((item) => item.account_type)));
+    const statusText = document.createElement("span");
+    statusText.textContent = availableTypes.length
+      ? `Included: ${availableTypes.join(", ")}`
+      : "No account balance type was available.";
+    footer.appendChild(statusText);
+
+    const accountNames = Array.isArray(portfolio.account_names)
+      ? portfolio.account_names
+      : [];
+    if (accountNames.length) {
+      const accountsText = document.createElement("span");
+      accountsText.className = "assets-account-list";
+      accountsText.textContent = `Accounts: ${accountNames.join(", ")}`;
+      accountsText.title = accountNames.join(", ");
+      footer.appendChild(accountsText);
+    }
+
+    const warnings = Array.isArray(portfolio.warnings) ? portfolio.warnings : [];
+    warnings.forEach((warning) => {
+      const warningText = document.createElement("span");
+      warningText.className = "assets-warning";
+      warningText.textContent = String(warning);
+      footer.appendChild(warningText);
+    });
+    section.appendChild(footer);
+    return section;
+  }
+
+  function renderAssetExchangeRow(portfolio) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "assets-exchange-row";
+    row.setAttribute("aria-label", `Show ${portfolio.account} asset details`);
+
+    const identity = document.createElement("span");
+    identity.className = "assets-exchange-identity";
+    const title = document.createElement("span");
+    title.className = "assets-exchange-title";
+    title.textContent = portfolio.account;
+    const accounts = document.createElement("span");
+    accounts.className = "assets-exchange-accounts";
+    const accountNames = Array.isArray(portfolio.account_names)
+      ? portfolio.account_names
+      : [];
+    accounts.textContent =
+      `${Number(portfolio.account_count || 0)} account${portfolio.account_count === 1 ? "" : "s"}`
+      + (accountNames.length ? ` · ${accountNames.join(", ")}` : "");
+    accounts.title = accountNames.join(", ");
+    identity.append(title, accounts);
+
+    const total = document.createElement("span");
+    total.className = "assets-exchange-total";
+    total.textContent = Number(portfolio.total_value || 0).toLocaleString(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: portfolio.quote_currency === "KRW" ? 0 : 2,
+    });
+    const quote = document.createElement("span");
+    quote.textContent = portfolio.quote_currency || "";
+    total.appendChild(quote);
+
+    const chevron = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    chevron.classList.add("assets-exchange-chevron");
+    chevron.setAttribute("viewBox", "0 0 24 24");
+    chevron.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", "m9 18 6-6-6-6");
+    chevron.appendChild(path);
+
+    row.append(identity, total, chevron);
+    row.addEventListener("click", () => {
+      selectedAssetExchange = portfolio.key;
+      renderAssetsView();
+      el("assets-body").scrollTop = 0;
+    });
+    return row;
+  }
+
+  function renderAssetsView() {
+    if (!assetsPayload) return;
+    const portfolios = Array.isArray(assetsPayload.exchangePortfolios)
+      ? assetsPayload.exchangePortfolios
+      : [];
+    let selected = selectedAssetExchange
+      ? portfolios.find((portfolio) => portfolio.key === selectedAssetExchange)
+      : null;
+    if (selectedAssetExchange && !selected) {
+      selectedAssetExchange = null;
+      selected = null;
+    }
+
+    const container = el("assets-portfolios");
+    container.replaceChildren();
+    container.className = selected
+      ? "assets-portfolios assets-detail"
+      : "assets-portfolios assets-overview";
+    el("assets-back").classList.toggle("hidden", !selected);
+    el("assets-title").textContent = selected
+      ? `${selected.account} Assets`
+      : "Assets";
+    el("assets-summary").classList.toggle(
+      "hidden",
+      Boolean(selected) || portfolios.length === 0,
+    );
+    el("assets-empty").classList.toggle("hidden", portfolios.length !== 0);
+
+    if (selected) {
+      const accountPortfolios = (Array.isArray(assetsPayload.portfolios)
+        ? assetsPayload.portfolios
+        : []).filter((portfolio) => (
+        assetExchangeKey(portfolio.exchange, portfolio.quote_currency) === selected.key
+      ));
+      accountPortfolios.forEach((portfolio) => {
+        container.appendChild(renderAssetPortfolio(portfolio));
+      });
+      return;
+    }
+    const list = document.createElement("div");
+    list.className = "assets-exchange-list";
+    portfolios.forEach((portfolio) => {
+      list.appendChild(renderAssetExchangeRow(portfolio));
+    });
+    container.appendChild(list);
+  }
+
+  function renderAssets(payload) {
+    const portfolios = Array.isArray(payload.portfolios) ? payload.portfolios : [];
+    const exchangePortfolios = groupAssetPortfolios(portfolios);
+    assetsPayload = { ...payload, exchangePortfolios };
+    const summary = payload.summary || {};
+    const totals = Array.isArray(payload.totals_by_quote) ? payload.totals_by_quote : [];
+
+    const totalsElement = el("assets-summary-totals");
+    totalsElement.replaceChildren();
+    totals.forEach((total) => {
+      const item = document.createElement("span");
+      item.className = "assets-summary-total-value";
+      item.textContent = Number(total.value || 0).toLocaleString(undefined, {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: total.currency === "KRW" ? 0 : 2,
+      });
+      const currency = document.createElement("span");
+      currency.className = "assets-summary-total-currency";
+      currency.textContent = total.currency || "";
+      item.appendChild(currency);
+      totalsElement.appendChild(item);
+    });
+    el("assets-summary-counts").textContent =
+      `${exchangePortfolios.length} exchanges · ${Number(summary.accounts || 0)} accounts`;
+    const collectedAt = Date.parse(payload.collected_at || "");
+    el("assets-updated").textContent = Number.isFinite(collectedAt)
+      ? `Updated ${new Date(collectedAt).toLocaleString("en-US", {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        })}${payload.cached ? " · cached" : ""}`
+      : "";
+    renderAssetsView();
+    assetsHaveData = true;
+  }
+
+  function setAssetsLoading(loading, preserveContent = false) {
+    el("assets-refresh").disabled = loading;
+    el("assets-refresh").classList.toggle("assets-refreshing", loading);
+    el("assets-loading").classList.toggle("hidden", !loading || preserveContent);
+    if (loading) el("assets-error").classList.add("hidden");
+    if (loading && !preserveContent) {
+      assetsPayload = null;
+      el("assets-summary").classList.add("hidden");
+      el("assets-empty").classList.add("hidden");
+      el("assets-portfolios").replaceChildren();
+    }
+  }
+
+  async function loadAssets(force) {
+    const seq = ++assetsRequestSeq;
+    const preserveContent = Boolean(force && assetsHaveData);
+    setAssetsLoading(true, preserveContent);
+    try {
+      const payload = await api(`/api/assets${force ? "?refresh=true" : ""}`);
+      if (seq !== assetsRequestSeq || !isAssetsOpen()) return;
+      renderAssets(payload);
+    } catch (error) {
+      if (seq !== assetsRequestSeq || !isAssetsOpen()) return;
+      const errorElement = el("assets-error");
+      errorElement.textContent = `${error.message}\nUse refresh to try again.`;
+      errorElement.classList.remove("hidden");
+      if (!preserveContent) {
+        el("assets-summary").classList.add("hidden");
+        el("assets-portfolios").replaceChildren();
+      }
+    } finally {
+      if (seq === assetsRequestSeq) setAssetsLoading(false);
+    }
   }
 
   async function loadCalendarEvents() {
@@ -712,6 +1888,65 @@
     }, true);
   }
 
+  function initMobileAssetsGestures() {
+    const modal = el("assets-modal");
+    const box = modal.querySelector(".assets-modal-box");
+    const header = modal.querySelector(".assets-modal-header");
+    let closeDrag = null;
+
+    header.addEventListener("pointerdown", (event) => {
+      if (!mobileHubQuery.matches || !event.isPrimary) return;
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      closeDrag = {
+        id: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        dy: 0,
+        active: false,
+      };
+      try { header.setPointerCapture(event.pointerId); } catch {}
+    });
+    header.addEventListener("pointermove", (event) => {
+      if (!closeDrag || event.pointerId !== closeDrag.id) return;
+      const dx = event.clientX - closeDrag.startX;
+      const dy = event.clientY - closeDrag.startY;
+      if (!closeDrag.active) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < 8) return;
+        if (dy <= 0 || Math.abs(dy) <= Math.abs(dx)) {
+          closeDrag = null;
+          return;
+        }
+        closeDrag.active = true;
+        finishAssetsOpening();
+        modal.classList.add("assets-dragging");
+      }
+      event.preventDefault();
+      closeDrag.dy = Math.max(0, dy);
+      box.style.transform = `translateY(${closeDrag.dy}px)`;
+    }, { passive: false });
+    function endAssetsCloseDrag(event, cancelled = false) {
+      if (!closeDrag || (event && event.pointerId !== closeDrag.id)) return;
+      const current = closeDrag;
+      closeDrag = null;
+      try { header.releasePointerCapture(current.id); } catch {}
+      modal.classList.remove("assets-dragging");
+      if (!cancelled && current.active && current.dy > 100) {
+        closeAssets({ fromDrag: true });
+        return;
+      }
+      if (!current.active) return;
+      box.style.transition = "transform 180ms ease";
+      box.style.transform = "translateY(0)";
+      window.setTimeout(() => {
+        if (!isAssetsOpen() || modal.classList.contains("assets-closing")) return;
+        box.style.transition = "";
+        box.style.transform = "";
+      }, 190);
+    }
+    header.addEventListener("pointerup", (event) => endAssetsCloseDrag(event));
+    header.addEventListener("pointercancel", (event) => endAssetsCloseDrag(event, true));
+  }
+
   function initHubMenuCalendar() {
     const calendarModal = el("calendar-modal");
     calendarModal.addEventListener("touchend", (event) => {
@@ -737,6 +1972,7 @@
     el("hub-menu-close").addEventListener("click", closeHubMenu);
     el("hub-menu-backdrop").addEventListener("click", closeHubMenu);
     el("hub-calendar-open").addEventListener("click", openCalendar);
+    el("hub-assets-open").addEventListener("click", openAssets);
     el("calendar-close").addEventListener("click", closeCalendar);
     calendarModal.addEventListener("click", (event) => {
       if (event.target === calendarModal) closeCalendar();
@@ -789,6 +2025,102 @@
     }
     initMobileHubMenuSwipe();
     initMobileCalendarGestures();
+    el("assets-close").addEventListener("click", closeAssets);
+    el("assets-back").addEventListener("click", () => {
+      selectedAssetExchange = null;
+      renderAssetsView();
+      el("assets-body").scrollTop = 0;
+    });
+    el("assets-refresh").addEventListener("click", () => loadAssets(true));
+    const assetsModal = el("assets-modal");
+    assetsModal.addEventListener("click", (event) => {
+      if (event.target === assetsModal) closeAssets();
+    });
+    el("asset-transfer-close").addEventListener("click", closeAssetTransfer);
+    el("asset-transfer-back").addEventListener("click", () => {
+      if (assetTransferMode === "review") {
+        assetTransferReview = null;
+        setAssetTransferMode("options");
+        updateAssetTransferForm();
+        return;
+      }
+      closeAssetTransfer();
+    });
+    el("asset-transfer-submit").addEventListener("click", () => {
+      if (assetTransferMode === "options") reviewAssetTransfer();
+      else if (assetTransferMode === "review") executeAssetTransfer();
+      else if (assetTransferMode === "result") closeAssetTransfer();
+    });
+    el("asset-transfer-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (assetTransferMode === "options" && !el("asset-transfer-submit").disabled) {
+        reviewAssetTransfer();
+      }
+    });
+    el("asset-transfer-asset").addEventListener("change", () => {
+      el("asset-transfer-amount").value = "";
+      setAssetTransferError("");
+      syncAssetTransferDropdown("asset");
+      updateAssetTransferForm();
+    });
+    el("asset-transfer-destination").addEventListener("change", () => {
+      setAssetTransferError("");
+      syncAssetTransferDropdown("destination");
+      updateAssetTransferForm();
+    });
+    el("asset-transfer-account").addEventListener("change", () => {
+      setAssetTransferError("");
+      syncAssetTransferDropdown("account");
+      renderAssetTransferDestinations();
+      updateAssetTransferForm();
+    });
+    initAssetTransferDropdown("asset");
+    initAssetTransferDropdown("account");
+    initAssetTransferDropdown("destination");
+    el("asset-transfer-amount").addEventListener("input", () => {
+      setAssetTransferError("");
+      updateAssetTransferForm();
+    });
+    el("asset-transfer-max").addEventListener("click", () => {
+      const item = selectedAssetTransferItem();
+      if (!item || !item.transferable) return;
+      el("asset-transfer-amount").value = item.available;
+      setAssetTransferError("");
+      updateAssetTransferForm();
+    });
+    const transferModal = el("asset-transfer-modal");
+    transferModal.addEventListener("click", (event) => {
+      if (event.target === transferModal && assetTransferMode !== "review") {
+        closeAssetTransfer();
+      }
+    });
+    document.addEventListener("pointerdown", (event) => {
+      const target = event.target && event.target.closest ? event.target : null;
+      if (target && target.closest(".asset-transfer-select")) return;
+      closeAssetTransferDropdown();
+    }, { passive: true });
+    const positionOpenTransferDropdown = () => {
+      ["asset", "account", "destination"].forEach((name) => {
+        positionAssetTransferDropdown(name);
+      });
+    };
+    window.addEventListener("resize", positionOpenTransferDropdown, { passive: true });
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener(
+        "resize",
+        positionOpenTransferDropdown,
+        { passive: true },
+      );
+    }
+    const transferBody = el("asset-transfer-body");
+    if (transferBody) {
+      transferBody.addEventListener(
+        "scroll",
+        () => closeAssetTransferDropdown(),
+        { passive: true },
+      );
+    }
+    initMobileAssetsGestures();
   }
 
   function updateHubClock() {
@@ -2966,6 +4298,8 @@
     if (e.key !== "Escape") return;
     closeHubMenu();
     if (isCalendarOpen()) closeCalendar();
+    if (isAssetTransferOpen()) closeAssetTransfer();
+    else if (isAssetsOpen()) closeAssets();
     closeScriptDropdown();
     closeDataSinceTooltips();
     if (!el("log-modal").classList.contains("hidden")) closeLogs();

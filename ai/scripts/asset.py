@@ -310,6 +310,18 @@ def build_exchange(
     return exchange
 
 
+def apply_cached_markets(
+    exchange: ccxt.Exchange,
+    market_source: ccxt.Exchange,
+) -> None:
+    helpers = market_source.options.get("marketHelperProps", [])
+    if isinstance(helpers, list):
+        for helper in helpers:
+            if isinstance(helper, str):
+                market_source.options.setdefault(helper, None)
+    exchange.set_markets_from_exchange(market_source)
+
+
 def number_or_none(value: Any) -> int | float | None:
     if isinstance(value, bool) or value is None:
         return None
@@ -406,6 +418,12 @@ def retry_read(
         ):
             raise
         except ccxt.BaseError as exc:
+            message = str(exc).lower()
+            if (
+                ("50021" in message and "margin trading account does not exist" in message)
+                or ("40068" in message and "disable subaccount access" in message)
+            ):
+                raise
             if attempt >= attempts:
                 raise
             delay = min(2 ** (attempt - 1), 4)
@@ -665,10 +683,6 @@ def collect_account_type(
     secrets: list[str],
     args: argparse.Namespace,
 ) -> dict[str, Any]:
-    eprint(
-        f"[asset] collecting account={account_name} exchange={exchange_id} "
-        f"account_type={account_type}"
-    )
     try:
         balance, source = fetch_account_type_balance(
             exchange,
@@ -720,6 +734,7 @@ def collect_account(
     account: ExchangeAccount,
     account_types: list[str],
     args: argparse.Namespace,
+    market_source: ccxt.Exchange | None = None,
 ) -> list[dict[str, Any]]:
     secrets = secret_values(account.config)
     supported = [
@@ -738,6 +753,14 @@ def collect_account(
                 args.timeout_ms,
                 None,
             )
+            if market_source is not None:
+                try:
+                    apply_cached_markets(exchange, market_source)
+                except Exception as exc:
+                    eprint(
+                        f"[asset] {account.exchange_id} cached markets unavailable: "
+                        f"{type(exc).__name__}; loading markets on demand"
+                    )
         except Exception as exc:
             build_error = exc
 
