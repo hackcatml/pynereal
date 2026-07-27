@@ -160,7 +160,7 @@ class CodexService:
         session_registry: Any,
         calendar_store: Any,
         developer_instructions: str = DEFAULT_DEVELOPER_INSTRUCTIONS,
-        timeout_seconds: float = 180,
+        timeout_seconds: float = 600,
         chat_state_path: Path | None = None,
     ) -> None:
         self.project_root = project_root.resolve()
