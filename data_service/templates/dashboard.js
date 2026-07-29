@@ -138,12 +138,10 @@
     return calendarColors[Math.abs(hash) % calendarColors.length];
   }
 
-  function calendarEventSessionIds(event) {
-    if (Array.isArray(event && event.session_ids)) {
-      return [...new Set(event.session_ids.map((value) => String(value || "")).filter(Boolean))];
-    }
-    const sessionId = String(event && event.session_id || "");
-    return sessionId ? [sessionId] : [];
+  function calendarEventColor(index) {
+    if (index < calendarColors.length) return calendarColors[index];
+    const hue = Math.round((index * 137.508) % 360);
+    return `hsl(${hue} 68% 65%)`;
   }
 
   function calendarAffectedSessions(event) {
@@ -1489,12 +1487,11 @@
         key === todayKey ? "today" : "",
         key === calendarSelectedDate ? "selected" : "",
       ].filter(Boolean).join(" ");
-      const sessionIds = [...new Set(events.flatMap(calendarEventSessionIds))];
-      const dots = sessionIds.slice(0, 4).map((sessionId) => (
-        `<span class="calendar-event-dot" style="--event-color:${calendarSessionColor(sessionId)}"></span>`
+      const dots = events.slice(0, 5).map((event, index) => (
+        `<span class="calendar-event-dot" style="--event-color:${calendarEventColor(index)}"></span>`
       )).join("");
       const eventRow = events.length
-        ? `<span class="calendar-day-event-row">${dots}<span class="calendar-event-count">${events.length}</span></span>`
+        ? `<span class="calendar-day-event-row">${dots}</span>`
         : "";
       cells.push(
         `<button class="${classes}" type="button" data-calendar-date="${key}" ` +
@@ -1522,10 +1519,9 @@
       section.classList.remove("hidden");
       return;
     }
-    el("calendar-detail-events").innerHTML = events.map((event) => {
+    el("calendar-detail-events").innerHTML = events.map((event, eventIndex) => {
       const forecastState = calendarForecastState(event);
       const affectedSessions = calendarAffectedSessions(event);
-      const sessionIds = calendarEventSessionIds(event);
       const sessionsExpanded = calendarExpandedSessionEvents.has(String(event.id || ""));
       const sessionSummary = affectedSessions.length === 1
         ? calendarSessionLabel(affectedSessions[0])
@@ -1598,7 +1594,7 @@
           `</svg></button></div>` +
           `${content}</aside>`;
       }
-      return `<article class="calendar-event-card has-forecast" style="--event-color:${calendarSessionColor(sessionIds[0])}">` +
+      return `<article class="calendar-event-card has-forecast" style="--event-color:${calendarEventColor(eventIndex)}">` +
         `${forecastButton}` +
         `${sessionToggle}` +
         `<div class="calendar-event-title">${esc(event.title || "Schedule")}${time}</div>` +

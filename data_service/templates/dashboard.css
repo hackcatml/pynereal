@@ -808,12 +808,6 @@ tr:last-child td { border-bottom: none; }
   border-radius: 50%;
   background: var(--event-color, #58a6ff);
 }
-.calendar-event-count {
-  margin-left: auto;
-  color: var(--muted);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
 .calendar-details {
   margin-top: 18px;
   padding-top: 16px;
@@ -2369,7 +2363,6 @@ tr:last-child td { border-bottom: none; }
   .calendar-day-number { width: 21px; height: 21px; font-size: 11px; }
   .calendar-day-event-row { left: 5px; right: 5px; bottom: 6px; gap: 3px; }
   .calendar-event-dot { width: 5px; height: 5px; }
-  .calendar-event-count { font-size: 9px; }
   .calendar-forecast-bubble {
     right: 44px;
     width: calc(100% - 62px);
