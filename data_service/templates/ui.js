@@ -390,8 +390,18 @@ App.ui = {
     return Number.isInteger(index) && index >= 0 && index < templates.length ? templates[index] : null;
   },
   manualAlertTriggerActive() {
-    const trigger = App.state.manualAlertTrigger;
-    return !!(trigger && trigger.enabled && Number.isFinite(Number(trigger.price)));
+    return this.manualAlertTriggers().length > 0;
+  },
+  manualAlertTriggers() {
+    return Array.isArray(App.state.manualAlertTriggers)
+      ? App.state.manualAlertTriggers.filter(t => t && t.enabled && Number.isFinite(Number(t.price)))
+      : [];
+  },
+  setManualAlertTriggerState(triggers) {
+    const normalized = Array.isArray(triggers)
+      ? triggers.filter(t => t && t.enabled && Number.isFinite(Number(t.price)))
+      : [];
+    App.state.manualAlertTriggers = normalized;
   },
   setManualAlertPriceValue(price, { updateInput = true } = {}) {
     const context = App.state.manualAlertContext;
@@ -401,10 +411,9 @@ App.ui = {
     if (updateInput) {
       this.elements.manualAlertPriceInput.value = this.formatPriceInput(n);
     }
-    if (this.manualAlertTriggerActive() && updateInput) {
-      this.manualAlertArmedInputDirty = false;
+    if (App.state.manualAlertMenuOpen && App.chart && App.chart.updateManualAlertPreviewGuide) {
+      App.chart.updateManualAlertPreviewGuide(n);
     }
-    App.chart.updateManualAlertPriceGuide(n, { armed: this.manualAlertTriggerActive() });
     return true;
   },
   moveManualAlertMenuToPrice(price) {
@@ -421,12 +430,11 @@ App.ui = {
     return true;
   },
   updateManualAlertSetButtonState() {
-    const active = this.manualAlertTriggerActive();
     const template = this.manualAlertSelectedTemplate();
     const button = this.elements.manualAlertSet;
-    button.textContent = active ? "Unset" : "Set";
-    button.disabled = !active && !template;
-    button.classList.toggle("armed", active);
+    button.textContent = "Set";
+    button.disabled = !template;
+    button.classList.remove("armed");
   },
   clearManualAlertTriggerSyncTimer() {
     if (this.manualAlertTriggerSyncTimer !== null) {
@@ -435,52 +443,47 @@ App.ui = {
     }
   },
   restoreManualAlertActiveTriggerPrice() {
-    const trigger = App.state.manualAlertTrigger || {};
-    if (!trigger.enabled || !Number.isFinite(Number(trigger.price))) return false;
-    this.manualAlertArmedInputDirty = false;
-    return this.setManualAlertPriceValue(Number(trigger.price));
+    return false;
   },
-  previewManualAlertTriggerPrice(price) {
-    const trigger = App.state.manualAlertTrigger || {};
+  previewManualAlertTriggerPrice(triggerId, price) {
     const n = Number(price);
-    if (!trigger.enabled || !Number.isFinite(n)) return false;
+    if (!triggerId || !Number.isFinite(n)) return false;
+    const triggers = this.manualAlertTriggers();
+    const trigger = triggers.find(t => String(t.id) === String(triggerId));
+    if (!trigger) return false;
     trigger.price = n;
-    this.manualAlertArmedInputDirty = false;
+    this.setManualAlertTriggerState(triggers);
     if (App.state.manualAlertMenuOpen) {
       this.elements.manualAlertPriceInput.value = this.formatPriceInput(n);
     }
-    App.chart.updateManualAlertPriceGuide(n, { armed: true });
+    if (App.chart && App.chart.renderManualAlertTriggerGuides) {
+      App.chart.renderManualAlertTriggerGuides(triggers);
+    }
     return true;
   },
-  applyManualAlertTriggerState(trigger) {
-    const normalized = trigger && trigger.enabled ? trigger : { enabled: false };
-    App.state.manualAlertTrigger = normalized;
+  applyManualAlertTriggerState(triggers) {
+    if (!Array.isArray(triggers)) triggers = [];
+    this.setManualAlertTriggerState(triggers);
     const context = App.state.manualAlertContext;
-    if (normalized.enabled && Number.isFinite(Number(normalized.price))) {
-      this.manualAlertArmedInputDirty = false;
-      this.setManualAlertPriceValue(Number(normalized.price));
-      App.chart.updateManualAlertPriceGuide(Number(normalized.price), { armed: true });
-    } else {
-      this.clearManualAlertTriggerSyncTimer();
-      this.manualAlertArmedInputDirty = false;
-      if (context && App.state.manualAlertMenuOpen) {
-        App.chart.updateManualAlertPriceGuide(context.price, { armed: false });
-      } else if (App.chart && App.chart.removeManualAlertPriceGuide) {
-        App.chart.removeManualAlertPriceGuide();
-      }
+    if (App.chart && App.chart.renderManualAlertTriggerGuides) {
+      App.chart.renderManualAlertTriggerGuides(App.state.manualAlertTriggers);
+    }
+    this.clearManualAlertTriggerSyncTimer();
+    this.manualAlertArmedInputDirty = false;
+    if (context && App.state.manualAlertMenuOpen && App.chart && App.chart.updateManualAlertPreviewGuide) {
+      App.chart.updateManualAlertPreviewGuide(context.price);
     }
     this.updateManualAlertSetButtonState();
   },
   async loadManualAlertTrigger() {
     const result = await App.data.loadManualAlertTrigger();
     if (result && result.ok) {
-      this.applyManualAlertTriggerState(result.trigger);
+      this.applyManualAlertTriggerState(result.triggers || []);
     }
     return result;
   },
   buildManualAlertTriggerPayload() {
-    const activeTrigger = App.state.manualAlertTrigger || {};
-    const template = this.manualAlertSelectedTemplate() || (activeTrigger.enabled ? activeTrigger.template : null);
+    const template = this.manualAlertSelectedTemplate();
     const price = this.parseManualAlertPriceInput();
     if (!template || price == null) return null;
     return {
@@ -492,9 +495,9 @@ App.ui = {
       }
     };
   },
-  async saveManualAlertTrigger(trigger, { quiet = false } = {}) {
+  async saveManualAlertTriggers(triggers, { quiet = false } = {}) {
     const status = this.elements.manualAlertStatus;
-    const result = await App.data.saveManualAlertTrigger(trigger);
+    const result = await App.data.saveManualAlertTriggers(triggers || []);
     if (!result || !result.ok) {
       if (!quiet) {
         status.textContent = (result && result.error) || "Set failed";
@@ -503,9 +506,10 @@ App.ui = {
       this.updateManualAlertSetButtonState();
       return false;
     }
-    this.applyManualAlertTriggerState(result.trigger);
+    const savedTriggers = result.triggers || [];
+    this.applyManualAlertTriggerState(savedTriggers);
     if (!quiet) {
-      status.textContent = result.trigger.enabled ? "Set" : "Unset";
+      status.textContent = "Set";
       status.classList.remove("error");
     }
     return true;
@@ -523,62 +527,37 @@ App.ui = {
     status.textContent = "Setting...";
     status.classList.remove("error");
     this.elements.manualAlertSet.disabled = true;
-    const saved = await this.saveManualAlertTrigger(trigger);
+    const saved = await this.saveManualAlertTriggers([...this.manualAlertTriggers(), trigger]);
     if (saved && moveMenu) {
       this.moveManualAlertMenuToPrice(trigger.price);
     }
     this.updateManualAlertSetButtonState();
     return saved;
   },
-  async saveManualAlertTriggerPriceFromLine(price) {
-    const trigger = App.state.manualAlertTrigger || {};
+  async saveManualAlertTriggerPriceFromLine(triggerId, price) {
     const n = Number(price);
-    if (!trigger.enabled || !Number.isFinite(n)) return false;
+    if (!triggerId || !Number.isFinite(n)) return false;
+    const triggers = this.manualAlertTriggers();
+    const trigger = triggers.find(t => String(t.id) === String(triggerId));
+    if (!trigger) return false;
     const template = trigger.template || {};
     if (!template.title || !template.message) return false;
-    return await this.saveManualAlertTrigger({
-      enabled: true,
-      price: n,
-      template: {
-        title: template.title,
-        message: template.message
-      }
-    }, { quiet: true });
+    trigger.price = n;
+    return await this.saveManualAlertTriggers(triggers, { quiet: true });
   },
-  async unsetManualAlertTriggerFromLine() {
-    if (!this.manualAlertTriggerActive()) return false;
+  async unsetManualAlertTriggerFromLine(triggerId) {
+    if (!triggerId || !this.manualAlertTriggerActive()) return false;
     this.clearManualAlertTriggerSyncTimer();
-    return await this.saveManualAlertTrigger({ enabled: false }, { quiet: true });
+    const triggers = this.manualAlertTriggers().filter(t => String(t.id) !== String(triggerId));
+    return await this.saveManualAlertTriggers(triggers, { quiet: true });
   },
   scheduleManualAlertTriggerSync() {
-    if (!this.manualAlertTriggerActive()) return;
-    if (this.manualAlertArmedInputDirty) return;
-    if (this.manualAlertTriggerSyncTimer !== null) {
-      clearTimeout(this.manualAlertTriggerSyncTimer);
-    }
-    this.manualAlertTriggerSyncTimer = setTimeout(() => {
-      this.manualAlertTriggerSyncTimer = null;
-      if (!this.manualAlertTriggerActive()) return;
-      const trigger = this.buildManualAlertTriggerPayload();
-      if (trigger) this.saveManualAlertTrigger(trigger, { quiet: true });
-    }, 250);
+    return;
   },
   flushManualAlertTriggerSync() {
     this.clearManualAlertTriggerSyncTimer();
-    if (!this.manualAlertTriggerActive()) return;
-    if (this.manualAlertArmedInputDirty) {
-      this.restoreManualAlertActiveTriggerPrice();
-      return;
-    }
-    const trigger = this.buildManualAlertTriggerPayload();
-    if (trigger) this.saveManualAlertTrigger(trigger, { quiet: true });
   },
   async toggleManualAlertTrigger() {
-    if (this.manualAlertTriggerActive()) {
-      this.clearManualAlertTriggerSyncTimer();
-      await this.saveManualAlertTrigger({ enabled: false });
-      return;
-    }
     await this.setManualAlertTriggerFromInput({ moveMenu: true });
   },
   buildManualAlertPayload(pending) {
@@ -761,11 +740,6 @@ App.ui = {
   },
   async showManualAlertMenu(context) {
     const status = this.elements.manualAlertStatus;
-    const trigger = App.state.manualAlertTrigger || { enabled: false };
-    const triggerActive = trigger.enabled && Number.isFinite(Number(trigger.price));
-    if (triggerActive) {
-      context.price = Number(trigger.price);
-    }
     App.state.manualAlertContext = context;
     App.state.manualAlertMenuOpen = true;
     this.refreshMobileViewportLock();
@@ -779,28 +753,11 @@ App.ui = {
     this.updateManualAlertSetButtonState();
     status.textContent = "Loading...";
     status.classList.remove("error");
-    let anchorY = context.clientY;
-    let updatePrice = true;
-    if (triggerActive && App.chart && App.chart.clientYFromPrice) {
-      const triggerY = App.chart.clientYFromPrice(context.price);
-      if (triggerY != null) {
-        anchorY = triggerY;
-      } else {
-        updatePrice = false;
-      }
-    }
-    this.positionManualAlertMenu(context.clientX, anchorY, { updatePrice });
-    if (triggerActive) {
-      this.applyManualAlertTriggerState(trigger);
-    }
+    this.positionManualAlertMenu(context.clientX, context.clientY, { updatePrice: true });
 
     const templates = await this.loadManualAlertTemplates({ migrateLocal: true });
     if (App.state.manualAlertContext !== context) return;
     this.renderManualAlertTemplatePicker(templates);
-    if (triggerActive && trigger.template && trigger.template.title) {
-      const index = templates.findIndex(t => t.title === trigger.template.title && t.message === trigger.template.message);
-      if (index >= 0) this.selectManualAlertTemplate(index);
-    }
     this.elements.manualAlertSend.disabled = templates.length === 0;
     status.textContent = templates.length ? "" : "No templates";
     status.classList.toggle("error", templates.length === 0);
@@ -825,10 +782,11 @@ App.ui = {
     this.closeManualAlertTemplateList();
     this.closeManualAlertConfirm();
     App.state.manualAlertSelectedTemplateIndex = -1;
-    if (this.manualAlertTriggerActive()) {
-      this.applyManualAlertTriggerState(App.state.manualAlertTrigger);
-    } else if (App.chart && App.chart.removeManualAlertPriceGuide) {
-      App.chart.removeManualAlertPriceGuide();
+    if (App.chart && App.chart.removeManualAlertPreviewGuide) {
+      App.chart.removeManualAlertPreviewGuide();
+    }
+    if (App.chart && App.chart.renderManualAlertTriggerGuides) {
+      App.chart.renderManualAlertTriggerGuides(App.state.manualAlertTriggers || []);
     }
     if (App.chart && App.chart.restoreMagnetMode) {
       App.chart.restoreMagnetMode();
@@ -860,7 +818,6 @@ App.ui = {
   endManualAlertDrag(e) {
     if (this.manualAlertDragState && this.manualAlertDragState.pointerId === e.pointerId) {
       this.manualAlertDragState = null;
-      this.flushManualAlertTriggerSync();
     }
   },
   async sendManualAlertFromMenu() {
@@ -1300,11 +1257,6 @@ App.ui = {
       if (e.key !== "Enter") return;
       e.preventDefault();
       e.stopPropagation();
-      if (this.manualAlertTriggerActive()) {
-        this.clearManualAlertTriggerSyncTimer();
-        this.restoreManualAlertActiveTriggerPrice();
-        return;
-      }
       const price = this.parseManualAlertPriceInput();
       if (price != null) {
         this.elements.manualAlertPriceInput.value = this.formatPriceInput(price);
@@ -1315,32 +1267,20 @@ App.ui = {
 
     manualAlertPriceInput.addEventListener("input", () => {
       const price = this.parseManualAlertPriceInput();
-      if (this.manualAlertTriggerActive()) {
-        this.manualAlertArmedInputDirty = true;
-        this.clearManualAlertTriggerSyncTimer();
-        this.updateManualAlertSetButtonState();
-        return;
-      }
       if (price == null) {
         this.updateManualAlertSetButtonState();
         return;
       }
       this.setManualAlertPriceValue(price, { updateInput: false });
-      this.scheduleManualAlertTriggerSync();
       this.updateManualAlertSetButtonState();
     });
 
     manualAlertPriceInput.addEventListener("change", () => {
-      if (this.manualAlertTriggerActive()) {
-        this.clearManualAlertTriggerSyncTimer();
-        this.restoreManualAlertActiveTriggerPrice();
-        return;
-      }
       const price = this.parseManualAlertPriceInput();
       if (price != null) {
         this.elements.manualAlertPriceInput.value = this.formatPriceInput(price);
+        this.setManualAlertPriceValue(price, { updateInput: false });
       }
-      this.flushManualAlertTriggerSync();
     });
 
     manualAlertTemplateButton.addEventListener("click", (e) => {

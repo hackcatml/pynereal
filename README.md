@@ -1,14 +1,74 @@
 # PyneReal
+
+<p align="center">
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+"></a>
+  <a href="LICENSE.txt"><img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="License: Apache-2.0"></a>
+</p>
+
 <p align="center">
   <img src="docs/images/dashboard-desktop.png" alt="PyneReal dashboard" width="900">
 </p>
 
 Run your crypto trading strategy in real time without TradingView.
 
+## ✨ Highlights
+
+- 🤖 **AI copilot** — chat with your running strategies, inspect balances and
+  positions across every exchange account, and set price alerts in plain
+  language
+- ⚡ Realtime [PyneCore](https://github.com/PyneSys/pynecore) strategy runner —
+  signal to exchange in under a second after candle confirmation
+- 📊 Bitget, Hyperliquid, OKX, Binance, and Bybit supported
+- 🔔 Webhook, Telegram, and draggable manual price alerts on the chart
+- 💼 Exchange and account-level asset portfolios with reviewed internal transfers
+- 📱 Full mobile dashboard
+
+## 🤖 AI Copilot
+
+<!-- TODO: record a 10-15s GIF of the AI chat setting a price trigger
+     (red trigger line appearing on the chart), save it as
+     docs/images/ai-chat.gif, then uncomment:
+<p align="center">
+  <img src="docs/images/ai-chat.gif" alt="PyneReal AI chat" width="900">
+</p>
+-->
+
+Ask the dashboard chat things like:
+
+> "Update the key events for each session"
+>
+> "Set a take-profit alert on the BTC 1m session at 3% above entry"
+
+The AI copilot can:
+
+- inspect exchange assets and derivative positions — every configured account
+  at once when you don't name one;
+- set or remove persisted Manual Alert price triggers straight from chat;
+- research and maintain a shared calendar for every active trading session;
+- analyze repository files, running sessions, and public market information;
+- send a finished result to Telegram when you ask for it.
+
+And the unique part — **your strategy can talk to the AI too**. When an order
+fills, its `ai` instruction runs automatically:
+
+```python
+strategy.entry(
+    "Long 3",
+    strategy.long,
+    alert_message=f'{{"signal": "Long 3", "price": {close}}}',
+    ai=f"Set the close2 and close3 manual alerts at {avgEntry * 1.003}",
+)
+```
+
+All account tools are **read-only** — the AI never places or cancels orders,
+changes leverage, or mutates account state.
+See [AI Setup & Details](#ai-setup--details) for configuration.
+
 ## Requirements
 
 - Python 3.11+ (3.14+ recommended)
 - **[PyneCore](https://github.com/PyneSys/pynecore)** strategy file under `workdir/scripts`
+- Optional AI Copilot: an OpenAI account with Codex access
 
 ## Supported Exchanges
 
@@ -131,7 +191,6 @@ symbol = "BTC/USDT:USDT"
 timeframe = "1m"
 history_since = "2026-06-10"
 script_name = "demo/demo_1m.py"
-autostart_runner = false
 
 [session.webhook]
 enabled = false
@@ -160,6 +219,20 @@ Supported exchange behavior is handled per exchange.<br>
 For example, **OKX**, **Binance**, and
 **Bybit** zero-volume candles are **hidden** to match TradingView, while **Bitget** and
 **Hyperliquid** zero-volume candles remain **visible**.
+
+### Re-sync Historical Data
+
+Open a session's **Data** settings to change its `Data start (UTC)` value after
+the session has been created. Saving a new date or datetime re-syncs the cached
+market data and regenerated OHLCV file from that boundary. Sessions that share
+the same exchange, symbol, and timeframe use the same feed, so the new boundary
+applies to all of them.
+
+Running strategies on the affected feed are stopped before the data file is
+updated and restarted after it is ready. They then replay the new historical
+window to rebuild chart plots and strategy state. Webhook, Telegram, and AI
+notifications are suppressed during this re-sync replay so historical signals
+are not delivered as new alerts.
 
 ## Running a Strategy
 
@@ -242,12 +315,13 @@ To send a manual alert:
 4. Click `Send` and confirm the webhook URL.
 
 To set a price trigger, enter or adjust the `Price`, choose a template, and
-click `Set`. PyneReal keeps the red dotted alert line with the session, so the
-trigger stays active after the chart is closed or the browser reconnects.
-When the live price touches the line, PyneReal sends the selected manual-alert
-template and then automatically unsets the trigger. While a trigger is active,
-you can move it by dragging the alert label on the price axis, click `Unset`, or
-use `Send` to send a one-off manual alert immediately.
+click `Set`. PyneReal keeps each red dotted alert line with the session, so
+triggers stay active after the chart is closed or the browser reconnects.
+When the live price touches a trigger line, PyneReal sends that line's selected
+manual-alert template and then automatically removes that trigger. You can set
+multiple triggers, move each one by dragging its alert label on the price axis,
+remove one with the label `X`, or use `Send` to send a one-off manual alert
+immediately.
 
 Manual alerts are independent from the Webhook checkbox. The checkbox controls
 strategy-generated alerts only; a manual alert can still be sent while the
@@ -279,6 +353,145 @@ values:
 ```json
 {"signal":"CLOSE TP3","ticker":"{{ticker}}","timeframe":"{{timeframe}}"}
 ```
+
+## Assets and Internal Transfers
+
+Open the Hub menu beside the PyneReal Hub title and select **Assets** to view the
+combined value of every configured exchange account. The list shows totals by
+exchange and account; select an account to open a donut chart with its asset and
+account-type breakdown, including supported spot, futures, margin, funding, and
+earn balances.
+
+Select a non-zero account type to open **Internal transfer**. Available routes
+depend on the exchange and account configuration. PyneReal supports transfers
+between the exchange's internal wallets, flexible Earn redemption where
+available, and main/sub-account transfers where the exchange API permits them.
+Every transfer is shown on a review screen and requires explicit confirmation.
+This feature does not perform blockchain withdrawals.
+
+Asset access uses credentials from `workdir/config/providers.toml`. Keep API
+keys read-only when only portfolio viewing is needed. If internal transfers are
+required, grant only the minimum account and transfer permissions for the
+intended routes; withdrawal permission is not required and should remain
+disabled.
+
+## Session Calendar
+
+Open the Hub menu beside the PyneReal Hub title and select **Calendar**. The
+monthly view marks dates that have schedules for active sessions; select a date
+to see the related symbol, title, details, time, and source.
+
+Each event card includes a Pepe forecast control. Select it to run a read-only
+AI outlook for that event without opening or modifying the main chat. Pepe's
+eyes move while the analysis is running and the face shakes when a new result
+is ready. Select the face again to open the Markdown response, or use the
+refresh control in the response bubble to run a new outlook.
+
+Calendar events are stored by data-service and shared across desktop and mobile
+browsers. Ask Dashboard AI to check or refresh schedules to populate it. A
+request without a named session covers every active session and defaults to the
+next 90 days. The AI uses SaveTicker calendar titles as discovery leads, searches
+the web when no matching title exists, and stores only events whose dates and
+details can be supported by a public source.
+
+## AI Setup & Details
+
+PyneReal currently integrates OpenAI Codex through a local Codex app-server and
+the dashboard AI chat. It uses the current local Codex login rather than an
+OpenAI API key. The Codex runtime is installed automatically by `setup.sh`
+through the `openai-codex` dependency, so no separate Codex CLI installation is
+required. When no authenticated account is found in an interactive terminal,
+data-service asks whether to enable AI and can start device-code login. Before
+running data-service non-interactively, start it once in an interactive terminal
+and complete that login.
+
+Dashboard AI can:
+
+- inspect exchange assets and derivative positions with the read-only scripts
+  under `ai/scripts`;
+- query every configured account when no exchange or account is specified;
+- analyze repository files, running sessions, and publicly available market
+  information;
+- set or remove persisted Manual Alert price triggers, including adding a
+  missing template when its title and JSON message are explicitly supplied;
+- research verified schedules for active sessions and persist them in the
+  shared Hub calendar;
+- send a completed result to the fixed Telegram destination when explicitly
+  requested; and
+- edit existing files only under `workdir/`, `modules/`, and
+  `data_service/templates/` when explicitly requested, or create new files
+  under `tmp/`.
+
+### Exchange Account Access
+
+Put exchange credentials in the local file below if AI should inspect account
+balances or positions:
+
+```text
+workdir/config/providers.toml
+```
+
+The file is created from `providers.example.toml` when missing and is excluded
+from Git. Do not commit or print its contents. Grant API keys only the minimum
+permissions required for the intended lookup or internal transfer.
+
+```toml
+[ccxt.binance]
+apiKey = "your_binance_api_key"
+secret = "your_binance_secret"
+
+[ccxt.bitget]
+apiKey = "your_bitget_api_key"
+secret = "your_bitget_secret"
+password = "your_bitget_passphrase"
+```
+
+Multiple accounts on the same exchange can be configured with named account
+tables:
+
+```toml
+[ccxt_accounts.binance_main]
+exchange = "binance"
+apiKey = "your_main_api_key"
+secret = "your_main_secret"
+
+[ccxt_accounts.binance_sub1]
+exchange = "binance"
+apiKey = "your_subaccount_api_key"
+secret = "your_subaccount_secret"
+```
+
+A general asset request checks spot, futures, margin, funding, and supported
+earn balances. A general position request checks the supported derivative
+markets for every selected account. Unsupported account types and partial API
+failures are reported without exposing credentials. These AI account tools are
+read-only and do not place or cancel exchange orders.
+
+### Strategy AI Instructions
+
+Realtime `strategy.entry` and `strategy.close` orders can provide an `ai`
+instruction. The instruction runs only after the order fills on the latest
+confirmed bar and is restricted to the originating session.
+
+```python
+strategy.entry(
+    "Long 3",
+    strategy.long,
+    alert_message=f'{{"signal": "Long 3", "price": {close}}}',
+    ai=f"Set the close2 and close3 manual alerts at {avgEntry * 1.003}",
+)
+```
+
+The runner does not wait for the AI response. Strategy instructions run
+independently from dashboard chat and from other sessions, while instructions
+from the same session run in event order. The instruction and final result are
+stored in shared dashboard chat history. Automated instructions are ignored
+during historical backtests and skipped when the AI service is disabled.
+
+Values such as `avgEntry` or `close` are not automatically included. Put values
+required by the instruction in the `ai` string, usually with an f-string. AI
+never invents a missing Manual Alert title or JSON message, but it can create a
+missing template when both are explicitly included in the instruction.
 
 ## Backtesting
 

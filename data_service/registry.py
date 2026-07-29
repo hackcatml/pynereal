@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import shutil
 import traceback
-from typing import Dict, List, Optional
+from dataclasses import replace
+from typing import Awaitable, Callable, Dict, List, Optional
 
 from config import MAX_SESSIONS, FeedSpec, SessionSpec, save_sessions
 from collector_loop import fix_missing_bars_loop, watch_trades_loop
@@ -26,6 +27,14 @@ class SessionNotFoundError(Exception):
     pass
 
 
+class HistoryNotReadyError(Exception):
+    pass
+
+
+class SessionOrderError(Exception):
+    pass
+
+
 class SessionRegistry:
     """Owns Feeds (one per market, shared) and Sessions (one per strategy), their
     background tasks, the runner supervisor, and the dashboard (/ws/hub) push.
@@ -40,6 +49,9 @@ class SessionRegistry:
         self.supervisor = RunnerSupervisor(port=port, on_change=self.notify_hub)
         self.logo_resolver = TradingViewLogoResolver()
         self.logo_tasks: Dict[str, asyncio.Task] = {}
+        self.ai_instruction_handler: Optional[
+            Callable[[Session, dict], Awaitable[None]]
+        ] = None
 
     # ------------------------------------------------------------------
     # Queries
@@ -76,6 +88,14 @@ class SessionRegistry:
                 continue
             self._schedule_logo_resolution(session)
 
+    def set_ai_instruction_handler(
+        self,
+        handler: Callable[[Session, dict], Awaitable[None]],
+    ) -> None:
+        self.ai_instruction_handler = handler
+        for session in self.sessions.values():
+            session.on_ai_instruction = handler
+
     def _schedule_logo_resolution(self, session: Session) -> None:
         task = self.logo_tasks.pop(session.spec.id, None)
         if task is not None:
@@ -102,17 +122,32 @@ class SessionRegistry:
     # ------------------------------------------------------------------
     # Feed lifecycle (shared data layer)
     # ------------------------------------------------------------------
+    def _start_file_update_task(
+        self,
+        feed: Feed,
+        *,
+        history_ready_event: asyncio.Event | None = None,
+    ) -> asyncio.Task:
+        spec = feed.spec
+        history_ready_event = history_ready_event or feed.history_ready_event
+        task = asyncio.create_task(self._guard_feed(feed, "file_update_loop", file_update_loop(
+            config=spec, ohlcv_path=feed.paths.ohlcv_path, toml_path=feed.paths.toml_path,
+            state=feed.state, emit_event=feed.emit_event,
+            history_ready_event=history_ready_event,
+        )))
+        feed.tasks["file_update_loop"] = task
+        return task
+
     def _start_feed_tasks(self, feed: Feed) -> None:
         spec = feed.spec
-        feed.tasks = [
-            asyncio.create_task(self._guard_feed(feed, "watch_trades_loop", watch_trades_loop(
-                spec.exchange, spec.symbol, spec.timeframe, feed.state, feed.broadcast_bar))),
-            asyncio.create_task(self._guard_feed(feed, "fix_missing_bars_loop", fix_missing_bars_loop(
+        feed.tasks = {
+            "watch_trades_loop": asyncio.create_task(self._guard_feed(feed, "watch_trades_loop", watch_trades_loop(
+                spec.exchange, spec.symbol, spec.timeframe, feed.state, feed.broadcast_bar,
+                market_type=spec.market_type))),
+            "fix_missing_bars_loop": asyncio.create_task(self._guard_feed(feed, "fix_missing_bars_loop", fix_missing_bars_loop(
                 spec.exchange, spec.timeframe, feed.state))),
-            asyncio.create_task(self._guard_feed(feed, "file_update_loop", file_update_loop(
-                config=spec, ohlcv_path=feed.paths.ohlcv_path, toml_path=feed.paths.toml_path,
-                state=feed.state, emit_event=feed.emit_event))),
-        ]
+        }
+        self._start_file_update_task(feed)
 
     async def _guard_feed(self, feed: Feed, name: str, coro) -> None:
         try:
@@ -138,12 +173,44 @@ class SessionRegistry:
     async def _teardown_feed_if_idle(self, feed: Feed) -> None:
         if feed.subscribers:
             return
-        for t in feed.tasks:
+        tasks = list(feed.tasks.values())
+        for t in tasks:
             t.cancel()
-        if feed.tasks:
-            await asyncio.gather(*feed.tasks, return_exceptions=True)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        feed.tasks.clear()
         self.feeds.pop(feed.spec.id, None)
         print(f"[registry] feed torn down (idle): {feed.spec.id}")
+
+    async def _restart_file_update(self, feed: Feed) -> None:
+        task = feed.tasks.pop("file_update_loop", None)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        if (feed.collector_error or "").startswith("file_update_loop:"):
+            feed.collector_error = None
+        async with feed.state.lock:
+            feed.state.pending_prerun_event = None
+
+        feed.history_ready_event.clear()
+        task = self._start_file_update_task(
+            feed,
+            history_ready_event=feed.history_ready_event,
+        )
+        ready_wait = asyncio.create_task(feed.history_ready_event.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {task, ready_wait},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if ready_wait not in done:
+                raise RuntimeError(feed.collector_error or "file update stopped before history was ready")
+        finally:
+            if not ready_wait.done():
+                ready_wait.cancel()
+            await asyncio.gather(ready_wait, return_exceptions=True)
+        print(f"[registry] file updater restarted: {feed.spec.id}")
 
     # ------------------------------------------------------------------
     # Session lifecycle
@@ -157,6 +224,7 @@ class SessionRegistry:
         session = Session(spec, feed)
         session.on_status_change = self.notify_hub
         session.on_spec_change = self._persist_and_notify
+        session.on_ai_instruction = self.ai_instruction_handler
         feed.subscribers[spec.id] = session
         self.sessions[spec.id] = session
         self._schedule_logo_resolution(session)
@@ -187,6 +255,23 @@ class SessionRegistry:
             self._persist()
         await self.notify_hub()
 
+    async def reorder_sessions(self, session_ids: list[str]) -> List[dict]:
+        current_ids = list(self.sessions)
+        if len(session_ids) != len(current_ids) or len(set(session_ids)) != len(session_ids):
+            raise SessionOrderError("session order must contain every session exactly once")
+        if set(session_ids) != set(current_ids):
+            raise SessionOrderError("session order contains unknown or missing session ids")
+
+        previous_sessions = self.sessions
+        self.sessions = {session_id: previous_sessions[session_id] for session_id in session_ids}
+        try:
+            self._persist()
+        except Exception:
+            self.sessions = previous_sessions
+            raise
+        await self.notify_hub()
+        return self.snapshots()
+
     async def update_webhook(self, session_id: str, *, enabled: bool | None = None,
                              telegram_notification: bool | None = None,
                              url: str | None = None,
@@ -204,6 +289,45 @@ class SessionRegistry:
         await self.notify_hub()
         return dict(session.spec.webhook)
 
+    async def update_history_since(self, session_id: str, history_since: str) -> None:
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise SessionNotFoundError(session_id)
+        feed = session.feed
+        # The ohlcv file is shared per feed, so every session on this market
+        # has to move to the new start together.
+        targets = list(feed.subscribers.values())
+        if all(s.spec.history_since == history_since for s in targets):
+            return
+
+        previous = [(s, s.spec) for s in targets]
+        for s in targets:
+            s.spec = s.spec.with_history_since(history_since)
+        try:
+            self._persist()
+        except Exception:
+            for s, spec in previous:
+                s.spec = spec
+            raise
+
+        # Runners must not hold the ohlcv file while file_update_loop
+        # regenerates it, and the strategies have to recompute over the new
+        # window anyway — stop them, restart only the file updater, bring them back.
+        running = [
+            s for s in targets
+            if self.supervisor.status(s.spec.id) in ("running", "starting")
+        ]
+        for s in running:
+            await self.supervisor.stop(s.spec.id)
+
+        feed.spec = replace(feed.spec, history_since=history_since)
+        await self._restart_file_update(feed)
+
+        for s in running:
+            s.history_resync_pending = True
+            await self.supervisor.start(s.spec, s.paths)
+        await self.notify_hub()
+
     async def update_manual_alert_templates(self, session_id: str, templates: list[dict]) -> list[dict]:
         session = self.sessions.get(session_id)
         if session is None:
@@ -212,16 +336,102 @@ class SessionRegistry:
         self._persist()
         return [dict(t) for t in session.spec.manual_alert_templates]
 
-    async def update_manual_alert_trigger(self, session_id: str, trigger: object) -> dict:
+    async def update_manual_alert_triggers(self, session_id: str, triggers: object) -> list[dict]:
         session = self.sessions.get(session_id)
         if session is None:
             raise SessionNotFoundError(session_id)
-        session.spec = session.spec.with_manual_alert_trigger(trigger)
+        session.spec = session.spec.with_manual_alert_triggers(triggers)
         session.reset_manual_alert_trigger_gate()
         self._persist()
         await session.push_manual_alert_trigger()
         await self.notify_hub()
-        return dict(session.spec.manual_alert_trigger)
+        return [dict(t) for t in session.spec.manual_alert_triggers]
+
+    async def update_manual_alert_configuration(
+        self,
+        session_id: str,
+        *,
+        templates: list[dict],
+        triggers: object,
+    ) -> dict[str, list[dict]]:
+        """Persist templates and triggers together for one AI-driven alert setup."""
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise SessionNotFoundError(session_id)
+
+        previous_spec = session.spec
+        session.spec = (
+            session.spec
+            .with_manual_alert_templates(templates)
+            .with_manual_alert_triggers(triggers)
+        )
+        try:
+            self._persist()
+        except Exception:
+            session.spec = previous_spec
+            raise
+
+        session.reset_manual_alert_trigger_gate()
+        await session.push_manual_alert_trigger()
+        await self.notify_hub()
+        return {
+            "templates": [dict(t) for t in session.spec.manual_alert_templates],
+            "triggers": [dict(t) for t in session.spec.manual_alert_triggers],
+        }
+
+    async def delete_manual_alert_triggers(
+        self,
+        selections: dict[str, set[str] | None],
+    ) -> list[dict]:
+        """Delete selected or all triggers from multiple sessions in one save."""
+        unknown = [session_id for session_id in selections if session_id not in self.sessions]
+        if unknown:
+            raise SessionNotFoundError(unknown[0])
+
+        changes: list[tuple[Session, object, list[dict]]] = []
+        deleted: list[dict] = []
+        for session_id, trigger_ids in selections.items():
+            session = self.sessions[session_id]
+            current = [dict(trigger) for trigger in session.spec.manual_alert_triggers]
+            if trigger_ids is None:
+                removed = current
+                remaining: list[dict] = []
+            else:
+                removed = [
+                    trigger for trigger in current
+                    if str(trigger.get("id") or "") in trigger_ids
+                ]
+                remaining = [
+                    trigger for trigger in current
+                    if str(trigger.get("id") or "") not in trigger_ids
+                ]
+            if not removed:
+                continue
+            changes.append((session, session.spec, removed))
+            session.spec = session.spec.with_manual_alert_triggers(remaining)
+
+        if not changes:
+            return []
+
+        try:
+            self._persist()
+        except Exception:
+            for session, previous_spec, _ in changes:
+                session.spec = previous_spec
+            raise
+
+        for session, _, removed in changes:
+            session.reset_manual_alert_trigger_gate()
+            await session.push_manual_alert_trigger()
+            deleted.extend({
+                "session_id": session.spec.id,
+                "exchange": session.spec.exchange,
+                "symbol": session.spec.symbol,
+                "timeframe": session.spec.timeframe,
+                "trigger": dict(trigger),
+            } for trigger in removed)
+        await self.notify_hub()
+        return deleted
 
     # ------------------------------------------------------------------
     # Runner control
@@ -230,6 +440,8 @@ class SessionRegistry:
         session = self.sessions.get(session_id)
         if session is None:
             raise SessionNotFoundError(session_id)
+        if not session.feed.history_ready():
+            raise HistoryNotReadyError(session_id)
         await self.supervisor.start(session.spec, session.paths)
 
     async def stop_runner(self, session_id: str) -> None:
@@ -243,6 +455,8 @@ class SessionRegistry:
         session = self.sessions.get(session_id)
         if session is None:
             raise SessionNotFoundError(session_id)
+        if not session.feed.history_ready():
+            raise HistoryNotReadyError(session_id)
         await self.supervisor.restart(session.spec, session.paths)
 
     # ------------------------------------------------------------------
@@ -259,13 +473,6 @@ class SessionRegistry:
             self._persist()
         except Exception as e:
             print(f"[registry] initial persist failed: {e}")
-        # Autostart runners for sessions flagged autostart_runner (decision: boot restore).
-        for s in list(self.sessions.values()):
-            if s.spec.autostart_runner:
-                try:
-                    await self.start_runner(s.spec.id)
-                except Exception as e:
-                    print(f"[registry] autostart runner failed for {s.spec.id}: {e}")
 
     async def shutdown(self) -> None:
         await self.supervisor.shutdown()
@@ -275,7 +482,7 @@ class SessionRegistry:
             t.cancel()
         if logo_tasks:
             await asyncio.gather(*logo_tasks, return_exceptions=True)
-        all_tasks = [t for feed in self.feeds.values() for t in feed.tasks]
+        all_tasks = [t for feed in self.feeds.values() for t in feed.tasks.values()]
         for t in all_tasks:
             t.cancel()
         if all_tasks:

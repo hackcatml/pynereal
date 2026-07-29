@@ -4,14 +4,17 @@ import json
 import math
 import os
 import re
+import shutil
 import tomllib
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from pynecore.cli.app import app_state
 
 # Maximum number of concurrent sessions the hub will manage (decision 8-4).
-MAX_SESSIONS = 10
+MAX_SESSIONS = 20
 
 
 def _slug(raw: str) -> str:
@@ -54,7 +57,7 @@ def sanitize_manual_alert_templates(raw: object) -> list[dict]:
     return templates
 
 
-def sanitize_manual_alert_trigger(raw: object) -> dict:
+def _sanitize_manual_alert_trigger_item(raw: object) -> dict:
     if not isinstance(raw, dict) or not bool(raw.get("enabled", False)):
         return {"enabled": False}
 
@@ -70,11 +73,62 @@ def sanitize_manual_alert_trigger(raw: object) -> dict:
     if len(templates) != 1:
         return {"enabled": False}
 
+    trigger_id = raw.get("id")
+    if not isinstance(trigger_id, str) or not trigger_id.strip():
+        trigger_id = uuid.uuid4().hex
+    trigger_id = re.sub(r"[^A-Za-z0-9_-]+", "_", trigger_id.strip())[:64] or uuid.uuid4().hex
+
     return {
+        "id": trigger_id,
         "enabled": True,
         "price": price,
         "template": templates[0],
     }
+
+
+def sanitize_manual_alert_triggers(raw: object) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+
+    triggers: list[dict] = []
+    seen_ids: set[str] = set()
+    for item in raw[:50]:
+        trigger = _sanitize_manual_alert_trigger_item(item)
+        if not trigger.get("enabled"):
+            continue
+        trigger_id = str(trigger["id"])
+        if trigger_id in seen_ids:
+            trigger["id"] = uuid.uuid4().hex
+            trigger_id = str(trigger["id"])
+        seen_ids.add(trigger_id)
+        triggers.append(trigger)
+    return triggers
+
+
+def validate_history_since(raw: object) -> str:
+    """Validate a history_since value for the dashboard edit endpoint: a UTC
+    date or datetime only, e.g. '2026-05-01' or '2026-06-01 07:30'. Raises
+    ValueError otherwise.
+
+    The looser forms Add session accepts (a number of days back, 'continue',
+    empty) are intentionally rejected here — the edit UI is date-only. A naive
+    value is treated as UTC downstream (see file_update_loop)."""
+    value = str(raw or "").strip()
+    if not value:
+        raise ValueError("history_since is required (e.g. 2026-05-01 or 2026-06-01 07:30, UTC)")
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        raise ValueError(
+            "history_since must be a UTC date like 2026-05-01 or 2026-06-01 07:30")
+    return value
+
+
+def sanitize_market_type(raw: object) -> str:
+    value = str(raw or "").strip().lower()
+    if value in {"spot", "linear", "inverse"}:
+        return value
+    return ""
 
 
 @dataclass(frozen=True)
@@ -88,9 +142,9 @@ class SessionSpec:
     history_since: str
     script_name: str
     webhook: dict  # {"enabled": bool, "telegram_notification": bool}  (decision 8-1)
-    autostart_runner: bool = False  # start the runner automatically on hub boot
+    market_type: str = ""
     manual_alert_templates: list[dict] = field(default_factory=list)
-    manual_alert_trigger: dict = field(default_factory=lambda: {"enabled": False})
+    manual_alert_triggers: list[dict] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict) -> "SessionSpec":
@@ -120,9 +174,9 @@ class SessionSpec:
                 "telegram_token": (webhook.get("telegram_token") or ""),
                 "telegram_chat_id": (webhook.get("telegram_chat_id") or ""),
             },
-            autostart_runner=bool(d.get("autostart_runner", False)),
+            market_type=sanitize_market_type(d.get("market_type")),
             manual_alert_templates=sanitize_manual_alert_templates(d.get("manual_alert_templates")),
-            manual_alert_trigger=sanitize_manual_alert_trigger(d.get("manual_alert_trigger")),
+            manual_alert_triggers=sanitize_manual_alert_triggers(d.get("manual_alert_triggers")),
         )
 
     def with_webhook(self, *, enabled: bool | None = None,
@@ -145,9 +199,21 @@ class SessionSpec:
             id=self.id, provider=self.provider, exchange=self.exchange,
             symbol=self.symbol, timeframe=self.timeframe,
             history_since=self.history_since, script_name=self.script_name,
-            webhook=wh, autostart_runner=self.autostart_runner,
+            webhook=wh,
+            market_type=self.market_type,
             manual_alert_templates=[dict(t) for t in self.manual_alert_templates],
-            manual_alert_trigger=dict(self.manual_alert_trigger),
+            manual_alert_triggers=[dict(t) for t in self.manual_alert_triggers],
+        )
+
+    def with_history_since(self, history_since: str) -> "SessionSpec":
+        return SessionSpec(
+            id=self.id, provider=self.provider, exchange=self.exchange,
+            symbol=self.symbol, timeframe=self.timeframe,
+            history_since=history_since, script_name=self.script_name,
+            webhook=dict(self.webhook),
+            market_type=self.market_type,
+            manual_alert_templates=[dict(t) for t in self.manual_alert_templates],
+            manual_alert_triggers=[dict(t) for t in self.manual_alert_triggers],
         )
 
     def with_manual_alert_templates(self, templates: list[dict]) -> "SessionSpec":
@@ -155,23 +221,25 @@ class SessionSpec:
             id=self.id, provider=self.provider, exchange=self.exchange,
             symbol=self.symbol, timeframe=self.timeframe,
             history_since=self.history_since, script_name=self.script_name,
-            webhook=dict(self.webhook), autostart_runner=self.autostart_runner,
+            webhook=dict(self.webhook),
+            market_type=self.market_type,
             manual_alert_templates=sanitize_manual_alert_templates(templates),
-            manual_alert_trigger=dict(self.manual_alert_trigger),
+            manual_alert_triggers=[dict(t) for t in self.manual_alert_triggers],
         )
 
-    def with_manual_alert_trigger(self, trigger: object) -> "SessionSpec":
+    def with_manual_alert_triggers(self, triggers: object) -> "SessionSpec":
         return SessionSpec(
             id=self.id, provider=self.provider, exchange=self.exchange,
             symbol=self.symbol, timeframe=self.timeframe,
             history_since=self.history_since, script_name=self.script_name,
-            webhook=dict(self.webhook), autostart_runner=self.autostart_runner,
+            webhook=dict(self.webhook),
+            market_type=self.market_type,
             manual_alert_templates=[dict(t) for t in self.manual_alert_templates],
-            manual_alert_trigger=sanitize_manual_alert_trigger(trigger),
+            manual_alert_triggers=sanitize_manual_alert_triggers(triggers),
         )
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "id": self.id,
             "provider": self.provider,
             "exchange": self.exchange,
@@ -180,10 +248,12 @@ class SessionSpec:
             "history_since": self.history_since,
             "script_name": self.script_name,
             "webhook": dict(self.webhook),
-            "autostart_runner": self.autostart_runner,
             "manual_alert_templates": [dict(t) for t in self.manual_alert_templates],
-            "manual_alert_trigger": dict(self.manual_alert_trigger),
+            "manual_alert_triggers": [dict(t) for t in self.manual_alert_triggers],
         }
+        if self.market_type:
+            data["market_type"] = self.market_type
+        return data
 
     @property
     def feed_id(self) -> str:
@@ -200,6 +270,7 @@ class FeedSpec:
     symbol: str
     timeframe: str
     history_since: str
+    market_type: str = ""
 
     @classmethod
     def from_session(cls, s: SessionSpec) -> "FeedSpec":
@@ -207,6 +278,7 @@ class FeedSpec:
             id=feed_key(s.provider, s.exchange, s.symbol, s.timeframe),
             provider=s.provider, exchange=s.exchange, symbol=s.symbol,
             timeframe=s.timeframe, history_since=s.history_since,
+            market_type=s.market_type,
         )
 
 
@@ -215,6 +287,25 @@ class HubConfig:
     host: str
     port: int
     pyne_section: dict
+
+
+def ensure_provider_config(config_dir: Path | None = None) -> Path:
+    config_dir = config_dir or app_state.config_dir
+    providers_path = config_dir / "providers.toml"
+    if providers_path.exists():
+        return providers_path
+
+    example_path = config_dir / "providers.example.toml"
+    if not example_path.is_file():
+        raise FileNotFoundError(
+            f"provider config not found: {providers_path} "
+            f"(example also missing: {example_path})"
+        )
+
+    config_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(example_path, providers_path)
+    print(f"[config] created {providers_path.name} from {example_path.name}")
+    return providers_path
 
 
 def _toml_path() -> Path:

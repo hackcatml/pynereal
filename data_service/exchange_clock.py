@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 import ccxt.pro as ccxt
 
 from ohlcv_io import make_ccxt_pro_client
+from log_utils import log_with_time
 
 
 @dataclass
@@ -45,7 +46,8 @@ class ExchangeClock:
                 jitter = random.uniform(0.0, min(1.0, delay * 0.2))
                 self.next_sync = mono + delay + jitter
                 self.backoff_sec = min(delay * 2.0, 60.0)
-                print(
+                await self.close()
+                log_with_time(
                     f"[exchange_clock] {self.exchange_name} fetch_time error: "
                     f"{type(e).__name__}: {e}; using cached/local clock, "
                     f"retrying in {delay:g}s"

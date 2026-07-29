@@ -13,6 +13,7 @@ from pynecore.core.ohlcv_file import OHLCVReader, OHLCVWriter
 from pynecore.types.ohlcv import OHLCV
 from ohlcv_cache import import_from_ohlcv
 from pynecore.cli.app import app_state
+from log_utils import log_with_time
 
 
 def convert_timeframe(timeframe: str, to_ms: bool = False) -> int | str:
@@ -134,7 +135,35 @@ def _filter_invalid_ccxt_markets(markets: list) -> list:
     ]
 
 
-def make_ccxt_client(ccxt_module, exchange: str):
+def _infer_market_type_from_symbol(symbol: str) -> str:
+    value = (symbol or "").upper()
+    if ":" not in value:
+        return "spot"
+    settle = value.rsplit(":", 1)[-1]
+    if settle in {"USDT", "USDC"}:
+        return "linear"
+    return "inverse"
+
+
+def _make_ccxt_config(exchange: str, market_type: str = "", symbol: str = "") -> dict:
+    if exchange.lower() != "binance":
+        return {}
+
+    resolved_market_type = (market_type or "").strip().lower()
+    if resolved_market_type not in {"spot", "linear", "inverse"}:
+        resolved_market_type = _infer_market_type_from_symbol(symbol) if symbol else ""
+
+    if resolved_market_type == "spot":
+        return {"options": {"defaultType": "spot", "fetchMarkets": {"types": ["spot"]}}}
+    if resolved_market_type == "linear":
+        return {"options": {"defaultType": "future", "fetchMarkets": {"types": ["linear"]}}}
+    if resolved_market_type == "inverse":
+        return {"options": {"defaultType": "delivery", "fetchMarkets": {"types": ["inverse"]}}}
+
+    return {"options": {"defaultType": "future"}}
+
+
+def make_ccxt_client(ccxt_module, exchange: str, market_type: str = "", symbol: str = ""):
     """Create a sync ccxt client.
 
     For OKX, wrap the exchange class so fetch_markets() drops invalid markets
@@ -142,7 +171,7 @@ def make_ccxt_client(ccxt_module, exchange: str):
     are created as-is.
     """
     exchange_class = getattr(ccxt_module, exchange)
-    config = _make_ccxt_config(exchange)
+    config = _make_ccxt_config(exchange, market_type, symbol)
     if exchange.lower() != "okx":
         return exchange_class(config=config)
 
@@ -153,7 +182,7 @@ def make_ccxt_client(ccxt_module, exchange: str):
     return SafeOKX(config=config)
 
 
-def make_ccxt_pro_client(ccxt_module, exchange: str):
+def make_ccxt_pro_client(ccxt_module, exchange: str, market_type: str = "", symbol: str = ""):
     """ccxt.pro (async) counterpart of make_ccxt_client().
 
     Kept separate because fetch_markets() is a coroutine in ccxt.pro and needs
@@ -162,7 +191,7 @@ def make_ccxt_pro_client(ccxt_module, exchange: str):
     coroutine to sync callers.
     """
     exchange_class = getattr(ccxt_module, exchange)
-    config = _make_ccxt_config(exchange)
+    config = _make_ccxt_config(exchange, market_type, symbol)
     if exchange.lower() != "okx":
         return exchange_class(config=config)
 
@@ -174,22 +203,17 @@ def make_ccxt_pro_client(ccxt_module, exchange: str):
     return SafeOKXPro(config=config)
 
 
-def _make_ccxt_config(exchange: str) -> dict:
-    if exchange.lower() == "binance":
-        return {"options": {"defaultType": "swap"}}
-    return {}
-
-
 def fetch_ohlcv_data(
     exchange: str,
     symbol: str,
     timeframe: str,
     since: int,
     limit: int | None = None,
+    market_type: str = "",
 ) -> list | None:
     import ccxt
 
-    client = make_ccxt_client(ccxt, exchange)
+    client = make_ccxt_client(ccxt, exchange, market_type=market_type, symbol=symbol)
     return client.fetch_ohlcv(
         symbol=symbol,
         timeframe=timeframe,
@@ -203,6 +227,7 @@ def fix_last_open_if_needed(
     exchange: str = "",
     symbol: str = "",
     timeframe: str = "",
+    market_type: str = "",
 ) -> float:
     retry_delays = (1.0, 2.0)
     max_attempts = len(retry_delays) + 1
@@ -235,16 +260,17 @@ def fix_last_open_if_needed(
                     timeframe=timeframe,
                     since=(last_timestamp - interval) * 1000,
                     limit=3,
+                    market_type=market_type,
                 )
             except Exception as e:
                 if attempt >= max_attempts:
-                    print(
+                    log_with_time(
                         f"[fix_last_open_if_needed] Error fetching current open: {e}; "
                         f"failed after {attempt}/{max_attempts}"
                     )
                     return fixed_candle_open_price
                 delay = retry_delays[attempt - 1]
-                print(
+                log_with_time(
                     f"[fix_last_open_if_needed] Error fetching current open: {e}; "
                     f"retrying in {delay:g}s ({attempt}/{max_attempts})"
                 )
@@ -262,7 +288,7 @@ def fix_last_open_if_needed(
             if attempt >= max_attempts:
                 return fixed_candle_open_price
             delay = retry_delays[attempt - 1]
-            print(
+            log_with_time(
                 "[fix_last_open_if_needed] current open not found in fetched OHLCV; "
                 f"retrying in {delay:g}s ({attempt}/{max_attempts})"
             )
@@ -332,6 +358,7 @@ def fetch_and_update_ohlcv_data(
     symbol: str,
     timeframe: str,
     ohlcv_path: str,
+    market_type: str = "",
 ) -> list | None:
     """
     Fetch and update candles using fetch_ohlcv.
@@ -358,7 +385,8 @@ def fetch_and_update_ohlcv_data(
             symbol=symbol,
             timeframe=timeframe,
             since=last_timestamp_sec * 1000 - interval * 1000,  # Convert to milliseconds
-            limit=None
+            limit=None,
+            market_type=market_type,
         )
 
         if not res or len(res) == 0:
@@ -369,7 +397,7 @@ def fetch_and_update_ohlcv_data(
         return res
 
     except Exception as e:
-        print(f"[fetch_and_update_ohlcv_data] Error fetching OHLCV: {e}")
+        log_with_time(f"[fetch_and_update_ohlcv_data] Error fetching OHLCV: {e}")
         return None
 
 
@@ -380,6 +408,7 @@ def fetch_and_update_recent_ohlcv_data(
     ohlcv_path: str,
     current_bar_ts_ms: int,
     bar_count: int = 10,
+    market_type: str = "",
 ) -> list | None:
     """
     Fetch and update recently closed candles before the current live candle.
@@ -396,7 +425,7 @@ def fetch_and_update_recent_ohlcv_data(
         return None
 
     if last_bar.timestamp != current_ts_sec:
-        print(
+        log_with_time(
             "[fetch_and_update_recent_closed_ohlcv_data] "
             f"current bar mismatch: file={last_bar.timestamp}, live={current_ts_sec}"
         )
@@ -420,6 +449,7 @@ def fetch_and_update_recent_ohlcv_data(
             timeframe=timeframe,
             since=since_ms,
             limit=bar_count + 1,
+            market_type=market_type,
         )
 
         if not res:
@@ -438,5 +468,5 @@ def fetch_and_update_recent_ohlcv_data(
         return closed_bars
 
     except Exception as e:
-        print(f"[fetch_and_update_recent_closed_ohlcv_data] Error fetching OHLCV: {e}")
+        log_with_time(f"[fetch_and_update_recent_closed_ohlcv_data] Error fetching OHLCV: {e}")
         return None

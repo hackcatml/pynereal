@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "position_snapshot.schema.json",
+  "title": "Position Snapshot",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "collected_at",
+    "exchange",
+    "symbol",
+    "positions"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "collected_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "exchange": {
+      "type": "string"
+    },
+    "account": {
+      "type": ["string", "null"]
+    },
+    "session_id": {
+      "type": ["string", "null"]
+    },
+    "symbol": {
+      "type": "string"
+    },
+    "positions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["side", "quantity"],
+        "properties": {
+          "side": {
+            "enum": ["long", "short"]
+          },
+          "quantity": {
+            "type": "number"
+          },
+          "entry_price": {
+            "type": ["number", "null"]
+          },
+          "mark_price": {
+            "type": ["number", "null"]
+          },
+          "liquidation_price": {
+            "type": ["number", "null"]
+          },
+          "leverage": {
+            "type": ["number", "null"]
+          },
+          "unrealized_pnl": {
+            "type": ["number", "null"]
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": true
+}

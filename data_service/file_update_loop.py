@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, UTC
 from dateutil.relativedelta import relativedelta
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional, TypeVar
 
 from config import FeedSpec
 from pynecore.cli.commands.data import parse_date_or_days
@@ -32,22 +31,38 @@ from ohlcv_cache import (
 )
 from ohlcv_paths import make_cache_path
 from state import DataState
+from log_utils import log_with_time
+
+
+T = TypeVar("T")
+
+
+async def _to_thread_cancel_safe(func: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+    worker = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        try:
+            await worker
+        except Exception:
+            pass
+        raise
 
 
 async def _retry_ohlcv_update(label: str, call: Callable[[], list | None]) -> list | None:
     delays = (1.0, 2.0, 4.0, 8.0)
     attempts = len(delays) + 1
     for attempt in range(1, attempts + 1):
-        res = await asyncio.to_thread(call)
+        res = await _to_thread_cancel_safe(call)
         if res:
             if attempt > 1:
-                print(f"[data_service] {label} succeeded on retry {attempt}/{attempts}")
+                log_with_time(f"[data_service] {label} succeeded on retry {attempt}/{attempts}")
             return res
         if attempt < attempts:
             delay = delays[attempt - 1]
-            print(f"[data_service] {label} failed; retrying in {delay:g}s ({attempt}/{attempts})")
+            log_with_time(f"[data_service] {label} failed; retrying in {delay:g}s ({attempt}/{attempts})")
             await asyncio.sleep(delay)
-    print(f"[data_service] {label} failed after {attempts} attempts; continuing with local OHLCV")
+    log_with_time(f"[data_service] {label} failed after {attempts} attempts; continuing with local OHLCV")
     return None
 
 
@@ -59,11 +74,13 @@ async def file_update_loop(
     state: DataState,
     emit_event: Callable[[dict], Awaitable[None]],
     poll_sec: float = 0.1,
+    history_ready_event: asyncio.Event | None = None,
 ) -> None:
     provider = config.provider
     exchange = config.exchange
     symbol = config.symbol
     timeframe = config.timeframe
+    market_type = config.market_type
     cache_path = make_cache_path()
     init_cache(cache_path)
     # print(f"[data_service] sqlite cache path: {cache_path}")
@@ -133,17 +150,16 @@ async def file_update_loop(
                 min_ts = get_min_ts(cache_path, provider, exchange, symbol, timeframe)
                 if min_ts is not None and desired_ts < min_ts:
                     print(f"[data_service] backfilling cache: {desired_ts} -> {min_ts}")
-                    with ThreadPoolExecutor() as ex:
-                        ok = ex.submit(
-                            download_history_range_into_cache,
-                            cache_path=cache_path,
-                            provider=provider,
-                            exchange=exchange,
-                            symbol=symbol,
-                            timeframe=timeframe,
-                            time_from=desired_dt,
-                            time_to=datetime.fromtimestamp(min_ts, UTC),
-                        ).result()
+                    ok = await _to_thread_cancel_safe(
+                        download_history_range_into_cache,
+                        cache_path=cache_path,
+                        provider=provider,
+                        exchange=exchange,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        time_from=desired_dt,
+                        time_to=datetime.fromtimestamp(min_ts, UTC),
+                    )
                     if ok:
                         print("[data_service] backfill updated cache via download_history")
                 else:
@@ -153,25 +169,25 @@ async def file_update_loop(
         # Refresh cache from last_ts (include last bar to finalize).
         last_ts = get_last_ts(cache_path, provider, exchange, symbol, timeframe)
         if last_ts is not None:
-            with ThreadPoolExecutor() as ex:
-                ok = ex.submit(
-                    download_history_range_into_cache,
-                    cache_path=cache_path,
-                    provider=provider,
-                    exchange=exchange,
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    time_from=datetime.fromtimestamp(
-                        int(last_ts) - int(convert_timeframe(timeframe, to_ms=True) / 1000),
-                        UTC,
-                    ),
-                    time_to=datetime.now(UTC),
-                ).result()
+            ok = await _to_thread_cancel_safe(
+                download_history_range_into_cache,
+                cache_path=cache_path,
+                provider=provider,
+                exchange=exchange,
+                symbol=symbol,
+                timeframe=timeframe,
+                time_from=datetime.fromtimestamp(
+                    int(last_ts) - int(convert_timeframe(timeframe, to_ms=True) / 1000),
+                    UTC,
+                ),
+                time_to=datetime.now(UTC),
+            )
             if ok:
                 print("[data_service] sqlite cache updated via download_history")
         # Export cache into ohlcv for runner consumption.
         if export_start_ts is not None:
-            export_to_ohlcv_since(
+            await _to_thread_cancel_safe(
+                export_to_ohlcv_since,
                 cache_path,
                 provider,
                 exchange,
@@ -181,16 +197,27 @@ async def file_update_loop(
                 export_start_ts,
             )
         else:
-            export_to_ohlcv(cache_path, provider, exchange, symbol, timeframe, ohlcv_path)
+            await _to_thread_cancel_safe(
+                export_to_ohlcv,
+                cache_path,
+                provider,
+                exchange,
+                symbol,
+                timeframe,
+                ohlcv_path,
+            )
         if ohlcv_path.exists():
             print("[data_service] ohlcv regenerated from sqlite cache")
             history_download_complete = True
-            state.pending_prerun_event = {
-                "type": "prerun_ready_after_history_download",
-                "ohlcv_path": str(ohlcv_path),
-                "toml_path": str(toml_path),
-                "confirmed_bar_and_new_bar": None
-            }
+            async with state.lock:
+                state.pending_prerun_event = {
+                    "type": "prerun_ready_after_history_download",
+                    "ohlcv_path": str(ohlcv_path),
+                    "toml_path": str(toml_path),
+                    "confirmed_bar_and_new_bar": None,
+                }
+            if history_ready_event is not None:
+                history_ready_event.set()
     if not cache_ready:
         # No cache: start history download flow.
         print("[data_service] sqlite cache missing; starting history download")
@@ -245,15 +272,14 @@ async def file_update_loop(
                 elif history_since != "":
                     since = history_since
 
-                with ThreadPoolExecutor() as ex:
-                    ok = ex.submit(
-                        download_history,
-                        provider,
-                        exchange,
-                        symbol,
-                        timeframe,
-                        since,
-                    ).result()
+                ok = await _to_thread_cancel_safe(
+                    download_history,
+                    provider,
+                    exchange,
+                    symbol,
+                    timeframe,
+                    since,
+                )
 
                 if not ok:
                     for fp in (ohlcv_path, toml_path):
@@ -263,7 +289,15 @@ async def file_update_loop(
                 else:
                     history_download_complete = True
                     first_fetch_after_download_done = False
-                    import_from_ohlcv(cache_path, provider, exchange, symbol, timeframe, ohlcv_path)
+                    await _to_thread_cancel_safe(
+                        import_from_ohlcv,
+                        cache_path,
+                        provider,
+                        exchange,
+                        symbol,
+                        timeframe,
+                        ohlcv_path,
+                    )
                     # print("[data_service] sqlite cache populated from downloaded ohlcv")
 
                     # Store pending event instead of emitting immediately
@@ -272,8 +306,10 @@ async def file_update_loop(
                         "type": "prerun_ready_after_history_download",
                         "ohlcv_path": str(ohlcv_path),
                         "toml_path": str(toml_path),
-                        "confirmed_bar_and_new_bar": None
+                        "confirmed_bar_and_new_bar": None,
                     }
+                    if history_ready_event is not None:
+                        history_ready_event.set()
                     # print("[file_update_loop] History download complete. Event will be sent when client connects.")
 
                 fixed_open_price = 0.0
@@ -295,7 +331,13 @@ async def file_update_loop(
                 if not first_fetch_after_download_done:
                     res = await _retry_ohlcv_update(
                         "pre_run initial OHLCV refresh",
-                        lambda: fetch_and_update_ohlcv_data(exchange, symbol, timeframe, str(ohlcv_path)),
+                        lambda: fetch_and_update_ohlcv_data(
+                            exchange,
+                            symbol,
+                            timeframe,
+                            str(ohlcv_path),
+                            market_type=market_type,
+                        ),
                     )
                     if res:
                         # print(f"[data_service] pre_run fetch updated {len(res)} bars")
@@ -321,6 +363,7 @@ async def file_update_loop(
                             str(ohlcv_path),
                             current_bar_ts_ms=current_bar_ts_ms,
                             bar_count=10,
+                            market_type=market_type,
                         ),
                     )
                     if res:
@@ -330,12 +373,13 @@ async def file_update_loop(
                         ]
                         upsert_bars(cache_path, provider, exchange, symbol, timeframe, cache_rows)
                     # Current candle open price fix if needed
-                    fixed_open_price = await asyncio.to_thread(
+                    fixed_open_price = await _to_thread_cancel_safe(
                         fix_last_open_if_needed,
                         str(ohlcv_path),
                         exchange=exchange,
                         symbol=symbol,
                         timeframe=timeframe,
+                        market_type=market_type,
                     )
                     if fixed_open_price > 0.0:
                         # Fix the last bar stored in the ohlcv cache

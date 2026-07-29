@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import json
+import time
 from datetime import datetime, UTC
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
-from fastapi import APIRouter, Body
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Body, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from markdown_it import MarkdownIt
 
 from pynecore.cli.app import app_state
 from pynecore.core.exchange_policy import tradingview_hides_zero_volume
@@ -16,37 +19,220 @@ from pynecore.core.csv_file import CSVReader
 
 import ccxt.pro as ccxtpro
 
-from registry import SessionNotFoundError, SessionExistsError, SessionLimitError, SessionRegistry
+from ai.provider.codex_service import CodexService
+from asset_portfolio import AssetPortfolioError, AssetPortfolioService
+from asset_transfer import AssetTransferError, AssetTransferService
+from calendar_store import CalendarEventStore, CalendarStoreError
+from registry import (
+    HistoryNotReadyError,
+    SessionExistsError,
+    SessionLimitError,
+    SessionNotFoundError,
+    SessionOrderError,
+    SessionRegistry,
+)
 from runtime import Session
 from config import (
     SessionSpec,
     default_webhook_url,
     sanitize_manual_alert_templates,
-    sanitize_manual_alert_trigger,
+    sanitize_manual_alert_triggers,
+    validate_history_since,
 )
 from manual_alerts import send_manual_alert_payload
 from ohlcv_io import make_ccxt_pro_client
 
-# Cache of exchange -> set(symbols) so symbol validation hits the network at most
+# Cache of exchange -> ccxt markets so symbol validation hits the network at most
 # once per exchange for the hub's lifetime.
-_markets_cache: dict[str, set] = {}
+_markets_cache: dict[tuple[str, str], dict] = {}
+_AI_CHAT_MAX_MESSAGE_CHARS = 4000
+_AI_CHAT_MAX_HISTORY_MESSAGES = 12
+_AI_MARKDOWN_STREAM_INTERVAL_SECONDS = 0.05
+_AI_MARKDOWN = MarkdownIt(
+    "commonmark",
+    {"html": False, "linkify": False, "typographer": False},
+).enable("table")
+_AI_STRONG_WORD_BOUNDARY_TOKEN = "AI_MD_STRONG_WORD_BOUNDARY_7F1C"
 
 
-async def _load_exchange_symbols(exchange: str) -> set:
-    cached = _markets_cache.get(exchange)
-    if cached is not None:
-        return cached
-    ex = make_ccxt_pro_client(ccxtpro, exchange)
+def _tail_log_text(log_path: Path, lines: int) -> tuple[str, int]:
+    data = log_path.read_bytes()
+    text = data.decode("utf-8", errors="replace")
+    tail = "\n".join(text.splitlines()[-lines:])
+    return tail, len(data)
+
+
+def _sse_event(event: str, payload: dict[str, Any]) -> str:
+    data = json.dumps(payload, ensure_ascii=False)
+    return f"event: {event}\ndata: {data}\n\n"
+
+
+def _normalize_ai_strong_word_boundaries(content: str) -> str:
+    normalized: list[str] = []
+    strong_open = False
+    index = 0
+    while index < len(content):
+        if content.startswith("**", index):
+            normalized.append("**")
+            index += 2
+            if strong_open:
+                if index < len(content) and (content[index].isalnum() or content[index] == "_"):
+                    normalized.append(f" {_AI_STRONG_WORD_BOUNDARY_TOKEN}")
+                strong_open = False
+            else:
+                strong_open = True
+            continue
+        char = content[index]
+        normalized.append(char)
+        index += 1
+        if char == "\n":
+            strong_open = False
+    return "".join(normalized)
+
+
+def _render_ai_markdown(content: str) -> str:
+    normalized = _normalize_ai_strong_word_boundaries(content)
+    return _AI_MARKDOWN.render(normalized).replace(
+        f" {_AI_STRONG_WORD_BOUNDARY_TOKEN}",
+        "",
+    )
+
+
+def _calendar_session_context(session: Session) -> dict[str, str]:
+    return {
+        "session_id": session.spec.id,
+        "exchange": session.spec.exchange,
+        "symbol": session.spec.symbol,
+        "timeframe": session.spec.timeframe,
+        "script_name": session.spec.script_name,
+        "script_title": str(session.chart_info.get("script_title") or ""),
+        "strategy": str(session.chart_info.get("script_title") or session.spec.script_name or ""),
+    }
+
+
+def _calendar_forecast_prompt(
+    event: dict[str, Any],
+    sessions: list[Session],
+) -> str:
+    context = {
+        "event_id": event["id"],
+        "date": event["date"],
+        "time": event.get("time"),
+        "timezone": event.get("timezone"),
+        "title": event["title"],
+        "details": event.get("details"),
+        "category": event.get("category"),
+        "source_name": event.get("source_name"),
+        "source_url": event.get("source_url"),
+        "affected_sessions": [
+            _calendar_session_context(session)
+            for session in sessions
+        ],
+    }
+    return (
+        "This is a read-only forecast request launched from a verified PyneReal calendar event. "
+        "Do not add, update, or remove calendar events, do not call calendar mutation tools, and "
+        "do not change any account, file, or strategy state. Use current public information and "
+        "authoritative sources to assess the most likely outcome, meaningful upside/downside "
+        "scenarios, uncertainty, and the potential impact on every affected session below. "
+        "Distinguish confirmed facts from inference. Respond in Korean Markdown and include concise "
+        "source links. Do not describe your internal procedure.\n\n"
+        f"Calendar event and affected session context:\n{json.dumps(context, ensure_ascii=False)}\n\n"
+        f"User request:\n{event['title']} 전망을 분석해줘."
+    )
+
+
+def _present_ai_chat_state(state: dict[str, Any]) -> dict[str, Any]:
+    presented = dict(state)
+    messages: list[dict[str, Any]] = []
+    for raw in state.get("messages", []):
+        if not isinstance(raw, dict):
+            continue
+        message = dict(raw)
+        content = message.get("content")
+        if message.get("role") == "assistant" and not message.get("error") and isinstance(content, str):
+            message["html"] = _render_ai_markdown(content)
+        messages.append(message)
+    presented["messages"] = messages
+    return presented
+
+
+def _sanitize_ai_chat_history(raw: Any) -> list[dict[str, str]]:
+    if not isinstance(raw, list):
+        return []
+    items: list[dict[str, str]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        role = entry.get("role")
+        content = entry.get("content")
+        if role not in ("user", "assistant") or not isinstance(content, str):
+            continue
+        content = content.strip()
+        if not content:
+            continue
+        items.append({"role": role, "content": content[:_AI_CHAT_MAX_MESSAGE_CHARS]})
+    return items[-_AI_CHAT_MAX_HISTORY_MESSAGES:]
+
+
+def _market_type_from_market(market: dict) -> str:
+    if market.get("spot"):
+        return "spot"
+    if market.get("linear"):
+        return "linear"
+    if market.get("inverse"):
+        return "inverse"
+    return ""
+
+
+def _market_scope_from_symbol(exchange: str, symbol: str) -> str:
+    if exchange != "binance":
+        return "all"
+    if ":" not in symbol:
+        return "spot"
+    settle = symbol.rsplit(":", 1)[-1]
+    if settle in {"USDT", "USDC"}:
+        return "linear"
+    return "inverse"
+
+
+async def _load_exchange_markets(
+    exchange: str,
+    symbol: str,
+    *,
+    force_refresh: bool = False,
+) -> tuple[dict, bool]:
+    scope = _market_scope_from_symbol(exchange, symbol)
+    cache_key = (exchange, scope)
+    if not force_refresh:
+        cached = _markets_cache.get(cache_key)
+        if cached is not None:
+            return cached, True
+    ex = make_ccxt_pro_client(
+        ccxtpro,
+        exchange,
+        market_type=scope if scope != "all" else "",
+        symbol=symbol,
+    )
     try:
         await ex.load_markets()
-        symbols = set(ex.symbols or [])
+        markets = dict(ex.markets or {})
     finally:
         try:
             await ex.close()
         except Exception:
             pass
-    _markets_cache[exchange] = symbols
-    return symbols
+    _markets_cache[cache_key] = markets
+    return markets, False
+
+
+async def _find_exchange_market(exchange: str, symbol: str) -> dict | None:
+    markets, from_cache = await _load_exchange_markets(exchange, symbol)
+    market = markets.get(symbol)
+    if market is None and from_cache:
+        markets, _ = await _load_exchange_markets(exchange, symbol, force_refresh=True)
+        market = markets.get(symbol)
+    return market
 
 
 # Cache of script path -> (mtime, is_strategy) so we only AST-parse on change.
@@ -399,29 +585,25 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
         rt = _rt(session_id)
         if rt is None:
             return JSONResponse({"error": "session not found"}, status_code=404)
-        return JSONResponse({"trigger": dict(rt.spec.manual_alert_trigger)})
+        triggers = [dict(t) for t in rt.spec.manual_alert_triggers]
+        return JSONResponse({"triggers": triggers})
 
     @r.post("/api/{session_id}/manual-alert-trigger")
     async def update_manual_alert_trigger(session_id: str, payload: dict = Body(default_factory=dict)) -> JSONResponse:
-        enabled = bool(payload.get("enabled", False))
-        if enabled:
-            trigger = sanitize_manual_alert_trigger({
-                "enabled": True,
-                "price": payload.get("price"),
-                "template": payload.get("template"),
-            })
-            if not trigger.get("enabled"):
-                return JSONResponse({"error": "trigger requires valid price and template"}, status_code=400)
-        else:
-            trigger = {"enabled": False}
+        raw_triggers = payload.get("triggers")
+        if not isinstance(raw_triggers, list):
+            return JSONResponse({"error": "triggers must be array"}, status_code=400)
+        triggers = sanitize_manual_alert_triggers(raw_triggers)
+        if len(triggers) != len(raw_triggers):
+            return JSONResponse({"error": "each trigger requires valid price and template"}, status_code=400)
 
         try:
-            updated = await registry.update_manual_alert_trigger(session_id, trigger)
+            updated = await registry.update_manual_alert_triggers(session_id, triggers)
         except SessionNotFoundError:
             return JSONResponse({"error": "session not found"}, status_code=404)
         except Exception as e:
             return JSONResponse({"error": f"failed to update trigger: {e}"}, status_code=500)
-        return JSONResponse({"trigger": updated})
+        return JSONResponse({"triggers": updated})
 
     @r.post("/api/{session_id}/manual-alert")
     async def send_manual_alert(session_id: str, payload: dict = Body(default_factory=dict)) -> JSONResponse:
@@ -451,12 +633,430 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
 # ----------------------------------------------------------------------
 # Control-plane router:  /api/sessions ...
 # ----------------------------------------------------------------------
-def build_control_router(registry: SessionRegistry) -> APIRouter:
+def build_control_router(
+    registry: SessionRegistry,
+    codex_service: CodexService,
+    calendar_store: CalendarEventStore,
+    asset_portfolio_service: AssetPortfolioService,
+    asset_transfer_service: AssetTransferService,
+) -> APIRouter:
     r = APIRouter()
+    calendar_forecast_runs: dict[str, int] = {}
+    calendar_forecast_tasks: dict[str, set[asyncio.Task[Any]]] = {}
+
+    @r.get("/api/assets")
+    async def get_assets(refresh: bool = False) -> JSONResponse:
+        try:
+            result = await asset_portfolio_service.snapshot(force=refresh)
+        except AssetPortfolioError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+        return JSONResponse(result)
+
+    @r.get("/api/assets/transfer/options")
+    async def get_asset_transfer_options(
+        exchange: str,
+        account: str,
+        source: str,
+    ) -> JSONResponse:
+        try:
+            result = await asset_transfer_service.options(exchange, account, source)
+        except AssetTransferError as exc:
+            return JSONResponse(
+                {"error": str(exc), **exc.details},
+                status_code=exc.status_code,
+            )
+        return JSONResponse(result)
+
+    @r.post("/api/assets/transfer")
+    async def execute_asset_transfer(
+        payload: dict = Body(default_factory=dict),
+    ) -> JSONResponse:
+        try:
+            result = await asset_transfer_service.execute(payload)
+        except AssetTransferError as exc:
+            if exc.details.get("status") in {"partial", "unknown"}:
+                await asset_portfolio_service.invalidate()
+            return JSONResponse(
+                {"error": str(exc), **exc.details},
+                status_code=exc.status_code,
+            )
+        await asset_portfolio_service.invalidate()
+        return JSONResponse(result)
+
+    @r.get("/api/ai/chat")
+    async def get_ai_chat() -> JSONResponse:
+        return JSONResponse(_present_ai_chat_state(await codex_service.chat_state()))
+
+    @r.get("/api/ai/models")
+    async def get_ai_models() -> JSONResponse:
+        try:
+            models = await codex_service.model_options()
+            prefs = await codex_service.chat_preferences()
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=503)
+        return JSONResponse({
+            "models": models,
+            "selected_model": prefs["model"],
+            "selected_effort": prefs["effort"],
+        })
+
+    @r.put("/api/ai/chat/preferences")
+    async def set_ai_chat_preferences(payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        model = payload.get("model")
+        if model is not None and not isinstance(model, str):
+            return JSONResponse({"error": "model must be a string"}, status_code=400)
+        effort = payload.get("effort")
+        if effort is not None and not isinstance(effort, str):
+            return JSONResponse({"error": "effort must be a string"}, status_code=400)
+        try:
+            prefs = await codex_service.set_chat_preferences(model, effort)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=503)
+        # other connected browsers switch to the same selection
+        await registry.hub_ws.broadcast_json({
+            "type": "ai_prefs_updated",
+            "model": prefs["model"],
+            "effort": prefs["effort"],
+        })
+        return JSONResponse(prefs)
+
+    @r.put("/api/ai/chat/state")
+    async def import_ai_chat_state(payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        conversation_id = payload.get("conversation_id")
+        if conversation_id is not None and not isinstance(conversation_id, str):
+            return JSONResponse({"error": "conversation_id must be a string"}, status_code=400)
+        state = await codex_service.import_chat_state(
+            payload.get("messages"),
+            (conversation_id or "").strip() or None,
+        )
+        await registry.hub_ws.broadcast_json({"type": "ai_chat_updated"})
+        return JSONResponse(_present_ai_chat_state(state))
+
+    @r.post("/api/ai/chat")
+    async def ai_chat(payload: dict = Body(default_factory=dict)):
+        message = payload.get("message")
+        if not isinstance(message, str) or not message.strip():
+            return JSONResponse({"error": "message must be a non-empty string"}, status_code=400)
+        message = message.strip()
+        if len(message) > _AI_CHAT_MAX_MESSAGE_CHARS:
+            return JSONResponse(
+                {"error": f"message is too long (max {_AI_CHAT_MAX_MESSAGE_CHARS} chars)"},
+                status_code=400,
+            )
+        conversation_id = payload.get("conversation_id")
+        if conversation_id is not None and not isinstance(conversation_id, str):
+            return JSONResponse({"error": "conversation_id must be a string"}, status_code=400)
+        model = payload.get("model")
+        if model is not None and not isinstance(model, str):
+            return JSONResponse({"error": "model must be a string"}, status_code=400)
+        effort = payload.get("effort")
+        if effort is not None and not isinstance(effort, str):
+            return JSONResponse({"error": "effort must be a string"}, status_code=400)
+        try:
+            model = await codex_service.validate_model(model)
+            effort = await codex_service.validate_effort(effort, model)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        if model is None or effort is None:
+            # fall back to the shared dashboard selection (or its defaults)
+            try:
+                prefs = await codex_service.chat_preferences()
+            except Exception:
+                prefs = None
+            if prefs:
+                if model is None:
+                    model = prefs["model"]
+                if effort is None and model == prefs["model"]:
+                    effort = prefs["effort"]
+        history = _sanitize_ai_chat_history(payload.get("history"))
+        async def notify_chat_updated() -> None:
+            await registry.hub_ws.broadcast_json({"type": "ai_chat_updated"})
+
+        run = codex_service.start_shared_chat(
+            message,
+            client_conversation_id=(conversation_id or "").strip() or None,
+            client_history=history,
+            on_state_changed=notify_chat_updated,
+            model=model,
+            effort=effort,
+        )
+
+        async def stream() -> AsyncIterator[str]:
+            streamed_answer = ""
+            pending_delta = ""
+            last_delta_emit = 0.0
+            try:
+                async for event in run.events():
+                    if event.event == "delta":
+                        delta = str(event.payload.get("text") or "")
+                        streamed_answer += delta
+                        pending_delta += delta
+                        now = time.monotonic()
+                        if last_delta_emit and now - last_delta_emit < _AI_MARKDOWN_STREAM_INTERVAL_SECONDS:
+                            continue
+                        yield _sse_event(
+                            "delta",
+                            {"text": pending_delta, "html": _render_ai_markdown(streamed_answer)},
+                        )
+                        pending_delta = ""
+                        last_delta_emit = now
+                        continue
+                    if event.event == "done" and pending_delta:
+                        yield _sse_event(
+                            "delta",
+                            {"text": pending_delta, "html": _render_ai_markdown(streamed_answer)},
+                        )
+                        pending_delta = ""
+                    event_payload = event.payload
+                    if event.event == "done":
+                        answer = str(event.payload.get("answer") or "")
+                        event_payload = {**event.payload, "html": _render_ai_markdown(answer)}
+                    yield _sse_event(event.event, event_payload)
+            except asyncio.CancelledError:
+                print(
+                    f"[ai] stream={run.id} client disconnected; "
+                    "background turn continues"
+                )
+                raise
+            except Exception as e:
+                await registry.hub_ws.broadcast_json({"type": "ai_chat_updated"})
+                yield _sse_event("stream_error", {"error": str(e)})
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @r.post("/api/ai/chat/reset")
+    async def reset_ai_chat(payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        conversation_id = payload.get("conversation_id")
+        await codex_service.clear_shared_chat(
+            conversation_id.strip() if isinstance(conversation_id, str) else None
+        )
+        await registry.hub_ws.broadcast_json({"type": "ai_chat_updated"})
+        return JSONResponse({"ok": True})
+
+    @r.get("/api/calendar/events")
+    async def list_calendar_events(
+        start: str | None = None,
+        end: str | None = None,
+    ) -> JSONResponse:
+        try:
+            events = calendar_store.list_events(
+                active_session_ids=registry.sessions,
+                start=start,
+                end=end,
+            )
+        except CalendarStoreError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+        result = []
+        for event in events:
+            affected_sessions = [
+                session
+                for session_id in event["session_ids"]
+                if (session := registry.get(session_id)) is not None
+            ]
+            if not affected_sessions:
+                continue
+            item = dict(event)
+            item["forecast_running"] = calendar_forecast_runs.get(event["id"], 0) > 0
+            forecast = calendar_store.get_forecast(event["id"])
+            if forecast is not None:
+                item["forecast"] = {
+                    **forecast,
+                    "html": _render_ai_markdown(forecast["answer"]),
+                }
+            item["sessions"] = [
+                _calendar_session_context(session)
+                for session in affected_sessions
+            ]
+            item.update(item["sessions"][0])
+            result.append(item)
+        return JSONResponse({
+            "events": result,
+            "updated_at": calendar_store.updated_at,
+        })
+
+    @r.post("/api/calendar/events/{event_id}/forecast")
+    async def forecast_calendar_event(event_id: str):
+        if not codex_service.enabled:
+            return JSONResponse({"error": "AI service is disabled"}, status_code=503)
+        event = calendar_store.get_event(
+            event_id,
+            active_session_ids=registry.sessions,
+        )
+        if event is None:
+            return JSONResponse({"error": "calendar event not found"}, status_code=404)
+        affected_sessions = [
+            session
+            for session_id in event["session_ids"]
+            if (session := registry.get(session_id)) is not None
+        ]
+        if not affected_sessions:
+            return JSONResponse({"error": "calendar session is not active"}, status_code=409)
+
+        try:
+            preferences = await codex_service.chat_preferences()
+        except Exception:
+            preferences = {}
+        if not isinstance(preferences, dict):
+            preferences = {}
+        model = preferences.get("model")
+        effort = preferences.get("effort")
+        message = f"{event['title']} 전망을 분석해줘."
+        prompt = _calendar_forecast_prompt(event, affected_sessions)
+
+        async def stream() -> AsyncIterator[str]:
+            conversation_id: str | None = None
+            stream_task = asyncio.current_task()
+            if stream_task is not None:
+                calendar_forecast_tasks.setdefault(event_id, set()).add(stream_task)
+            calendar_forecast_runs[event_id] = calendar_forecast_runs.get(event_id, 0) + 1
+            try:
+                # Tell open dashboards immediately; dashboards opened later read
+                # the same state from GET /api/calendar/events.
+                await registry.hub_ws.broadcast_json({
+                    "type": "calendar_forecast_running",
+                    "event_id": event_id,
+                })
+                async for stream_event in codex_service.stream_chat(
+                    message,
+                    conversation_id=None,
+                    initial_context=prompt,
+                    model=model,
+                    effort=effort,
+                ):
+                    payload = stream_event.payload
+                    if stream_event.event == "conversation":
+                        conversation_id = str(payload.get("conversation_id") or "") or None
+                    elif stream_event.event == "done":
+                        answer = str(payload.get("answer") or "").strip()
+                        if not answer:
+                            yield _sse_event("stream_error", {"error": "AI returned an empty forecast"})
+                            return
+                        try:
+                            forecast = calendar_store.set_forecast(
+                                event_id,
+                                answer,
+                                active_session_ids=registry.sessions,
+                            )
+                        except CalendarStoreError as exc:
+                            yield _sse_event("stream_error", {"error": str(exc)})
+                            return
+                        payload = {
+                            **payload,
+                            "event_id": event_id,
+                            "answer": answer,
+                            "html": _render_ai_markdown(answer),
+                            "updated_at": forecast["updated_at"],
+                        }
+                    yield _sse_event(stream_event.event, payload)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"[calendar] forecast failed event={event_id[:8]}: {type(exc).__name__}")
+                yield _sse_event(
+                    "stream_error",
+                    {"error": f"Calendar forecast failed ({type(exc).__name__})"},
+                )
+            finally:
+                remaining = calendar_forecast_runs.get(event_id, 1) - 1
+                if remaining > 0:
+                    calendar_forecast_runs[event_id] = remaining
+                else:
+                    calendar_forecast_runs.pop(event_id, None)
+                if stream_task is not None:
+                    event_tasks = calendar_forecast_tasks.get(event_id)
+                    if event_tasks is not None:
+                        event_tasks.discard(stream_task)
+                        if not event_tasks:
+                            calendar_forecast_tasks.pop(event_id, None)
+                try:
+                    await registry.hub_ws.broadcast_json({
+                        "type": "calendar_forecast_updated",
+                        "event_id": event_id,
+                    })
+                except Exception:
+                    pass
+                if conversation_id:
+                    await codex_service.reset(conversation_id)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @r.post("/api/calendar/events/{event_id}/forecast/cancel")
+    async def cancel_calendar_event_forecast(event_id: str) -> JSONResponse:
+        event = calendar_store.get_event(
+            event_id,
+            active_session_ids=registry.sessions,
+        )
+        if event is None:
+            return JSONResponse({"error": "calendar event not found"}, status_code=404)
+
+        tasks = [
+            task
+            for task in calendar_forecast_tasks.get(event_id, set())
+            if not task.done()
+        ]
+        if not tasks:
+            return JSONResponse({"event_id": event_id, "cancelled": False})
+
+        await registry.hub_ws.broadcast_json({
+            "type": "calendar_forecast_cancelled",
+            "event_id": event_id,
+        })
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        return JSONResponse({"event_id": event_id, "cancelled": True})
+
+    @r.post("/api/calendar/events/{event_id}/forecast/viewed")
+    async def mark_calendar_forecast_viewed(event_id: str) -> JSONResponse:
+        try:
+            forecast = calendar_store.mark_forecast_viewed(
+                event_id,
+                active_session_ids=registry.sessions,
+            )
+        except CalendarStoreError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        await registry.hub_ws.broadcast_json({
+            "type": "calendar_forecast_updated",
+            "event_id": event_id,
+        })
+        return JSONResponse({"event_id": event_id, "viewed_at": forecast["viewed_at"]})
 
     @r.get("/api/sessions")
     def list_sessions() -> JSONResponse:
-        return JSONResponse({"sessions": registry.snapshots()})
+        return JSONResponse({
+            "sessions": registry.snapshots(),
+            "ai_enabled": codex_service.enabled,
+        })
+
+    @r.put("/api/sessions/order")
+    async def reorder_sessions(payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        session_ids = payload.get("session_ids")
+        if not isinstance(session_ids, list) or not all(isinstance(item, str) for item in session_ids):
+            return JSONResponse({"error": "session_ids must be an array of strings"}, status_code=400)
+        try:
+            ordered = await registry.reorder_sessions(session_ids)
+        except SessionOrderError as e:
+            return JSONResponse({"error": str(e)}, status_code=409)
+        except Exception as e:
+            return JSONResponse({"error": f"failed to reorder sessions: {e}"}, status_code=500)
+        return JSONResponse({"sessions": ordered})
 
     @r.post("/api/sessions")
     async def create_session(payload: dict = Body(default_factory=dict)) -> JSONResponse:
@@ -484,12 +1084,28 @@ def build_control_router(registry: SessionRegistry) -> APIRouter:
             return JSONResponse({"error": f"failed to remove session: {e}"}, status_code=500)
         return JSONResponse({"ok": True})
 
+    @r.patch("/api/sessions/{session_id}/history-since")
+    async def update_history_since(session_id: str, payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        try:
+            value = validate_history_since(payload.get("history_since"))
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        try:
+            await registry.update_history_since(session_id, value)
+        except SessionNotFoundError:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        except Exception as e:
+            return JSONResponse({"error": f"failed to update history_since: {e}"}, status_code=500)
+        return JSONResponse({"ok": True, "history_since": value})
+
     @r.post("/api/sessions/{session_id}/runner/start")
     async def runner_start(session_id: str) -> JSONResponse:
         try:
             await registry.start_runner(session_id)
         except SessionNotFoundError:
             return JSONResponse({"error": "session not found"}, status_code=404)
+        except HistoryNotReadyError:
+            return JSONResponse({"error": "market data is still preparing"}, status_code=409)
         return JSONResponse({"ok": True})
 
     @r.post("/api/sessions/{session_id}/runner/stop")
@@ -506,6 +1122,8 @@ def build_control_router(registry: SessionRegistry) -> APIRouter:
             await registry.restart_runner(session_id)
         except SessionNotFoundError:
             return JSONResponse({"error": "session not found"}, status_code=404)
+        except HistoryNotReadyError:
+            return JSONResponse({"error": "market data is still preparing"}, status_code=409)
         return JSONResponse({"ok": True})
 
     @r.get("/api/sessions/{session_id}/runner/logs")
@@ -517,11 +1135,73 @@ def build_control_router(registry: SessionRegistry) -> APIRouter:
         if not log_path.exists():
             return JSONResponse({"log": ""})
         try:
-            content = log_path.read_text(encoding="utf-8", errors="replace")
-            tail = "\n".join(content.splitlines()[-lines:])
+            tail, _ = _tail_log_text(log_path, lines)
         except Exception as e:
             return JSONResponse({"error": f"failed to read log: {e}"}, status_code=500)
         return JSONResponse({"log": tail})
+
+    @r.get("/api/sessions/{session_id}/runner/logs/stream", response_model=None)
+    async def runner_logs_stream(
+        request: Request,
+        session_id: str,
+        lines: int = 500,
+    ):
+        rt = registry.get(session_id)
+        if rt is None:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        log_path = rt.paths.log_path
+        lines = max(1, min(int(lines or 500), 5000))
+
+        async def events() -> AsyncIterator[str]:
+            offset = 0
+            try:
+                if log_path.exists():
+                    tail, offset = await asyncio.to_thread(_tail_log_text, log_path, lines)
+                else:
+                    tail = ""
+                yield _sse_event("snapshot", {"log": tail})
+            except Exception as e:
+                yield _sse_event("stream_error", {"error": f"failed to read log: {e}"})
+
+            heartbeat_after = 0
+            while not await request.is_disconnected():
+                try:
+                    if not log_path.exists():
+                        if offset != 0:
+                            offset = 0
+                            yield _sse_event("snapshot", {"log": ""})
+                    else:
+                        size = log_path.stat().st_size
+                        if size < offset:
+                            tail, offset = await asyncio.to_thread(_tail_log_text, log_path, lines)
+                            yield _sse_event("snapshot", {"log": tail})
+                        elif size > offset:
+                            def read_chunk() -> tuple[str, int]:
+                                with log_path.open("rb") as fh:
+                                    fh.seek(offset)
+                                    chunk = fh.read(size - offset)
+                                return chunk.decode("utf-8", errors="replace"), size
+
+                            chunk_text, offset = await asyncio.to_thread(read_chunk)
+                            if chunk_text:
+                                yield _sse_event("append", {"chunk": chunk_text})
+                except Exception as e:
+                    yield _sse_event("stream_error", {"error": f"failed to stream log: {e}"})
+
+                heartbeat_after += 1
+                if heartbeat_after >= 30:
+                    heartbeat_after = 0
+                    yield ": heartbeat\n\n"
+                await asyncio.sleep(0.5)
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @r.delete("/api/sessions/{session_id}/runner/logs")
     def clear_runner_logs(session_id: str) -> JSONResponse:
@@ -567,11 +1247,13 @@ def build_validation_router() -> APIRouter:
         if exchange not in ccxtpro.exchanges:
             return JSONResponse({"exists": False, "error": f"unknown exchange: {exchange}"})
         try:
-            symbols = await _load_exchange_symbols(exchange)
+            market = await _find_exchange_market(exchange, symbol)
         except Exception as e:
             # Network/market-load failure: don't claim the symbol is invalid.
             return JSONResponse({"exists": None, "error": f"could not load markets: {e}"})
-        return JSONResponse({"exists": symbol in symbols})
+        if not market:
+            return JSONResponse({"exists": False})
+        return JSONResponse({"exists": True, "market_type": _market_type_from_market(market)})
 
     @r.get("/api/scripts")
     def list_scripts() -> JSONResponse:

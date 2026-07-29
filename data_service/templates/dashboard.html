@@ -4,13 +4,43 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=54" />
 </head>
 <body>
   <header class="topbar">
+    <button id="hub-menu-button" class="hub-menu-button" type="button"
+            aria-label="Open menu" aria-expanded="false" aria-controls="hub-menu">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 6h16M4 12h16M4 18h16" />
+      </svg>
+    </button>
     <h1>PyneReal&nbsp;Hub</h1>
     <span id="conn-status" class="conn">connecting…</span>
+    <div id="hub-clock" class="hub-clock" aria-label="Local time">
+      <span class="clock-hand clock-hour" aria-hidden="true"></span>
+      <span class="clock-hand clock-minute" aria-hidden="true"></span>
+      <span class="clock-hand clock-second" aria-hidden="true"></span>
+      <span class="clock-center" aria-hidden="true"></span>
+    </div>
   </header>
+
+  <div id="hub-menu-backdrop" class="hub-menu-backdrop" aria-hidden="true"></div>
+  <aside id="hub-menu" class="hub-menu" aria-hidden="true">
+    <div class="hub-menu-header">
+      <span>PyneReal Hub</span>
+      <button id="hub-menu-close" class="hub-menu-close" type="button" aria-label="Close menu">&times;</button>
+    </div>
+    <nav class="hub-menu-nav" aria-label="Hub menu">
+      <button id="hub-assets-open" class="hub-menu-item" type="button">
+        <span class="hub-menu-emoji" aria-hidden="true">&#x1f4b0;</span>
+        <span>Assets</span>
+      </button>
+      <button id="hub-calendar-open" class="hub-menu-item" type="button">
+        <span class="hub-menu-emoji" aria-hidden="true">&#x1f4c5;</span>
+        <span>Calendar</span>
+      </button>
+    </nav>
+  </aside>
 
   <section class="card collapsible collapsed" id="add-card">
     <h2 class="card-toggle" id="add-toggle" role="button" tabindex="0" aria-expanded="false" aria-controls="add-body">
@@ -51,7 +81,6 @@
               <path d="M3 21v-5h5" />
             </svg>
           </button>
-          <label class="autostart-label"><input type="checkbox" name="autostart_runner" /> autostart runner</label>
         </div>
       </div>
       <button type="submit" class="btn btn-primary">Add</button>
@@ -83,6 +112,178 @@
     </table>
     <div id="empty" class="muted">No sessions yet. Add one above.</div>
   </section>
+
+  <div id="calendar-modal" class="modal calendar-modal hidden" aria-hidden="true">
+    <div class="modal-box calendar-modal-box" role="dialog" aria-modal="true" aria-labelledby="calendar-title">
+      <div class="modal-header calendar-modal-header">
+        <span id="calendar-title">Calendar</span>
+        <button id="calendar-close" class="btn" type="button" title="Close" aria-label="Close">&times;</button>
+      </div>
+      <div class="calendar-body">
+        <div class="calendar-toolbar">
+          <div class="calendar-month-nav">
+            <button id="calendar-prev" class="btn btn-icon" type="button" title="Previous month" aria-label="Previous month">&#8249;</button>
+            <button id="calendar-today" class="btn" type="button">Today</button>
+            <button id="calendar-next" class="btn btn-icon" type="button" title="Next month" aria-label="Next month">&#8250;</button>
+          </div>
+          <h2 id="calendar-month-title"></h2>
+          <span id="calendar-updated" class="calendar-updated"></span>
+        </div>
+        <div class="calendar-weekdays" aria-hidden="true">
+          <span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span>
+          <span>Thu</span><span>Fri</span><span>Sat</span>
+        </div>
+        <div id="calendar-grid" class="calendar-grid"></div>
+        <section id="calendar-details" class="calendar-details hidden" aria-live="polite">
+          <h3 id="calendar-detail-date"></h3>
+          <div id="calendar-detail-events" class="calendar-detail-events"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div id="assets-modal" class="modal assets-modal hidden" aria-hidden="true">
+    <div class="modal-box assets-modal-box" role="dialog" aria-modal="true" aria-labelledby="assets-title">
+      <div class="modal-header assets-modal-header">
+        <div class="assets-title-group">
+          <button id="assets-back" class="btn btn-icon hidden" type="button"
+                  title="Back to exchanges" aria-label="Back to exchanges">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M19 12H5" />
+              <path d="m12 19-7-7 7-7" />
+            </svg>
+          </button>
+          <span id="assets-title">Assets</span>
+        </div>
+        <div class="modal-actions">
+          <button id="assets-refresh" class="btn btn-icon" type="button"
+                  title="Refresh assets" aria-label="Refresh assets">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 12a9 9 0 0 1 15.7-6L21 8" />
+              <path d="M21 3v5h-5" />
+              <path d="M21 12a9 9 0 0 1-15.7 6L3 16" />
+              <path d="M3 21v-5h5" />
+            </svg>
+          </button>
+          <button id="assets-close" class="btn" type="button" title="Close" aria-label="Close">&times;</button>
+        </div>
+      </div>
+      <div class="assets-body">
+        <section id="assets-summary" class="assets-summary hidden" aria-label="Asset summary">
+          <div>
+            <span class="assets-summary-label">Total assets</span>
+            <div id="assets-summary-totals" class="assets-summary-totals"></div>
+          </div>
+          <div class="assets-summary-meta">
+            <span id="assets-summary-counts"></span>
+            <span id="assets-updated"></span>
+          </div>
+        </section>
+        <div id="assets-loading" class="assets-state">
+          <span class="assets-spinner" aria-hidden="true"></span>
+          <span>Loading account assets...</span>
+        </div>
+        <div id="assets-error" class="assets-state assets-state-error hidden" role="alert"></div>
+        <div id="assets-empty" class="assets-state hidden">
+          No exchange accounts are configured in providers.toml.
+        </div>
+        <div id="assets-portfolios" class="assets-portfolios"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="asset-transfer-modal" class="modal asset-transfer-modal hidden" aria-hidden="true">
+    <div class="modal-box asset-transfer-box" role="dialog" aria-modal="true"
+         aria-labelledby="asset-transfer-title">
+      <div class="modal-header asset-transfer-header">
+        <div>
+          <span id="asset-transfer-title">Internal transfer</span>
+          <small id="asset-transfer-subtitle"></small>
+        </div>
+        <button id="asset-transfer-close" class="btn" type="button"
+                title="Close" aria-label="Close">&times;</button>
+      </div>
+      <div id="asset-transfer-body" class="asset-transfer-body">
+        <div id="asset-transfer-loading" class="asset-transfer-state">
+          <span class="assets-spinner" aria-hidden="true"></span>
+          <span>Loading transferable balance...</span>
+        </div>
+        <form id="asset-transfer-form" class="asset-transfer-form hidden">
+          <div class="asset-transfer-field">
+            <span id="asset-transfer-asset-caption">Asset</span>
+            <div id="asset-transfer-asset-control" class="asset-transfer-select">
+              <select id="asset-transfer-asset" class="asset-transfer-native-select"
+                      tabindex="-1" aria-hidden="true"></select>
+              <button id="asset-transfer-asset-button" class="asset-transfer-select-button"
+                      type="button" aria-haspopup="listbox" aria-expanded="false"
+                      aria-controls="asset-transfer-asset-options"
+                      aria-labelledby="asset-transfer-asset-caption asset-transfer-asset-label">
+                <span id="asset-transfer-asset-label" class="asset-transfer-select-label">
+                  Select asset
+                </span>
+                <span class="asset-transfer-select-chevron" aria-hidden="true">&#9662;</span>
+              </button>
+              <div id="asset-transfer-asset-options"
+                   class="asset-transfer-select-options hidden" role="listbox"></div>
+            </div>
+          </div>
+          <label class="asset-transfer-field">
+            <span>Amount</span>
+            <div class="asset-transfer-amount-row">
+              <input id="asset-transfer-amount" type="text" inputmode="decimal"
+                     autocomplete="off" enterkeyhint="done" />
+              <button id="asset-transfer-max" class="btn" type="button">Max</button>
+            </div>
+            <small id="asset-transfer-available"></small>
+          </label>
+          <div class="asset-transfer-field">
+            <span id="asset-transfer-account-caption">Account</span>
+            <div id="asset-transfer-account-control" class="asset-transfer-select">
+              <select id="asset-transfer-account" class="asset-transfer-native-select"
+                      tabindex="-1" aria-hidden="true"></select>
+              <button id="asset-transfer-account-button"
+                      class="asset-transfer-select-button" type="button"
+                      aria-haspopup="listbox" aria-expanded="false"
+                      aria-controls="asset-transfer-account-options"
+                      aria-labelledby="asset-transfer-account-caption asset-transfer-account-label">
+                <span id="asset-transfer-account-label"
+                      class="asset-transfer-select-label">Select account</span>
+                <span class="asset-transfer-select-chevron" aria-hidden="true">&#9662;</span>
+              </button>
+              <div id="asset-transfer-account-options"
+                   class="asset-transfer-select-options hidden" role="listbox"></div>
+            </div>
+          </div>
+          <div class="asset-transfer-field">
+            <span id="asset-transfer-destination-caption">To</span>
+            <div id="asset-transfer-destination-control" class="asset-transfer-select">
+              <select id="asset-transfer-destination" class="asset-transfer-native-select"
+                      tabindex="-1" aria-hidden="true"></select>
+              <button id="asset-transfer-destination-button"
+                      class="asset-transfer-select-button" type="button"
+                      aria-haspopup="listbox" aria-expanded="false"
+                      aria-controls="asset-transfer-destination-options"
+                      aria-labelledby="asset-transfer-destination-caption asset-transfer-destination-label">
+                <span id="asset-transfer-destination-label"
+                      class="asset-transfer-select-label">Select destination</span>
+                <span class="asset-transfer-select-chevron" aria-hidden="true">&#9662;</span>
+              </button>
+              <div id="asset-transfer-destination-options"
+                   class="asset-transfer-select-options hidden" role="listbox"></div>
+            </div>
+          </div>
+          <p id="asset-transfer-note" class="asset-transfer-note hidden"></p>
+        </form>
+        <div id="asset-transfer-review" class="asset-transfer-review hidden"></div>
+        <div id="asset-transfer-result" class="asset-transfer-result hidden"></div>
+        <div id="asset-transfer-error" class="asset-transfer-error hidden" role="alert"></div>
+      </div>
+      <div class="asset-transfer-footer">
+        <button id="asset-transfer-back" class="btn" type="button">Cancel</button>
+        <button id="asset-transfer-submit" class="btn btn-primary" type="button" disabled>Review</button>
+      </div>
+    </div>
+  </div>
 
   <div id="log-modal" class="modal hidden" aria-hidden="true">
     <div class="modal-box">
@@ -132,6 +333,77 @@
     </div>
   </div>
 
-  <script src="/static/dashboard.js"></script>
+  <button id="ai-chat-fab" class="ai-chat-fab hidden" type="button" aria-label="Open AI chat" aria-expanded="false">
+    <svg class="pepe" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+      <path d="M32 10C18 10 9 19 9 31c0 7 3 13 8 17 4 3.2 9.3 5 15 5s11-1.8 15-5c5-4 8-10 8-17 0-12-9-21-23-21z" fill="#5B9E4D" stroke="#2f5c28" stroke-width="1.8" stroke-linejoin="round"/>
+      <path d="M13 22c1-5 5.5-8 10-8s8 3 8.5 7.5" fill="#5B9E4D" stroke="#2f5c28" stroke-width="1.6"/>
+      <path d="M32.5 21.5C33 17 36.5 14 41 14s9 3 10 8" fill="#5B9E4D" stroke="#2f5c28" stroke-width="1.6"/>
+      <g class="pepe-eye">
+        <ellipse cx="23" cy="23.5" rx="8" ry="5.5" fill="#fff" stroke="#2f5c28" stroke-width="1.5"/>
+        <circle class="pepe-pupil" cx="24" cy="26" r="1.8" fill="#1c1c1c"/>
+        <path d="M15 22.2c2-3.5 5-4.8 8-4.8s6 1.3 8 4.8c-1 1.5-4 2.6-8 2.6s-7-1.1-8-2.6z" fill="#5B9E4D" stroke="#2f5c28" stroke-width="1.4"/>
+      </g>
+      <g class="pepe-eye">
+        <ellipse cx="41" cy="23.5" rx="8" ry="5.5" fill="#fff" stroke="#2f5c28" stroke-width="1.5"/>
+        <circle class="pepe-pupil" cx="40" cy="26" r="1.8" fill="#1c1c1c"/>
+        <path d="M33 22.2c2-3.5 5-4.8 8-4.8s6 1.3 8 4.8c-1 1.5-4 2.6-8 2.6s-7-1.1-8-2.6z" fill="#5B9E4D" stroke="#2f5c28" stroke-width="1.4"/>
+      </g>
+      <circle cx="30" cy="33" r=".9" fill="#2f5c28"/>
+      <circle cx="34" cy="33" r=".9" fill="#2f5c28"/>
+      <path d="M14 38c2-2.5 6-4 11-3.5l16 1.5c5 .5 8.5 2 9.5 4.5-.5 3-4 5-9 4.7l-18-1c-5-.3-9-2.7-9.5-6.2z" fill="#B0623F" stroke="#2f5c28" stroke-width="1.6" stroke-linejoin="round"/>
+      <path d="M16.5 39.5c4.5 1.8 10 2.6 16.5 2.9 6 .3 11.5-.2 15.5-1.6" stroke="#2f5c28" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>
+  </button>
+
+  <div id="ai-chat-panel" class="ai-chat-panel hidden" role="dialog" aria-label="AI chat" aria-hidden="true">
+    <div class="ai-chat-header">
+      <button id="ai-chat-title" class="ai-chat-title" type="button" aria-haspopup="listbox" aria-expanded="false">
+        <svg class="pepe" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+          <path d="M32 10C18 10 9 19 9 31c0 7 3 13 8 17 4 3.2 9.3 5 15 5s11-1.8 15-5c5-4 8-10 8-17 0-12-9-21-23-21z" fill="#5B9E4D" stroke="#2f5c28" stroke-width="1.8" stroke-linejoin="round"/>
+          <path d="M13 22c1-5 5.5-8 10-8s8 3 8.5 7.5" fill="#5B9E4D" stroke="#2f5c28" stroke-width="1.6"/>
+          <path d="M32.5 21.5C33 17 36.5 14 41 14s9 3 10 8" fill="#5B9E4D" stroke="#2f5c28" stroke-width="1.6"/>
+          <g class="pepe-eye">
+            <ellipse cx="23" cy="23.5" rx="8" ry="5.5" fill="#fff" stroke="#2f5c28" stroke-width="1.5"/>
+            <circle class="pepe-pupil" cx="24" cy="26" r="1.8" fill="#1c1c1c"/>
+            <path d="M15 22.2c2-3.5 5-4.8 8-4.8s6 1.3 8 4.8c-1 1.5-4 2.6-8 2.6s-7-1.1-8-2.6z" fill="#5B9E4D" stroke="#2f5c28" stroke-width="1.4"/>
+          </g>
+          <g class="pepe-eye">
+            <ellipse cx="41" cy="23.5" rx="8" ry="5.5" fill="#fff" stroke="#2f5c28" stroke-width="1.5"/>
+            <circle class="pepe-pupil" cx="40" cy="26" r="1.8" fill="#1c1c1c"/>
+            <path d="M33 22.2c2-3.5 5-4.8 8-4.8s6 1.3 8 4.8c-1 1.5-4 2.6-8 2.6s-7-1.1-8-2.6z" fill="#5B9E4D" stroke="#2f5c28" stroke-width="1.4"/>
+          </g>
+          <circle cx="30" cy="33" r=".9" fill="#2f5c28"/>
+          <circle cx="34" cy="33" r=".9" fill="#2f5c28"/>
+          <path d="M14 38c2-2.5 6-4 11-3.5l16 1.5c5 .5 8.5 2 9.5 4.5-.5 3-4 5-9 4.7l-18-1c-5-.3-9-2.7-9.5-6.2z" fill="#B0623F" stroke="#2f5c28" stroke-width="1.6" stroke-linejoin="round"/>
+          <path d="M16.5 39.5c4.5 1.8 10 2.6 16.5 2.9 6 .3 11.5-.2 15.5-1.6" stroke="#2f5c28" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <span>PyneReal Ai</span><span class="ai-chat-title-chevron" aria-hidden="true">&gt;</span>
+      </button>
+      <div class="modal-actions">
+        <button id="ai-chat-clear" class="btn btn-danger" title="Clear chat">&#x1f5d1;&#xfe0f;</button>
+        <button id="ai-chat-close" class="btn" title="Close">&times;</button>
+      </div>
+    </div>
+    <div id="ai-model-menu" class="ai-model-menu hidden" role="listbox" aria-label="AI model and reasoning effort"></div>
+    <div id="ai-chat-messages" class="ai-chat-messages"></div>
+    <form id="ai-chat-form" class="ai-chat-form">
+      <div class="ai-chat-composer">
+        <textarea id="ai-chat-input" class="ai-chat-input" rows="1" placeholder="Ask AI anything&#8230;" enterkeyhint="send"></textarea>
+        <div class="ai-chat-composer-actions">
+          <button id="ai-model-selector" class="ai-model-selector" type="button" aria-haspopup="listbox" aria-expanded="false" disabled>
+            <span id="ai-model-label">Default model</span>
+            <!-- inline SVG instead of the &#8964; glyph: the text arrowhead sits below
+                 the baseline and looked sunken next to the label -->
+            <svg class="ai-model-chevron" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" focusable="false">
+              <path d="M2.5 4.25 6 7.75l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <button type="submit" id="ai-chat-send" class="ai-chat-send" aria-label="Send" title="Send"><span aria-hidden="true">&#8593;</span></button>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  <script src="/static/dashboard.js?v=56"></script>
 </body>
 </html>

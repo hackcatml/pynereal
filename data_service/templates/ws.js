@@ -25,6 +25,11 @@ App.ws = {
           }
           chart.resetChartState(false);
           App.data.loadInitialWithRetry();
+        } else if (msg.type === "chart_reset") {
+          // data window changed (history_since edit): drop stale series and
+          // reload the freshly regenerated ohlcv/plot/markers
+          chart.resetChartState(false);
+          App.data.loadInitialWithRetry();
         } else if (msg.type === "runner_disconnected") {
           state.runnerConnected = false;
           chart.resetChartState(false);
@@ -69,11 +74,11 @@ App.ws = {
           }
         } else if (msg.type === "manual_alert_trigger") {
           if (App.ui && App.ui.applyManualAlertTriggerState) {
-            App.ui.applyManualAlertTriggerState(msg.trigger || { enabled: false });
+            App.ui.applyManualAlertTriggerState(msg.triggers || []);
           }
         } else if (msg.type === "manual_alert_trigger_fired") {
           if (App.ui && App.ui.applyManualAlertTriggerState) {
-            App.ui.applyManualAlertTriggerState({ enabled: false });
+            App.ui.applyManualAlertTriggerState(msg.triggers || App.state.manualAlertTriggers || []);
           }
           if (App.ui && App.ui.elements && App.ui.elements.manualAlertStatus) {
             App.ui.elements.manualAlertStatus.textContent = "Triggered";

@@ -1,11 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+from pathlib import Path
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from config import load_hub_config, load_initial_sessions
+from ai.provider.codex_service import CodexService
+from asset_portfolio import AssetPortfolioService
+from asset_transfer import AssetTransferService
+from calendar_store import CalendarEventStore
+from config import ensure_provider_config, load_hub_config, load_initial_sessions
 from registry import SessionRegistry
 from api import build_session_api_router, build_control_router, build_validation_router
 from ui import build_ui_router
@@ -20,10 +30,24 @@ _BANNER = r"""
 """
 
 
-def build_app(registry: SessionRegistry) -> FastAPI:
+def build_app(
+    registry: SessionRegistry,
+    codex_service: CodexService,
+    calendar_store: CalendarEventStore,
+    asset_portfolio_service: AssetPortfolioService,
+    asset_transfer_service: AssetTransferService,
+) -> FastAPI:
     app = FastAPI()
     app.include_router(build_ui_router())
-    app.include_router(build_control_router(registry))
+    app.include_router(
+        build_control_router(
+            registry,
+            codex_service,
+            calendar_store,
+            asset_portfolio_service,
+            asset_transfer_service,
+        )
+    )
     app.include_router(build_validation_router())
     app.include_router(build_session_api_router(registry))
 
@@ -31,7 +55,11 @@ def build_app(registry: SessionRegistry) -> FastAPI:
     async def hub_ws(ws: WebSocket):
         await registry.hub_ws.connect(ws)
         registry.retry_missing_symbol_logos()
-        await registry.hub_ws.send(ws, {"type": "sessions", "sessions": registry.snapshots()})
+        await registry.hub_ws.send(ws, {
+            "type": "sessions",
+            "sessions": registry.snapshots(),
+            "ai_enabled": codex_service.enabled,
+        })
         try:
             while True:
                 # Dashboard clients only receive pushes; ignore inbound keepalive.
@@ -105,12 +133,39 @@ async def main() -> None:
     # Required by PyneCore's NOTICE file (Apache-2.0, Section 4d)
     print("Powered by PyneSys (https://pynesys.io)\n")
 
+    ensure_provider_config()
     cfg = load_hub_config()
     specs = load_initial_sessions()
     registry = SessionRegistry(port=cfg.port)
-    app = build_app(registry)
+    calendar_store = CalendarEventStore(
+        _PROJECT_ROOT / "workdir" / "config" / "calendar_events.json"
+    )
+    asset_portfolio_service = AssetPortfolioService(
+        _PROJECT_ROOT / "workdir" / "config" / "providers.toml"
+    )
+    asset_transfer_service = AssetTransferService(
+        _PROJECT_ROOT / "workdir" / "config" / "providers.toml"
+    )
+    codex_service = CodexService(
+        project_root=_PROJECT_ROOT,
+        session_registry=registry,
+        calendar_store=calendar_store,
+    )
+    registry.set_ai_instruction_handler(codex_service.handle_strategy_instruction)
+    try:
+        await codex_service.start()
+    except Exception as e:
+        print(f"[ai] Codex app-server startup failed: {e}")
+    app = build_app(
+        registry,
+        codex_service,
+        calendar_store,
+        asset_portfolio_service,
+        asset_transfer_service,
+    )
 
     await registry.start_all(specs)
+    await asset_portfolio_service.start()
     heartbeat = asyncio.create_task(_hub_status_heartbeat(registry))
 
     server = uvicorn.Server(
@@ -121,7 +176,13 @@ async def main() -> None:
         await server.serve()
     finally:
         heartbeat.cancel()
-        await registry.shutdown()
+        try:
+            await registry.shutdown()
+        finally:
+            try:
+                await asset_portfolio_service.close()
+            finally:
+                await codex_service.close()
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -9,11 +10,16 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from fastapi import WebSocket
 
 from config import FeedSpec, SessionSpec
+from log_utils import log_with_time
 from manual_alerts import build_manual_alert_payload, send_manual_alert_payload
 from ohlcv_paths import make_ohlcv_paths, runtime_output_dir
 from state import DataState
 from tv_logos import static_logo_info
 from ws_manager import WSManager
+
+
+_MAX_AI_INSTRUCTION_CHARS = 4_000
+_MAX_PROCESSED_AI_INSTRUCTION_EVENTS = 500
 
 
 # ======================================================================
@@ -58,7 +64,8 @@ class Feed:
         self.spec = spec
         self.paths = FeedPaths.build(spec)
         self.state = DataState()
-        self.tasks: List[Any] = []
+        self.tasks: Dict[str, Any] = {}
+        self.history_ready_event = asyncio.Event()
         self.collector_error: Optional[str] = None
         self._history_start_mtime: Optional[float] = None
         self._history_start_time: Optional[int] = None
@@ -90,7 +97,7 @@ class Feed:
             await session.send_to_runners(payload)
 
     def history_ready(self) -> bool:
-        return self.paths.ohlcv_path.exists()
+        return self.history_ready_event.is_set()
 
     def history_start_time(self) -> Optional[int]:
         path = self.paths.ohlcv_path
@@ -128,7 +135,7 @@ class Feed:
     def collector_status(self) -> str:
         if self.collector_error:
             return "error"
-        if self.tasks and any(not t.done() for t in self.tasks):
+        if self.tasks and any(not t.done() for t in self.tasks.values()):
             return "running"
         return "stopped"
 
@@ -155,9 +162,11 @@ class Session:
         # Drives the dashboard LED: connected-but-prerunning = "starting" (amber),
         # ready = "running" (green).
         self.runner_ready = False
+        self.history_resync_pending = False
         self.chart_info: Dict[str, Any] = {
             "exchange": spec.exchange,
             "symbol": spec.symbol,
+            "market_type": spec.market_type,
             "timeframe": spec.timeframe,
             "provider": spec.provider,
             "script_title": None,
@@ -168,8 +177,11 @@ class Session:
         # registry wires this to push /ws/hub status when runner connect/disconnect.
         self.on_status_change: Optional[Callable[[], Awaitable[None]]] = None
         self.on_spec_change: Optional[Callable[[], Awaitable[None]]] = None
-        self._manual_alert_trigger_sending = False
-        self._manual_alert_trigger_last_bar_time: Optional[int] = None
+        self.on_ai_instruction: Optional[Callable[["Session", dict], Awaitable[None]]] = None
+        self._processed_ai_instruction_ids: set[str] = set()
+        self._processed_ai_instruction_order: deque[str] = deque()
+        self._manual_alert_trigger_sending_ids: set[str] = set()
+        self._manual_alert_trigger_last_bar_time: dict[str, int] = {}
 
     @property
     def ohlcv_path(self) -> Path:
@@ -235,6 +247,9 @@ class Session:
                 async with self.feed.state.lock:
                     pending_prerun_event = self.feed.state.pending_prerun_event
                 if pending_prerun_event is not None:
+                    pending_prerun_event = dict(pending_prerun_event)
+                    if self.history_resync_pending:
+                        pending_prerun_event["history_resync"] = True
                     await ws_manager.send(ws, pending_prerun_event)
 
                 self.client_roles[ws] = role
@@ -251,7 +266,7 @@ class Session:
                     await ws_manager.send(ws, {"type": "runner_connected"})
                 await ws_manager.send(ws, {
                     "type": "manual_alert_trigger",
-                    "trigger": self.manual_alert_trigger_payload(),
+                    "triggers": self.manual_alert_triggers_payload(),
                 })
             else:
                 self.client_roles[ws] = None
@@ -259,6 +274,7 @@ class Session:
         elif msg_type == "runner_ready":
             # Runner finished its first pre_run -> flip the LED to green.
             self.runner_ready = True
+            self.history_resync_pending = False
             await self._notify_status()
 
         elif msg_type == "last_bar_open_fix":
@@ -285,6 +301,37 @@ class Session:
                         reader.close()
                 except Exception as e:
                     print(f"[{self.spec.id}] Failed to send confirmed bar: {e}")
+
+        elif msg_type == "ai_instruction":
+            if self.client_roles.get(ws) != "runner":
+                return
+            event_id = str(event.get("event_id") or "").strip()
+            instruction = str(event.get("instruction") or "").strip()
+            if not event_id or len(event_id) > 128:
+                log_with_time(f"[{self.spec.id}] ignored AI instruction with invalid event ID")
+                return
+            if not instruction or len(instruction) > _MAX_AI_INSTRUCTION_CHARS:
+                log_with_time(f"[{self.spec.id}] ignored invalid AI instruction")
+                return
+            if event_id in self._processed_ai_instruction_ids:
+                return
+
+            self._processed_ai_instruction_ids.add(event_id)
+            self._processed_ai_instruction_order.append(event_id)
+            while len(self._processed_ai_instruction_order) > _MAX_PROCESSED_AI_INSTRUCTION_EVENTS:
+                expired_id = self._processed_ai_instruction_order.popleft()
+                self._processed_ai_instruction_ids.discard(expired_id)
+
+            if self.on_ai_instruction is None:
+                log_with_time(f"[{self.spec.id}] AI instruction skipped: no handler")
+                return
+            normalized_event = dict(event)
+            normalized_event["event_id"] = event_id
+            normalized_event["instruction"] = instruction
+            try:
+                await self.on_ai_instruction(self, normalized_event)
+            except Exception as e:
+                log_with_time(f"[{self.spec.id}] AI instruction dispatch failed: {e}")
 
         elif msg_type in ("trade_entry", "trade_close"):
             if event not in self.trades_history:
@@ -356,6 +403,13 @@ class Session:
                 self.chart_info["script_source"] = ""
                 await self.send_to_charts({"type": "script_modified"})
 
+        elif msg_type == "chart_reset":
+            # Data window changed (history_since edit): the runner has finished
+            # regenerating plot.csv and re-emitting markers, so tell chart pages to
+            # drop stale series and reload from the fresh files. Caches were already
+            # cleared via the reset_history above.
+            await self.send_to_charts({"type": "chart_reset"})
+
         elif msg_type == "ack_prerun_ready_after_history_download":
             # No-op: with a shared feed the pending event must reach every session's
             # runner, so it is not cleared globally (see client_hello handling).
@@ -385,16 +439,17 @@ class Session:
             if role == "runner":
                 await self.ws_manager.send(ws, payload)
 
-    def manual_alert_trigger_payload(self) -> dict:
-        return dict(self.spec.manual_alert_trigger or {"enabled": False})
+    def manual_alert_triggers_payload(self) -> list[dict]:
+        return [dict(t) for t in self.spec.manual_alert_triggers]
 
     def reset_manual_alert_trigger_gate(self) -> None:
-        self._manual_alert_trigger_last_bar_time = None
+        self._manual_alert_trigger_last_bar_time.clear()
+        self._manual_alert_trigger_sending_ids.clear()
 
     async def push_manual_alert_trigger(self) -> None:
         await self.send_to_charts({
             "type": "manual_alert_trigger",
-            "trigger": self.manual_alert_trigger_payload(),
+            "triggers": self.manual_alert_triggers_payload(),
         })
 
     async def push_webhook_config(self) -> None:
@@ -418,25 +473,24 @@ class Session:
         high = max(float(prev_price), close)
         return low <= trigger_price <= high
 
-    def _manual_alert_trigger_matches(self, trigger: dict) -> bool:
-        current = self.spec.manual_alert_trigger or {}
-        if not current.get("enabled"):
+    def _remove_manual_alert_trigger(self, trigger_id: str) -> bool:
+        triggers = [dict(t) for t in self.spec.manual_alert_triggers]
+        remaining = [t for t in triggers if str(t.get("id", "")) != trigger_id]
+        if len(remaining) == len(triggers):
             return False
-        current_template = current.get("template") or {}
-        trigger_template = trigger.get("template") or {}
-        try:
-            if float(current.get("price")) != float(trigger.get("price")):
-                return False
-        except (TypeError, ValueError):
-            return False
-        return (
-            current_template.get("title") == trigger_template.get("title")
-            and current_template.get("message") == trigger_template.get("message")
-        )
+        self.spec = self.spec.with_manual_alert_triggers(remaining)
+        return True
+
+    async def _discard_manual_alert_trigger(self, trigger_id: str) -> None:
+        if trigger_id and self._remove_manual_alert_trigger(trigger_id):
+            await self._notify_spec_change()
+            await self.push_manual_alert_trigger()
 
     async def _send_manual_alert_trigger(self, trigger: dict, trigger_price: float,
                                          market_price: float, bar_time: int) -> None:
         template = trigger.get("template") or {}
+        trigger_id = str(trigger.get("id") or "")
+        await self._discard_manual_alert_trigger(trigger_id)
         try:
             payload = build_manual_alert_payload(
                 template=template,
@@ -452,41 +506,45 @@ class Session:
                 payload=payload,
             )
         except Exception as e:
-            await self.send_to_charts({
-                "type": "manual_alert_trigger_error",
-                "error": str(e)[:240],
-                "trigger": self.manual_alert_trigger_payload(),
-            })
+            log_with_time(
+                f"[manual_alert_trigger] send failed for {self.spec.id} "
+                f"trigger={trigger_id or '?'} price={trigger_price}: {e}"
+            )
         else:
-            if self._manual_alert_trigger_matches(trigger):
-                self.spec = self.spec.with_manual_alert_trigger({"enabled": False})
-                await self._notify_spec_change()
-                await self.push_manual_alert_trigger()
             await self.send_to_charts({
                 "type": "manual_alert_trigger_fired",
+                "triggers": self.manual_alert_triggers_payload(),
                 "result": result,
             })
         finally:
-            self._manual_alert_trigger_sending = False
+            if trigger_id:
+                self._manual_alert_trigger_sending_ids.discard(trigger_id)
 
     async def maybe_fire_manual_alert_trigger(self, bar: dict, prev_price: float | None) -> None:
-        trigger = self.spec.manual_alert_trigger or {}
-        if not trigger.get("enabled") or self._manual_alert_trigger_sending:
-            return
         try:
-            trigger_price = float(trigger.get("price"))
             bar_time = int(bar.get("time"))
             market_price = float(bar.get("close"))
         except (TypeError, ValueError):
             return
-        if self._manual_alert_trigger_last_bar_time == bar_time:
-            return
-        if not self._manual_alert_trigger_touched(bar, prev_price, trigger_price):
-            return
 
-        self._manual_alert_trigger_last_bar_time = bar_time
-        self._manual_alert_trigger_sending = True
-        asyncio.create_task(self._send_manual_alert_trigger(dict(trigger), trigger_price, market_price, bar_time))
+        for trigger in self.spec.manual_alert_triggers:
+            if not trigger.get("enabled"):
+                continue
+            trigger_id = str(trigger.get("id") or "")
+            if not trigger_id or trigger_id in self._manual_alert_trigger_sending_ids:
+                continue
+            try:
+                trigger_price = float(trigger.get("price"))
+            except (TypeError, ValueError):
+                continue
+            if self._manual_alert_trigger_last_bar_time.get(trigger_id) == bar_time:
+                continue
+            if not self._manual_alert_trigger_touched(bar, prev_price, trigger_price):
+                continue
+
+            self._manual_alert_trigger_last_bar_time[trigger_id] = bar_time
+            self._manual_alert_trigger_sending_ids.add(trigger_id)
+            asyncio.create_task(self._send_manual_alert_trigger(dict(trigger), trigger_price, market_price, bar_time))
 
     # ------------------------------------------------------------------
     # Status snapshot (merges feed data-plane state)
@@ -499,6 +557,7 @@ class Session:
             "provider": self.spec.provider,
             "exchange": self.spec.exchange,
             "symbol": self.spec.symbol,
+            "market_type": self.spec.market_type,
             "timeframe": self.spec.timeframe,
             "history_since": self.spec.history_since,
             "script_name": self.spec.script_name,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -39,9 +40,12 @@ TELEGRAM_ENABLED: bool = False
 WEBHOOK_URL: str = ""
 TELEGRAM_TOKEN: str = ""
 TELEGRAM_CHAT_ID: str = ""
+SUPPRESS_EXTERNAL_NOTIFICATIONS: bool = False
 DEFAULT_WEBHOOK_REQUEST_TIMEOUT = (5, 10)
 HYPERLIQUID_WEBHOOK_REQUEST_TIMEOUT = (5, 30)
 TELEGRAM_REQUEST_TIMEOUT = (5, 10)
+TELEGRAM_CONNECT_ATTEMPTS = 3
+TELEGRAM_CONNECT_RETRY_DELAYS = (1, 2)
 
 # Event queue for trade events
 trade_event_queue = deque()
@@ -130,7 +134,34 @@ def send_webhook_message(webhook_url: str, message: str, *, script_title: str | 
     import json
     import re
     import datetime
+    import time
     import requests
+
+    def is_connection_stage_error(error: BaseException) -> bool:
+        pending: list[BaseException] = [error]
+        seen: set[int] = set()
+        while pending:
+            current = pending.pop()
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            if isinstance(current, requests.exceptions.ConnectTimeout):
+                return True
+            if type(current).__name__ in {
+                "ConnectTimeoutError",
+                "NameResolutionError",
+                "NewConnectionError",
+            }:
+                return True
+            for related in (
+                current.__cause__,
+                current.__context__,
+                getattr(current, "reason", None),
+            ):
+                if isinstance(related, BaseException):
+                    pending.append(related)
+            pending.extend(arg for arg in current.args if isinstance(arg, BaseException))
+        return False
 
     # Wrap unquoted message fields so JSON parsing succeeds.
     s = re.sub(r'"message"\s*:\s*(?![{["0-9])([A-Za-z][A-Za-z0-9 ]*)',
@@ -181,12 +212,22 @@ def send_webhook_message(webhook_url: str, message: str, *, script_title: str | 
             ),
             # "parse_mode": "Markdown"  # 굵게/이탤릭 등 쓰고 싶으면 선택
         }
-        try:
-            response = requests.get(url, params=payload, timeout=TELEGRAM_REQUEST_TIMEOUT)
-            response.raise_for_status()
-            print("Telegram response:", response.json())
-        except Exception as e:
-            print(f"Telegram notification error: {e}")
+        for attempt in range(1, TELEGRAM_CONNECT_ATTEMPTS + 1):
+            try:
+                response = requests.get(url, params=payload, timeout=TELEGRAM_REQUEST_TIMEOUT)
+                response.raise_for_status()
+                print("Telegram response:", response.json())
+                break
+            except Exception as e:
+                if not is_connection_stage_error(e) or attempt == TELEGRAM_CONNECT_ATTEMPTS:
+                    print(f"Telegram notification error: {e}")
+                    break
+                delay = TELEGRAM_CONNECT_RETRY_DELAYS[attempt - 1]
+                print(
+                    f"Telegram connection error: {e}; "
+                    f"retrying in {delay}s ({attempt}/{TELEGRAM_CONNECT_ATTEMPTS})"
+                )
+                time.sleep(delay)
 
 
 def clear_local_state() -> None:
@@ -269,6 +310,8 @@ def on_plotchar_event(plotchar_data):
 
 def on_alert_event(message: str, runner: ScriptRunner):
     """Callback for alert events - webhook/telegram notifications"""
+    if SUPPRESS_EXTERNAL_NOTIFICATIONS:
+        return
     script = runner.script
 
     # Per-session overrides (from the hub's webhook_config WS message) take
@@ -297,6 +340,39 @@ def on_alert_event(message: str, runner: ScriptRunner):
         telegram_token=telegram_token,
         telegram_chat_id=telegram_chat_id,
     )
+
+
+def on_ai_event(instruction: str, order, bar_time: int, runner: ScriptRunner):
+    """Queue one deterministic AI instruction event for a realtime order fill."""
+    if SUPPRESS_EXTERNAL_NOTIFICATIONS:
+        return
+    instruction = str(instruction or "").strip()
+    if not instruction or getattr(runner.script, "pre_run", False):
+        return
+
+    action = "close" if getattr(order, "exit_id", None) else "entry"
+    identity = {
+        "session_id": SESSION_ID,
+        "action": action,
+        "bar_time": int(bar_time),
+        "bar_index": int(getattr(order, "bar_index", -1)),
+        "order_id": str(getattr(order, "order_id", "") or ""),
+        "exit_id": str(getattr(order, "exit_id", "") or ""),
+        "instruction": instruction,
+    }
+    event_id = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    trade_event_queue.append({
+        "type": "ai_instruction",
+        "event_id": event_id,
+        "instruction": instruction,
+        "action": action,
+        "time": int(bar_time / 1000),
+        "bar_index": identity["bar_index"],
+        "order_id": identity["order_id"],
+        "comment": str(getattr(order, "comment", "") or ""),
+    })
 
 
 def hide_zero_volume_bars(exchange: str | None) -> bool:
@@ -403,6 +479,7 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
             runner.script.position.on_entry_callback = partial(on_entry_event, runner=runner)
             runner.script.position.on_close_callback = partial(on_close_event, runner=runner)
             runner.script.position.on_alert_callback = partial(on_alert_event, runner=runner)
+            runner.script.position.on_ai_callback = partial(on_ai_event, runner=runner)
             # Register plot event callback
             runner.script.on_plot_callback = on_plot_event
             # Register plotchar event callback
@@ -610,6 +687,7 @@ async def main():
 
     global SCRIPT_PATH, SCRIPT_HASH_PATH, DATA_WS, PLOT_PATH, SESSION_ID
     global WEBHOOK_ENABLED, TELEGRAM_ENABLED, WEBHOOK_URL, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
+    global SUPPRESS_EXTERNAL_NOTIFICATIONS
     SCRIPT_PATH = script_path
     SESSION_ID = _resolve(args.session_id, "PYNEREAL_SESSION_ID", None, default="default")
 
@@ -718,8 +796,17 @@ async def main():
                     await ws.send(json.dumps({"type": "script_modified"}))
                     clear_local_state()
                     write_script_hashes(SCRIPT_HASH_PATH, current_hashes)
+                elif (
+                    mtype == "prerun_ready_after_history_download"
+                    and msg.get("history_resync")
+                ):
+                    # The data window changed with an unchanged script. Drop the
+                    # hub's cached markers so this full replay rebuilds only the
+                    # markers inside the new window.
+                    await ws.send(json.dumps({"type": "reset_history"}))
+                    clear_local_state()
             except Exception as e:
-                print(f"[runner] Failed to send script_modified (prerun): {e}")
+                print(f"[runner] Failed to prepare chart refresh (prerun): {e}")
 
             # Ready runner + stream
             result = ready_scrip_runner(script_path, ohlcv_path, toml_path)
@@ -757,8 +844,26 @@ async def main():
                 # markers. prerun_range stays size-1: the last open bar is still left for
                 # run_ready, so no spurious last-bar alert fires (its fill bar isn't stepped).
                 runner.script.pre_run = False
-            await asyncio.to_thread(run_prerun_steps, runner, prerun_range)
+            SUPPRESS_EXTERNAL_NOTIFICATIONS = bool(
+                mtype == "prerun_ready_after_history_download"
+                and msg.get("history_resync")
+            )
+            try:
+                await asyncio.to_thread(run_prerun_steps, runner, prerun_range)
+            finally:
+                SUPPRESS_EXTERNAL_NOTIFICATIONS = False
             pending_full_reemit = False
+
+            # The re-sync plot.csv and historical markers are complete. Reload chart
+            # pages now so an earlier runner-connected reload cannot leave stale data.
+            if (
+                mtype == "prerun_ready_after_history_download"
+                and msg.get("history_resync")
+            ):
+                try:
+                    await ws.send(json.dumps({"type": "chart_reset"}))
+                except Exception as e:
+                    print(f"[runner] Failed to send chart_reset: {e}")
 
             # First pre_run done -> tell the hub the chart plots are ready (LED green).
             if not ready_sent:

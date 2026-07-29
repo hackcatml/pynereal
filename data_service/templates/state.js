@@ -19,6 +19,10 @@ window.App.state = {
   runnerConnected: false,
   initialLoadInProgress: false,
   initialLoadDone: false,
+  // bumped by resetChartState so an in-flight loadInitialWithRetry started
+  // before a reset bails out instead of racing the fresh reload (which would
+  // otherwise duplicate plot series or draw stale data)
+  loadGeneration: 0,
   firstBarTime: null,
   timeframeInterval: 60,
   // Timeframe from /api/info (seconds). Source of truth for the countdown:
@@ -55,7 +59,7 @@ window.App.state = {
   manualAlertConfirmOpen: false,
   manualAlertSelectedTemplateIndex: -1,
   manualAlertSuppressClickUntil: 0,
-  manualAlertTrigger: { enabled: false },
+  manualAlertTriggers: [],
   measureToolActive: false,
   measureDraft: null,
   measureResult: null

@@ -8,20 +8,21 @@ App.chart = {
   entryMarkerSeries: null,
   closeMarkerSeries: null,
   currentPriceLine: null,
-  manualAlertPriceLine: null,
+  manualAlertPreviewPriceLine: null,
+  manualAlertTriggerItems: new Map(),
   resizeObserver: null,
   touchGuardsAttached: false,
   manualAlertLastTap: null,
   manualAlertLineDrag: null,
   manualAlertLineSuppressTapUntil: 0,
   manualAlertLineChartInputFrozen: false,
-  manualAlertChip: null,
-  manualAlertChipXSeg: null,
-  manualAlertChipVisible: false,
+  manualAlertChipsVisible: false,
   manualAlertUnsetPending: null,
+  manualAlertLabelTouchPending: null,
+  manualAlertTooltip: null,
+  manualAlertTooltipTriggerId: null,
+  manualAlertTooltipHideTimer: null,
   manualAlertChipRafId: null,
-  manualAlertChipState: { price: null, armed: false },
-  manualAlertChipPos: { top: null, right: null },
   isMobileViewport() {
     return window.matchMedia("(max-width: 640px), (hover: none) and (pointer: coarse)").matches;
   },
@@ -87,43 +88,49 @@ App.chart = {
       handleScale: true
     });
   },
-  removeManualAlertPriceGuide() {
-    if (this.manualAlertPriceLine && this.candleSeries && this.candleSeries.removePriceLine) {
-      this.candleSeries.removePriceLine(this.manualAlertPriceLine);
-    }
-    this.manualAlertPriceLine = null;
-    this.hideManualAlertChip();
-  },
-  updateManualAlertPriceGuide(price, optionsOverride = {}) {
-    if (!this.candleSeries || !Number.isFinite(Number(price))) return;
-    const dottedLineStyle = (LightweightCharts.LineStyle && LightweightCharts.LineStyle.Dotted != null)
+  manualAlertDottedLineStyle() {
+    return (LightweightCharts.LineStyle && LightweightCharts.LineStyle.Dotted != null)
       ? LightweightCharts.LineStyle.Dotted
       : 1;
-    const armed = !!optionsOverride.armed;
-    const color = armed ? "#d32f2f" : "#111111";
+  },
+  removeManualAlertPreviewGuide() {
+    if (this.manualAlertPreviewPriceLine && this.candleSeries && this.candleSeries.removePriceLine) {
+      this.candleSeries.removePriceLine(this.manualAlertPreviewPriceLine);
+    }
+    this.manualAlertPreviewPriceLine = null;
+  },
+  removeManualAlertPriceGuide() {
+    this.removeManualAlertPreviewGuide();
+    this.clearManualAlertTriggerGuides();
+  },
+  updateManualAlertPreviewGuide(price) {
+    if (!this.candleSeries || !Number.isFinite(Number(price))) return;
+    const color = "#111111";
     const options = {
       price: Number(price),
       color,
       lineWidth: 1,
-      lineStyle: dottedLineStyle,
+      lineStyle: this.manualAlertDottedLineStyle(),
       axisLabelVisible: true,
       axisLabelColor: color,
       axisLabelTextColor: "#ffffff",
-      // 타이틀 라벨은 라이브러리 대신 HTML 칩(#manual-alert-chip)으로 그린다.
       title: ""
     };
-    if (this.manualAlertPriceLine) {
-      this.manualAlertPriceLine.applyOptions(options);
+    if (this.manualAlertPreviewPriceLine) {
+      this.manualAlertPreviewPriceLine.applyOptions(options);
     } else {
-      this.manualAlertPriceLine = this.candleSeries.createPriceLine(options);
+      this.manualAlertPreviewPriceLine = this.candleSeries.createPriceLine(options);
     }
-    this.showManualAlertChip(Number(price), armed);
   },
-  ensureManualAlertChip() {
-    if (this.manualAlertChip) return this.manualAlertChip;
+  ensureManualAlertTriggerItem(trigger) {
+    const triggerId = String(trigger.id || "");
+    if (!triggerId) return null;
+    let item = this.manualAlertTriggerItems.get(triggerId);
+    if (item) return item;
     const chip = document.createElement("div");
-    chip.id = "manual-alert-chip";
+    chip.className = "manual-alert-chip armed";
     chip.style.display = "none";
+    chip.dataset.triggerId = triggerId;
     const xSeg = document.createElement("span");
     xSeg.className = "chip-x";
     xSeg.innerHTML =
@@ -136,65 +143,132 @@ App.chart = {
     label.textContent = "Alert";
     chip.append(xSeg, divider, label);
     this.container.appendChild(chip);
-    this.manualAlertChip = chip;
-    this.manualAlertChipXSeg = xSeg;
-    return chip;
+    item = {
+      id: triggerId,
+      priceLine: null,
+      chip,
+      xSeg,
+      trigger: null,
+      price: null,
+      pos: { top: null, right: null }
+    };
+    this.manualAlertTriggerItems.set(triggerId, item);
+    return item;
   },
-  showManualAlertChip(price, armed) {
-    const chip = this.ensureManualAlertChip();
-    this.manualAlertChipState.price = Number(price);
-    this.manualAlertChipState.armed = !!armed;
-    chip.classList.toggle("armed", !!armed);
-    this.manualAlertChipVisible = true;
+  removeManualAlertTriggerItem(triggerId) {
+    const item = this.manualAlertTriggerItems.get(String(triggerId));
+    if (!item) return;
+    if (this.manualAlertTooltipTriggerId === String(triggerId)) {
+      this.hideManualAlertTooltip();
+    }
+    if (item.priceLine && this.candleSeries && this.candleSeries.removePriceLine) {
+      this.candleSeries.removePriceLine(item.priceLine);
+    }
+    if (item.chip && item.chip.parentNode) {
+      item.chip.parentNode.removeChild(item.chip);
+    }
+    this.manualAlertTriggerItems.delete(String(triggerId));
+  },
+  clearManualAlertTriggerGuides() {
+    Array.from(this.manualAlertTriggerItems.keys()).forEach((triggerId) => {
+      this.removeManualAlertTriggerItem(triggerId);
+    });
+    this.hideManualAlertChips();
+  },
+  renderManualAlertTriggerGuides(triggers) {
+    if (!this.candleSeries) return;
+    const activeIds = new Set();
+    const color = "#d32f2f";
+    (Array.isArray(triggers) ? triggers : []).forEach((trigger) => {
+      if (!trigger || !trigger.enabled || !Number.isFinite(Number(trigger.price))) return;
+      const item = this.ensureManualAlertTriggerItem(trigger);
+      if (!item) return;
+      activeIds.add(item.id);
+      item.trigger = trigger;
+      item.price = Number(trigger.price);
+      const options = {
+        price: item.price,
+        color,
+        lineWidth: 1,
+        lineStyle: this.manualAlertDottedLineStyle(),
+        axisLabelVisible: true,
+        axisLabelColor: color,
+        axisLabelTextColor: "#ffffff",
+        title: ""
+      };
+      if (item.priceLine) {
+        item.priceLine.applyOptions(options);
+      } else {
+        item.priceLine = this.candleSeries.createPriceLine(options);
+      }
+    });
+    if (this.manualAlertTooltipTriggerId) {
+      const item = this.manualAlertTriggerItems.get(this.manualAlertTooltipTriggerId);
+      if (item) this.updateManualAlertTooltipContent(item);
+    }
+    Array.from(this.manualAlertTriggerItems.keys()).forEach((triggerId) => {
+      if (!activeIds.has(triggerId)) this.removeManualAlertTriggerItem(triggerId);
+    });
+    this.showManualAlertChips();
+  },
+  showManualAlertChips() {
+    this.manualAlertChipsVisible = this.manualAlertTriggerItems.size > 0;
     this.syncManualAlertChipPosition();
     this.startManualAlertChipLoop();
   },
-  hideManualAlertChip() {
-    this.manualAlertChipVisible = false;
+  hideManualAlertChips() {
+    this.manualAlertChipsVisible = false;
     if (this.manualAlertChipRafId != null) {
       cancelAnimationFrame(this.manualAlertChipRafId);
       this.manualAlertChipRafId = null;
     }
     this.clearManualAlertChipHover();
-    if (this.manualAlertChip) {
-      this.manualAlertChip.style.display = "none";
-    }
+    this.manualAlertTriggerItems.forEach((item) => {
+      item.chip.style.display = "none";
+    });
+    this.hideManualAlertTooltip();
   },
   syncManualAlertChipPosition() {
-    const chip = this.manualAlertChip;
-    if (!chip || !this.manualAlertChipVisible || !this.chart || !this.candleSeries || !this.container) return;
-    const y = this.candleSeries.priceToCoordinate(Number(this.manualAlertChipState.price));
+    if (!this.manualAlertChipsVisible || !this.chart || !this.candleSeries || !this.container) return;
     let timeScaleHeight = 28;
     try {
       timeScaleHeight = this.chart.timeScale().height() || timeScaleHeight;
     } catch {}
     const paneBottom = Math.max(0, this.container.clientHeight - timeScaleHeight);
-    if (!Number.isFinite(Number(y)) || y < 0 || y > paneBottom) {
-      if (chip.style.display !== "none") chip.style.display = "none";
-      return;
-    }
     let priceScaleWidth = 76;
     try {
       priceScaleWidth = this.chart.priceScale("right").width() || priceScaleWidth;
     } catch {}
-    if (chip.style.display === "none") chip.style.display = "";
-    // 네이티브 축 라벨(높이 17px)과 같은 픽셀 정렬: 중심 = round(y), top = 중심 - floor(높이/2).
-    const top = Math.round(y) - Math.floor(chip.offsetHeight / 2);
     const right = Math.round(priceScaleWidth + 1);
-    if (this.manualAlertChipPos.top !== top) {
-      chip.style.top = top + "px";
-      this.manualAlertChipPos.top = top;
-    }
-    if (this.manualAlertChipPos.right !== right) {
-      chip.style.right = right + "px";
-      this.manualAlertChipPos.right = right;
+    this.manualAlertTriggerItems.forEach((item) => {
+      const chip = item.chip;
+      const y = this.candleSeries.priceToCoordinate(Number(item.price));
+      if (!Number.isFinite(Number(y)) || y < 0 || y > paneBottom) {
+        if (chip.style.display !== "none") chip.style.display = "none";
+        return;
+      }
+      if (chip.style.display === "none") chip.style.display = "";
+      // 네이티브 축 라벨(높이 17px)과 같은 픽셀 정렬: 중심 = round(y), top = 중심 - floor(높이/2).
+      const top = Math.round(y) - Math.floor(chip.offsetHeight / 2);
+      if (item.pos.top !== top) {
+        chip.style.top = top + "px";
+        item.pos.top = top;
+      }
+      if (item.pos.right !== right) {
+        chip.style.right = right + "px";
+        item.pos.right = right;
+      }
+    });
+    if (this.manualAlertTooltipTriggerId) {
+      const item = this.manualAlertTriggerItems.get(this.manualAlertTooltipTriggerId);
+      if (item) this.positionManualAlertTooltip(item);
     }
   },
   startManualAlertChipLoop() {
     // 가격축 스케일 변경(오토스케일, 축 드래그)은 구독 이벤트가 없어 rAF로 위치를 동기화한다.
     if (this.manualAlertChipRafId != null) return;
     const step = () => {
-      if (!this.manualAlertChipVisible) {
+      if (!this.manualAlertChipsVisible) {
         this.manualAlertChipRafId = null;
         return;
       }
@@ -204,23 +278,120 @@ App.chart = {
     this.manualAlertChipRafId = requestAnimationFrame(step);
   },
   updateManualAlertChipHover(pointer) {
-    const chip = this.manualAlertChip;
-    if (!chip || !this.manualAlertChipVisible || this.manualAlertLineDrag) {
+    if (!this.manualAlertChipsVisible || this.manualAlertLineDrag) {
       this.clearManualAlertChipHover();
+      this.hideManualAlertTooltip();
       return;
     }
     const hit = this.manualAlertLabelHitInfo(pointer);
     const overClose = !!(hit && hit.x <= hit.closeRight);
-    chip.classList.toggle("x-hover", overClose);
+    this.manualAlertTriggerItems.forEach((item) => {
+      item.chip.classList.toggle("x-hover", overClose && hit.triggerId === item.id);
+    });
     this.container.classList.toggle("manual-alert-x-hover", overClose);
     this.container.classList.toggle("manual-alert-grab-hover", !!hit && !overClose);
+    if (hit && !overClose) {
+      this.showManualAlertTooltip(hit.triggerId);
+    } else {
+      this.hideManualAlertTooltip();
+    }
   },
   clearManualAlertChipHover() {
-    if (this.manualAlertChip) {
-      this.manualAlertChip.classList.remove("x-hover");
-    }
+    this.manualAlertTriggerItems.forEach((item) => {
+      item.chip.classList.remove("x-hover", "x-pressed");
+    });
     if (this.container) {
       this.container.classList.remove("manual-alert-x-hover", "manual-alert-grab-hover");
+    }
+  },
+  ensureManualAlertTooltip() {
+    if (this.manualAlertTooltip) return this.manualAlertTooltip;
+    const tooltip = document.createElement("div");
+    tooltip.className = "manual-alert-chip-tooltip hidden";
+    tooltip.setAttribute("role", "tooltip");
+    this.container.appendChild(tooltip);
+    this.manualAlertTooltip = tooltip;
+    return tooltip;
+  },
+  manualAlertTooltipSignal(trigger) {
+    const template = (trigger && trigger.template) || {};
+    const title = String(template.title || "").trim();
+    if (title) return title;
+    const message = String(template.message || "").trim();
+    if (!message) return "Manual Alert";
+    try {
+      const parsed = JSON.parse(message);
+      if (parsed && typeof parsed.signal === "string" && parsed.signal.trim()) {
+        return parsed.signal.trim();
+      }
+    } catch {}
+    return message.length > 90 ? `${message.slice(0, 87)}...` : message;
+  },
+  updateManualAlertTooltipContent(item) {
+    if (!item) return;
+    const tooltip = this.ensureManualAlertTooltip();
+    tooltip.textContent = this.manualAlertTooltipSignal(item.trigger);
+  },
+  positionManualAlertTooltip(item) {
+    const tooltip = this.manualAlertTooltip;
+    if (!tooltip || tooltip.classList.contains("hidden") || !item || !item.chip || !this.container) return;
+    if (item.chip.style.display === "none") {
+      this.hideManualAlertTooltip();
+      return;
+    }
+    tooltip.style.left = "0px";
+    tooltip.style.top = "0px";
+    const containerRect = this.container.getBoundingClientRect();
+    const chipRect = item.chip.getBoundingClientRect();
+    const tipRect = tooltip.getBoundingClientRect();
+    const margin = 8;
+    let left = chipRect.left - containerRect.left + chipRect.width / 2 - tipRect.width / 2;
+    left = Math.max(margin, Math.min(left, containerRect.width - tipRect.width - margin));
+    let top = chipRect.top - containerRect.top - tipRect.height - margin;
+    if (top < margin) {
+      top = chipRect.bottom - containerRect.top + margin;
+    }
+    top = Math.max(margin, Math.min(top, containerRect.height - tipRect.height - margin));
+    tooltip.style.left = `${Math.round(left)}px`;
+    tooltip.style.top = `${Math.round(top)}px`;
+  },
+  showManualAlertTooltip(triggerId, { autoHideMs = 0 } = {}) {
+    const item = this.manualAlertTriggerItems.get(String(triggerId));
+    if (!item) return false;
+    if (this.manualAlertTooltipHideTimer !== null) {
+      clearTimeout(this.manualAlertTooltipHideTimer);
+      this.manualAlertTooltipHideTimer = null;
+    }
+    this.manualAlertTooltipTriggerId = item.id;
+    this.updateManualAlertTooltipContent(item);
+    const tooltip = this.ensureManualAlertTooltip();
+    tooltip.classList.remove("hidden");
+    this.manualAlertTriggerItems.forEach((other) => {
+      other.chip.classList.toggle("tooltip-active", other.id === item.id);
+    });
+    this.positionManualAlertTooltip(item);
+    if (autoHideMs > 0) {
+      this.manualAlertTooltipHideTimer = setTimeout(() => {
+        this.manualAlertTooltipHideTimer = null;
+        if (this.manualAlertTooltipTriggerId === item.id) {
+          this.hideManualAlertTooltip();
+        }
+      }, autoHideMs);
+    }
+    return true;
+  },
+  hideManualAlertTooltip() {
+    if (this.manualAlertTooltipHideTimer !== null) {
+      clearTimeout(this.manualAlertTooltipHideTimer);
+      this.manualAlertTooltipHideTimer = null;
+    }
+    this.manualAlertTooltipTriggerId = null;
+    this.manualAlertTriggerItems.forEach((item) => {
+      item.chip.classList.remove("tooltip-active");
+    });
+    if (this.manualAlertTooltip) {
+      this.manualAlertTooltip.classList.add("hidden");
+      this.manualAlertTooltip.textContent = "";
     }
   },
   priceFromClientY(clientY) {
@@ -246,54 +417,45 @@ App.chart = {
   },
   manualAlertLabelHitInfo(pointer) {
     if (!this.manualAlertLineDragEnabled() || !this.chart || !this.container) return false;
-    const trigger = App.state.manualAlertTrigger || {};
-    const lineY = this.clientYFromPrice(trigger.price);
-    if (lineY == null) return false;
     const rect = this.container.getBoundingClientRect();
     const x = pointer.clientX - rect.left;
     const y = pointer.clientY - rect.top;
     if (x < 0 || x > rect.width || y < 0 || y > rect.height) return false;
 
-    const lineDistance = Math.abs(pointer.clientY - lineY);
     const isTouch = pointer.pointerType !== "mouse";
     const labelTolerance = isTouch ? 24 : 16;
-    if (lineDistance > labelTolerance) return false;
 
-    const chip = this.manualAlertChip;
-    if (chip && this.manualAlertChipVisible) {
-      // 칩이 페인 밖으로 벗어나 숨겨진 동안에는 히트 대상이 아니다.
-      if (chip.style.display === "none") return false;
-      const chipRect = chip.getBoundingClientRect();
-      const xSegRect = this.manualAlertChipXSeg.getBoundingClientRect();
+    let best = null;
+    this.manualAlertTriggerItems.forEach((item) => {
+      if (item.chip.style.display === "none") return;
+      const lineY = this.clientYFromPrice(item.price);
+      if (lineY == null) return;
+      const lineDistance = Math.abs(pointer.clientY - lineY);
+      if (lineDistance > labelTolerance) return;
+
+      const chipRect = item.chip.getBoundingClientRect();
+      const xSegRect = item.xSeg.getBoundingClientRect();
       const labelLeft = chipRect.left - rect.left - (isTouch ? 8 : 0);
-      if (x < labelLeft) return false;
-      return {
-        x,
-        labelLeft,
-        closeRight: xSegRect.right - rect.left + (isTouch ? 4 : 0)
-      };
-    }
-
-    // 칩이 아직 생성되지 않은 경우의 안전망: 기존 고정 폭 히트 존.
-    let priceScaleWidth = 76;
-    try {
-      priceScaleWidth = this.chart.priceScale("right").width() || priceScaleWidth;
-    } catch {}
-    const titleLabelHitWidth = isTouch ? 72 : 58;
-    const labelLeft = rect.width - priceScaleWidth - titleLabelHitWidth;
-    if (x < labelLeft) return false;
-    return {
-      x,
-      labelLeft,
-      closeRight: labelLeft + (isTouch ? 28 : 22)
-    };
+      const labelRight = chipRect.right - rect.left + (isTouch ? 8 : 0);
+      if (x < labelLeft || x > labelRight) return;
+      if (!best || lineDistance < best.lineDistance) {
+        best = {
+          triggerId: item.id,
+          x,
+          labelLeft,
+          closeRight: xSegRect.right - rect.left + (isTouch ? 4 : 0),
+          lineDistance
+        };
+      }
+    });
+    return best || false;
   },
   manualAlertUnsetHitTest(pointer) {
     const hit = this.manualAlertLabelHitInfo(pointer);
-    return !!(hit && hit.x <= hit.closeRight);
+    return hit && hit.x <= hit.closeRight ? hit : false;
   },
   manualAlertLineHitTest(pointer) {
-    return !!this.manualAlertLabelHitInfo(pointer);
+    return this.manualAlertLabelHitInfo(pointer);
   },
   updateManualAlertLineDrag(pointer) {
     if (!this.manualAlertLineDrag || this.manualAlertLineDrag.pointerId !== pointer.pointerId) return;
@@ -301,33 +463,63 @@ App.chart = {
     if (price == null) return;
     this.manualAlertLineDrag.price = price;
     if (App.ui && App.ui.previewManualAlertTriggerPrice) {
-      App.ui.previewManualAlertTriggerPrice(price);
+      App.ui.previewManualAlertTriggerPrice(this.manualAlertLineDrag.triggerId, price);
     }
   },
+  beginManualAlertLineDrag(pointer, triggerId) {
+    const price = this.priceFromClientY(pointer.clientY);
+    if (price == null) return false;
+    this.hideManualAlertTooltip();
+    this.manualAlertLineDrag = {
+      pointerId: pointer.pointerId,
+      triggerId,
+      price
+    };
+    document.body.classList.add("manual-alert-line-dragging");
+    try {
+      this.container.setPointerCapture(pointer.pointerId);
+    } catch {}
+    this.freezeManualAlertLineChartInput();
+    this.setMagnetMode(false);
+    this.updateManualAlertLineDrag(pointer);
+    return true;
+  },
   startManualAlertLineDrag(e) {
-    if (this.manualAlertUnsetHitTest(e)) {
+    const unsetHit = this.manualAlertUnsetHitTest(e);
+    if (unsetHit) {
       // 버튼처럼 동작: down에서는 눌림 표시만 하고, X 위에서 뗄 때 unset 한다.
-      this.manualAlertUnsetPending = { pointerId: e.pointerId };
-      if (this.manualAlertChip) this.manualAlertChip.classList.add("x-pressed");
+      this.hideManualAlertTooltip();
+      this.manualAlertUnsetPending = { pointerId: e.pointerId, triggerId: unsetHit.triggerId };
+      const item = this.manualAlertTriggerItems.get(unsetHit.triggerId);
+      if (item) item.chip.classList.add("x-pressed");
       e.preventDefault();
       e.stopPropagation();
       if (e.stopImmediatePropagation) e.stopImmediatePropagation();
       return true;
     }
-    if (!this.manualAlertLineHitTest(e)) return false;
-    const price = this.priceFromClientY(e.clientY);
-    if (price == null) return false;
-    this.manualAlertLineDrag = {
-      pointerId: e.pointerId,
-      price
-    };
-    document.body.classList.add("manual-alert-line-dragging");
-    try {
-      this.container.setPointerCapture(e.pointerId);
-    } catch {}
-    this.freezeManualAlertLineChartInput();
-    this.setMagnetMode(false);
-    this.updateManualAlertLineDrag(e);
+    const lineHit = this.manualAlertLineHitTest(e);
+    if (!lineHit) {
+      this.hideManualAlertTooltip();
+      return false;
+    }
+    if (e.pointerType !== "mouse") {
+      this.hideManualAlertTooltip();
+      this.manualAlertLabelTouchPending = {
+        pointerId: e.pointerId,
+        triggerId: lineHit.triggerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        dragging: false
+      };
+      try {
+        this.container.setPointerCapture(e.pointerId);
+      } catch {}
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+      return true;
+    }
+    if (!this.beginManualAlertLineDrag(e, lineHit.triggerId)) return false;
     e.preventDefault();
     e.stopPropagation();
     if (e.stopImmediatePropagation) e.stopImmediatePropagation();
@@ -335,8 +527,24 @@ App.chart = {
   },
   moveManualAlertLineDrag(e) {
     if (this.manualAlertUnsetPending && this.manualAlertUnsetPending.pointerId === e.pointerId) {
-      if (this.manualAlertChip) {
-        this.manualAlertChip.classList.toggle("x-pressed", !!this.manualAlertUnsetHitTest(e));
+      const item = this.manualAlertTriggerItems.get(this.manualAlertUnsetPending.triggerId);
+      if (item) {
+        const hit = this.manualAlertUnsetHitTest(e);
+        item.chip.classList.toggle("x-pressed", !!hit && hit.triggerId === this.manualAlertUnsetPending.triggerId);
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+      return;
+    }
+    if (this.manualAlertLabelTouchPending && this.manualAlertLabelTouchPending.pointerId === e.pointerId) {
+      const pending = this.manualAlertLabelTouchPending;
+      const distance = Math.hypot(e.clientX - pending.startX, e.clientY - pending.startY);
+      if (!pending.dragging && distance >= 10) {
+        pending.dragging = this.beginManualAlertLineDrag(e, pending.triggerId);
+      }
+      if (pending.dragging) {
+        this.updateManualAlertLineDrag(e);
       }
       e.preventDefault();
       e.stopPropagation();
@@ -349,20 +557,53 @@ App.chart = {
     e.stopPropagation();
     if (e.stopImmediatePropagation) e.stopImmediatePropagation();
   },
+  endManualAlertLabelTouchFallback(e) {
+    const pending = this.manualAlertLabelTouchPending;
+    if (!pending || pending.dragging || this.manualAlertLineDrag) return;
+    const touch = e.changedTouches && e.changedTouches.length ? e.changedTouches[0] : null;
+    if (touch) {
+      const distance = Math.hypot(touch.clientX - pending.startX, touch.clientY - pending.startY);
+      if (distance >= 10) return;
+    }
+    this.manualAlertLabelTouchPending = null;
+    this.manualAlertLineSuppressTapUntil = performance.now() + 500;
+    this.showManualAlertTooltip(pending.triggerId, { autoHideMs: 3000 });
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+  },
   endManualAlertLineDrag(e) {
     if (this.manualAlertUnsetPending && this.manualAlertUnsetPending.pointerId === e.pointerId) {
+      const pending = this.manualAlertUnsetPending;
       this.manualAlertUnsetPending = null;
-      if (this.manualAlertChip) this.manualAlertChip.classList.remove("x-pressed");
-      if (e.type !== "pointercancel" && this.manualAlertUnsetHitTest(e)) {
+      const item = this.manualAlertTriggerItems.get(pending.triggerId);
+      if (item) item.chip.classList.remove("x-pressed");
+      const hit = e.type !== "pointercancel" ? this.manualAlertUnsetHitTest(e) : null;
+      if (hit && hit.triggerId === pending.triggerId) {
         this.manualAlertLineSuppressTapUntil = performance.now() + 500;
         if (App.ui && App.ui.unsetManualAlertTriggerFromLine) {
-          App.ui.unsetManualAlertTriggerFromLine();
+          App.ui.unsetManualAlertTriggerFromLine(pending.triggerId);
         }
       }
       e.preventDefault();
       e.stopPropagation();
       if (e.stopImmediatePropagation) e.stopImmediatePropagation();
       return;
+    }
+    if (this.manualAlertLabelTouchPending && this.manualAlertLabelTouchPending.pointerId === e.pointerId) {
+      const pending = this.manualAlertLabelTouchPending;
+      this.manualAlertLabelTouchPending = null;
+      if (!pending.dragging) {
+        try {
+          this.container.releasePointerCapture(e.pointerId);
+        } catch {}
+        this.manualAlertLineSuppressTapUntil = performance.now() + 500;
+        this.showManualAlertTooltip(pending.triggerId, { autoHideMs: 3000 });
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+        return;
+      }
     }
     const drag = this.manualAlertLineDrag;
     if (!drag || drag.pointerId !== e.pointerId) return;
@@ -376,7 +617,7 @@ App.chart = {
     this.restoreManualAlertLineChartInput();
     this.restoreMagnetMode();
     if (App.ui && App.ui.saveManualAlertTriggerPriceFromLine) {
-      App.ui.saveManualAlertTriggerPriceFromLine(drag.price);
+      App.ui.saveManualAlertTriggerPriceFromLine(drag.triggerId, drag.price);
     }
     e.preventDefault();
     e.stopPropagation();
@@ -459,9 +700,17 @@ App.chart = {
       if (e.pointerType !== "mouse") return;
       this.updateManualAlertChipHover(e);
     }, { passive: true });
-    this.container.addEventListener("pointerleave", () => {
+    this.container.addEventListener("pointerleave", (e) => {
+      if (e.pointerType !== "mouse") return;
       this.clearManualAlertChipHover();
+      this.hideManualAlertTooltip();
     }, { passive: true });
+    this.container.addEventListener("touchend", (e) => {
+      this.endManualAlertLabelTouchFallback(e);
+    }, { capture: true, passive: false });
+    this.container.addEventListener("touchcancel", (e) => {
+      this.endManualAlertLabelTouchFallback(e);
+    }, { capture: true, passive: false });
 
     this.container.addEventListener("dblclick", (e) => {
       if (e.button !== 0) return;
@@ -627,6 +876,9 @@ App.chart = {
     const collections = App.collections;
     state.initialLoadDone = false;
     state.initialLoadInProgress = false;
+    // invalidate any loadInitialWithRetry still in flight so it won't append to
+    // (or race with) the reload that typically follows this reset
+    state.loadGeneration++;
     if (resetCandles) {
       this.candleSeries.setData([]);
       this.volumeSeries.setData([]);
