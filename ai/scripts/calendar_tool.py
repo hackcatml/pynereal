@@ -74,7 +74,8 @@ class CalendarRegistryBridge:
         events = self._store.list_events(active_session_ids=active_ids)
         events_by_session: dict[str, list[dict[str, Any]]] = {}
         for event in events:
-            events_by_session.setdefault(event["session_id"], []).append(event)
+            for session_id in event["session_ids"]:
+                events_by_session.setdefault(session_id, []).append(event)
 
         sessions: list[dict[str, Any]] = []
         for session in self._registry.sessions.values():
@@ -155,7 +156,7 @@ class CalendarTools:
             "details": {
                 "type": "string",
                 "maxLength": 4000,
-                "description": "Verified details and why the event matters to this session.",
+                "description": "Verified event details shared by every affected session.",
             },
             "category": {
                 "type": "string",
@@ -196,7 +197,9 @@ class CalendarTools:
                     "Atomically replace verified calendar events inside one date range for one or "
                     "more active sessions. Include a session with an empty events array when the "
                     "range was researched and no relevant events were found, so stale entries are "
-                    "removed. Events outside the range and events for omitted sessions are preserved."
+                    "removed. Events outside the range and events for omitted sessions are preserved. "
+                    "Events with the same date, time, and normalized title are stored once with all "
+                    "affected sessions linked to that shared event."
                 ),
                 "inputSchema": {
                     "type": "object",

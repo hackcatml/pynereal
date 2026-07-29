@@ -77,9 +77,11 @@ DEFAULT_DEVELOPER_INSTRUCTIONS = (
     "calendar sources. If SaveTicker has no relevant item, search the web directly. Never invent an "
     "event or date. Unless the user specifies a period, refresh today through 90 days ahead. After "
     "research, call replace_calendar_events for every requested session, including an empty event "
-    "array for a researched session with no relevant schedule, and report only tool-confirmed saves. "
-    "A server-provided calendar event forecast request is analysis-only: research and assess the "
-    "specified event without calling calendar mutation tools or changing any account or repository state."
+    "array for a researched session with no relevant schedule. Use the same date, time, and concise "
+    "title in every affected session when one event applies to multiple sessions, and report only "
+    "tool-confirmed saves. A server-provided calendar event forecast request is analysis-only: research "
+    "and assess the specified event and affected sessions without calling calendar mutation tools or "
+    "changing any account or repository state."
 )
 _MAX_PERSISTED_MESSAGES = 200
 _MAX_CONTEXT_MESSAGES = 12

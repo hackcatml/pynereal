@@ -98,7 +98,22 @@ def _render_ai_markdown(content: str) -> str:
     )
 
 
-def _calendar_forecast_prompt(event: dict[str, Any], session: Session) -> str:
+def _calendar_session_context(session: Session) -> dict[str, str]:
+    return {
+        "session_id": session.spec.id,
+        "exchange": session.spec.exchange,
+        "symbol": session.spec.symbol,
+        "timeframe": session.spec.timeframe,
+        "script_name": session.spec.script_name,
+        "script_title": str(session.chart_info.get("script_title") or ""),
+        "strategy": str(session.chart_info.get("script_title") or session.spec.script_name or ""),
+    }
+
+
+def _calendar_forecast_prompt(
+    event: dict[str, Any],
+    sessions: list[Session],
+) -> str:
     context = {
         "event_id": event["id"],
         "date": event["date"],
@@ -109,21 +124,20 @@ def _calendar_forecast_prompt(event: dict[str, Any], session: Session) -> str:
         "category": event.get("category"),
         "source_name": event.get("source_name"),
         "source_url": event.get("source_url"),
-        "session_id": session.spec.id,
-        "exchange": session.spec.exchange,
-        "symbol": session.spec.symbol,
-        "timeframe": session.spec.timeframe,
-        "strategy": session.chart_info.get("script_title") or session.spec.script_name,
+        "affected_sessions": [
+            _calendar_session_context(session)
+            for session in sessions
+        ],
     }
     return (
         "This is a read-only forecast request launched from a verified PyneReal calendar event. "
         "Do not add, update, or remove calendar events, do not call calendar mutation tools, and "
         "do not change any account, file, or strategy state. Use current public information and "
         "authoritative sources to assess the most likely outcome, meaningful upside/downside "
-        "scenarios, uncertainty, and the potential impact on the exact session symbol below. "
+        "scenarios, uncertainty, and the potential impact on every affected session below. "
         "Distinguish confirmed facts from inference. Respond in Korean Markdown and include concise "
         "source links. Do not describe your internal procedure.\n\n"
-        f"Calendar event and session context:\n{json.dumps(context, ensure_ascii=False)}\n\n"
+        f"Calendar event and affected session context:\n{json.dumps(context, ensure_ascii=False)}\n\n"
         f"User request:\n{event['title']} 전망을 분석해줘."
     )
 
@@ -628,6 +642,7 @@ def build_control_router(
 ) -> APIRouter:
     r = APIRouter()
     calendar_forecast_runs: dict[str, int] = {}
+    calendar_forecast_tasks: dict[str, set[asyncio.Task[Any]]] = {}
 
     @r.get("/api/assets")
     async def get_assets(refresh: bool = False) -> JSONResponse:
@@ -843,8 +858,12 @@ def build_control_router(
 
         result = []
         for event in events:
-            session = registry.get(event["session_id"])
-            if session is None:
+            affected_sessions = [
+                session
+                for session_id in event["session_ids"]
+                if (session := registry.get(session_id)) is not None
+            ]
+            if not affected_sessions:
                 continue
             item = dict(event)
             item["forecast_running"] = calendar_forecast_runs.get(event["id"], 0) > 0
@@ -854,13 +873,11 @@ def build_control_router(
                     **forecast,
                     "html": _render_ai_markdown(forecast["answer"]),
                 }
-            item.update({
-                "exchange": session.spec.exchange,
-                "symbol": session.spec.symbol,
-                "timeframe": session.spec.timeframe,
-                "script_name": session.spec.script_name,
-                "script_title": str(session.chart_info.get("script_title") or ""),
-            })
+            item["sessions"] = [
+                _calendar_session_context(session)
+                for session in affected_sessions
+            ]
+            item.update(item["sessions"][0])
             result.append(item)
         return JSONResponse({
             "events": result,
@@ -877,8 +894,12 @@ def build_control_router(
         )
         if event is None:
             return JSONResponse({"error": "calendar event not found"}, status_code=404)
-        session = registry.get(event["session_id"])
-        if session is None:
+        affected_sessions = [
+            session
+            for session_id in event["session_ids"]
+            if (session := registry.get(session_id)) is not None
+        ]
+        if not affected_sessions:
             return JSONResponse({"error": "calendar session is not active"}, status_code=409)
 
         try:
@@ -890,10 +911,13 @@ def build_control_router(
         model = preferences.get("model")
         effort = preferences.get("effort")
         message = f"{event['title']} 전망을 분석해줘."
-        prompt = _calendar_forecast_prompt(event, session)
+        prompt = _calendar_forecast_prompt(event, affected_sessions)
 
         async def stream() -> AsyncIterator[str]:
             conversation_id: str | None = None
+            stream_task = asyncio.current_task()
+            if stream_task is not None:
+                calendar_forecast_tasks.setdefault(event_id, set()).add(stream_task)
             calendar_forecast_runs[event_id] = calendar_forecast_runs.get(event_id, 0) + 1
             try:
                 # Tell open dashboards immediately; dashboards opened later read
@@ -948,6 +972,12 @@ def build_control_router(
                     calendar_forecast_runs[event_id] = remaining
                 else:
                     calendar_forecast_runs.pop(event_id, None)
+                if stream_task is not None:
+                    event_tasks = calendar_forecast_tasks.get(event_id)
+                    if event_tasks is not None:
+                        event_tasks.discard(stream_task)
+                        if not event_tasks:
+                            calendar_forecast_tasks.pop(event_id, None)
                 try:
                     await registry.hub_ws.broadcast_json({
                         "type": "calendar_forecast_updated",
@@ -966,6 +996,32 @@ def build_control_router(
                 "X-Accel-Buffering": "no",
             },
         )
+
+    @r.post("/api/calendar/events/{event_id}/forecast/cancel")
+    async def cancel_calendar_event_forecast(event_id: str) -> JSONResponse:
+        event = calendar_store.get_event(
+            event_id,
+            active_session_ids=registry.sessions,
+        )
+        if event is None:
+            return JSONResponse({"error": "calendar event not found"}, status_code=404)
+
+        tasks = [
+            task
+            for task in calendar_forecast_tasks.get(event_id, set())
+            if not task.done()
+        ]
+        if not tasks:
+            return JSONResponse({"event_id": event_id, "cancelled": False})
+
+        await registry.hub_ws.broadcast_json({
+            "type": "calendar_forecast_cancelled",
+            "event_id": event_id,
+        })
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        return JSONResponse({"event_id": event_id, "cancelled": True})
 
     @r.post("/api/calendar/events/{event_id}/forecast/viewed")
     async def mark_calendar_forecast_viewed(event_id: str) -> JSONResponse:

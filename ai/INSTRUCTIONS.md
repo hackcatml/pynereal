@@ -126,11 +126,14 @@ internals when an existing script already provides the required data.
 - Save researched results with `replace_calendar_events`. Include an empty
   `events` array for a researched session with no relevant event so stale entries
   in that date range are removed. Events outside the requested range are kept.
+- When one event affects multiple sessions, use the same date, time, and concise
+  title in each affected session's event list. The calendar stores it once and
+  links every affected session; do not create session-specific title variants.
 - Calendar changes are allowed only when the user asks to check, refresh, add,
   update, or remove schedules. Report success only from the tool result.
 - A calendar-card event forecast is read-only analysis for the exact persisted
-  event and session supplied by data-service. Research current public sources,
-  distinguish facts from inference, and assess scenarios and symbol impact.
+  event and affected sessions supplied by data-service. Research current public
+  sources, distinguish facts from inference, and assess scenarios and symbol impact.
   Do not call calendar mutation tools or change account, strategy, or file state.
 
 ## Script Contract

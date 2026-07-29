@@ -866,6 +866,29 @@ tr:last-child td { border-bottom: none; }
   transform-origin: center;
   animation: calendar-pepe-eye-roll 600ms linear infinite;
 }
+.calendar-forecast-thinking {
+  position: absolute;
+  top: -3px;
+  right: 29px;
+  z-index: 3;
+  display: inline-flex;
+  gap: 2px;
+  align-items: center;
+  padding: 2px 5px;
+  border: 1px solid #394454;
+  border-radius: 8px 8px 2px 8px;
+  background: #1c2430;
+  color: #aeb7c2;
+  font-size: 5px;
+  line-height: 1;
+  pointer-events: none;
+}
+.calendar-forecast-thinking .ai-dot {
+  display: inline-block;
+  animation: ai-dot-blink 1.2s infinite;
+}
+.calendar-forecast-thinking .ai-dot:nth-child(2) { animation-delay: 0.2s; }
+.calendar-forecast-thinking .ai-dot:nth-child(3) { animation-delay: 0.4s; }
 .calendar-forecast-pepe.forecast-unread {
   animation: calendar-pepe-ready-shake 480ms ease-in-out infinite;
 }
@@ -998,9 +1021,58 @@ tr:last-child td { border-bottom: none; }
 }
 .calendar-forecast-content { min-width: 0; }
 .calendar-forecast-error { color: #ff7b72; line-height: 1.45; }
-.calendar-event-session {
+.calendar-event-session-toggle {
+  display: inline-flex;
+  max-width: calc(100% - 2px);
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: var(--muted);
+  font-family: inherit;
   font-size: 11px;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+}
+.calendar-event-session-toggle:hover { color: #c7d0da; }
+.calendar-event-session-toggle > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.calendar-event-session-chevron {
+  flex: 0 0 auto;
+  font-size: 16px;
+  line-height: 10px;
+  transition: transform 140ms ease;
+}
+.calendar-event-session-toggle[aria-expanded="true"] .calendar-event-session-chevron {
+  transform: rotate(90deg);
+}
+.calendar-event-session-list {
+  display: grid;
+  gap: 3px;
+  margin-top: 7px;
+  padding: 5px 0 3px 9px;
+  border-left: 1px solid #303946;
+}
+.calendar-event-session-item {
+  display: grid;
+  grid-template-columns: 7px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-height: 24px;
+  color: #c5ccd5;
+  font-size: 11px;
+  line-height: 1.35;
+}
+.calendar-event-session-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--event-color, #58a6ff);
 }
 .calendar-event-title {
   margin-top: 4px;

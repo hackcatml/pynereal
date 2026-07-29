@@ -24,6 +24,7 @@
   let calendarMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
   let calendarEvents = [];
   const calendarForecastStates = new Map();
+  const calendarExpandedSessionEvents = new Set();
   let calendarSelectedDate = null;
   let calendarRequestSeq = 0;
   let lastCalendarTouchAt = 0;
@@ -86,6 +87,8 @@
         state.viewed = false;
         continue;
       }
+      state.cancelPending = false;
+      state.cancelRequested = false;
       const forecast = event && event.forecast;
       if (!forecast || typeof forecast !== "object") {
         // no server forecast: clear a stale remote "running" back to idle so a
@@ -133,6 +136,35 @@
     const value = String(sessionId || "");
     for (let i = 0; i < value.length; i++) hash = ((hash << 5) - hash + value.charCodeAt(i)) | 0;
     return calendarColors[Math.abs(hash) % calendarColors.length];
+  }
+
+  function calendarEventSessionIds(event) {
+    if (Array.isArray(event && event.session_ids)) {
+      return [...new Set(event.session_ids.map((value) => String(value || "")).filter(Boolean))];
+    }
+    const sessionId = String(event && event.session_id || "");
+    return sessionId ? [sessionId] : [];
+  }
+
+  function calendarAffectedSessions(event) {
+    if (Array.isArray(event && event.sessions) && event.sessions.length) {
+      return event.sessions.filter((session) => session && session.session_id);
+    }
+    const sessionId = String(event && event.session_id || "");
+    return sessionId ? [{
+      session_id: sessionId,
+      symbol: event.symbol,
+      exchange: event.exchange,
+      timeframe: event.timeframe,
+    }] : [];
+  }
+
+  function calendarSessionLabel(session) {
+    return [
+      session.symbol || session.session_id,
+      String(session.exchange || "").toUpperCase(),
+      session.timeframe || "",
+    ].filter(Boolean).join(" · ");
   }
 
   function isCalendarOpen() {
@@ -1457,7 +1489,7 @@
         key === todayKey ? "today" : "",
         key === calendarSelectedDate ? "selected" : "",
       ].filter(Boolean).join(" ");
-      const sessionIds = [...new Set(events.map((event) => String(event.session_id || "")))];
+      const sessionIds = [...new Set(events.flatMap(calendarEventSessionIds))];
       const dots = sessionIds.slice(0, 4).map((sessionId) => (
         `<span class="calendar-event-dot" style="--event-color:${calendarSessionColor(sessionId)}"></span>`
       )).join("");
@@ -1492,11 +1524,28 @@
     }
     el("calendar-detail-events").innerHTML = events.map((event) => {
       const forecastState = calendarForecastState(event);
-      const sessionLabel = [
-        event.symbol || event.session_id,
-        String(event.exchange || "").toUpperCase(),
-        event.timeframe || "",
-      ].filter(Boolean).join(" · ");
+      const affectedSessions = calendarAffectedSessions(event);
+      const sessionIds = calendarEventSessionIds(event);
+      const sessionsExpanded = calendarExpandedSessionEvents.has(String(event.id || ""));
+      const sessionSummary = affectedSessions.length === 1
+        ? calendarSessionLabel(affectedSessions[0])
+        : `${affectedSessions.length} affected sessions`;
+      const sessionToggle = `<button class="calendar-event-session-toggle" type="button" ` +
+        `data-calendar-event-sessions="${esc(event.id)}" aria-expanded="${sessionsExpanded}" ` +
+        `aria-label="${sessionsExpanded ? "Hide" : "Show"} affected sessions">` +
+        `<span>${esc(sessionSummary)}</span>` +
+        `<span class="calendar-event-session-chevron" aria-hidden="true">&#8250;</span></button>`;
+      const sessionList = sessionsExpanded
+        ? `<div class="calendar-event-session-list">` +
+          affectedSessions.map((session) => {
+            const linkedSessionId = String(session.session_id || "");
+            return `<div class="calendar-event-session-item">` +
+              `<span class="calendar-event-session-dot" ` +
+              `style="--event-color:${calendarSessionColor(linkedSessionId)}"></span>` +
+              `<span>${esc(calendarSessionLabel(session))}</span></div>`;
+          }).join("") +
+          `</div>`
+        : "";
       const time = event.time
         ? `<span class="calendar-event-time">${esc(event.time)}${event.timezone ? ` ${esc(event.timezone)}` : ""}</span>`
         : "";
@@ -1512,7 +1561,7 @@
         forecastState.status === "ready" && !forecastState.viewed ? "forecast-unread" : "",
       ].filter(Boolean).join(" ");
       const forecastLabel = forecastState.status === "running"
-        ? `${event.title} forecast in progress`
+        ? `Cancel ${event.title} forecast`
         : forecastState.status === "ready"
           ? `Open ${event.title} forecast`
           : `Forecast ${event.title}`;
@@ -1522,11 +1571,16 @@
       const forecastSay = (forecastState.status === "ready" && !forecastState.open)
         ? `<span class="pepe-say" aria-hidden="true">&#x2827;&#x2837;&#x282e;</span>`
         : "";
+      const forecastThinking = forecastState.status === "running"
+        ? `<span class="calendar-forecast-thinking" aria-hidden="true">` +
+          `<span class="ai-dot">&#9679;</span><span class="ai-dot">&#9679;</span>` +
+          `<span class="ai-dot">&#9679;</span></span>`
+        : "";
       const forecastButton = `<button class="${forecastClasses}" type="button" ` +
         `data-calendar-forecast-event="${esc(event.id)}" aria-label="${esc(forecastLabel)}" ` +
         `title="${esc(forecastLabel)}" ` +
         `${forecastState.status === "running" ? 'aria-busy="true"' : ""} ` +
-        `${aiEnabled ? "" : "disabled"}>${forecastSay}</button>`;
+        `${aiEnabled ? "" : "disabled"}>${forecastThinking}${forecastSay}</button>`;
       let forecastBubble = "";
       if (forecastState.open && ["ready", "error"].includes(forecastState.status)) {
         const content = forecastState.status === "error"
@@ -1544,11 +1598,11 @@
           `</svg></button></div>` +
           `${content}</aside>`;
       }
-      return `<article class="calendar-event-card has-forecast" style="--event-color:${calendarSessionColor(event.session_id)}">` +
+      return `<article class="calendar-event-card has-forecast" style="--event-color:${calendarSessionColor(sessionIds[0])}">` +
         `${forecastButton}` +
-        `<div class="calendar-event-session">${esc(sessionLabel)}</div>` +
+        `${sessionToggle}` +
         `<div class="calendar-event-title">${esc(event.title || "Schedule")}${time}</div>` +
-        `${details}${source}${forecastBubble}</article>`;
+        `${sessionList}${details}${source}${forecastBubble}</article>`;
     }).join("");
     hydrateCalendarForecastCards();
     section.classList.remove("hidden");
@@ -1616,8 +1670,12 @@
   async function requestCalendarForecast(event) {
     const state = calendarForecastState(event);
     if (!aiEnabled || state.status === "running") return;
+    const controller = new AbortController();
     state.status = "running";
     state.localStream = true; // this client owns the stream; reconcile must not clobber it
+    state.abortController = controller;
+    state.cancelPending = false;
+    state.cancelRequested = false;
     state.error = "";
     state.open = false;
     state.viewed = false;
@@ -1630,6 +1688,7 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: "{}",
+        signal: controller.signal,
       }, (eventName, data) => {
         if (eventName === "stream_error") {
           streamError = String(data.error || "Calendar forecast failed");
@@ -1649,12 +1708,19 @@
       if (streamError) throw new Error(streamError);
       if (!completed) throw new Error("AI forecast ended without a response");
     } catch (error) {
-      state.status = "error";
-      state.error = error && error.message ? error.message : "Calendar forecast failed";
-      state.open = true;
-      state.viewed = true;
+      if (state.cancelRequested || (error && error.name === "AbortError")) {
+        state.status = state.answer ? "ready" : "idle";
+        state.error = "";
+        state.open = false;
+      } else {
+        state.status = "error";
+        state.error = error && error.message ? error.message : "Calendar forecast failed";
+        state.open = true;
+        state.viewed = true;
+      }
       renderCalendarDetails();
     } finally {
+      if (state.abortController === controller) state.abortController = null;
       state.localStream = false;
       if (isCalendarOpen()) loadCalendarEvents();
     }
@@ -1670,9 +1736,41 @@
     if (isCalendarOpen() && calendarSelectedDate) renderCalendarDetails();
   }
 
+  function applyCalendarForecastCancelled(eventId) {
+    const state = calendarForecastState({ id: eventId });
+    state.cancelRequested = true;
+    state.status = state.answer ? "ready" : "idle";
+    state.error = "";
+    state.open = false;
+    if (state.abortController) state.abortController.abort();
+    if (isCalendarOpen() && calendarSelectedDate) renderCalendarDetails();
+  }
+
+  async function cancelCalendarForecast(event) {
+    const state = calendarForecastState(event);
+    if (state.status !== "running" || state.cancelPending) return;
+    state.cancelPending = true;
+    try {
+      const result = await api(
+        `/api/calendar/events/${encodeURIComponent(event.id)}/forecast/cancel`,
+        { method: "POST" },
+      );
+      if (result.cancelled) {
+        applyCalendarForecastCancelled(event.id);
+      } else if (isCalendarOpen()) {
+        await loadCalendarEvents();
+      }
+    } catch {
+      state.cancelPending = false;
+    }
+  }
+
   function toggleCalendarForecast(event) {
     const state = calendarForecastState(event);
-    if (state.status === "running") return;
+    if (state.status === "running") {
+      cancelCalendarForecast(event);
+      return;
+    }
     if (state.status === "idle") {
       requestCalendarForecast(event);
       return;
@@ -1996,6 +2094,19 @@
       renderCalendar();
     });
     el("calendar-detail-events").addEventListener("click", (event) => {
+      const sessionToggle = event.target && event.target.closest
+        ? event.target.closest("[data-calendar-event-sessions]")
+        : null;
+      if (sessionToggle) {
+        const eventId = String(sessionToggle.dataset.calendarEventSessions || "");
+        if (calendarExpandedSessionEvents.has(eventId)) {
+          calendarExpandedSessionEvents.delete(eventId);
+        } else {
+          calendarExpandedSessionEvents.add(eventId);
+        }
+        renderCalendarDetails();
+        return;
+      }
       const refresh = event.target && event.target.closest
         ? event.target.closest("[data-calendar-forecast-refresh]")
         : null;
@@ -4631,6 +4742,8 @@
           if (isCalendarOpen()) loadCalendarEvents();
         } else if (msg.type === "calendar_forecast_running") {
           if (isCalendarOpen()) applyCalendarForecastRunning(String(msg.event_id || ""));
+        } else if (msg.type === "calendar_forecast_cancelled") {
+          if (isCalendarOpen()) applyCalendarForecastCancelled(String(msg.event_id || ""));
         } else if (msg.type === "calendar_forecast_updated") {
           if (isCalendarOpen()) loadCalendarEvents();
         }
