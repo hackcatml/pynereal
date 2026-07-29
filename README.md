@@ -20,6 +20,7 @@ Run your crypto trading strategy in real time without TradingView.
   signal to exchange in under a second after candle confirmation
 - 📊 Bitget, Hyperliquid, OKX, Binance, and Bybit supported
 - 🔔 Webhook, Telegram, and draggable manual price alerts on the chart
+- 💼 Exchange and account-level asset portfolios with reviewed internal transfers
 - 📱 Full mobile dashboard
 
 ## 🤖 AI Copilot
@@ -34,7 +35,7 @@ Run your crypto trading strategy in real time without TradingView.
 
 Ask the dashboard chat things like:
 
-> "Show my assets and positions across all Binance accounts"
+> "Update the key events for each session"
 >
 > "Set a take-profit alert on the BTC 1m session at 3% above entry"
 
@@ -219,6 +220,20 @@ For example, **OKX**, **Binance**, and
 **Bybit** zero-volume candles are **hidden** to match TradingView, while **Bitget** and
 **Hyperliquid** zero-volume candles remain **visible**.
 
+### Re-sync Historical Data
+
+Open a session's **Data** settings to change its `Data start (UTC)` value after
+the session has been created. Saving a new date or datetime re-syncs the cached
+market data and regenerated OHLCV file from that boundary. Sessions that share
+the same exchange, symbol, and timeframe use the same feed, so the new boundary
+applies to all of them.
+
+Running strategies on the affected feed are stopped before the data file is
+updated and restarted after it is ready. They then replay the new historical
+window to rebuild chart plots and strategy state. Webhook, Telegram, and AI
+notifications are suppressed during this re-sync replay so historical signals
+are not delivered as new alerts.
+
 ## Running a Strategy
 
 Prepare a [PyneCore](https://github.com/PyneSys/pynecore) strategy file first.
@@ -339,6 +354,27 @@ values:
 {"signal":"CLOSE TP3","ticker":"{{ticker}}","timeframe":"{{timeframe}}"}
 ```
 
+## Assets and Internal Transfers
+
+Open the Hub menu beside the PyneReal Hub title and select **Assets** to view the
+combined value of every configured exchange account. The list shows totals by
+exchange and account; select an account to open a donut chart with its asset and
+account-type breakdown, including supported spot, futures, margin, funding, and
+earn balances.
+
+Select a non-zero account type to open **Internal transfer**. Available routes
+depend on the exchange and account configuration. PyneReal supports transfers
+between the exchange's internal wallets, flexible Earn redemption where
+available, and main/sub-account transfers where the exchange API permits them.
+Every transfer is shown on a review screen and requires explicit confirmation.
+This feature does not perform blockchain withdrawals.
+
+Asset access uses credentials from `workdir/config/providers.toml`. Keep API
+keys read-only when only portfolio viewing is needed. If internal transfers are
+required, grant only the minimum account and transfer permissions for the
+intended routes; withdrawal permission is not required and should remain
+disabled.
+
 ## Session Calendar
 
 Open the Hub menu beside the PyneReal Hub title and select **Calendar**. The
@@ -397,7 +433,7 @@ workdir/config/providers.toml
 
 The file is created from `providers.example.toml` when missing and is excluded
 from Git. Do not commit or print its contents. Grant API keys only the minimum
-read permissions required for the intended lookup.
+permissions required for the intended lookup or internal transfer.
 
 ```toml
 [ccxt.binance]
