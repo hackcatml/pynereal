@@ -123,9 +123,15 @@ internals when an existing script already provides the required data.
 - If SaveTicker has no relevant event for a session, search the web directly.
 - Never invent an event, date, time, or source. Omit uncertain events and state
   uncertainty in the chat response when it matters.
-- Save researched results with `replace_calendar_events`. Include an empty
-  `events` array for a researched session with no relevant event so stale entries
-  in that date range are removed. Events outside the requested range are kept.
+- For a request to add one specific event, save it with `add_calendar_event`.
+  This operation must preserve every existing event. A server-provided
+  calendar-date input uses the date selected by the user and must call
+  `add_calendar_event` exactly once after verification; never use
+  `replace_calendar_events` for that request.
+- Save range-wide research results with `replace_calendar_events`. Include an
+  empty `events` array for a researched session with no relevant event so stale
+  entries in that date range are removed. Events outside the requested range
+  are kept.
 - When one event affects multiple sessions, use the same date, time, and concise
   title in each affected session's event list. The calendar stores it once and
   links every affected session; do not create session-specific title variants.

@@ -11,6 +11,7 @@ from data_service.calendar_store import CalendarEventStore, CalendarStoreError
 
 
 _CONTEXT_TOOL_NAME = "get_calendar_context"
+_ADD_TOOL_NAME = "add_calendar_event"
 _REPLACE_TOOL_NAME = "replace_calendar_events"
 _MAX_SESSIONS_PER_UPDATE = 20
 _MAX_EVENTS_PER_UPDATE = 500
@@ -65,6 +66,8 @@ class CalendarRegistryBridge:
     ) -> dict[str, Any]:
         if operation == "context":
             return self._context()
+        if operation == "add":
+            return await self._add(arguments)
         if operation == "replace":
             return await self._replace(arguments)
         raise CalendarToolError(f"Unknown Calendar operation: {operation}")
@@ -114,6 +117,21 @@ class CalendarRegistryBridge:
         ]
         return result
 
+    async def _add(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        event = self._store.add_event(
+            arguments,
+            active_session_ids=self._registry.sessions,
+        )
+        await self._registry.hub_ws.broadcast_json({"type": "calendar_updated"})
+        return {
+            "event": event,
+            "affected_sessions": [
+                self._session_summary(session_id)
+                for session_id in event["session_ids"]
+            ],
+            "updated_at": self._store.updated_at,
+        }
+
     def _session_summary(self, session_id: str) -> dict[str, Any]:
         session = self._registry.get(session_id)
         return {
@@ -130,7 +148,7 @@ class CalendarTools:
 
     @property
     def names(self) -> set[str]:
-        return {_CONTEXT_TOOL_NAME, _REPLACE_TOOL_NAME}
+        return {_CONTEXT_TOOL_NAME, _ADD_TOOL_NAME, _REPLACE_TOOL_NAME}
 
     @property
     def specs(self) -> list[dict[str, Any]]:
@@ -187,6 +205,31 @@ class CalendarTools:
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "type": "function",
+                "name": _ADD_TOOL_NAME,
+                "description": (
+                    "Add or update one verified calendar event without deleting any other event. "
+                    "Use this for a user's manual calendar-date input after resolving every affected "
+                    "active session with get_calendar_context. Events with the same date, time, and "
+                    "normalized title are merged and linked to all supplied sessions."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        **event_properties,
+                        "session_ids": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": _MAX_SESSIONS_PER_UPDATE,
+                            "items": {"type": "string", "minLength": 1},
+                            "description": "Exact affected active session IDs.",
+                        },
+                    },
+                    "required": ["date", "title", "source_url", "session_ids"],
                     "additionalProperties": False,
                 },
             },
@@ -264,6 +307,9 @@ class CalendarTools:
                 if arguments:
                     raise CalendarToolError("get_calendar_context does not accept arguments")
                 result = self.bridge.execute("context", arguments)
+            elif tool == _ADD_TOOL_NAME:
+                validated = self._validate_add(arguments)
+                result = self.bridge.execute("add", validated)
             else:
                 validated = self._validate_replace(arguments)
                 result = self.bridge.execute("replace", validated)
@@ -275,12 +321,49 @@ class CalendarTools:
                 False,
                 {"error": f"Calendar operation failed ({type(exc).__name__})"},
             )
-        if tool == _REPLACE_TOOL_NAME:
+        if tool == _ADD_TOOL_NAME:
+            print(
+                f"[ai] Calendar event added sessions={len(result['event']['session_ids'])} "
+                f"date={result['event']['date']}"
+            )
+        elif tool == _REPLACE_TOOL_NAME:
             print(
                 f"[ai] Calendar updated sessions={len(result['updated_session_ids'])} "
                 f"events={result['saved_event_count']} range={result['range_start']}..{result['range_end']}"
             )
         return self._tool_response(True, result)
+
+    @staticmethod
+    def _validate_add(arguments: dict[str, Any]) -> dict[str, Any]:
+        allowed = {
+            "date",
+            "time",
+            "timezone",
+            "title",
+            "details",
+            "category",
+            "source_name",
+            "source_url",
+            "session_ids",
+        }
+        unexpected = sorted(set(arguments) - allowed)
+        if unexpected:
+            raise CalendarToolError(f"Unexpected argument field(s): {', '.join(unexpected)}")
+        for field in ("date", "title", "source_url"):
+            if not isinstance(arguments.get(field), str) or not arguments[field].strip():
+                raise CalendarToolError(f"{field} must be a non-empty string")
+        session_ids = arguments.get("session_ids")
+        if not isinstance(session_ids, list) or not session_ids:
+            raise CalendarToolError("session_ids must be a non-empty array")
+        if len(session_ids) > _MAX_SESSIONS_PER_UPDATE:
+            raise CalendarToolError(
+                f"session_ids can contain at most {_MAX_SESSIONS_PER_UPDATE} sessions"
+            )
+        if any(not isinstance(value, str) or not value.strip() for value in session_ids):
+            raise CalendarToolError("session_ids must contain non-empty strings")
+        validated = dict(arguments)
+        validated["session_ids"] = list(dict.fromkeys(value.strip() for value in session_ids))
+        return validated
 
     @staticmethod
     def _validate_replace(arguments: dict[str, Any]) -> dict[str, Any]:

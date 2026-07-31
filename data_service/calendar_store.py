@@ -317,6 +317,63 @@ class CalendarEventStore:
             raise
         return dict(viewed_forecast)
 
+    def add_event(
+        self,
+        event: dict[str, Any],
+        *,
+        active_session_ids: Iterable[str],
+    ) -> dict[str, Any]:
+        active = set(active_session_ids)
+        sanitized = _sanitize_event(event)
+        unknown_ids = [
+            session_id
+            for session_id in sanitized["session_ids"]
+            if session_id not in active
+        ]
+        if unknown_ids:
+            raise CalendarStoreError(
+                f"session_id is not active: {unknown_ids[0]}"
+            )
+
+        existing = next(
+            (
+                item
+                for item in self._events
+                if _event_key(item) == _event_key(sanitized)
+            ),
+            None,
+        )
+        if existing is not None:
+            if sanitized.get("source_url"):
+                sanitized = _merge_event(existing, sanitized)
+            else:
+                sanitized = _with_session_ids(
+                    existing,
+                    [*existing["session_ids"], *sanitized["session_ids"]],
+                )
+                sanitized["updated_at"] = _utc_now()
+
+        retained = [
+            item
+            for item in self._events
+            if _event_key(item) != _event_key(sanitized)
+        ]
+        next_events = sorted([*retained, sanitized], key=_event_sort_key)
+        if len(next_events) > _MAX_EVENTS:
+            raise CalendarStoreError(f"calendar can contain at most {_MAX_EVENTS} events")
+
+        previous_events = self._events
+        previous_updated_at = self.updated_at
+        self._events = next_events
+        self.updated_at = _utc_now()
+        try:
+            self._save()
+        except Exception:
+            self._events = previous_events
+            self.updated_at = previous_updated_at
+            raise
+        return _copy_event(sanitized)
+
     def replace_range(
         self,
         *,

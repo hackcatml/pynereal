@@ -55,11 +55,13 @@ uses the setting tool's atomic replacement option.
 ## Session Calendar
 
 Dashboard Codex threads use `get_calendar_context` to resolve natural-language
-symbols and company names to active sessions. `replace_calendar_events` then
-replaces only the researched date range for those sessions and broadcasts the
-new state to every open dashboard. A schedule shared by multiple sessions is
-stored once with all affected sessions linked; its calendar card expands to show
-the linked sessions.
+symbols and company names to active sessions. `add_calendar_event` preserves
+existing entries when a user submits one event from a selected calendar date.
+`replace_calendar_events` replaces only a researched date range during broader
+schedule refreshes. Both paths broadcast the new state to every open dashboard.
+A schedule shared by multiple sessions is stored once with all affected sessions
+linked; its calendar card expands to show the linked sessions. If AI is disabled,
+the dashboard stores the user's text directly for the sessions they select.
 
 SaveTicker calendar titles are discovery leads rather than sufficient evidence.
 The AI verifies dates and details through public search or authoritative company,

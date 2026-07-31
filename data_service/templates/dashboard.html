@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=54" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=58" />
 </head>
 <body>
   <header class="topbar">
@@ -135,7 +135,36 @@
         </div>
         <div id="calendar-grid" class="calendar-grid"></div>
         <section id="calendar-details" class="calendar-details hidden" aria-live="polite">
-          <h3 id="calendar-detail-date"></h3>
+          <div class="calendar-detail-header">
+            <h3 id="calendar-detail-date"></h3>
+            <button id="calendar-add-toggle" class="calendar-add-toggle" type="button"
+                    aria-expanded="false" aria-controls="calendar-add-form">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              <span>Add event manually</span>
+            </button>
+          </div>
+          <form id="calendar-add-form" class="calendar-add-form hidden">
+            <textarea id="calendar-add-input" rows="2" maxlength="200"
+                      placeholder="Add an event in plain language..." aria-label="Calendar event"></textarea>
+            <div class="calendar-add-actions">
+              <div id="calendar-add-session-select" class="calendar-add-session-select">
+                <button id="calendar-add-session-button" class="calendar-add-session-button" type="button"
+                        aria-haspopup="listbox" aria-expanded="false"
+                        aria-controls="calendar-add-session-options">
+                  <span id="calendar-add-session-label">AI matches sessions</span>
+                  <span class="calendar-add-session-chevron" aria-hidden="true">&#9662;</span>
+                </button>
+                <div id="calendar-add-session-options"
+                     class="calendar-add-session-options hidden" role="listbox"
+                     aria-label="Affected sessions"></div>
+              </div>
+              <button id="calendar-add-submit" class="btn btn-primary calendar-add-submit"
+                      type="submit">Add</button>
+            </div>
+            <div id="calendar-add-status" class="calendar-add-status" aria-live="polite"></div>
+          </form>
           <div id="calendar-detail-events" class="calendar-detail-events"></div>
         </section>
       </div>
@@ -404,6 +433,6 @@
     </form>
   </div>
 
-  <script src="/static/dashboard.js?v=56"></script>
+  <script src="/static/dashboard.js?v=59"></script>
 </body>
 </html>
