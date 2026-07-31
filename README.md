@@ -390,6 +390,12 @@ Open the Hub menu beside the PyneReal Hub title and select **Calendar**. The
 monthly view marks dates that have schedules for active sessions; select a date
 to see the related symbol, title, details, time, and source.
 
+Select a date and enter a short natural-language event to add it manually. When
+AI is enabled, PyneReal verifies the event and resolves its affected sessions
+before saving it; optional session selection constrains that research. When AI
+is disabled, select the affected sessions and PyneReal stores the entered text
+as-is without researching it.
+
 Each event card includes a Pepe forecast control. Select it to run a read-only
 AI outlook for that event without opening or modifying the main chat. Pepe's
 eyes move while the analysis is running and the face shakes when a new result

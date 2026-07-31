@@ -7,7 +7,9 @@
 4. Verify each candidate date and detail with public web search or an
    authoritative company IR, filing, exchange, or economic-calendar source.
 5. Search the web directly for sessions with no relevant SaveTicker item.
-6. Call `replace_calendar_events` once with every researched session. Include
+6. For one explicitly requested event, call `add_calendar_event` once so all
+   existing events are preserved. For a schedule refresh or range-wide check,
+   call `replace_calendar_events` once with every researched session and include
    empty event arrays for sessions with no verified events in the range. Use the
    same date, time, and title when one event affects multiple sessions so it is
    stored once with all affected sessions linked.

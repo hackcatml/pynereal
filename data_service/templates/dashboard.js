@@ -31,6 +31,14 @@
   let calendarSuppressTapUntil = 0;
   let calendarOpenTimer = null;
   let calendarCloseTimer = null;
+  let calendarAddText = "";
+  let calendarAddPending = false;
+  let calendarAddOpen = false;
+  let calendarAddStatus = "";
+  let calendarAddError = false;
+  let calendarAddSessionMenuOpen = false;
+  let calendarAddComposing = false;
+  const calendarAddSessionIds = new Set();
   let registerAnimatedPepeFace = () => {};
   const assetColors = [
     "#3b82f6", "#f59e0b", "#10b981", "#ef4444",
@@ -165,6 +173,154 @@
     ].filter(Boolean).join(" · ");
   }
 
+  function closeCalendarAddSessionMenu() {
+    calendarAddSessionMenuOpen = false;
+    const select = el("calendar-add-session-select");
+    const options = el("calendar-add-session-options");
+    const button = el("calendar-add-session-button");
+    if (select) select.classList.remove("open");
+    if (options) options.classList.add("hidden");
+    if (button) button.setAttribute("aria-expanded", "false");
+  }
+
+  function renderCalendarAddControls() {
+    if (!calendarSelectedDate) return;
+    el("calendar-add-form").classList.toggle("hidden", !calendarAddOpen);
+    el("calendar-add-toggle").setAttribute(
+      "aria-expanded",
+      calendarAddOpen ? "true" : "false",
+    );
+    el("calendar-add-toggle").disabled = calendarAddPending;
+    const liveSessionIds = new Set(sessions.map(sessionId));
+    for (const sessionIdValue of calendarAddSessionIds) {
+      if (!liveSessionIds.has(sessionIdValue)) calendarAddSessionIds.delete(sessionIdValue);
+    }
+
+    const input = el("calendar-add-input");
+    if (document.activeElement !== input) input.value = calendarAddText;
+    input.disabled = calendarAddPending;
+
+    let selectionLabel = "";
+    if (calendarAddSessionIds.size) {
+      if (calendarAddSessionIds.size === 1) {
+        const selected = sessions.find((session) => (
+          calendarAddSessionIds.has(sessionId(session))
+        ));
+        selectionLabel = selected ? calendarSessionLabel(selected) : "1 session";
+      } else {
+        selectionLabel = `${calendarAddSessionIds.size} sessions`;
+      }
+    } else {
+      selectionLabel = aiEnabled ? "AI matches sessions" : "Select sessions";
+    }
+    el("calendar-add-session-label").textContent = selectionLabel;
+
+    const options = [];
+    if (aiEnabled) {
+      options.push(
+        `<button class="calendar-add-session-option${calendarAddSessionIds.size ? "" : " selected"}" ` +
+        `type="button" data-calendar-add-session="__auto__" role="option" ` +
+        `aria-selected="${calendarAddSessionIds.size ? "false" : "true"}">AI matches sessions</button>`,
+      );
+    }
+    for (const session of sessions) {
+      const id = sessionId(session);
+      const selected = calendarAddSessionIds.has(id);
+      options.push(
+        `<button class="calendar-add-session-option${selected ? " selected" : ""}" ` +
+        `type="button" data-calendar-add-session="${esc(id)}" role="option" ` +
+        `aria-selected="${selected ? "true" : "false"}">${esc(calendarSessionLabel(session))}</button>`,
+      );
+    }
+    if (!options.length) {
+      options.push(`<div class="script-select-empty">No active sessions</div>`);
+    }
+    el("calendar-add-session-options").innerHTML = options.join("");
+    el("calendar-add-session-select").classList.toggle("open", calendarAddSessionMenuOpen);
+    el("calendar-add-session-options").classList.toggle("hidden", !calendarAddSessionMenuOpen);
+    el("calendar-add-session-button").setAttribute(
+      "aria-expanded",
+      calendarAddSessionMenuOpen ? "true" : "false",
+    );
+    el("calendar-add-session-button").disabled = calendarAddPending || !sessions.length;
+    el("calendar-add-submit").disabled = (
+      calendarAddPending || !calendarAddText.trim() || !sessions.length
+    );
+
+    const status = el("calendar-add-status");
+    status.textContent = calendarAddStatus;
+    status.classList.toggle("error", calendarAddError);
+    status.classList.toggle("pending", calendarAddPending);
+  }
+
+  async function submitCalendarEvent() {
+    const text = calendarAddText.trim();
+    if (!calendarSelectedDate || !text || calendarAddPending) return;
+    if (!sessions.length) {
+      calendarAddStatus = "Add a session before creating an event.";
+      calendarAddError = true;
+      renderCalendarAddControls();
+      return;
+    }
+    if (!aiEnabled && !calendarAddSessionIds.size) {
+      calendarAddStatus = "Select at least one session.";
+      calendarAddError = true;
+      renderCalendarAddControls();
+      return;
+    }
+
+    const submittedDate = calendarSelectedDate;
+    calendarAddPending = true;
+    calendarAddError = false;
+    calendarAddStatus = aiEnabled ? "Researching event" : "Adding event";
+    closeCalendarAddSessionMenu();
+    renderCalendarAddControls();
+
+    let completed = false;
+    try {
+      await streamSse("/api/calendar/events/manual", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          date: submittedDate,
+          text,
+          session_ids: Array.from(calendarAddSessionIds),
+        }),
+      }, (eventName, data) => {
+        if (eventName === "status" || eventName === "work_status") {
+          const statusText = String(data.text || "").trim();
+          if (statusText) {
+            calendarAddStatus = statusText;
+            calendarAddError = false;
+            renderCalendarAddControls();
+          }
+          return;
+        }
+        if (eventName === "stream_error") {
+          throw new Error(data.error || "Calendar event could not be added");
+        }
+        if (eventName === "done") {
+          completed = true;
+          calendarAddStatus = String(data.answer || "Event added").trim() || "Event added";
+          calendarAddError = false;
+        }
+      });
+      if (!completed) throw new Error("Calendar event request ended before completion");
+      calendarAddText = "";
+      calendarAddSessionIds.clear();
+      calendarAddOpen = false;
+      await loadCalendarEvents();
+    } catch (error) {
+      calendarAddStatus = error && error.message
+        ? error.message
+        : "Calendar event could not be added";
+      calendarAddError = true;
+    } finally {
+      calendarAddPending = false;
+      if (isCalendarOpen() && calendarSelectedDate) renderCalendarDetails();
+    }
+  }
+
   function isCalendarOpen() {
     return !el("calendar-modal").classList.contains("hidden");
   }
@@ -207,6 +363,7 @@
       calendarOpenTimer = null;
     }
     calendarSelectedDate = null;
+    calendarAddOpen = false;
     const modal = el("calendar-modal");
     const box = modal.querySelector(".calendar-modal-box");
     modal.classList.remove(
@@ -1450,7 +1607,7 @@
       reconcileCalendarForecasts(calendarEvents);
       const updated = String(payload.updated_at || "").trim();
       el("calendar-updated").textContent = updated
-        ? `Updated ${new Date(updated).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`
+        ? `Updated ${new Date(updated).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`
         : "";
       renderCalendar();
     } catch (error) {
@@ -1462,7 +1619,7 @@
   }
 
   function renderCalendar() {
-    const title = calendarMonth.toLocaleDateString([], { year: "numeric", month: "long" });
+    const title = calendarMonth.toLocaleDateString("en-US", { year: "numeric", month: "long" });
     el("calendar-month-title").textContent = title;
 
     const byDate = new Map();
@@ -1495,7 +1652,7 @@
         : "";
       cells.push(
         `<button class="${classes}" type="button" data-calendar-date="${key}" ` +
-        `aria-label="${esc(day.toLocaleDateString())}, ${events.length} events">` +
+        `aria-label="${esc(day.toLocaleDateString("en-US"))}, ${events.length} events">` +
         `<span class="calendar-day-number">${day.getDate()}</span>${eventRow}</button>`,
       );
     }
@@ -1511,8 +1668,9 @@
     }
     const selected = calendarDateFromKey(calendarSelectedDate);
     el("calendar-detail-date").textContent = selected
-      ? selected.toLocaleDateString([], { weekday: "long", year: "numeric", month: "long", day: "numeric" })
+      ? selected.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })
       : calendarSelectedDate;
+    renderCalendarAddControls();
     const events = calendarEvents.filter((event) => event.date === calendarSelectedDate);
     if (!events.length) {
       el("calendar-detail-events").innerHTML = `<div class="calendar-empty-day">No events</div>`;
@@ -1803,6 +1961,7 @@
   function moveCalendarMonth(delta, animate = false) {
     calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + delta, 1);
     calendarSelectedDate = null;
+    calendarAddOpen = false;
     calendarEvents = [];
     renderCalendar();
     if (animate) {
@@ -2077,6 +2236,7 @@
       const now = new Date();
       calendarMonth = new Date(now.getFullYear(), now.getMonth(), 1);
       calendarSelectedDate = null;
+      calendarAddOpen = false;
       calendarEvents = [];
       renderCalendar();
       loadCalendarEvents();
@@ -2086,8 +2246,65 @@
         ? event.target.closest("[data-calendar-date]")
         : null;
       if (!day) return;
+      if (calendarAddPending) return;
       calendarSelectedDate = day.dataset.calendarDate || null;
+      calendarAddOpen = false;
+      calendarAddText = "";
+      calendarAddStatus = "";
+      calendarAddError = false;
+      closeCalendarAddSessionMenu();
       renderCalendar();
+    });
+    el("calendar-add-toggle").addEventListener("click", () => {
+      if (calendarAddPending) return;
+      calendarAddOpen = !calendarAddOpen;
+      if (!calendarAddOpen) closeCalendarAddSessionMenu();
+      renderCalendarAddControls();
+      if (calendarAddOpen) {
+        window.requestAnimationFrame(() => el("calendar-add-input").focus());
+      }
+    });
+    el("calendar-add-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitCalendarEvent();
+    });
+    el("calendar-add-input").addEventListener("input", (event) => {
+      calendarAddText = event.target.value;
+      renderCalendarAddControls();
+    });
+    el("calendar-add-input").addEventListener("compositionstart", () => {
+      calendarAddComposing = true;
+    });
+    el("calendar-add-input").addEventListener("compositionend", (event) => {
+      calendarAddComposing = false;
+      calendarAddText = event.target.value;
+      renderCalendarAddControls();
+    });
+    el("calendar-add-input").addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.shiftKey || event.isComposing || calendarAddComposing) return;
+      event.preventDefault();
+      el("calendar-add-form").requestSubmit();
+    });
+    el("calendar-add-session-button").addEventListener("click", () => {
+      if (calendarAddPending || !sessions.length) return;
+      calendarAddSessionMenuOpen = !calendarAddSessionMenuOpen;
+      renderCalendarAddControls();
+    });
+    el("calendar-add-session-options").addEventListener("click", (event) => {
+      const option = event.target && event.target.closest
+        ? event.target.closest("[data-calendar-add-session]")
+        : null;
+      if (!option || calendarAddPending) return;
+      const sessionIdValue = String(option.dataset.calendarAddSession || "");
+      if (sessionIdValue === "__auto__") {
+        calendarAddSessionIds.clear();
+        calendarAddSessionMenuOpen = false;
+      } else if (calendarAddSessionIds.has(sessionIdValue)) {
+        calendarAddSessionIds.delete(sessionIdValue);
+      } else {
+        calendarAddSessionIds.add(sessionIdValue);
+      }
+      renderCalendarAddControls();
     });
     el("calendar-detail-events").addEventListener("click", (event) => {
       const sessionToggle = event.target && event.target.closest
@@ -2123,6 +2340,9 @@
     document.addEventListener("pointerdown", (event) => {
       if (!isCalendarOpen()) return;
       const target = event.target && event.target.closest ? event.target : null;
+      if (!target || !target.closest(".calendar-add-session-select")) {
+        closeCalendarAddSessionMenu();
+      }
       if (target && target.closest(".calendar-forecast-bubble, [data-calendar-forecast-event]")) return;
       closeCalendarForecastBubbles();
     }, { passive: true });
@@ -2373,6 +2593,7 @@
       sessions = incoming;
     }
     if (!draggedSessionId) render();
+    if (isCalendarOpen() && calendarSelectedDate) renderCalendarDetails();
   }
 
   function runnerButtons(s) {
