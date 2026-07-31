@@ -588,6 +588,11 @@ App.data = {
   normalizeManualAlertTemplates(templates) {
     return Array.isArray(templates)
       ? templates.filter(t => t && typeof t.title === "string" && typeof t.message === "string")
+          .map(t => ({
+            title: t.title,
+            message: t.message,
+            ...(typeof t.ai === "string" && t.ai.trim() ? { ai: t.ai } : {})
+          }))
       : [];
   },
   async loadManualAlertTemplates() {

@@ -304,8 +304,9 @@ They are useful when you want discretionary control in addition to fully
 automated strategy alerts.
 
 Open a chart, click the alert menu gear, and configure **Manual Alert
-Templates**. Each template has a `TITLE` and a JSON `MESSAGE`. Templates are
-stored with the session, so they are shared between desktop and mobile browsers.
+Templates**. Each template has a `TITLE`, a JSON `MESSAGE`, and an optional
+`AI INSTRUCTION`. Templates are stored with the session, so they are shared
+between desktop and mobile browsers.
 
 To send a manual alert:
 
@@ -323,6 +324,14 @@ multiple triggers, move each one by dragging its alert label on the price axis,
 remove one with the label `X`, or use `Send` to send a one-off manual alert
 immediately.
 
+When a template has an `AI INSTRUCTION`, PyneReal queues it after the template's
+webhook is sent successfully. This applies to both direct `Send` and automatic
+price-trigger delivery. The AI receives the exact session and alert context, and
+its instruction and result appear in shared dashboard chat as
+`[Manual Alert AI]`. The AI instruction is not included in the webhook JSON.
+Webhook failure prevents the AI instruction from running; an unavailable or
+failed AI service does not roll back a successful webhook.
+
 Manual alerts are independent from the Webhook checkbox. The checkbox controls
 strategy-generated alerts only; a manual alert can still be sent while the
 checkbox is off. A valid webhook URL is still required. PyneReal sends the final
@@ -332,7 +341,7 @@ If Telegram credentials are configured for the session, or through the root
 `.env` fallback, PyneReal also sends a Telegram manual-alert message after the
 webhook send succeeds. This does not depend on the Telegram checkbox.
 
-Supported placeholders:
+The JSON `MESSAGE` and optional `AI INSTRUCTION` support these placeholders:
 
 - `{{price}}`: the selected chart price. Drag the manual alert menu to adjust it.
 - `{{market}}`: the latest live price at the final `Send` click.

@@ -207,6 +207,17 @@ def build_manual_alert_message(template: dict, spec: SessionSpec,
     return replace_alert_template_value(parsed, spec, full_context)
 
 
+def build_manual_alert_ai_instruction(template: dict, spec: SessionSpec,
+                                      context: dict[str, Any]) -> str:
+    title = str(template.get("title") or "")
+    instruction = str(template.get("ai") or "").strip()
+    if not instruction:
+        return ""
+    full_context = {**context, "title": title}
+    rendered = replace_alert_template_value(instruction, spec, full_context)
+    return str(rendered).strip()
+
+
 def build_manual_alert_payload(*, template: dict, spec: SessionSpec,
                                price: float, market: float | None,
                                time: int | None) -> dict[str, Any]:
@@ -216,10 +227,14 @@ def build_manual_alert_payload(*, template: dict, spec: SessionSpec,
         "time": time,
         "title": template.get("title") or "",
     }
-    return {
+    payload = {
         "title": template.get("title") or "",
         "price": price,
         "market": market,
         "time": time,
         "message": build_manual_alert_message(template, spec, context),
     }
+    ai_instruction = build_manual_alert_ai_instruction(template, spec, context)
+    if ai_instruction:
+        payload["ai_instruction"] = ai_instruction
+    return payload

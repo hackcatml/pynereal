@@ -571,7 +571,10 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
             return JSONResponse({"error": "templates can contain at most 50 items"}, status_code=400)
         sanitized = sanitize_manual_alert_templates(templates)
         if len(sanitized) != len(templates):
-            return JSONResponse({"error": "each template requires string title and message"}, status_code=400)
+            return JSONResponse(
+                {"error": "each template requires string title, message, and optional AI instruction"},
+                status_code=400,
+            )
         try:
             updated = await registry.update_manual_alert_templates(session_id, sanitized)
         except SessionNotFoundError:
@@ -612,6 +615,9 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
             return JSONResponse({"error": "session not found"}, status_code=404)
         if "message" not in payload:
             return JSONResponse({"error": "message is required"}, status_code=400)
+        ai_instruction = payload.get("ai_instruction")
+        if ai_instruction is not None and not isinstance(ai_instruction, str):
+            return JSONResponse({"error": "ai_instruction must be string"}, status_code=400)
 
         try:
             script_title, _, _, _ = _load_script_source_info(rt.spec, rt.chart_info)
@@ -625,6 +631,11 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
             return JSONResponse({"error": str(e)}, status_code=400)
         except Exception as e:
             return JSONResponse({"error": f"webhook send failed: {e}"}, status_code=502)
+        await rt.dispatch_manual_alert_ai_instruction(
+            payload,
+            result,
+            mode="send",
+        )
         return JSONResponse(result)
 
     return r
