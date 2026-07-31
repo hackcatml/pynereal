@@ -307,7 +307,7 @@ body.measure-active #chart {
   top: 72px;
   left: 50%;
   z-index: 30;
-  width: min(760px, calc(100vw - 32px));
+  width: min(980px, calc(100vw - 32px));
   max-height: calc(100dvh - 112px);
   display: flex;
   flex-direction: column;
@@ -431,7 +431,7 @@ body.measure-active #chart {
 .template-table-head,
 .template-row {
   display: grid;
-  grid-template-columns: minmax(120px, 180px) minmax(260px, 1fr) 34px;
+  grid-template-columns: minmax(120px, 170px) minmax(240px, 1fr) minmax(240px, 1fr) 34px;
   gap: 8px;
   align-items: start;
   padding: 10px 14px;
@@ -469,6 +469,10 @@ body.measure-active #chart {
   padding: 8px 9px;
   resize: vertical;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.template-row .template-ai-input {
+  height: 53px;
+  min-height: 53px;
 }
 .template-btn,
 .template-remove {
@@ -1141,6 +1145,12 @@ body.source-open .source-panel {
     grid-column: 1 / -1;
     grid-row: 2;
     resize: vertical;
+  }
+
+  .template-row .template-ai-input {
+    grid-row: 3;
+    height: 53px;
+    min-height: 53px;
   }
 
   .template-remove {

@@ -49,8 +49,10 @@ Dashboard Codex threads use three server-controlled dynamic tools:
 The AI must resolve the exact session, price, and template before setting a
 trigger. When the requested template is missing, a user-supplied title and
 message format are persisted as a new session template together with the price
-trigger. A combined "delete all in this session, then set this trigger" request
-uses the setting tool's atomic replacement option.
+trigger. The template may also contain an explicit optional AI instruction,
+which runs only after successful direct or price-trigger webhook delivery. A
+combined "delete all in this session, then set this trigger" request uses the
+setting tool's atomic replacement option.
 
 ## Session Calendar
 

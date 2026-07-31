@@ -47,13 +47,22 @@ def sanitize_manual_alert_templates(raw: object) -> list[dict]:
             continue
         title = item.get("title")
         message = item.get("message")
-        if not isinstance(title, str) or not isinstance(message, str):
+        ai_instruction = item.get("ai", "")
+        if (
+            not isinstance(title, str)
+            or not isinstance(message, str)
+            or not isinstance(ai_instruction, str)
+        ):
             continue
         title = title.strip()[:100]
         message = message.strip()
+        ai_instruction = ai_instruction.strip()
         if not title or not message:
             continue
-        templates.append({"title": title, "message": message[:5000]})
+        template = {"title": title, "message": message[:5000]}
+        if ai_instruction:
+            template["ai"] = ai_instruction[:4000]
+        templates.append(template)
     return templates
 
 

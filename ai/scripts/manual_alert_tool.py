@@ -16,6 +16,7 @@ _DELETE_TOOL_NAME = "delete_manual_alert_triggers"
 _MAX_MANUAL_ALERT_TRIGGERS = 50
 _MAX_MANUAL_ALERT_TEMPLATES = 50
 _TEMPLATE_MESSAGE_PREVIEW_CHARS = 500
+_TEMPLATE_AI_PREVIEW_CHARS = 500
 
 
 class ManualAlertToolError(ValueError):
@@ -85,6 +86,9 @@ class ManualAlertRegistryBridge:
                     "message_preview": str(template.get("message") or "")[
                         :_TEMPLATE_MESSAGE_PREVIEW_CHARS
                     ],
+                    "ai_instruction_preview": str(template.get("ai") or "")[
+                        :_TEMPLATE_AI_PREVIEW_CHARS
+                    ],
                 }
                 for index, template in enumerate(spec.manual_alert_templates)
             ]
@@ -131,8 +135,13 @@ class ManualAlertRegistryBridge:
         template_index = arguments.get("template_index")
         custom_title = arguments.get("custom_template_title")
         custom_message = arguments.get("custom_template_message")
+        custom_ai = arguments.get("custom_template_ai")
 
-        has_custom_template = custom_title is not None or custom_message is not None
+        has_custom_template = (
+            custom_title is not None
+            or custom_message is not None
+            or custom_ai is not None
+        )
         if template_index is not None and has_custom_template:
             raise ManualAlertToolError(
                 "use either template_index or custom template fields, not both"
@@ -150,10 +159,11 @@ class ManualAlertRegistryBridge:
             sanitized = sanitize_manual_alert_templates([{
                 "title": custom_title,
                 "message": custom_message,
+                "ai": custom_ai or "",
             }])
             if len(sanitized) != 1:
                 raise ManualAlertToolError(
-                    "custom_template_title and custom_template_message must both be valid"
+                    "custom template title, message, and optional AI instruction must be valid"
                 )
             template = sanitized[0]
             exact_template_index = next(
@@ -177,7 +187,7 @@ class ManualAlertRegistryBridge:
                 )
                 if title_conflict is not None:
                     raise ManualAlertToolError(
-                        "a template with this title already exists with a different message"
+                        "a template with this title already exists with different content"
                     )
                 if len(templates) >= _MAX_MANUAL_ALERT_TEMPLATES:
                     raise ManualAlertToolError(
@@ -355,6 +365,7 @@ class ManualAlertRegistryBridge:
             "trigger_id": str(trigger.get("id") or ""),
             "price": trigger.get("price"),
             "template_title": str(template.get("title") or ""),
+            "has_ai_instruction": bool(str(template.get("ai") or "").strip()),
             "template_source": template_source,
             "template_index": template_index,
             "template_added": template_added,
@@ -432,6 +443,14 @@ class ManualAlertTools:
                             "minLength": 1,
                             "maxLength": 5000,
                             "description": "User-supplied message format for a template that is not configured.",
+                        },
+                        "custom_template_ai": {
+                            "type": "string",
+                            "maxLength": 4000,
+                            "description": (
+                                "Optional user-supplied AI instruction for a new template. "
+                                "It runs only after the Manual Alert webhook succeeds."
+                            ),
                         },
                         "replace_existing_triggers": {
                             "type": "boolean",
@@ -554,6 +573,7 @@ class ManualAlertTools:
             "template_index",
             "custom_template_title",
             "custom_template_message",
+            "custom_template_ai",
             "replace_existing_triggers",
         }
         unexpected = sorted(set(arguments) - allowed)
@@ -586,10 +606,15 @@ class ManualAlertTools:
         custom_message = arguments.get("custom_template_message")
         if custom_message is not None and not isinstance(custom_message, str):
             raise ManualAlertToolError("custom_template_message must be a string")
+        custom_ai = arguments.get("custom_template_ai")
+        if custom_ai is not None and not isinstance(custom_ai, str):
+            raise ManualAlertToolError("custom_template_ai must be a string")
         if isinstance(custom_title, str) and len(custom_title.strip()) > 100:
             raise ManualAlertToolError("custom_template_title exceeds 100 characters")
         if isinstance(custom_message, str) and len(custom_message.strip()) > 5000:
             raise ManualAlertToolError("custom_template_message exceeds 5000 characters")
+        if isinstance(custom_ai, str) and len(custom_ai.strip()) > 4000:
+            raise ManualAlertToolError("custom_template_ai exceeds 4000 characters")
         replace_existing = arguments.get("replace_existing_triggers", False)
         if not isinstance(replace_existing, bool):
             raise ManualAlertToolError("replace_existing_triggers must be boolean")

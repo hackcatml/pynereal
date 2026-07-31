@@ -31,6 +31,7 @@ App.ui = {
     manualAlertConfirmBackdrop: document.getElementById("manual-alert-confirm-backdrop"),
     manualAlertConfirm: document.getElementById("manual-alert-confirm"),
     manualAlertConfirmUrl: document.getElementById("manual-alert-confirm-url"),
+    manualAlertConfirmNote: document.getElementById("manual-alert-confirm-note"),
     manualAlertConfirmCancel: document.getElementById("manual-alert-confirm-cancel"),
     manualAlertConfirmSend: document.getElementById("manual-alert-confirm-send"),
     webhookToggle: document.getElementById("alert-webhook-toggle"),
@@ -220,12 +221,13 @@ App.ui = {
       });
     });
   },
-  addAlertTemplateRow(template = { title: "", message: "{}" }) {
+  addAlertTemplateRow(template = { title: "", message: "{}", ai: "" }) {
     const row = document.createElement("div");
     row.className = "template-row";
     row.innerHTML =
       `<input type="text" class="template-title-input" value="${this.escapeHtml(template.title || "")}" placeholder="TITLE" spellcheck="false">` +
       `<textarea class="template-message-input" placeholder="MESSAGE JSON" spellcheck="false">${this.escapeHtml(template.message || "{}")}</textarea>` +
+      `<textarea class="template-ai-input" placeholder="AI runs when this alert triggers (optional)" spellcheck="false">${this.escapeHtml(template.ai || "")}</textarea>` +
       `<button class="template-remove" title="Remove" aria-label="Remove">&times;</button>`;
     row.querySelector(".template-remove").addEventListener("click", () => {
       row.remove();
@@ -243,15 +245,17 @@ App.ui = {
     for (const row of rows) {
       const title = row.querySelector(".template-title-input").value.trim();
       const message = row.querySelector(".template-message-input").value.trim();
-      if (!title && !message) continue;
+      const ai = row.querySelector(".template-ai-input").value.trim();
+      if (!title && !message && !ai) continue;
       if (!title) return { ok: false, error: "TITLE is required" };
       if (!message) return { ok: false, error: "MESSAGE is required" };
+      if (ai.length > 4000) return { ok: false, error: `AI instruction is too long: ${title}` };
       try {
         this.parseAlertTemplateMessage(message, { price: 1, market: 1, time: 0, title });
       } catch (e) {
         return { ok: false, error: `Invalid JSON: ${title}` };
       }
-      templates.push({ title, message });
+      templates.push({ title, message, ...(ai ? { ai } : {}) });
     }
     return { ok: true, templates };
   },
@@ -366,6 +370,14 @@ App.ui = {
   buildManualAlertMessage(template, context) {
     const parsed = this.parseAlertTemplateMessage(template.message, { ...context, title: template.title });
     return this.replaceAlertTemplateValue(parsed, { ...context, title: template.title });
+  },
+  buildManualAlertAiInstruction(template, context) {
+    const instruction = String(template.ai || "").trim();
+    if (!instruction) return "";
+    return String(this.replaceAlertTemplateValue(
+      instruction,
+      { ...context, title: template.title }
+    )).trim();
   },
   currentMarketPrice() {
     const lastPrice = Number(App.state.lastPrice);
@@ -491,7 +503,8 @@ App.ui = {
       price,
       template: {
         title: template.title,
-        message: template.message
+        message: template.message,
+        ...(template.ai ? { ai: template.ai } : {})
       }
     };
   },
@@ -568,13 +581,16 @@ App.ui = {
       market: this.currentMarketPrice(),
       title: template.title
     };
-    return {
+    const payload = {
       title: template.title,
       price: context.price,
       market: context.market,
       time: context.time,
       message: this.buildManualAlertMessage(template, context)
     };
+    const aiInstruction = this.buildManualAlertAiInstruction(template, context);
+    if (aiInstruction) payload.ai_instruction = aiInstruction;
+    return payload;
   },
   clampManualAlertMenuPosition(left, top) {
     const menu = this.elements.manualAlertMenu;
@@ -624,6 +640,12 @@ App.ui = {
     this.manualAlertPendingSend = payload;
     App.state.manualAlertConfirmOpen = true;
     this.elements.manualAlertConfirmUrl.textContent = url;
+    const hasAiInstruction = Boolean(
+      payload && payload.template && String(payload.template.ai || "").trim()
+    );
+    this.elements.manualAlertConfirmNote.textContent = hasAiInstruction
+      ? "Telegram will also be sent if configured. The AI instruction will run after a successful webhook when AI is enabled."
+      : "Telegram will also be sent if credentials are configured.";
     this.elements.manualAlertConfirmBackdrop.classList.remove("hidden");
     this.elements.manualAlertConfirm.classList.remove("hidden");
     this.elements.manualAlertConfirm.setAttribute("aria-hidden", "false");
