@@ -3139,7 +3139,7 @@
         setUpdateMessage(
           result.blocked_reason || "No updates available.",
           blocked,
-          blocked ? 5000 : 0,
+          5000,
         );
         return;
       }
