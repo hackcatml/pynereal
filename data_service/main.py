@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from config import ensure_provider_config, load_hub_config, load_initial_session
 from registry import SessionRegistry
 from api import build_session_api_router, build_control_router, build_validation_router
 from ui import build_ui_router
+from update_service import UpdateService
 
 _BANNER = r"""
     ____                   ____             __
@@ -36,6 +38,7 @@ def build_app(
     calendar_store: CalendarEventStore,
     asset_portfolio_service: AssetPortfolioService,
     asset_transfer_service: AssetTransferService,
+    update_service: UpdateService,
 ) -> FastAPI:
     app = FastAPI()
     app.include_router(build_ui_router())
@@ -46,6 +49,7 @@ def build_app(
             calendar_store,
             asset_portfolio_service,
             asset_transfer_service,
+            update_service,
         )
     )
     app.include_router(build_validation_router())
@@ -150,6 +154,15 @@ async def main() -> None:
         project_root=_PROJECT_ROOT,
         session_registry=registry,
         calendar_store=calendar_store,
+        startup_enabled=os.environ.get("PYNEREAL_UPDATE_AI_ENABLED") != "0",
+    )
+    update_shutdown = asyncio.Event()
+    update_service = UpdateService(
+        repo_root=_PROJECT_ROOT,
+        registry=registry,
+        port=cfg.port,
+        ai_enabled=lambda: codex_service.enabled,
+        request_shutdown=update_shutdown.set,
     )
     registry.set_ai_instruction_handler(codex_service.handle_strategy_instruction)
     try:
@@ -162,6 +175,7 @@ async def main() -> None:
         calendar_store,
         asset_portfolio_service,
         asset_transfer_service,
+        update_service,
     )
 
     await registry.start_all(specs)
@@ -172,9 +186,32 @@ async def main() -> None:
         uvicorn.Config(app, host=cfg.host, port=cfg.port, loop="asyncio", lifespan="off",
                        ws_ping_interval=None, ws_ping_timeout=None)
     )
+
+    async def stop_server_for_update() -> None:
+        await update_shutdown.wait()
+        server.should_exit = True
+
+    async def finish_update_after_start() -> None:
+        while not server.started and not server.should_exit:
+            await asyncio.sleep(0.05)
+        if server.started:
+            await update_service.finish_restart()
+
+    update_shutdown_task = asyncio.create_task(stop_server_for_update())
+    update_finish_task = (
+        asyncio.create_task(finish_update_after_start())
+        if update_service.pending_restart()
+        else None
+    )
     try:
         await server.serve()
     finally:
+        update_shutdown_task.cancel()
+        shutdown_tasks = [update_shutdown_task]
+        if update_finish_task is not None:
+            update_finish_task.cancel()
+            shutdown_tasks.append(update_finish_task)
+        await asyncio.gather(*shutdown_tasks, return_exceptions=True)
         heartbeat.cancel()
         try:
             await registry.shutdown()
@@ -183,6 +220,8 @@ async def main() -> None:
                 await asset_portfolio_service.close()
             finally:
                 await codex_service.close()
+    if update_shutdown.is_set():
+        update_service.apply_and_restart()
 
 
 if __name__ == "__main__":

@@ -41,6 +41,7 @@ from config import (
 )
 from manual_alerts import send_manual_alert_payload
 from ohlcv_io import make_ccxt_pro_client
+from update_service import UpdateService, UpdateServiceError
 
 # Cache of exchange -> ccxt markets so symbol validation hits the network at most
 # once per exchange for the hub's lifetime.
@@ -691,10 +692,38 @@ def build_control_router(
     calendar_store: CalendarEventStore,
     asset_portfolio_service: AssetPortfolioService,
     asset_transfer_service: AssetTransferService,
+    update_service: UpdateService,
 ) -> APIRouter:
     r = APIRouter()
     calendar_forecast_runs: dict[str, int] = {}
     calendar_forecast_tasks: dict[str, set[asyncio.Task[Any]]] = {}
+
+    @r.get("/api/update/status")
+    async def update_status() -> JSONResponse:
+        try:
+            result = await update_service.status()
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+        return JSONResponse(result)
+
+    @r.post("/api/update/check")
+    async def update_check() -> JSONResponse:
+        try:
+            result = await update_service.check()
+        except UpdateServiceError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+        return JSONResponse(result)
+
+    @r.post("/api/update/start")
+    async def update_start(payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        confirmation_token = payload.get("confirmation_token")
+        if not isinstance(confirmation_token, str) or not confirmation_token:
+            return JSONResponse({"error": "confirmation_token is required"}, status_code=400)
+        try:
+            result = await update_service.start(confirmation_token)
+        except UpdateServiceError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+        return JSONResponse(result, status_code=202)
 
     @r.get("/api/assets")
     async def get_assets(refresh: bool = False) -> JSONResponse:

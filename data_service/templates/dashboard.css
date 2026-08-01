@@ -192,6 +192,45 @@ body {
 /* the money-bag glyph fills its em square more than the calendar's, so it reads
    wider at the same font-size — nudge it down to match Calendar's footprint */
 #hub-assets-open .hub-menu-emoji { font-size: 16px; }
+.hub-menu-footer {
+  position: relative;
+  margin-top: auto;
+  padding: 28px 14px 14px;
+  border-top: 1px solid var(--border);
+}
+.hub-menu-version-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.hub-version {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-update-button {
+  flex: none;
+  min-width: 68px;
+  padding: 5px 10px;
+}
+.hub-update-message {
+  position: absolute;
+  top: 8px;
+  right: 14px;
+  left: 14px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 14px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-update-message.error { color: #ff7b72; margin: 0; min-height: 0; }
 
 .conn {
   font-size: 12px;
@@ -2057,6 +2096,33 @@ tr:last-child td { border-bottom: none; }
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+.update-revisions {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: #f2f5f8;
+  font-size: 12px;
+  line-height: 1.5;
+}
+#update-modal { z-index: 90; }
+#update-modal.updating .modal-header button,
+#update-modal.updating #update-cancel { visibility: hidden; }
+#update-modal.completed .modal-header button { visibility: hidden; }
+#update-modal.completed .confirm-footer { display: none; }
+#update-detail.update-detail-pending::after {
+  content: "...";
+  display: inline-block;
+  width: 0;
+  overflow: hidden;
+  margin-left: 3px;
+  vertical-align: bottom;
+  white-space: nowrap;
+  animation: update-detail-dots 1.2s steps(4, end) infinite;
+}
+@keyframes update-detail-dots {
+  to { width: 14px; }
 }
 
 /* ---- AI chat: floating 🐸 button + chat panel ---- */
