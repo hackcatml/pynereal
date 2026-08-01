@@ -67,6 +67,7 @@
   let updateMessageTimer = null;
   let updateCompleteTimer = null;
   let updateRestartPending = false;
+  let updateRequiresRestart = true;
 
   const el = (id) => document.getElementById(id);
 
@@ -3003,6 +3004,9 @@
     const state = payload.update && typeof payload.update === "object" ? payload.update : {};
     const status = String(state.status || "");
     const button = el("hub-update-button");
+    if (updateRestartPending && typeof state.restart_required === "boolean") {
+      updateRequiresRestart = state.restart_required;
+    }
     if (updateRestartPending && state.message) {
       setUpdateDetail(state.message, updateInProgress(status));
     }
@@ -3043,7 +3047,10 @@
       if (updateInProgress(status)) scheduleUpdatePoll();
     } catch (error) {
       if (updateRestartPending) {
-        setUpdateDetail("Running git pull", true);
+        setUpdateDetail(
+          updateRequiresRestart ? "Applying confirmed update" : "Applying frontend update",
+          true,
+        );
         scheduleUpdatePoll();
       }
     }
@@ -3068,12 +3075,14 @@
     modal.classList.remove("updating", "completed");
     modal.setAttribute("aria-hidden", "true");
     updateConfirmationToken = "";
+    updateRequiresRestart = true;
   }
 
   function openUpdateConfirmation(result) {
     closeHubMenu();
     setUpdateMessage("");
     updateConfirmationToken = String(result.confirmation_token || "");
+    updateRequiresRestart = result.restart_required !== false;
     const current = result.version
       ? `${result.version} · ${result.commit}`
       : result.commit;
@@ -3085,8 +3094,9 @@
       `${result.branch} · ${result.behind} new commit${result.behind === 1 ? "" : "s"}`,
     );
     el("update-error").textContent = "";
-    el("update-confirm-message").textContent =
-      "Running sessions will stop while the update is installed, then resume automatically.";
+    el("update-confirm-message").textContent = updateRequiresRestart
+      ? "Running sessions will stop while the update is installed, then resume automatically."
+      : "Only frontend files changed. Running sessions will continue without interruption.";
     el("update-confirm").disabled = false;
     el("update-confirm").textContent = "Update";
     el("update-cancel").textContent = "Cancel";
@@ -3103,7 +3113,9 @@
     modal.classList.add("completed");
     modal.setAttribute("aria-hidden", "false");
     el("update-confirm-message").textContent = "Update completed.";
-    setUpdateDetail("Data service restarted and running sessions were restored.");
+    setUpdateDetail(updateRequiresRestart
+      ? "Data service restarted and running sessions were restored."
+      : "Frontend refreshed without interrupting running sessions.");
     el("update-error").textContent = "";
     if (updateCompleteTimer !== null) clearTimeout(updateCompleteTimer);
     updateCompleteTimer = window.setTimeout(() => {
@@ -3165,14 +3177,18 @@
     el("update-confirm").disabled = true;
     el("update-confirm").textContent = "Updating";
     el("update-error").textContent = "";
-    setUpdateDetail("Stopping runners and data service", true);
+    setUpdateDetail(
+      updateRequiresRestart ? "Stopping runners and data service" : "Applying frontend update",
+      true,
+    );
     el("update-modal").classList.add("updating");
     try {
-      await api("/api/update/start", {
+      const result = await api("/api/update/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ confirmation_token: updateConfirmationToken }),
       });
+      updateRequiresRestart = result.restart_required !== false;
       updateConfirmationToken = "";
       updateRestartPending = true;
       setUpdateMessage("Updating...");

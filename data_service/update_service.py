@@ -63,6 +63,7 @@ class UpdateService:
         self.request_path = self.repo_root / "workdir" / "config" / "update_request.json"
         self._lock = asyncio.Lock()
         self._confirmation: dict[str, Any] | None = None
+        self._live_update_task: asyncio.Task[None] | None = None
 
     async def status(self) -> dict[str, Any]:
         repo = await asyncio.to_thread(self._repo_info)
@@ -86,8 +87,11 @@ class UpdateService:
                 token = secrets.token_urlsafe(24)
                 self._confirmation = {
                     "token": token,
-                    "head": result["commit"],
-                    "target": result["target_commit"],
+                    "branch": result["branch"],
+                    "head_sha": result["commit_sha"],
+                    "target_sha": result["target_sha"],
+                    "changed_files": tuple(result["changed_files"]),
+                    "restart_required": result["restart_required"],
                     "expires_at": time.monotonic() + self._CONFIRM_TTL_SECONDS,
                 }
                 result["confirmation_token"] = token
@@ -108,16 +112,20 @@ class UpdateService:
             if self._update_in_progress():
                 raise UpdateServiceError("an update is already in progress", 409)
 
-            check = await asyncio.to_thread(self._check_sync, False)
-            if not check["available"]:
-                raise UpdateServiceError("no update is available", 409)
-            if not check["can_update"]:
-                raise UpdateServiceError(check["blocked_reason"], 409)
-            if (
-                check["commit"] != confirmation["head"]
-                or check["target_commit"] != confirmation["target"]
-            ):
-                raise UpdateServiceError("repository changed; check for updates again", 409)
+            try:
+                check = await asyncio.to_thread(
+                    self._validate_confirmed_target,
+                    str(confirmation["branch"]),
+                    str(confirmation["head_sha"]),
+                    str(confirmation["target_sha"]),
+                    tuple(confirmation["changed_files"]),
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise UpdateServiceError(f"update validation failed: {exc}", 409) from exc
+
+            restart_required = bool(confirmation["restart_required"])
+            if check["restart_required"] != restart_required:
+                raise UpdateServiceError("update contents changed; check again", 409)
 
             active_runner_ids = [
                 session_id
@@ -132,17 +140,46 @@ class UpdateService:
                 "port": self.port,
                 "branch": check["branch"],
                 "from_commit": check["commit"],
+                "from_sha": check["commit_sha"],
                 "target_commit": check["target_commit"],
+                "target_sha": check["target_sha"],
+                "changed_files": check["changed_files"],
+                "restart_required": restart_required,
                 "active_runner_ids": active_runner_ids,
                 "ai_enabled": bool(self.ai_enabled()),
             }
             _write_json_atomic(self.request_path, request)
+            if not restart_required:
+                write_update_state(
+                    self.state_path,
+                    status="updating",
+                    branch=check["branch"],
+                    from_commit=check["commit"],
+                    target_commit=check["target_commit"],
+                    target_sha=check["target_sha"],
+                    restart_required=False,
+                    message="Applying frontend update",
+                    error="",
+                    owner_pid=os.getpid(),
+                )
+                self._live_update_task = asyncio.create_task(
+                    self._apply_live_update(request)
+                )
+                return {
+                    "ok": True,
+                    "active_runners": len(active_runner_ids),
+                    "target_commit": check["target_commit"],
+                    "restart_required": False,
+                }
+
             write_update_state(
                 self.state_path,
                 status="stopping",
                 branch=check["branch"],
                 from_commit=check["commit"],
                 target_commit=check["target_commit"],
+                target_sha=check["target_sha"],
+                restart_required=True,
                 message="Stopping runners and data service",
                 error="",
                 owner_pid=os.getpid(),
@@ -153,7 +190,40 @@ class UpdateService:
                 "ok": True,
                 "active_runners": len(active_runner_ids),
                 "target_commit": check["target_commit"],
+                "restart_required": True,
             }
+
+    async def _apply_live_update(self, request: dict[str, Any]) -> None:
+        try:
+            output = await asyncio.to_thread(
+                self._merge_target,
+                str(request["target_sha"]),
+            )
+            if output:
+                print(f"[update] {output}")
+            commit = await asyncio.to_thread(
+                self._git, "rev-parse", "--short=7", "HEAD"
+            )
+            write_update_state(
+                self.state_path,
+                status="completed",
+                message="Update completed.",
+                error="",
+                commit=commit,
+                restart_required=False,
+                pending_runner_ids=[],
+            )
+        except Exception as exc:
+            print(f"[update] frontend update failed: {exc}", file=sys.stderr)
+            write_update_state(
+                self.state_path,
+                status="failed",
+                message="Frontend update failed.",
+                error=str(exc),
+                restart_required=False,
+            )
+        finally:
+            self._live_update_task = None
 
     def _update_in_progress(self) -> bool:
         state = read_update_state(self.state_path)
@@ -205,9 +275,9 @@ class UpdateService:
                 write_update_state(
                     self.state_path,
                     status="updating",
-                    message="Running git pull",
+                    message="Applying confirmed update",
                 )
-                output = self._git("pull", "--ff-only", timeout=180)
+                output = self._merge_target(str(request["target_sha"]))
                 if output:
                     print(f"[update] {output}")
                 write_update_state(
@@ -330,8 +400,14 @@ class UpdateService:
             raise subprocess.SubprocessError(detail or f"git {' '.join(args)} failed")
         return completed.stdout.strip()
 
+    def _merge_target(self, target_sha: str) -> str:
+        if not target_sha:
+            raise subprocess.SubprocessError("confirmed target commit is missing")
+        return self._git("merge", "--ff-only", target_sha, timeout=180)
+
     def _repo_info(self, ref: str = "HEAD") -> dict[str, Any]:
         branch = self._git("rev-parse", "--abbrev-ref", "HEAD")
+        commit_sha = self._git("rev-parse", ref)
         commit = self._git("rev-parse", "--short=7", ref)
         version = ""
         if branch == "main":
@@ -345,8 +421,67 @@ class UpdateService:
         return {
             "branch": branch,
             "commit": commit,
+            "commit_sha": commit_sha,
             "version": version,
             "display": display,
+        }
+
+    def _changed_files(self, start_sha: str, target_sha: str) -> list[str]:
+        return sorted(
+            filter(
+                None,
+                self._git("diff", "--name-only", f"{start_sha}..{target_sha}").splitlines(),
+            )
+        )
+
+    @staticmethod
+    def _restart_required(changed_files: list[str] | tuple[str, ...]) -> bool:
+        return any(
+            not path.startswith("data_service/templates/")
+            for path in changed_files
+        )
+
+    def _local_conflicts(self, changed_files: list[str] | tuple[str, ...]) -> list[str]:
+        local = set(filter(None, self._git("diff", "--name-only", "HEAD").splitlines()))
+        local.update(
+            filter(
+                None,
+                self._git("ls-files", "--others", "--exclude-standard").splitlines(),
+            )
+        )
+        return sorted(set(changed_files) & local)
+
+    @staticmethod
+    def _conflict_message(conflicts: list[str]) -> str:
+        preview = ", ".join(conflicts[:3])
+        if len(conflicts) > 3:
+            preview += f" and {len(conflicts) - 3} more"
+        return f"local changes overlap update files: {preview}"
+
+    def _validate_confirmed_target(
+        self,
+        branch: str,
+        head_sha: str,
+        target_sha: str,
+        expected_changed_files: tuple[str, ...],
+    ) -> dict[str, Any]:
+        current = self._repo_info()
+        if current["branch"] != branch or current["commit_sha"] != head_sha:
+            raise subprocess.SubprocessError("repository changed; check for updates again")
+        self._git("cat-file", "-e", f"{target_sha}^{{commit}}")
+        self._git("merge-base", "--is-ancestor", head_sha, target_sha)
+        changed_files = self._changed_files(head_sha, target_sha)
+        if tuple(changed_files) != expected_changed_files:
+            raise subprocess.SubprocessError("update contents changed; check again")
+        conflicts = self._local_conflicts(changed_files)
+        if conflicts:
+            raise subprocess.SubprocessError(self._conflict_message(conflicts))
+        return {
+            **current,
+            "target_sha": target_sha,
+            "target_commit": self._git("rev-parse", "--short=7", target_sha),
+            "changed_files": changed_files,
+            "restart_required": self._restart_required(changed_files),
         }
 
     def _check_sync(self, fetch: bool) -> dict[str, Any]:
@@ -363,7 +498,10 @@ class UpdateService:
                 "can_update": False,
                 "blocked_reason": "current branch has no tracking branch",
                 "target_commit": info["commit"],
+                "target_sha": info["commit_sha"],
                 "target_version": info["version"],
+                "changed_files": [],
+                "restart_required": False,
             }
 
         if fetch:
@@ -372,7 +510,8 @@ class UpdateService:
         counts = self._git("rev-list", "--left-right", "--count", "HEAD...@{upstream}")
         ahead_text, behind_text = counts.split()
         ahead, behind = int(ahead_text), int(behind_text)
-        target_commit = self._git("rev-parse", "--short=7", "@{upstream}")
+        target_sha = self._git("rev-parse", "@{upstream}")
+        target_commit = self._git("rev-parse", "--short=7", target_sha)
         target_version = ""
         if info["branch"] == "main":
             try:
@@ -382,32 +521,21 @@ class UpdateService:
                     "--abbrev=0",
                     "--match",
                     "v[0-9]*",
-                    "@{upstream}",
+                    target_sha,
                 )
             except subprocess.SubprocessError:
                 pass
 
         available = behind > 0
         blocked_reason = ""
+        changed_files: list[str] = []
         if available and ahead > 0:
             blocked_reason = "local and remote branches have diverged; update manually"
         elif available:
-            incoming = set(
-                filter(None, self._git("diff", "--name-only", "HEAD..@{upstream}").splitlines())
-            )
-            local = set(filter(None, self._git("diff", "--name-only", "HEAD").splitlines()))
-            local.update(
-                filter(
-                    None,
-                    self._git("ls-files", "--others", "--exclude-standard").splitlines(),
-                )
-            )
-            conflicts = sorted(incoming & local)
+            changed_files = self._changed_files(info["commit_sha"], target_sha)
+            conflicts = self._local_conflicts(changed_files)
             if conflicts:
-                preview = ", ".join(conflicts[:3])
-                if len(conflicts) > 3:
-                    preview += f" and {len(conflicts) - 3} more"
-                blocked_reason = f"local changes overlap update files: {preview}"
+                blocked_reason = self._conflict_message(conflicts)
 
         return {
             **info,
@@ -416,7 +544,10 @@ class UpdateService:
             "can_update": available and not blocked_reason,
             "blocked_reason": blocked_reason,
             "target_commit": target_commit,
+            "target_sha": target_sha,
             "target_version": target_version,
+            "changed_files": changed_files,
+            "restart_required": self._restart_required(changed_files),
             "ahead": ahead,
             "behind": behind,
         }
