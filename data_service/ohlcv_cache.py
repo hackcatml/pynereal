@@ -10,28 +10,38 @@ from pynecore.types.ohlcv import OHLCV
 
 
 _CACHE_WRITE_LOCK = threading.RLock()
+_CACHE_BUSY_TIMEOUT_SECONDS = 30.0
+_CACHE_BUSY_TIMEOUT_MS = int(_CACHE_BUSY_TIMEOUT_SECONDS * 1000)
+
+
+def _connect(db_path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path, timeout=_CACHE_BUSY_TIMEOUT_SECONDS)
+    conn.execute(f"PRAGMA busy_timeout = {_CACHE_BUSY_TIMEOUT_MS}")
+    return conn
 
 
 def init_cache(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS bars (
-                provider TEXT NOT NULL,
-                exchange TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                timeframe TEXT NOT NULL,
-                ts INTEGER NOT NULL,
-                open REAL NOT NULL,
-                high REAL NOT NULL,
-                low REAL NOT NULL,
-                close REAL NOT NULL,
-                volume REAL NOT NULL,
-                PRIMARY KEY (provider, exchange, symbol, timeframe, ts)
+    with _CACHE_WRITE_LOCK:
+        with _connect(db_path) as conn:
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bars (
+                    provider TEXT NOT NULL,
+                    exchange TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    ts INTEGER NOT NULL,
+                    open REAL NOT NULL,
+                    high REAL NOT NULL,
+                    low REAL NOT NULL,
+                    close REAL NOT NULL,
+                    volume REAL NOT NULL,
+                    PRIMARY KEY (provider, exchange, symbol, timeframe, ts)
+                )
+                """
             )
-            """
-        )
 
 
 def cache_has_data(
@@ -41,7 +51,7 @@ def cache_has_data(
     symbol: str,
     timeframe: str,
 ) -> bool:
-    with sqlite3.connect(db_path) as conn:
+    with _connect(db_path) as conn:
         row = conn.execute(
             """
             SELECT 1 FROM bars
@@ -60,7 +70,7 @@ def get_last_ts(
     symbol: str,
     timeframe: str,
 ) -> int | None:
-    with sqlite3.connect(db_path) as conn:
+    with _connect(db_path) as conn:
         row = conn.execute(
             """
             SELECT MAX(ts) FROM bars
@@ -78,7 +88,7 @@ def get_min_ts(
     symbol: str,
     timeframe: str,
 ) -> int | None:
-    with sqlite3.connect(db_path) as conn:
+    with _connect(db_path) as conn:
         row = conn.execute(
             """
             SELECT MIN(ts) FROM bars
@@ -115,7 +125,7 @@ def upsert_bars(
     if not rows:
         return
     with _CACHE_WRITE_LOCK:
-        with sqlite3.connect(db_path, timeout=30.0) as conn:
+        with _connect(db_path) as conn:
             conn.executemany(
                 """
                 INSERT INTO bars (provider, exchange, symbol, timeframe, ts, open, high, low, close, volume)
@@ -174,7 +184,7 @@ def export_to_ohlcv(
     timeframe: str,
     ohlcv_path: Path,
 ) -> None:
-    with sqlite3.connect(db_path) as conn:
+    with _connect(db_path) as conn:
         rows = conn.execute(
             """
             SELECT ts, open, high, low, close, volume
@@ -208,7 +218,7 @@ def export_to_ohlcv_since(
     ohlcv_path: Path,
     start_ts: int,
 ) -> None:
-    with sqlite3.connect(db_path) as conn:
+    with _connect(db_path) as conn:
         rows = conn.execute(
             """
             SELECT ts, open, high, low, close, volume

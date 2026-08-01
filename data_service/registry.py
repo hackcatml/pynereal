@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import shutil
 import traceback
 from dataclasses import replace
@@ -122,19 +123,56 @@ class SessionRegistry:
     # ------------------------------------------------------------------
     # Feed lifecycle (shared data layer)
     # ------------------------------------------------------------------
+    async def _file_update_loop_with_recovery(
+        self,
+        feed: Feed,
+        history_ready_event: asyncio.Event,
+    ) -> None:
+        delay = 1.0
+        attempt = 0
+        while True:
+            try:
+                await file_update_loop(
+                    config=feed.spec,
+                    ohlcv_path=feed.paths.ohlcv_path,
+                    toml_path=feed.paths.toml_path,
+                    state=feed.state,
+                    emit_event=feed.emit_event,
+                    history_ready_event=history_ready_event,
+                )
+                return
+            except asyncio.CancelledError:
+                raise
+            except sqlite3.OperationalError as e:
+                if "database is locked" not in str(e).lower() or history_ready_event.is_set():
+                    raise
+                attempt += 1
+                previous_error = feed.collector_error
+                retry_error = f"file_update_loop: {e}"
+                feed.collector_error = retry_error
+                print(
+                    f"[feed {feed.spec.id}] SQLite cache locked during startup; "
+                    f"retrying file updater in {delay:g}s (attempt {attempt})"
+                )
+                await self.notify_hub()
+                await asyncio.sleep(delay)
+                if feed.collector_error == retry_error:
+                    feed.collector_error = previous_error
+                    await self.notify_hub()
+                delay = min(delay * 2, 30.0)
+
     def _start_file_update_task(
         self,
         feed: Feed,
         *,
         history_ready_event: asyncio.Event | None = None,
     ) -> asyncio.Task:
-        spec = feed.spec
         history_ready_event = history_ready_event or feed.history_ready_event
-        task = asyncio.create_task(self._guard_feed(feed, "file_update_loop", file_update_loop(
-            config=spec, ohlcv_path=feed.paths.ohlcv_path, toml_path=feed.paths.toml_path,
-            state=feed.state, emit_event=feed.emit_event,
-            history_ready_event=history_ready_event,
-        )))
+        task = asyncio.create_task(self._guard_feed(
+            feed,
+            "file_update_loop",
+            self._file_update_loop_with_recovery(feed, history_ready_event),
+        ))
         feed.tasks["file_update_loop"] = task
         return task
 
