@@ -12,6 +12,7 @@ _STATIC_FILES = {
     "styles.css": "text/css",
     "state.js": "text/javascript",
     "ui.js": "text/javascript",
+    "bgcolor.js": "text/javascript",
     "chart.js": "text/javascript",
     "measure.js": "text/javascript",
     "data.js": "text/javascript",
