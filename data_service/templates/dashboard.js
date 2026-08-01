@@ -3206,6 +3206,7 @@
   let aiStreamingResponse = false;
   let aiRenderFrame = null;
   let aiChatLockedScroll = false;
+  let aiChatSwipeCloseTimer = null;
   let aiStateSyncPromise = null;
   let aiModelsPromise = null;
   let aiModels = [];
@@ -3657,8 +3658,15 @@
   }
 
   function openAiChat() {
-    el("ai-chat-panel").classList.remove("hidden");
-    el("ai-chat-panel").setAttribute("aria-hidden", "false");
+    const panel = el("ai-chat-panel");
+    if (aiChatSwipeCloseTimer !== null) {
+      clearTimeout(aiChatSwipeCloseTimer);
+      aiChatSwipeCloseTimer = null;
+    }
+    panel.classList.remove("hidden", "ai-chat-swipe-closing");
+    panel.style.transition = "";
+    panel.style.transform = "";
+    panel.setAttribute("aria-hidden", "false");
     el("ai-chat-fab").setAttribute("aria-expanded", "true");
     positionAiChatPanel();
     renderAiMessages();
@@ -3676,23 +3684,47 @@
     }
   }
 
-  function closeAiChat() {
-    if (!isAiChatOpen()) return;
-    closeAiModelMenu();
+  function finishAiChatClose() {
     const panel = el("ai-chat-panel");
+    if (aiChatSwipeCloseTimer !== null) clearTimeout(aiChatSwipeCloseTimer);
+    aiChatSwipeCloseTimer = null;
     panel.classList.add("hidden");
+    panel.classList.remove("ai-chat-swipe-closing");
     panel.setAttribute("aria-hidden", "true");
-    // drop any keyboard pin / sheet-drag offset
     panel.style.top = "";
     panel.style.height = "";
     panel.style.bottom = "";
     panel.style.paddingBottom = "";
+    panel.style.transition = "";
     panel.style.transform = "";
     el("ai-chat-fab").setAttribute("aria-expanded", "false");
     if (aiChatLockedScroll) {
       unlockBodyScroll();
       aiChatLockedScroll = false;
     }
+  }
+
+  function closeAiChat(options = {}) {
+    if (!isAiChatOpen()) return;
+    closeAiModelMenu();
+    const panel = el("ai-chat-panel");
+    const fromDrag = options && options.fromDrag === true && !desktopReorderQuery.matches;
+    if (panel.classList.contains("ai-chat-swipe-closing")) {
+      if (!fromDrag) finishAiChatClose();
+      return;
+    }
+    el("ai-chat-fab").setAttribute("aria-expanded", "false");
+
+    if (fromDrag) {
+      panel.classList.add("ai-chat-swipe-closing");
+      panel.style.transition = "transform 220ms cubic-bezier(0.55, 0, 1, 0.45)";
+      window.requestAnimationFrame(() => {
+        panel.style.transform = "translateY(100dvh)";
+      });
+      aiChatSwipeCloseTimer = window.setTimeout(finishAiChatClose, 220);
+      return;
+    }
+    finishAiChatClose();
   }
 
   function autosizeAiInput() {
@@ -3983,23 +4015,52 @@
     sheetHeader.addEventListener("pointerdown", (e) => {
       if (desktopReorderQuery.matches || !e.isPrimary) return;
       if (e.target && e.target.closest && e.target.closest("button")) return;
-      sheetDrag = { id: e.pointerId, startY: e.clientY, dy: 0 };
+      sheetDrag = {
+        id: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        dy: 0,
+        active: false,
+      };
       try { sheetHeader.setPointerCapture(e.pointerId); } catch {}
     });
     sheetHeader.addEventListener("pointermove", (e) => {
       if (!sheetDrag || e.pointerId !== sheetDrag.id) return;
-      sheetDrag.dy = Math.max(0, e.clientY - sheetDrag.startY);
-      panel.style.transform = sheetDrag.dy > 0 ? `translateY(${sheetDrag.dy}px)` : "";
-    });
-    function endSheetDrag(e) {
-      if (!sheetDrag || e.pointerId !== sheetDrag.id) return;
-      const dy = sheetDrag.dy;
+      const dx = e.clientX - sheetDrag.startX;
+      const dy = e.clientY - sheetDrag.startY;
+      if (!sheetDrag.active) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < 8) return;
+        if (dy <= 0 || Math.abs(dy) <= Math.abs(dx)) {
+          sheetDrag = null;
+          return;
+        }
+        sheetDrag.active = true;
+        panel.style.transition = "none";
+      }
+      e.preventDefault();
+      sheetDrag.dy = Math.max(0, dy);
+      panel.style.transform = `translateY(${sheetDrag.dy}px)`;
+    }, { passive: false });
+    function endSheetDrag(e, cancelled = false) {
+      if (!sheetDrag || (e && e.pointerId !== sheetDrag.id)) return;
+      const current = sheetDrag;
       sheetDrag = null;
-      panel.style.transform = "";
-      if (dy > 100) closeAiChat();
+      try { sheetHeader.releasePointerCapture(current.id); } catch {}
+      if (!cancelled && current.active && current.dy > 100) {
+        closeAiChat({ fromDrag: true });
+        return;
+      }
+      if (!current.active) return;
+      panel.style.transition = "transform 180ms ease";
+      panel.style.transform = "translateY(0)";
+      window.setTimeout(() => {
+        if (!isAiChatOpen() || panel.classList.contains("ai-chat-swipe-closing")) return;
+        panel.style.transition = "";
+        panel.style.transform = "";
+      }, 190);
     }
     sheetHeader.addEventListener("pointerup", endSheetDrag);
-    sheetHeader.addEventListener("pointercancel", endSheetDrag);
+    sheetHeader.addEventListener("pointercancel", (e) => endSheetDrag(e, true));
 
     el("ai-model-selector").addEventListener("click", () => {
       if (!mobileAiQuery.matches) openAiModelMenu(el("ai-model-selector"));
@@ -4646,15 +4707,53 @@
   });
 
   // ---- collapsible "Add session" card (collapsed by default) ---------------
+  let addCardAnimation = null;
   function toggleAddCard() {
     const card = el("add-card");
-    const collapsed = card.classList.toggle("collapsed");
-    el("add-toggle").setAttribute("aria-expanded", String(!collapsed));
-    if (!collapsed) {
+    const body = el("add-body");
+    if (addCardAnimation) return;
+    const opening = card.classList.contains("collapsed");
+    el("add-toggle").setAttribute("aria-expanded", String(opening));
+
+    if (opening) {
+      card.classList.remove("collapsed", "add-card-closing");
       loadScripts();  // refresh the script list each time it opens
     } else {
+      card.classList.add("add-card-closing");
       closeScriptDropdown();
     }
+
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      card.classList.toggle("collapsed", !opening);
+      card.classList.remove("add-card-closing");
+      return;
+    }
+
+    body.style.overflow = "hidden";
+    const height = body.scrollHeight;
+    const animation = body.animate(
+      opening
+        ? [
+            { height: "0px", opacity: 0, transform: "translateY(-6px)" },
+            { height: `${height}px`, opacity: 1, transform: "translateY(0)" },
+          ]
+        : [
+            { height: `${height}px`, opacity: 1, transform: "translateY(0)" },
+            { height: "0px", opacity: 0, transform: "translateY(-6px)" },
+          ],
+      { duration: 220, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
+    );
+    addCardAnimation = animation;
+    animation.finished.then(() => {
+      if (addCardAnimation !== animation) return;
+      if (!opening) card.classList.add("collapsed");
+      card.classList.remove("add-card-closing");
+      body.style.overflow = "";
+      addCardAnimation = null;
+    }).catch(() => {
+      body.style.overflow = "";
+      addCardAnimation = null;
+    });
   }
   el("add-toggle").addEventListener("click", toggleAddCard);
   el("add-toggle").addEventListener("keydown", (e) => {
