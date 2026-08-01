@@ -62,6 +62,11 @@
   let assetTransferReview = null;
   let assetTransferMode = "options";
   let assetTransferSubmitting = false;
+  let updateConfirmationToken = "";
+  let updatePollTimer = null;
+  let updateMessageTimer = null;
+  let updateCompleteTimer = null;
+  let updateRestartPending = false;
 
   const el = (id) => document.getElementById(id);
 
@@ -337,6 +342,7 @@
     menu.setAttribute("aria-hidden", "false");
     backdrop.setAttribute("aria-hidden", "false");
     el("hub-menu-button").setAttribute("aria-expanded", "true");
+    loadUpdateStatus();
   }
 
   function closeHubMenu() {
@@ -2226,6 +2232,13 @@
     el("hub-menu-backdrop").addEventListener("click", closeHubMenu);
     el("hub-calendar-open").addEventListener("click", openCalendar);
     el("hub-assets-open").addEventListener("click", openAssets);
+    el("hub-update-button").addEventListener("click", checkForUpdate);
+    el("update-close").addEventListener("click", closeUpdateModal);
+    el("update-cancel").addEventListener("click", closeUpdateModal);
+    el("update-confirm").addEventListener("click", startUpdate);
+    el("update-modal").addEventListener("click", (event) => {
+      if (event.target === el("update-modal")) closeUpdateModal();
+    });
     el("calendar-close").addEventListener("click", closeCalendar);
     calendarModal.addEventListener("click", (event) => {
       if (event.target === calendarModal) closeCalendar();
@@ -2953,6 +2966,221 @@
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     return data;
+  }
+
+  function setUpdateMessage(message, isError = false, autoClearMs = 0) {
+    const node = el("hub-update-message");
+    if (updateMessageTimer !== null) {
+      clearTimeout(updateMessageTimer);
+      updateMessageTimer = null;
+    }
+    node.textContent = String(message || "");
+    node.classList.toggle("error", Boolean(isError));
+    node.title = node.textContent;
+    if (autoClearMs > 0 && node.textContent) {
+      updateMessageTimer = window.setTimeout(() => {
+        updateMessageTimer = null;
+        node.textContent = "";
+        node.title = "";
+        node.classList.remove("error");
+      }, autoClearMs);
+    }
+  }
+
+  function updateInProgress(status) {
+    return ["stopping", "updating", "restarting", "resuming_runners"].includes(status);
+  }
+
+  function setUpdateDetail(message, pending = false) {
+    const node = el("update-detail");
+    node.textContent = String(message || "").replace(/\s*\.{3}$/, "");
+    node.classList.toggle("update-detail-pending", Boolean(pending));
+  }
+
+  function applyUpdateStatus(payload) {
+    if (!payload || typeof payload !== "object") return;
+    el("hub-version").textContent = String(payload.display || payload.commit || "-------");
+    const state = payload.update && typeof payload.update === "object" ? payload.update : {};
+    const status = String(state.status || "");
+    const button = el("hub-update-button");
+    if (updateRestartPending && state.message) {
+      setUpdateDetail(state.message, updateInProgress(status));
+    }
+    if (updateInProgress(status)) {
+      button.disabled = true;
+      button.textContent = "Updating";
+      setUpdateMessage(state.message || "Updating...");
+      return;
+    }
+    button.disabled = false;
+    button.textContent = "Update";
+    if (status === "failed") {
+      const failedAt = Number(state.updated_at || 0) * 1000;
+      const remaining = Math.max(0, 5000 - (Date.now() - failedAt));
+      if (remaining > 0) {
+        setUpdateMessage(state.error || state.message || "Update failed.", true, remaining);
+      } else {
+        setUpdateMessage("");
+      }
+    } else if (status === "completed" && state.commit === payload.commit) {
+      setUpdateMessage("");
+    }
+  }
+
+  async function loadUpdateStatus() {
+    try {
+      const payload = await api("/api/update/status");
+      applyUpdateStatus(payload);
+      const status = String(payload.update && payload.update.status || "");
+      if (updateRestartPending && status === "completed" && payload.update.commit === payload.commit) {
+        showUpdateCompleted();
+        return;
+      }
+      if (updateRestartPending && status === "failed") {
+        updateRestartPending = false;
+        showUpdateFailure(payload.update.error || payload.update.message || "Update failed.");
+      }
+      if (updateInProgress(status)) scheduleUpdatePoll();
+    } catch (error) {
+      if (updateRestartPending) {
+        setUpdateDetail("Running git pull", true);
+        scheduleUpdatePoll();
+      }
+    }
+  }
+
+  function scheduleUpdatePoll() {
+    if (updatePollTimer !== null) return;
+    updatePollTimer = window.setTimeout(() => {
+      updatePollTimer = null;
+      loadUpdateStatus();
+    }, 1000);
+  }
+
+  function closeUpdateModal() {
+    if (updateRestartPending) return;
+    if (updateCompleteTimer !== null) {
+      clearTimeout(updateCompleteTimer);
+      updateCompleteTimer = null;
+    }
+    const modal = el("update-modal");
+    modal.classList.add("hidden");
+    modal.classList.remove("updating", "completed");
+    modal.setAttribute("aria-hidden", "true");
+    updateConfirmationToken = "";
+  }
+
+  function openUpdateConfirmation(result) {
+    closeHubMenu();
+    setUpdateMessage("");
+    updateConfirmationToken = String(result.confirmation_token || "");
+    const current = result.version
+      ? `${result.version} · ${result.commit}`
+      : result.commit;
+    const target = result.target_version
+      ? `${result.target_version} · ${result.target_commit}`
+      : result.target_commit;
+    el("update-revisions").textContent = `${current}  →  ${target}`;
+    setUpdateDetail(
+      `${result.branch} · ${result.behind} new commit${result.behind === 1 ? "" : "s"}`,
+    );
+    el("update-error").textContent = "";
+    el("update-confirm-message").textContent =
+      "Running sessions will stop while the update is installed, then resume automatically.";
+    el("update-confirm").disabled = false;
+    el("update-confirm").textContent = "Update";
+    el("update-cancel").textContent = "Cancel";
+    const modal = el("update-modal");
+    modal.classList.remove("hidden", "updating", "completed");
+    modal.setAttribute("aria-hidden", "false");
+  }
+
+  function showUpdateCompleted() {
+    updateRestartPending = false;
+    setUpdateMessage("");
+    const modal = el("update-modal");
+    modal.classList.remove("hidden", "updating");
+    modal.classList.add("completed");
+    modal.setAttribute("aria-hidden", "false");
+    el("update-confirm-message").textContent = "Update completed.";
+    setUpdateDetail("Data service restarted and running sessions were restored.");
+    el("update-error").textContent = "";
+    if (updateCompleteTimer !== null) clearTimeout(updateCompleteTimer);
+    updateCompleteTimer = window.setTimeout(() => {
+      updateCompleteTimer = null;
+      closeUpdateModal();
+      window.location.reload();
+    }, 4000);
+  }
+
+  function showUpdateFailure(message) {
+    const modal = el("update-modal");
+    modal.classList.remove("hidden", "updating", "completed");
+    modal.setAttribute("aria-hidden", "false");
+    el("update-confirm-message").textContent = "The update could not be completed.";
+    el("update-detail").classList.remove("update-detail-pending");
+    el("update-error").textContent = String(message || "Update failed.");
+    el("update-confirm").disabled = true;
+    el("update-confirm").textContent = "Update";
+    el("update-cancel").textContent = "Close";
+    setUpdateMessage(message || "Update failed.", true, 5000);
+  }
+
+  async function checkForUpdate() {
+    const button = el("hub-update-button");
+    button.disabled = true;
+    button.textContent = "Checking";
+    setUpdateMessage("Checking for updates...");
+    try {
+      const result = await api("/api/update/check", { method: "POST" });
+      el("hub-version").textContent = String(result.display || result.commit || "-------");
+      if (!result.available) {
+        const blocked = Boolean(result.blocked_reason);
+        setUpdateMessage(
+          result.blocked_reason || "No updates available.",
+          blocked,
+          blocked ? 5000 : 0,
+        );
+        return;
+      }
+      if (!result.can_update) {
+        setUpdateMessage(
+          result.blocked_reason || "Update requires manual action.",
+          true,
+          5000,
+        );
+        return;
+      }
+      openUpdateConfirmation(result);
+    } catch (error) {
+      setUpdateMessage(error.message || "Update check failed.", true, 5000);
+    } finally {
+      button.disabled = false;
+      button.textContent = "Update";
+    }
+  }
+
+  async function startUpdate() {
+    if (!updateConfirmationToken) return;
+    el("update-confirm").disabled = true;
+    el("update-confirm").textContent = "Updating";
+    el("update-error").textContent = "";
+    setUpdateDetail("Stopping runners and data service", true);
+    el("update-modal").classList.add("updating");
+    try {
+      await api("/api/update/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmation_token: updateConfirmationToken }),
+      });
+      updateConfirmationToken = "";
+      updateRestartPending = true;
+      setUpdateMessage("Updating...");
+      scheduleUpdatePoll();
+    } catch (error) {
+      updateRestartPending = false;
+      showUpdateFailure(error.message || "Update failed to start.");
+    }
   }
 
   async function streamSse(path, opts, onEvent) {

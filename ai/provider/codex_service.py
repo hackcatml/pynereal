@@ -167,6 +167,7 @@ class CodexService:
         developer_instructions: str = DEFAULT_DEVELOPER_INSTRUCTIONS,
         timeout_seconds: float = 600,
         chat_state_path: Path | None = None,
+        startup_enabled: bool = True,
     ) -> None:
         self.project_root = project_root.resolve()
         self.session_registry = session_registry
@@ -184,7 +185,7 @@ class CodexService:
             chat_state_path or self.project_root / "workdir" / "config" / "ai_chat.json"
         ).resolve()
         self._codex: AsyncCodex | None = None
-        self._disabled = False
+        self._disabled = not startup_enabled
         self._lifecycle_lock = asyncio.Lock()
         self._conversations_lock = asyncio.Lock()
         self._models_lock = asyncio.Lock()
