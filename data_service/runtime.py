@@ -23,6 +23,12 @@ _MAX_AI_INSTRUCTION_CHARS = 4_000
 _MAX_PROCESSED_AI_INSTRUCTION_EVENTS = 500
 
 
+def _plot_wire_value(value: Any, kind: str) -> float | int | None:
+    if value is None or str(value) == "":
+        return None
+    return int(value) if kind == "bgcolor" else float(value)
+
+
 # ======================================================================
 # Paths
 # ======================================================================
@@ -366,13 +372,15 @@ class Session:
                             if candle is None:
                                 return
 
-                            for title in self.plot_options.keys():
+                            for title, options in self.plot_options.items():
+                                kind = str(options.get("kind") or "line")
                                 value = candle.extra_fields.get(title)
                                 plot_data_event = {
                                     "type": "plot_data",
                                     "title": title,
+                                    "kind": kind,
                                     "time": int(candle.timestamp),
-                                    "value": None if (value == "" or value is None) else float(value),
+                                    "value": _plot_wire_value(value, kind),
                                 }
                                 await self.send_to_charts(plot_data_event)
                             reader.close()

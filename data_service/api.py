@@ -434,18 +434,29 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
                 candles = candles[start_idx:]
 
                 for title, options in plot_options.items():
+                    kind = str(options.get("kind") or "line")
                     series_data = []
                     for candle in candles:
                         value = candle.extra_fields.get(title)
                         series_data.append({
                             "time": int(candle.timestamp),
-                            "value": None if (value == "" or value is None) else float(value),
+                            "value": (
+                                None
+                                if value is None or str(value) == ""
+                                else int(value) if kind == "bgcolor" else float(value)
+                            ),
                         })
                     result.append({
                         "title": title,
+                        "kind": kind,
                         "color": options.get("color"),
                         "linewidth": options.get("linewidth"),
                         "style": options.get("style"),
+                        "offset": options.get("offset", 0),
+                        "editable": options.get("editable", True),
+                        "show_last": options.get("show_last"),
+                        "force_overlay": options.get("force_overlay", False),
+                        "order": options.get("order", 0),
                         "data": series_data,
                     })
                 reader.close()
