@@ -474,6 +474,9 @@ body {
 .btn:hover { border-color: var(--accent); }
 .btn:disabled { cursor: not-allowed; opacity: 0.45; }
 .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+@media (min-width: 721px) {
+  .add-form > .btn-primary { transform: translateY(2px); }
+}
 .btn-danger { color: var(--danger); border-color: transparent; }
 .btn-danger:hover { border-color: var(--danger); }
 .btn-danger-primary { background: var(--danger); border-color: var(--danger); color: #fff; }
