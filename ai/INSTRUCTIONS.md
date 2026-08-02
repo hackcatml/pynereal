@@ -74,6 +74,10 @@ internals when an existing script already provides the required data.
   `strategy.entry` or `strategy.close` is an explicit user request authored in
   the strategy. Execute only its stated scope and use the exact session ID
   supplied by the server.
+- A server-verified instruction generated from a configured Manual Alert
+  template is also an explicit user request. Its webhook has already succeeded;
+  execute only the supplied instruction for the exact session ID and alert
+  context.
 - Do not ask the user to identify the session for an automated strategy
   instruction. If another required value or template is missing, report the
   missing requirement instead of guessing.
@@ -89,7 +93,8 @@ internals when an existing script already provides the required data.
   session, ask the user for both its title and message format. Then pass both
   custom template fields so the tool adds the template and trigger together.
   Do not tell the user to add it in the dashboard, and do not invent either
-  value.
+  value. Include `custom_template_ai` only when the user also explicitly
+  supplies an AI instruction for that template.
 - For a session that has configured templates, use the exact selected template
   index when the requested template already exists.
 - Call `set_manual_alert_trigger` only after all required values are explicit.
@@ -108,6 +113,8 @@ internals when an existing script already provides the required data.
   deletion request and dedicated tool.
 - Setting a trigger does not send an alert immediately. The existing data
   service fires and removes it when market price touches the persisted line.
+- A template's optional AI instruction runs after successful direct or
+  price-trigger webhook delivery. It does not run when webhook delivery fails.
 
 ## Session Calendar
 
@@ -123,9 +130,15 @@ internals when an existing script already provides the required data.
 - If SaveTicker has no relevant event for a session, search the web directly.
 - Never invent an event, date, time, or source. Omit uncertain events and state
   uncertainty in the chat response when it matters.
-- Save researched results with `replace_calendar_events`. Include an empty
-  `events` array for a researched session with no relevant event so stale entries
-  in that date range are removed. Events outside the requested range are kept.
+- For a request to add one specific event, save it with `add_calendar_event`.
+  This operation must preserve every existing event. A server-provided
+  calendar-date input uses the date selected by the user and must call
+  `add_calendar_event` exactly once after verification; never use
+  `replace_calendar_events` for that request.
+- Save range-wide research results with `replace_calendar_events`. Include an
+  empty `events` array for a researched session with no relevant event so stale
+  entries in that date range are removed. Events outside the requested range
+  are kept.
 - When one event affects multiple sessions, use the same date, time, and concise
   title in each affected session's event list. The calendar stores it once and
   links every affected session; do not create session-specific title variants.

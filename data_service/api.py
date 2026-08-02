@@ -4,7 +4,7 @@ import asyncio
 import ast
 import json
 import time
-from datetime import datetime, UTC
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
 
@@ -41,6 +41,7 @@ from config import (
 )
 from manual_alerts import send_manual_alert_payload
 from ohlcv_io import make_ccxt_pro_client
+from update_service import UpdateService, UpdateServiceError
 
 # Cache of exchange -> ccxt markets so symbol validation hits the network at most
 # once per exchange for the hub's lifetime.
@@ -139,6 +140,36 @@ def _calendar_forecast_prompt(
         "source links. Do not describe your internal procedure.\n\n"
         f"Calendar event and affected session context:\n{json.dumps(context, ensure_ascii=False)}\n\n"
         f"User request:\n{event['title']} 전망을 분석해줘."
+    )
+
+
+def _manual_calendar_event_prompt(
+    *,
+    event_date: str,
+    user_text: str,
+    preferred_sessions: list[Session],
+) -> str:
+    context = {
+        "selected_date": event_date,
+        "user_text": user_text,
+        "preferred_sessions": [
+            _calendar_session_context(session)
+            for session in preferred_sessions
+        ],
+    }
+    return (
+        "This is an explicit calendar-add request submitted from the selected date in the "
+        "PyneReal Hub. Call get_calendar_context first. Research only the event described by "
+        "the user and verify that it occurs on the selected date with a public source. Resolve "
+        "every affected active session from the calendar context. If preferred_sessions is not "
+        "empty, use exactly those sessions; otherwise infer the affected sessions from the user "
+        "text and active session metadata. Do not ask for a session ID. If the date cannot be "
+        "verified or no affected active session can be resolved, do not mutate the calendar and "
+        "explain the issue briefly. To save the verified result, call add_calendar_event exactly "
+        "once with the selected date, a concise title, useful verified details, source metadata, "
+        "and all affected session IDs. Do not call replace_calendar_events and do not remove or "
+        "rewrite any existing event. Report only a tool-confirmed save.\n\n"
+        f"Calendar input:\n{json.dumps(context, ensure_ascii=False)}"
     )
 
 
@@ -404,18 +435,29 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
                 candles = candles[start_idx:]
 
                 for title, options in plot_options.items():
+                    kind = str(options.get("kind") or "line")
                     series_data = []
                     for candle in candles:
                         value = candle.extra_fields.get(title)
                         series_data.append({
                             "time": int(candle.timestamp),
-                            "value": None if (value == "" or value is None) else float(value),
+                            "value": (
+                                None
+                                if value is None or str(value) == ""
+                                else int(value) if kind == "bgcolor" else float(value)
+                            ),
                         })
                     result.append({
                         "title": title,
+                        "kind": kind,
                         "color": options.get("color"),
                         "linewidth": options.get("linewidth"),
                         "style": options.get("style"),
+                        "offset": options.get("offset", 0),
+                        "editable": options.get("editable", True),
+                        "show_last": options.get("show_last"),
+                        "force_overlay": options.get("force_overlay", False),
+                        "order": options.get("order", 0),
                         "data": series_data,
                     })
                 reader.close()
@@ -571,7 +613,10 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
             return JSONResponse({"error": "templates can contain at most 50 items"}, status_code=400)
         sanitized = sanitize_manual_alert_templates(templates)
         if len(sanitized) != len(templates):
-            return JSONResponse({"error": "each template requires string title and message"}, status_code=400)
+            return JSONResponse(
+                {"error": "each template requires string title, message, and optional AI instruction"},
+                status_code=400,
+            )
         try:
             updated = await registry.update_manual_alert_templates(session_id, sanitized)
         except SessionNotFoundError:
@@ -612,6 +657,9 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
             return JSONResponse({"error": "session not found"}, status_code=404)
         if "message" not in payload:
             return JSONResponse({"error": "message is required"}, status_code=400)
+        ai_instruction = payload.get("ai_instruction")
+        if ai_instruction is not None and not isinstance(ai_instruction, str):
+            return JSONResponse({"error": "ai_instruction must be string"}, status_code=400)
 
         try:
             script_title, _, _, _ = _load_script_source_info(rt.spec, rt.chart_info)
@@ -625,6 +673,11 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
             return JSONResponse({"error": str(e)}, status_code=400)
         except Exception as e:
             return JSONResponse({"error": f"webhook send failed: {e}"}, status_code=502)
+        await rt.dispatch_manual_alert_ai_instruction(
+            payload,
+            result,
+            mode="send",
+        )
         return JSONResponse(result)
 
     return r
@@ -639,10 +692,38 @@ def build_control_router(
     calendar_store: CalendarEventStore,
     asset_portfolio_service: AssetPortfolioService,
     asset_transfer_service: AssetTransferService,
+    update_service: UpdateService,
 ) -> APIRouter:
     r = APIRouter()
     calendar_forecast_runs: dict[str, int] = {}
     calendar_forecast_tasks: dict[str, set[asyncio.Task[Any]]] = {}
+
+    @r.get("/api/update/status")
+    async def update_status() -> JSONResponse:
+        try:
+            result = await update_service.status()
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+        return JSONResponse(result)
+
+    @r.post("/api/update/check")
+    async def update_check() -> JSONResponse:
+        try:
+            result = await update_service.check()
+        except UpdateServiceError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+        return JSONResponse(result)
+
+    @r.post("/api/update/start")
+    async def update_start(payload: dict = Body(default_factory=dict)) -> JSONResponse:
+        confirmation_token = payload.get("confirmation_token")
+        if not isinstance(confirmation_token, str) or not confirmation_token:
+            return JSONResponse({"error": "confirmation_token is required"}, status_code=400)
+        try:
+            result = await update_service.start(confirmation_token)
+        except UpdateServiceError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+        return JSONResponse(result, status_code=202)
 
     @r.get("/api/assets")
     async def get_assets(refresh: bool = False) -> JSONResponse:
@@ -883,6 +964,145 @@ def build_control_router(
             "events": result,
             "updated_at": calendar_store.updated_at,
         })
+
+    @r.post("/api/calendar/events/manual")
+    async def add_manual_calendar_event(payload: dict = Body(default_factory=dict)):
+        event_date = payload.get("date")
+        if not isinstance(event_date, str):
+            return JSONResponse({"error": "date must use YYYY-MM-DD"}, status_code=400)
+        event_date = event_date.strip()
+        try:
+            parsed_event_date = date.fromisoformat(event_date)
+        except ValueError:
+            return JSONResponse({"error": "date must use YYYY-MM-DD"}, status_code=400)
+        if parsed_event_date.isoformat() != event_date:
+            return JSONResponse({"error": "date must use YYYY-MM-DD"}, status_code=400)
+
+        user_text = payload.get("text")
+        if not isinstance(user_text, str) or not user_text.strip():
+            return JSONResponse({"error": "event text must not be empty"}, status_code=400)
+        user_text = user_text.strip()
+        if len(user_text) > 200:
+            return JSONResponse(
+                {"error": "event text is too long (max 200 chars)"},
+                status_code=400,
+            )
+
+        raw_session_ids = payload.get("session_ids", [])
+        if not isinstance(raw_session_ids, list):
+            return JSONResponse({"error": "session_ids must be an array"}, status_code=400)
+        session_ids: list[str] = []
+        for raw_session_id in raw_session_ids:
+            if not isinstance(raw_session_id, str) or not raw_session_id.strip():
+                return JSONResponse(
+                    {"error": "session_ids must contain non-empty strings"},
+                    status_code=400,
+                )
+            session_id = raw_session_id.strip()
+            if session_id not in session_ids:
+                session_ids.append(session_id)
+        if len(session_ids) > 20:
+            return JSONResponse(
+                {"error": "session_ids can contain at most 20 sessions"},
+                status_code=400,
+            )
+        unknown_session_ids = [
+            session_id
+            for session_id in session_ids
+            if registry.get(session_id) is None
+        ]
+        if unknown_session_ids:
+            return JSONResponse(
+                {"error": f"calendar session is not active: {unknown_session_ids[0]}"},
+                status_code=409,
+            )
+        if not registry.sessions:
+            return JSONResponse(
+                {"error": "add a session before creating a calendar event"},
+                status_code=409,
+            )
+        if not codex_service.enabled and not session_ids:
+            return JSONResponse(
+                {"error": "select at least one session while AI is disabled"},
+                status_code=400,
+            )
+
+        preferred_sessions = [
+            session
+            for session_id in session_ids
+            if (session := registry.get(session_id)) is not None
+        ]
+
+        async def stream() -> AsyncIterator[str]:
+            if not codex_service.enabled:
+                try:
+                    event = calendar_store.add_event(
+                        {
+                            "date": event_date,
+                            "title": user_text,
+                            "category": "other",
+                            "source_name": "Manual",
+                            "session_ids": session_ids,
+                        },
+                        active_session_ids=registry.sessions,
+                    )
+                    await registry.hub_ws.broadcast_json({"type": "calendar_updated"})
+                except CalendarStoreError as exc:
+                    yield _sse_event("stream_error", {"error": str(exc)})
+                    return
+                yield _sse_event(
+                    "done",
+                    {
+                        "event_id": event["id"],
+                        "ai_used": False,
+                        "answer": "Event added",
+                    },
+                )
+                return
+
+            conversation_id: str | None = None
+            try:
+                preferences = await codex_service.chat_preferences()
+                model = preferences.get("model") if isinstance(preferences, dict) else None
+                effort = preferences.get("effort") if isinstance(preferences, dict) else None
+                prompt = _manual_calendar_event_prompt(
+                    event_date=event_date,
+                    user_text=user_text,
+                    preferred_sessions=preferred_sessions,
+                )
+                async for stream_event in codex_service.stream_chat(
+                    user_text,
+                    conversation_id=None,
+                    initial_context=prompt,
+                    model=model,
+                    effort=effort,
+                ):
+                    event_payload = stream_event.payload
+                    if stream_event.event == "conversation":
+                        conversation_id = (
+                            str(event_payload.get("conversation_id") or "") or None
+                        )
+                    elif stream_event.event == "done":
+                        event_payload = {**event_payload, "ai_used": True}
+                    yield _sse_event(stream_event.event, event_payload)
+            except Exception as exc:
+                print(f"[calendar] manual add failed: {type(exc).__name__}")
+                yield _sse_event(
+                    "stream_error",
+                    {"error": f"Calendar event research failed ({type(exc).__name__})"},
+                )
+            finally:
+                if conversation_id:
+                    await codex_service.reset(conversation_id)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @r.post("/api/calendar/events/{event_id}/forecast")
     async def forecast_calendar_event(event_id: str):

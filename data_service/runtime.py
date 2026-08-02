@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,12 @@ from ws_manager import WSManager
 
 _MAX_AI_INSTRUCTION_CHARS = 4_000
 _MAX_PROCESSED_AI_INSTRUCTION_EVENTS = 500
+
+
+def _plot_wire_value(value: Any, kind: str) -> float | int | None:
+    if value is None or str(value) == "":
+        return None
+    return int(value) if kind == "bgcolor" else float(value)
 
 
 # ======================================================================
@@ -365,13 +372,15 @@ class Session:
                             if candle is None:
                                 return
 
-                            for title in self.plot_options.keys():
+                            for title, options in self.plot_options.items():
+                                kind = str(options.get("kind") or "line")
                                 value = candle.extra_fields.get(title)
                                 plot_data_event = {
                                     "type": "plot_data",
                                     "title": title,
+                                    "kind": kind,
                                     "time": int(candle.timestamp),
-                                    "value": None if (value == "" or value is None) else float(value),
+                                    "value": _plot_wire_value(value, kind),
                                 }
                                 await self.send_to_charts(plot_data_event)
                             reader.close()
@@ -511,6 +520,12 @@ class Session:
                 f"trigger={trigger_id or '?'} price={trigger_price}: {e}"
             )
         else:
+            await self.dispatch_manual_alert_ai_instruction(
+                payload,
+                result,
+                mode="trigger",
+                trigger_id=trigger_id,
+            )
             await self.send_to_charts({
                 "type": "manual_alert_trigger_fired",
                 "triggers": self.manual_alert_triggers_payload(),
@@ -545,6 +560,54 @@ class Session:
             self._manual_alert_trigger_last_bar_time[trigger_id] = bar_time
             self._manual_alert_trigger_sending_ids.add(trigger_id)
             asyncio.create_task(self._send_manual_alert_trigger(dict(trigger), trigger_price, market_price, bar_time))
+
+    async def dispatch_manual_alert_ai_instruction(
+        self,
+        payload: dict,
+        delivery_result: dict,
+        *,
+        mode: str,
+        trigger_id: str = "",
+    ) -> bool:
+        instruction = str(payload.get("ai_instruction") or "").strip()
+        if not instruction:
+            return False
+        if len(instruction) > _MAX_AI_INSTRUCTION_CHARS:
+            log_with_time(
+                f"[{self.spec.id}] Manual Alert AI instruction skipped: instruction too long"
+            )
+            return False
+        if self.on_ai_instruction is None:
+            log_with_time(
+                f"[{self.spec.id}] Manual Alert AI instruction skipped: no handler"
+            )
+            return False
+
+        telegram = delivery_result.get("telegram")
+        telegram = telegram if isinstance(telegram, dict) else {}
+        event = {
+            "event_id": f"manual-alert-{uuid.uuid4().hex}",
+            "instruction": instruction,
+            "source": "manual_alert",
+            "action": "manual_alert",
+            "mode": "trigger" if mode == "trigger" else "send",
+            "time": payload.get("time"),
+            "template_title": str(payload.get("title") or ""),
+            "trigger_id": str(trigger_id or ""),
+            "trigger_price": payload.get("price"),
+            "market_price": payload.get("market"),
+            "webhook_sent": True,
+            "telegram_sent": bool(telegram.get("sent", False)),
+            "telegram_failed": bool(telegram.get("error")),
+        }
+        try:
+            await self.on_ai_instruction(self, event)
+        except Exception as e:
+            log_with_time(
+                f"[{self.spec.id}] Manual Alert AI instruction dispatch failed: {e}"
+            )
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Status snapshot (merges feed data-plane state)

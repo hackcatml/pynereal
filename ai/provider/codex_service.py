@@ -75,11 +75,14 @@ DEFAULT_DEVELOPER_INSTRUCTIONS = (
     "https://www.saveticker.com/calendar as a discovery source for event titles, then verify dates "
     "and details with public web search or authoritative company, exchange, filing, or economic "
     "calendar sources. If SaveTicker has no relevant item, search the web directly. Never invent an "
-    "event or date. Unless the user specifies a period, refresh today through 90 days ahead. After "
-    "research, call replace_calendar_events for every requested session, including an empty event "
-    "array for a researched session with no relevant schedule. Use the same date, time, and concise "
-    "title in every affected session when one event applies to multiple sessions, and report only "
-    "tool-confirmed saves. A server-provided calendar event forecast request is analysis-only: research "
+    "event or date. Unless the user specifies a period, refresh today through 90 days ahead. Use "
+    "add_calendar_event for a request to add one specific event without changing other events. A "
+    "server-provided calendar-date input must call add_calendar_event exactly once after verification "
+    "and must never call replace_calendar_events. For a calendar refresh or range-wide schedule check, "
+    "call replace_calendar_events for every requested session, including an empty event array for a "
+    "researched session with no relevant schedule. Use the same date, time, and concise title in every "
+    "affected session when one event applies to multiple sessions, and report only tool-confirmed saves. "
+    "A server-provided calendar event forecast request is analysis-only: research "
     "and assess the specified event and affected sessions without calling calendar mutation tools or "
     "changing any account or repository state."
 )
@@ -164,6 +167,7 @@ class CodexService:
         developer_instructions: str = DEFAULT_DEVELOPER_INSTRUCTIONS,
         timeout_seconds: float = 600,
         chat_state_path: Path | None = None,
+        startup_enabled: bool = True,
     ) -> None:
         self.project_root = project_root.resolve()
         self.session_registry = session_registry
@@ -181,7 +185,7 @@ class CodexService:
             chat_state_path or self.project_root / "workdir" / "config" / "ai_chat.json"
         ).resolve()
         self._codex: AsyncCodex | None = None
-        self._disabled = False
+        self._disabled = not startup_enabled
         self._lifecycle_lock = asyncio.Lock()
         self._conversations_lock = asyncio.Lock()
         self._models_lock = asyncio.Lock()
@@ -474,11 +478,13 @@ class CodexService:
     async def handle_strategy_instruction(self, session: Any, event: dict[str, Any]) -> None:
         instruction = str(event.get("instruction") or "").strip()
         event_id = str(event.get("event_id") or "").strip()
+        source = self._instruction_source(event)
+        event_log_id = event_id[-8:] if source == "manual_alert" else event_id[:8]
         if not instruction or not event_id:
             return
         if self._disabled:
             print(
-                f"[ai] strategy instruction skipped session={session.spec.id} "
+                f"[ai] {source} instruction skipped session={session.spec.id} "
                 "reason=AI service disabled"
             )
             return
@@ -486,27 +492,31 @@ class CodexService:
         self._pending_shared_chats += 1
         task = asyncio.create_task(
             self._run_strategy_instruction(session, event),
-            name=f"codex-strategy-{event_id[:8]}",
+            name=f"codex-{source.replace('_', '-')}-{event_log_id}",
         )
         self._shared_chat_tasks.add(task)
         task.add_done_callback(self._shared_chat_tasks.discard)
         await self._notify_strategy_chat_changed()
         print(
-            f"[ai] strategy instruction queued session={session.spec.id} "
-            f"event={event_id[:8]} action={event.get('action') or 'order'}"
+            f"[ai] {source} instruction queued session={session.spec.id} "
+            f"event={event_log_id} action={event.get('action') or 'order'}"
         )
 
     async def _run_strategy_instruction(self, session: Any, event: dict[str, Any]) -> None:
         conversation_id: str | None = None
         instruction = str(event.get("instruction") or "").strip()
         label = self._strategy_instruction_label(session, event)
+        prefix = self._instruction_prefix(event)
+        source = self._instruction_source(event)
+        event_id = str(event.get("event_id") or "")
+        event_log_id = event_id[-8:] if source == "manual_alert" else event_id[:8]
         session_lock = self._strategy_instruction_locks.setdefault(
             str(session.spec.id),
             asyncio.Lock(),
         )
         try:
             async with session_lock:
-                await self._append_chat_message("user", f"[Strategy AI] {label}\n{instruction}")
+                await self._append_chat_message("user", f"{prefix} {label}\n{instruction}")
                 await self._notify_strategy_chat_changed()
 
                 answer = ""
@@ -527,23 +537,23 @@ class CodexService:
                 if answer:
                     await self._append_chat_message(
                         "assistant",
-                        f"[Strategy AI] {label}\n{answer}",
+                        f"{prefix} {label}\n{answer}",
                     )
                 print(
-                    f"[ai] strategy instruction completed session={session.spec.id} "
-                    f"event={str(event.get('event_id') or '')[:8]}"
+                    f"[ai] {source} instruction completed session={session.spec.id} "
+                    f"event={event_log_id}"
                 )
         except asyncio.CancelledError:
             raise
         except Exception as e:
             await self._append_chat_message(
                 "assistant",
-                f"Strategy AI failed for {label}: {e}",
+                f"{prefix} failed for {label}: {e}",
                 error=True,
             )
             print(
-                f"[ai] strategy instruction failed session={session.spec.id} "
-                f"event={str(event.get('event_id') or '')[:8]}: {e}"
+                f"[ai] {source} instruction failed session={session.spec.id} "
+                f"event={event_log_id}: {e}"
             )
         finally:
             if conversation_id:
@@ -558,7 +568,20 @@ class CodexService:
             print(f"[ai] strategy chat state notification failed: {e}")
 
     @staticmethod
+    def _instruction_source(event: dict[str, Any]) -> str:
+        return "manual_alert" if event.get("source") == "manual_alert" else "strategy"
+
+    @classmethod
+    def _instruction_prefix(cls, event: dict[str, Any]) -> str:
+        return "[Manual Alert AI]" if cls._instruction_source(event) == "manual_alert" else "[Strategy AI]"
+
+    @staticmethod
     def _strategy_instruction_label(session: Any, event: dict[str, Any]) -> str:
+        if event.get("source") == "manual_alert":
+            mode = "trigger" if event.get("mode") == "trigger" else "send"
+            title = str(event.get("template_title") or "").strip()
+            title_label = f" {title}" if title else ""
+            return f"{session.spec.symbol} {session.spec.timeframe} {mode}{title_label}"
         action = str(event.get("action") or "order")
         order_id = str(event.get("order_id") or "").strip()
         order_label = f" {order_id}" if order_id else ""
@@ -566,6 +589,42 @@ class CodexService:
 
     @staticmethod
     def _build_strategy_instruction_prompt(session: Any, event: dict[str, Any]) -> str:
+        if event.get("source") == "manual_alert":
+            context = {
+                "session_id": session.spec.id,
+                "provider": session.spec.provider,
+                "exchange": session.spec.exchange,
+                "symbol": session.spec.symbol,
+                "market_type": session.spec.market_type,
+                "timeframe": session.spec.timeframe,
+                "strategy": session.chart_info.get("script_title") or session.spec.script_name,
+                "event_id": event.get("event_id"),
+                "mode": event.get("mode"),
+                "template_title": event.get("template_title"),
+                "trigger_id": event.get("trigger_id"),
+                "trigger_price": event.get("trigger_price"),
+                "market_price": event.get("market_price"),
+                "alert_time": event.get("time"),
+                "webhook_sent": event.get("webhook_sent"),
+                "telegram_sent": event.get("telegram_sent"),
+                "telegram_failed": event.get("telegram_failed"),
+            }
+            return (
+                "This is a server-verified Manual Alert AI instruction explicitly configured "
+                "by the user in a Manual Alert template. The webhook was delivered successfully "
+                "before this instruction was queued. Treat it as an explicit user request and "
+                "execute it now. For any session state change, use only the exact session_id "
+                "below; do not ask the user to identify the session and do not apply the "
+                "instruction to another session. Do not broaden the requested action. If a "
+                "required template or value is missing, report what is missing instead of "
+                "inventing it. Respond in the same language as the instruction unless the "
+                "instruction explicitly requests another language. Use that same language for "
+                "any requested Telegram delivery.\n\n"
+                f"Exact session and Manual Alert context:\n"
+                f"{json.dumps(context, ensure_ascii=False)}\n\n"
+                f"Instruction:\n{str(event.get('instruction') or '').strip()}"
+            )
+
         context = {
             "session_id": session.spec.id,
             "provider": session.spec.provider,

@@ -278,11 +278,23 @@ def on_close_event(trade, runner=None):
 def on_plot_event(plot_data):
     """Callback for plot events - stores/updates plot options"""
     title = plot_data['title']
-    new_options = {
-        "color": plot_data.get('color'),
-        "linewidth": plot_data.get('linewidth'),
-        "style": plot_data.get('style'),
-    }
+    kind = plot_data.get("kind", "line")
+    if kind == "bgcolor":
+        new_options = {
+            "kind": "bgcolor",
+            "offset": plot_data.get("offset", 0),
+            "editable": plot_data.get("editable", True),
+            "show_last": plot_data.get("show_last"),
+            "force_overlay": plot_data.get("force_overlay", False),
+            "order": plot_data.get("order", 0),
+        }
+    else:
+        new_options = {
+            "kind": "line",
+            "color": plot_data.get('color'),
+            "linewidth": plot_data.get('linewidth'),
+            "style": plot_data.get('style'),
+        }
 
     # Check if title exists and options are the same
     if title in plot_options:

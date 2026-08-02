@@ -31,6 +31,14 @@
   let calendarSuppressTapUntil = 0;
   let calendarOpenTimer = null;
   let calendarCloseTimer = null;
+  let calendarAddText = "";
+  let calendarAddPending = false;
+  let calendarAddOpen = false;
+  let calendarAddStatus = "";
+  let calendarAddError = false;
+  let calendarAddSessionMenuOpen = false;
+  let calendarAddComposing = false;
+  const calendarAddSessionIds = new Set();
   let registerAnimatedPepeFace = () => {};
   const assetColors = [
     "#3b82f6", "#f59e0b", "#10b981", "#ef4444",
@@ -54,6 +62,12 @@
   let assetTransferReview = null;
   let assetTransferMode = "options";
   let assetTransferSubmitting = false;
+  let updateConfirmationToken = "";
+  let updatePollTimer = null;
+  let updateMessageTimer = null;
+  let updateCompleteTimer = null;
+  let updateRestartPending = false;
+  let updateRequiresRestart = true;
 
   const el = (id) => document.getElementById(id);
 
@@ -165,6 +179,154 @@
     ].filter(Boolean).join(" · ");
   }
 
+  function closeCalendarAddSessionMenu() {
+    calendarAddSessionMenuOpen = false;
+    const select = el("calendar-add-session-select");
+    const options = el("calendar-add-session-options");
+    const button = el("calendar-add-session-button");
+    if (select) select.classList.remove("open");
+    if (options) options.classList.add("hidden");
+    if (button) button.setAttribute("aria-expanded", "false");
+  }
+
+  function renderCalendarAddControls() {
+    if (!calendarSelectedDate) return;
+    el("calendar-add-form").classList.toggle("hidden", !calendarAddOpen);
+    el("calendar-add-toggle").setAttribute(
+      "aria-expanded",
+      calendarAddOpen ? "true" : "false",
+    );
+    el("calendar-add-toggle").disabled = calendarAddPending;
+    const liveSessionIds = new Set(sessions.map(sessionId));
+    for (const sessionIdValue of calendarAddSessionIds) {
+      if (!liveSessionIds.has(sessionIdValue)) calendarAddSessionIds.delete(sessionIdValue);
+    }
+
+    const input = el("calendar-add-input");
+    if (document.activeElement !== input) input.value = calendarAddText;
+    input.disabled = calendarAddPending;
+
+    let selectionLabel = "";
+    if (calendarAddSessionIds.size) {
+      if (calendarAddSessionIds.size === 1) {
+        const selected = sessions.find((session) => (
+          calendarAddSessionIds.has(sessionId(session))
+        ));
+        selectionLabel = selected ? calendarSessionLabel(selected) : "1 session";
+      } else {
+        selectionLabel = `${calendarAddSessionIds.size} sessions`;
+      }
+    } else {
+      selectionLabel = aiEnabled ? "AI matches sessions" : "Select sessions";
+    }
+    el("calendar-add-session-label").textContent = selectionLabel;
+
+    const options = [];
+    if (aiEnabled) {
+      options.push(
+        `<button class="calendar-add-session-option${calendarAddSessionIds.size ? "" : " selected"}" ` +
+        `type="button" data-calendar-add-session="__auto__" role="option" ` +
+        `aria-selected="${calendarAddSessionIds.size ? "false" : "true"}">AI matches sessions</button>`,
+      );
+    }
+    for (const session of sessions) {
+      const id = sessionId(session);
+      const selected = calendarAddSessionIds.has(id);
+      options.push(
+        `<button class="calendar-add-session-option${selected ? " selected" : ""}" ` +
+        `type="button" data-calendar-add-session="${esc(id)}" role="option" ` +
+        `aria-selected="${selected ? "true" : "false"}">${esc(calendarSessionLabel(session))}</button>`,
+      );
+    }
+    if (!options.length) {
+      options.push(`<div class="script-select-empty">No active sessions</div>`);
+    }
+    el("calendar-add-session-options").innerHTML = options.join("");
+    el("calendar-add-session-select").classList.toggle("open", calendarAddSessionMenuOpen);
+    el("calendar-add-session-options").classList.toggle("hidden", !calendarAddSessionMenuOpen);
+    el("calendar-add-session-button").setAttribute(
+      "aria-expanded",
+      calendarAddSessionMenuOpen ? "true" : "false",
+    );
+    el("calendar-add-session-button").disabled = calendarAddPending || !sessions.length;
+    el("calendar-add-submit").disabled = (
+      calendarAddPending || !calendarAddText.trim() || !sessions.length
+    );
+
+    const status = el("calendar-add-status");
+    status.textContent = calendarAddStatus;
+    status.classList.toggle("error", calendarAddError);
+    status.classList.toggle("pending", calendarAddPending);
+  }
+
+  async function submitCalendarEvent() {
+    const text = calendarAddText.trim();
+    if (!calendarSelectedDate || !text || calendarAddPending) return;
+    if (!sessions.length) {
+      calendarAddStatus = "Add a session before creating an event.";
+      calendarAddError = true;
+      renderCalendarAddControls();
+      return;
+    }
+    if (!aiEnabled && !calendarAddSessionIds.size) {
+      calendarAddStatus = "Select at least one session.";
+      calendarAddError = true;
+      renderCalendarAddControls();
+      return;
+    }
+
+    const submittedDate = calendarSelectedDate;
+    calendarAddPending = true;
+    calendarAddError = false;
+    calendarAddStatus = aiEnabled ? "Researching event" : "Adding event";
+    closeCalendarAddSessionMenu();
+    renderCalendarAddControls();
+
+    let completed = false;
+    try {
+      await streamSse("/api/calendar/events/manual", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          date: submittedDate,
+          text,
+          session_ids: Array.from(calendarAddSessionIds),
+        }),
+      }, (eventName, data) => {
+        if (eventName === "status" || eventName === "work_status") {
+          const statusText = String(data.text || "").trim();
+          if (statusText) {
+            calendarAddStatus = statusText;
+            calendarAddError = false;
+            renderCalendarAddControls();
+          }
+          return;
+        }
+        if (eventName === "stream_error") {
+          throw new Error(data.error || "Calendar event could not be added");
+        }
+        if (eventName === "done") {
+          completed = true;
+          calendarAddStatus = String(data.answer || "Event added").trim() || "Event added";
+          calendarAddError = false;
+        }
+      });
+      if (!completed) throw new Error("Calendar event request ended before completion");
+      calendarAddText = "";
+      calendarAddSessionIds.clear();
+      calendarAddOpen = false;
+      await loadCalendarEvents();
+    } catch (error) {
+      calendarAddStatus = error && error.message
+        ? error.message
+        : "Calendar event could not be added";
+      calendarAddError = true;
+    } finally {
+      calendarAddPending = false;
+      if (isCalendarOpen() && calendarSelectedDate) renderCalendarDetails();
+    }
+  }
+
   function isCalendarOpen() {
     return !el("calendar-modal").classList.contains("hidden");
   }
@@ -181,6 +343,7 @@
     menu.setAttribute("aria-hidden", "false");
     backdrop.setAttribute("aria-hidden", "false");
     el("hub-menu-button").setAttribute("aria-expanded", "true");
+    loadUpdateStatus();
   }
 
   function closeHubMenu() {
@@ -207,6 +370,7 @@
       calendarOpenTimer = null;
     }
     calendarSelectedDate = null;
+    calendarAddOpen = false;
     const modal = el("calendar-modal");
     const box = modal.querySelector(".calendar-modal-box");
     modal.classList.remove(
@@ -1450,7 +1614,7 @@
       reconcileCalendarForecasts(calendarEvents);
       const updated = String(payload.updated_at || "").trim();
       el("calendar-updated").textContent = updated
-        ? `Updated ${new Date(updated).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`
+        ? `Updated ${new Date(updated).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`
         : "";
       renderCalendar();
     } catch (error) {
@@ -1462,7 +1626,7 @@
   }
 
   function renderCalendar() {
-    const title = calendarMonth.toLocaleDateString([], { year: "numeric", month: "long" });
+    const title = calendarMonth.toLocaleDateString("en-US", { year: "numeric", month: "long" });
     el("calendar-month-title").textContent = title;
 
     const byDate = new Map();
@@ -1495,7 +1659,7 @@
         : "";
       cells.push(
         `<button class="${classes}" type="button" data-calendar-date="${key}" ` +
-        `aria-label="${esc(day.toLocaleDateString())}, ${events.length} events">` +
+        `aria-label="${esc(day.toLocaleDateString("en-US"))}, ${events.length} events">` +
         `<span class="calendar-day-number">${day.getDate()}</span>${eventRow}</button>`,
       );
     }
@@ -1511,8 +1675,9 @@
     }
     const selected = calendarDateFromKey(calendarSelectedDate);
     el("calendar-detail-date").textContent = selected
-      ? selected.toLocaleDateString([], { weekday: "long", year: "numeric", month: "long", day: "numeric" })
+      ? selected.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })
       : calendarSelectedDate;
+    renderCalendarAddControls();
     const events = calendarEvents.filter((event) => event.date === calendarSelectedDate);
     if (!events.length) {
       el("calendar-detail-events").innerHTML = `<div class="calendar-empty-day">No events</div>`;
@@ -1803,6 +1968,7 @@
   function moveCalendarMonth(delta, animate = false) {
     calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + delta, 1);
     calendarSelectedDate = null;
+    calendarAddOpen = false;
     calendarEvents = [];
     renderCalendar();
     if (animate) {
@@ -2067,6 +2233,13 @@
     el("hub-menu-backdrop").addEventListener("click", closeHubMenu);
     el("hub-calendar-open").addEventListener("click", openCalendar);
     el("hub-assets-open").addEventListener("click", openAssets);
+    el("hub-update-button").addEventListener("click", checkForUpdate);
+    el("update-close").addEventListener("click", closeUpdateModal);
+    el("update-cancel").addEventListener("click", closeUpdateModal);
+    el("update-confirm").addEventListener("click", startUpdate);
+    el("update-modal").addEventListener("click", (event) => {
+      if (event.target === el("update-modal")) closeUpdateModal();
+    });
     el("calendar-close").addEventListener("click", closeCalendar);
     calendarModal.addEventListener("click", (event) => {
       if (event.target === calendarModal) closeCalendar();
@@ -2077,6 +2250,7 @@
       const now = new Date();
       calendarMonth = new Date(now.getFullYear(), now.getMonth(), 1);
       calendarSelectedDate = null;
+      calendarAddOpen = false;
       calendarEvents = [];
       renderCalendar();
       loadCalendarEvents();
@@ -2086,8 +2260,65 @@
         ? event.target.closest("[data-calendar-date]")
         : null;
       if (!day) return;
+      if (calendarAddPending) return;
       calendarSelectedDate = day.dataset.calendarDate || null;
+      calendarAddOpen = false;
+      calendarAddText = "";
+      calendarAddStatus = "";
+      calendarAddError = false;
+      closeCalendarAddSessionMenu();
       renderCalendar();
+    });
+    el("calendar-add-toggle").addEventListener("click", () => {
+      if (calendarAddPending) return;
+      calendarAddOpen = !calendarAddOpen;
+      if (!calendarAddOpen) closeCalendarAddSessionMenu();
+      renderCalendarAddControls();
+      if (calendarAddOpen) {
+        window.requestAnimationFrame(() => el("calendar-add-input").focus());
+      }
+    });
+    el("calendar-add-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitCalendarEvent();
+    });
+    el("calendar-add-input").addEventListener("input", (event) => {
+      calendarAddText = event.target.value;
+      renderCalendarAddControls();
+    });
+    el("calendar-add-input").addEventListener("compositionstart", () => {
+      calendarAddComposing = true;
+    });
+    el("calendar-add-input").addEventListener("compositionend", (event) => {
+      calendarAddComposing = false;
+      calendarAddText = event.target.value;
+      renderCalendarAddControls();
+    });
+    el("calendar-add-input").addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.shiftKey || event.isComposing || calendarAddComposing) return;
+      event.preventDefault();
+      el("calendar-add-form").requestSubmit();
+    });
+    el("calendar-add-session-button").addEventListener("click", () => {
+      if (calendarAddPending || !sessions.length) return;
+      calendarAddSessionMenuOpen = !calendarAddSessionMenuOpen;
+      renderCalendarAddControls();
+    });
+    el("calendar-add-session-options").addEventListener("click", (event) => {
+      const option = event.target && event.target.closest
+        ? event.target.closest("[data-calendar-add-session]")
+        : null;
+      if (!option || calendarAddPending) return;
+      const sessionIdValue = String(option.dataset.calendarAddSession || "");
+      if (sessionIdValue === "__auto__") {
+        calendarAddSessionIds.clear();
+        calendarAddSessionMenuOpen = false;
+      } else if (calendarAddSessionIds.has(sessionIdValue)) {
+        calendarAddSessionIds.delete(sessionIdValue);
+      } else {
+        calendarAddSessionIds.add(sessionIdValue);
+      }
+      renderCalendarAddControls();
     });
     el("calendar-detail-events").addEventListener("click", (event) => {
       const sessionToggle = event.target && event.target.closest
@@ -2123,6 +2354,9 @@
     document.addEventListener("pointerdown", (event) => {
       if (!isCalendarOpen()) return;
       const target = event.target && event.target.closest ? event.target : null;
+      if (!target || !target.closest(".calendar-add-session-select")) {
+        closeCalendarAddSessionMenu();
+      }
       if (target && target.closest(".calendar-forecast-bubble, [data-calendar-forecast-event]")) return;
       closeCalendarForecastBubbles();
     }, { passive: true });
@@ -2373,6 +2607,7 @@
       sessions = incoming;
     }
     if (!draggedSessionId) render();
+    if (isCalendarOpen() && calendarSelectedDate) renderCalendarAddControls();
   }
 
   function runnerButtons(s) {
@@ -2734,6 +2969,236 @@
     return data;
   }
 
+  function setUpdateMessage(message, isError = false, autoClearMs = 0) {
+    const node = el("hub-update-message");
+    if (updateMessageTimer !== null) {
+      clearTimeout(updateMessageTimer);
+      updateMessageTimer = null;
+    }
+    node.textContent = String(message || "");
+    node.classList.toggle("error", Boolean(isError));
+    node.title = node.textContent;
+    if (autoClearMs > 0 && node.textContent) {
+      updateMessageTimer = window.setTimeout(() => {
+        updateMessageTimer = null;
+        node.textContent = "";
+        node.title = "";
+        node.classList.remove("error");
+      }, autoClearMs);
+    }
+  }
+
+  function updateInProgress(status) {
+    return ["stopping", "updating", "restarting", "resuming_runners"].includes(status);
+  }
+
+  function setUpdateDetail(message, pending = false) {
+    const node = el("update-detail");
+    node.textContent = String(message || "").replace(/\s*\.{3}$/, "");
+    node.classList.toggle("update-detail-pending", Boolean(pending));
+  }
+
+  function applyUpdateStatus(payload) {
+    if (!payload || typeof payload !== "object") return;
+    el("hub-version").textContent = String(payload.display || payload.commit || "-------");
+    const state = payload.update && typeof payload.update === "object" ? payload.update : {};
+    const status = String(state.status || "");
+    const button = el("hub-update-button");
+    if (updateRestartPending && typeof state.restart_required === "boolean") {
+      updateRequiresRestart = state.restart_required;
+    }
+    if (updateRestartPending && state.message) {
+      setUpdateDetail(state.message, updateInProgress(status));
+    }
+    if (updateInProgress(status)) {
+      button.disabled = true;
+      button.textContent = "Updating";
+      setUpdateMessage(state.message || "Updating...");
+      return;
+    }
+    button.disabled = false;
+    button.textContent = "Update";
+    if (status === "failed") {
+      const failedAt = Number(state.updated_at || 0) * 1000;
+      const remaining = Math.max(0, 5000 - (Date.now() - failedAt));
+      if (remaining > 0) {
+        setUpdateMessage(state.error || state.message || "Update failed.", true, remaining);
+      } else {
+        setUpdateMessage("");
+      }
+    } else if (status === "completed" && state.commit === payload.commit) {
+      setUpdateMessage("");
+    }
+  }
+
+  async function loadUpdateStatus() {
+    try {
+      const payload = await api("/api/update/status");
+      applyUpdateStatus(payload);
+      const status = String(payload.update && payload.update.status || "");
+      if (updateRestartPending && status === "completed" && payload.update.commit === payload.commit) {
+        showUpdateCompleted();
+        return;
+      }
+      if (updateRestartPending && status === "failed") {
+        updateRestartPending = false;
+        showUpdateFailure(payload.update.error || payload.update.message || "Update failed.");
+      }
+      if (updateInProgress(status)) scheduleUpdatePoll();
+    } catch (error) {
+      if (updateRestartPending) {
+        setUpdateDetail(
+          updateRequiresRestart ? "Applying confirmed update" : "Applying frontend update",
+          true,
+        );
+        scheduleUpdatePoll();
+      }
+    }
+  }
+
+  function scheduleUpdatePoll() {
+    if (updatePollTimer !== null) return;
+    updatePollTimer = window.setTimeout(() => {
+      updatePollTimer = null;
+      loadUpdateStatus();
+    }, 1000);
+  }
+
+  function closeUpdateModal() {
+    if (updateRestartPending) return;
+    if (updateCompleteTimer !== null) {
+      clearTimeout(updateCompleteTimer);
+      updateCompleteTimer = null;
+    }
+    const modal = el("update-modal");
+    modal.classList.add("hidden");
+    modal.classList.remove("updating", "completed");
+    modal.setAttribute("aria-hidden", "true");
+    updateConfirmationToken = "";
+    updateRequiresRestart = true;
+  }
+
+  function openUpdateConfirmation(result) {
+    closeHubMenu();
+    setUpdateMessage("");
+    updateConfirmationToken = String(result.confirmation_token || "");
+    updateRequiresRestart = result.restart_required !== false;
+    const current = result.version
+      ? `${result.version} · ${result.commit}`
+      : result.commit;
+    const target = result.target_version
+      ? `${result.target_version} · ${result.target_commit}`
+      : result.target_commit;
+    el("update-revisions").textContent = `${current}  →  ${target}`;
+    setUpdateDetail(
+      `${result.branch} · ${result.behind} new commit${result.behind === 1 ? "" : "s"}`,
+    );
+    el("update-error").textContent = "";
+    el("update-confirm-message").textContent = updateRequiresRestart
+      ? "Running sessions will stop while the update is installed, then resume automatically."
+      : "Only frontend files changed. Running sessions will continue without interruption.";
+    el("update-confirm").disabled = false;
+    el("update-confirm").textContent = "Update";
+    el("update-cancel").textContent = "Cancel";
+    const modal = el("update-modal");
+    modal.classList.remove("hidden", "updating", "completed");
+    modal.setAttribute("aria-hidden", "false");
+  }
+
+  function showUpdateCompleted() {
+    updateRestartPending = false;
+    setUpdateMessage("");
+    const modal = el("update-modal");
+    modal.classList.remove("hidden", "updating");
+    modal.classList.add("completed");
+    modal.setAttribute("aria-hidden", "false");
+    el("update-confirm-message").textContent = "Update completed.";
+    setUpdateDetail(updateRequiresRestart
+      ? "Data service restarted and running sessions were restored."
+      : "Frontend refreshed without interrupting running sessions.");
+    el("update-error").textContent = "";
+    if (updateCompleteTimer !== null) clearTimeout(updateCompleteTimer);
+    updateCompleteTimer = window.setTimeout(() => {
+      updateCompleteTimer = null;
+      closeUpdateModal();
+      window.location.reload();
+    }, 4000);
+  }
+
+  function showUpdateFailure(message) {
+    const modal = el("update-modal");
+    modal.classList.remove("hidden", "updating", "completed");
+    modal.setAttribute("aria-hidden", "false");
+    el("update-confirm-message").textContent = "The update could not be completed.";
+    el("update-detail").classList.remove("update-detail-pending");
+    el("update-error").textContent = String(message || "Update failed.");
+    el("update-confirm").disabled = true;
+    el("update-confirm").textContent = "Update";
+    el("update-cancel").textContent = "Close";
+    setUpdateMessage(message || "Update failed.", true, 5000);
+  }
+
+  async function checkForUpdate() {
+    const button = el("hub-update-button");
+    button.disabled = true;
+    button.textContent = "Checking";
+    setUpdateMessage("Checking for updates...");
+    try {
+      const result = await api("/api/update/check", { method: "POST" });
+      el("hub-version").textContent = String(result.display || result.commit || "-------");
+      if (!result.available) {
+        const blocked = Boolean(result.blocked_reason);
+        setUpdateMessage(
+          result.blocked_reason || "No updates available.",
+          blocked,
+          5000,
+        );
+        return;
+      }
+      if (!result.can_update) {
+        setUpdateMessage(
+          result.blocked_reason || "Update requires manual action.",
+          true,
+          5000,
+        );
+        return;
+      }
+      openUpdateConfirmation(result);
+    } catch (error) {
+      setUpdateMessage(error.message || "Update check failed.", true, 5000);
+    } finally {
+      button.disabled = false;
+      button.textContent = "Update";
+    }
+  }
+
+  async function startUpdate() {
+    if (!updateConfirmationToken) return;
+    el("update-confirm").disabled = true;
+    el("update-confirm").textContent = "Updating";
+    el("update-error").textContent = "";
+    setUpdateDetail(
+      updateRequiresRestart ? "Stopping runners and data service" : "Applying frontend update",
+      true,
+    );
+    el("update-modal").classList.add("updating");
+    try {
+      const result = await api("/api/update/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmation_token: updateConfirmationToken }),
+      });
+      updateRequiresRestart = result.restart_required !== false;
+      updateConfirmationToken = "";
+      updateRestartPending = true;
+      setUpdateMessage("Updating...");
+      scheduleUpdatePoll();
+    } catch (error) {
+      updateRestartPending = false;
+      showUpdateFailure(error.message || "Update failed to start.");
+    }
+  }
+
   async function streamSse(path, opts, onEvent) {
     const resp = await fetch(path, opts);
     if (!resp.ok) {
@@ -2985,6 +3450,7 @@
   let aiStreamingResponse = false;
   let aiRenderFrame = null;
   let aiChatLockedScroll = false;
+  let aiChatSwipeCloseTimer = null;
   let aiStateSyncPromise = null;
   let aiModelsPromise = null;
   let aiModels = [];
@@ -3436,8 +3902,15 @@
   }
 
   function openAiChat() {
-    el("ai-chat-panel").classList.remove("hidden");
-    el("ai-chat-panel").setAttribute("aria-hidden", "false");
+    const panel = el("ai-chat-panel");
+    if (aiChatSwipeCloseTimer !== null) {
+      clearTimeout(aiChatSwipeCloseTimer);
+      aiChatSwipeCloseTimer = null;
+    }
+    panel.classList.remove("hidden", "ai-chat-swipe-closing");
+    panel.style.transition = "";
+    panel.style.transform = "";
+    panel.setAttribute("aria-hidden", "false");
     el("ai-chat-fab").setAttribute("aria-expanded", "true");
     positionAiChatPanel();
     renderAiMessages();
@@ -3455,23 +3928,47 @@
     }
   }
 
-  function closeAiChat() {
-    if (!isAiChatOpen()) return;
-    closeAiModelMenu();
+  function finishAiChatClose() {
     const panel = el("ai-chat-panel");
+    if (aiChatSwipeCloseTimer !== null) clearTimeout(aiChatSwipeCloseTimer);
+    aiChatSwipeCloseTimer = null;
     panel.classList.add("hidden");
+    panel.classList.remove("ai-chat-swipe-closing");
     panel.setAttribute("aria-hidden", "true");
-    // drop any keyboard pin / sheet-drag offset
     panel.style.top = "";
     panel.style.height = "";
     panel.style.bottom = "";
     panel.style.paddingBottom = "";
+    panel.style.transition = "";
     panel.style.transform = "";
     el("ai-chat-fab").setAttribute("aria-expanded", "false");
     if (aiChatLockedScroll) {
       unlockBodyScroll();
       aiChatLockedScroll = false;
     }
+  }
+
+  function closeAiChat(options = {}) {
+    if (!isAiChatOpen()) return;
+    closeAiModelMenu();
+    const panel = el("ai-chat-panel");
+    const fromDrag = options && options.fromDrag === true && !desktopReorderQuery.matches;
+    if (panel.classList.contains("ai-chat-swipe-closing")) {
+      if (!fromDrag) finishAiChatClose();
+      return;
+    }
+    el("ai-chat-fab").setAttribute("aria-expanded", "false");
+
+    if (fromDrag) {
+      panel.classList.add("ai-chat-swipe-closing");
+      panel.style.transition = "transform 220ms cubic-bezier(0.55, 0, 1, 0.45)";
+      window.requestAnimationFrame(() => {
+        panel.style.transform = "translateY(100dvh)";
+      });
+      aiChatSwipeCloseTimer = window.setTimeout(finishAiChatClose, 220);
+      return;
+    }
+    finishAiChatClose();
   }
 
   function autosizeAiInput() {
@@ -3762,23 +4259,52 @@
     sheetHeader.addEventListener("pointerdown", (e) => {
       if (desktopReorderQuery.matches || !e.isPrimary) return;
       if (e.target && e.target.closest && e.target.closest("button")) return;
-      sheetDrag = { id: e.pointerId, startY: e.clientY, dy: 0 };
+      sheetDrag = {
+        id: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        dy: 0,
+        active: false,
+      };
       try { sheetHeader.setPointerCapture(e.pointerId); } catch {}
     });
     sheetHeader.addEventListener("pointermove", (e) => {
       if (!sheetDrag || e.pointerId !== sheetDrag.id) return;
-      sheetDrag.dy = Math.max(0, e.clientY - sheetDrag.startY);
-      panel.style.transform = sheetDrag.dy > 0 ? `translateY(${sheetDrag.dy}px)` : "";
-    });
-    function endSheetDrag(e) {
-      if (!sheetDrag || e.pointerId !== sheetDrag.id) return;
-      const dy = sheetDrag.dy;
+      const dx = e.clientX - sheetDrag.startX;
+      const dy = e.clientY - sheetDrag.startY;
+      if (!sheetDrag.active) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < 8) return;
+        if (dy <= 0 || Math.abs(dy) <= Math.abs(dx)) {
+          sheetDrag = null;
+          return;
+        }
+        sheetDrag.active = true;
+        panel.style.transition = "none";
+      }
+      e.preventDefault();
+      sheetDrag.dy = Math.max(0, dy);
+      panel.style.transform = `translateY(${sheetDrag.dy}px)`;
+    }, { passive: false });
+    function endSheetDrag(e, cancelled = false) {
+      if (!sheetDrag || (e && e.pointerId !== sheetDrag.id)) return;
+      const current = sheetDrag;
       sheetDrag = null;
-      panel.style.transform = "";
-      if (dy > 100) closeAiChat();
+      try { sheetHeader.releasePointerCapture(current.id); } catch {}
+      if (!cancelled && current.active && current.dy > 100) {
+        closeAiChat({ fromDrag: true });
+        return;
+      }
+      if (!current.active) return;
+      panel.style.transition = "transform 180ms ease";
+      panel.style.transform = "translateY(0)";
+      window.setTimeout(() => {
+        if (!isAiChatOpen() || panel.classList.contains("ai-chat-swipe-closing")) return;
+        panel.style.transition = "";
+        panel.style.transform = "";
+      }, 190);
     }
     sheetHeader.addEventListener("pointerup", endSheetDrag);
-    sheetHeader.addEventListener("pointercancel", endSheetDrag);
+    sheetHeader.addEventListener("pointercancel", (e) => endSheetDrag(e, true));
 
     el("ai-model-selector").addEventListener("click", () => {
       if (!mobileAiQuery.matches) openAiModelMenu(el("ai-model-selector"));
@@ -4425,15 +4951,53 @@
   });
 
   // ---- collapsible "Add session" card (collapsed by default) ---------------
+  let addCardAnimation = null;
   function toggleAddCard() {
     const card = el("add-card");
-    const collapsed = card.classList.toggle("collapsed");
-    el("add-toggle").setAttribute("aria-expanded", String(!collapsed));
-    if (!collapsed) {
+    const body = el("add-body");
+    if (addCardAnimation) return;
+    const opening = card.classList.contains("collapsed");
+    el("add-toggle").setAttribute("aria-expanded", String(opening));
+
+    if (opening) {
+      card.classList.remove("collapsed", "add-card-closing");
       loadScripts();  // refresh the script list each time it opens
     } else {
+      card.classList.add("add-card-closing");
       closeScriptDropdown();
     }
+
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      card.classList.toggle("collapsed", !opening);
+      card.classList.remove("add-card-closing");
+      return;
+    }
+
+    body.style.overflow = "hidden";
+    const height = body.scrollHeight;
+    const animation = body.animate(
+      opening
+        ? [
+            { height: "0px", opacity: 0, transform: "translateY(-6px)" },
+            { height: `${height}px`, opacity: 1, transform: "translateY(0)" },
+          ]
+        : [
+            { height: `${height}px`, opacity: 1, transform: "translateY(0)" },
+            { height: "0px", opacity: 0, transform: "translateY(-6px)" },
+          ],
+      { duration: 220, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
+    );
+    addCardAnimation = animation;
+    animation.finished.then(() => {
+      if (addCardAnimation !== animation) return;
+      if (!opening) card.classList.add("collapsed");
+      card.classList.remove("add-card-closing");
+      body.style.overflow = "";
+      addCardAnimation = null;
+    }).catch(() => {
+      body.style.overflow = "";
+      addCardAnimation = null;
+    });
   }
   el("add-toggle").addEventListener("click", toggleAddCard);
   el("add-toggle").addEventListener("keydown", (e) => {

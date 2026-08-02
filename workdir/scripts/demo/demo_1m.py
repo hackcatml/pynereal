@@ -3,7 +3,7 @@
 """
 from pynecore import Persistent
 from pynecore.lib import script, close, ta, strategy, time, plot, color, na, plotchar, request, syminfo, low, barmerge, \
-    log, bar_index, is_na
+    log, bar_index, is_na, bgcolor
 from pynecore.types import Series
 
 
@@ -54,6 +54,14 @@ def main():
     plot(bbUpper, title="BB Upper", color=color.red, linewidth=1, style=plot.style_line)
     plot(bbBasis, title="BB Basis", color=color.blue, linewidth=1, style=plot.style_line)
     plot(bbLower, title="BB Lower", color=color.green, linewidth=1, style=plot.style_line)
+
+    # Background Color Example
+    bgcolor(
+        color.new(color.red, 85) if rsi > 70
+        else color.new(color.green, 85) if rsi < 30
+        else na,
+        title="RSI Zone",
+    )
 
     # Plotchar Example
     plotchar(rsi < 30, title="RSI Low", text="RSI Low", location=plot.location_belowbar, color=color.green)

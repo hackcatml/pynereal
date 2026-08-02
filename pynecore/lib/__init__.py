@@ -20,7 +20,7 @@ from ..core.script import script, input
 from ..types.series import Series
 from ..types.na import NA
 from . import syminfo  # This should be imported before core.datetime to avoid circular import!
-from . import barstate, string, log, math, plot, hline, linefill, alert, request
+from . import barstate, string, log, math, plot, bgcolor, hline, linefill, alert, request
 from . import timeframe as timeframe_module
 from . import session as session_module
 
@@ -104,6 +104,7 @@ _security_ctx = None
 #
 
 if TYPE_CHECKING:
+    from bgcolor import bgcolor
     from hline import hline
     from plot import plot
     from alert import alert
@@ -220,10 +221,6 @@ def timestamp(year: int | float, month: int | float, day: int | float, hour: int
 # TODO: implement creating plot metadata to be able to plot in a different module
 
 def barcolor(*_, **__):
-    ...
-
-
-def bgcolor(*_, **__):
     ...
 
 

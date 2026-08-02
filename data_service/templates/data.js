@@ -4,7 +4,7 @@ App.data = {
   STYLE_CIRCLES: 2,
   STYLE_CROSS: 4,
   STYLE_LINEBR: 7,
-  rebuildOhlcvCache(data) {
+  rebuildOhlcvCache(data, notifyBgcolor = true) {
     const collections = App.collections;
     collections.ohlcvData = Array.isArray(data)
       ? data
@@ -30,6 +30,9 @@ App.data = {
     if (App.measure) {
       App.measure.scheduleRender();
     }
+    if (notifyBgcolor && App.chart && App.chart.bgcolorPrimitive) {
+      App.chart.bgcolorPrimitive.onOhlcvChanged();
+    }
   },
   upsertOhlcvCache(bar) {
     if (!bar || !Number.isFinite(Number(bar.time))) return;
@@ -46,7 +49,7 @@ App.data = {
     const existingIndex = collections.ohlcvIndexByTime.get(time);
     if (existingIndex != null) {
       collections.ohlcvData[existingIndex] = cachedBar;
-      this.rebuildOhlcvCache(collections.ohlcvData);
+      this.rebuildOhlcvCache(collections.ohlcvData, false);
       return;
     }
     const last = collections.ohlcvData[collections.ohlcvData.length - 1];
@@ -142,6 +145,13 @@ App.data = {
     return controller;
   },
   createPlotSeries(chart, collections, plot, seriesData) {
+    if (plot.kind === "bgcolor") {
+      if (chart.bgcolorPrimitive) {
+        chart.bgcolorPrimitive.setLayer(plot, seriesData);
+      }
+      collections.plotSeriesMap.set(plot.title, { type: "bgcolor" });
+      return;
+    }
     const { title, color, linewidth, style } = plot;
     const { options, isLineBreakStyle } = this.buildPlotSeriesOptions(color, linewidth, style);
     if (isLineBreakStyle) {
@@ -156,6 +166,13 @@ App.data = {
   updatePlotSeries(chart, collections, title, time, value) {
     const controller = collections.plotSeriesMap.get(title);
     if (!controller) {
+      return;
+    }
+
+    if (controller.type === "bgcolor") {
+      if (chart.bgcolorPrimitive) {
+        chart.bgcolorPrimitive.updatePoint(title, time, value);
+      }
       return;
     }
 
@@ -329,9 +346,16 @@ App.data = {
             const seriesData = [];
             if (plot.data && Array.isArray(plot.data)) {
               plot.data.forEach(point => {
-                const linePoint = App.data.toLinePoint(point.time, point.value);
-                if (linePoint) {
-                  seriesData.push(linePoint);
+                if (plot.kind === "bgcolor") {
+                  const pointTime = Number(point.time);
+                  if (Number.isFinite(pointTime)) {
+                    seriesData.push({ time: pointTime, value: point.value });
+                  }
+                } else {
+                  const linePoint = App.data.toLinePoint(point.time, point.value);
+                  if (linePoint) {
+                    seriesData.push(linePoint);
+                  }
                 }
               });
             }
@@ -588,6 +612,11 @@ App.data = {
   normalizeManualAlertTemplates(templates) {
     return Array.isArray(templates)
       ? templates.filter(t => t && typeof t.title === "string" && typeof t.message === "string")
+          .map(t => ({
+            title: t.title,
+            message: t.message,
+            ...(typeof t.ai === "string" && t.ai.trim() ? { ai: t.ai } : {})
+          }))
       : [];
   },
   async loadManualAlertTemplates() {

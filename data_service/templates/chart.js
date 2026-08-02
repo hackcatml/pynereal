@@ -7,6 +7,7 @@ App.chart = {
   volumeSeries: null,
   entryMarkerSeries: null,
   closeMarkerSeries: null,
+  bgcolorPrimitive: null,
   currentPriceLine: null,
   manualAlertPreviewPriceLine: null,
   manualAlertTriggerItems: new Map(),
@@ -811,6 +812,9 @@ App.chart = {
       }
     );
 
+    this.bgcolorPrimitive = new App.BgColorPanePrimitive(this.chart, App.collections);
+    this.chart.panes()[0].attachPrimitive(this.bgcolorPrimitive);
+
     this.volumeSeries = this.chart.addSeries(
       LightweightCharts.HistogramSeries,
       {
@@ -896,6 +900,9 @@ App.chart = {
     }
     collections.plotSeriesList.length = 0;
     collections.plotSeriesMap.clear();
+    if (this.bgcolorPrimitive) {
+      this.bgcolorPrimitive.clear();
+    }
     collections.markers.length = 0;
     collections.markerKeys.clear();
     collections.plotcharMarkers.length = 0;

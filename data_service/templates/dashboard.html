@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=54" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=63" />
 </head>
 <body>
   <header class="topbar">
@@ -40,6 +40,13 @@
         <span>Calendar</span>
       </button>
     </nav>
+    <div class="hub-menu-footer">
+      <div id="hub-update-message" class="hub-update-message" aria-live="polite"></div>
+      <div class="hub-menu-version-row">
+        <span id="hub-version" class="hub-version mono">-------</span>
+        <button id="hub-update-button" class="btn hub-update-button" type="button">Update</button>
+      </div>
+    </div>
   </aside>
 
   <section class="card collapsible collapsed" id="add-card">
@@ -135,7 +142,36 @@
         </div>
         <div id="calendar-grid" class="calendar-grid"></div>
         <section id="calendar-details" class="calendar-details hidden" aria-live="polite">
-          <h3 id="calendar-detail-date"></h3>
+          <div class="calendar-detail-header">
+            <h3 id="calendar-detail-date"></h3>
+            <button id="calendar-add-toggle" class="calendar-add-toggle" type="button"
+                    aria-expanded="false" aria-controls="calendar-add-form">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              <span>Add event manually</span>
+            </button>
+          </div>
+          <form id="calendar-add-form" class="calendar-add-form hidden">
+            <textarea id="calendar-add-input" rows="2" maxlength="200"
+                      placeholder="Add an event in plain language..." aria-label="Calendar event"></textarea>
+            <div class="calendar-add-actions">
+              <div id="calendar-add-session-select" class="calendar-add-session-select">
+                <button id="calendar-add-session-button" class="calendar-add-session-button" type="button"
+                        aria-haspopup="listbox" aria-expanded="false"
+                        aria-controls="calendar-add-session-options">
+                  <span id="calendar-add-session-label">AI matches sessions</span>
+                  <span class="calendar-add-session-chevron" aria-hidden="true">&#9662;</span>
+                </button>
+                <div id="calendar-add-session-options"
+                     class="calendar-add-session-options hidden" role="listbox"
+                     aria-label="Affected sessions"></div>
+              </div>
+              <button id="calendar-add-submit" class="btn btn-primary calendar-add-submit"
+                      type="submit">Add</button>
+            </div>
+            <div id="calendar-add-status" class="calendar-add-status" aria-live="polite"></div>
+          </form>
           <div id="calendar-detail-events" class="calendar-detail-events"></div>
         </section>
       </div>
@@ -333,6 +369,27 @@
     </div>
   </div>
 
+  <div id="update-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-box modal-box-sm" role="dialog" aria-modal="true" aria-labelledby="update-title">
+      <div class="modal-header">
+        <span id="update-title">Update PyneReal</span>
+        <button id="update-close" class="btn" type="button" title="Close" aria-label="Close">&times;</button>
+      </div>
+      <div class="confirm-body">
+        <div id="update-confirm-message" class="confirm-message">
+          Running sessions will stop while the update is installed, then resume automatically.
+        </div>
+        <div id="update-revisions" class="update-revisions mono"></div>
+        <div id="update-detail" class="muted"></div>
+        <div id="update-error" class="error"></div>
+      </div>
+      <div class="confirm-footer">
+        <button id="update-cancel" class="btn" type="button">Cancel</button>
+        <button id="update-confirm" class="btn btn-primary" type="button">Update</button>
+      </div>
+    </div>
+  </div>
+
   <button id="ai-chat-fab" class="ai-chat-fab hidden" type="button" aria-label="Open AI chat" aria-expanded="false">
     <svg class="pepe" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
       <path d="M32 10C18 10 9 19 9 31c0 7 3 13 8 17 4 3.2 9.3 5 15 5s11-1.8 15-5c5-4 8-10 8-17 0-12-9-21-23-21z" fill="#5B9E4D" stroke="#2f5c28" stroke-width="1.8" stroke-linejoin="round"/>
@@ -404,6 +461,6 @@
     </form>
   </div>
 
-  <script src="/static/dashboard.js?v=56"></script>
+  <script src="/static/dashboard.js?v=70"></script>
 </body>
 </html>

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Chart</title>
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/styles.css?v=3" />
   <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.9/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
@@ -87,8 +87,8 @@
       </div>
     </div>
     <div id="alert-template-help" class="template-help hidden">
-      <div><strong>Purpose</strong>: send a one-off manual webhook alert from the chart at a selected price.</div>
-      <div><strong>Use</strong>: double-click or double-tap the chart, choose a template, drag the menu to adjust price, then Send.</div>
+      <div><strong>Purpose</strong>: send a manual webhook alert now or when live price reaches a trigger.</div>
+      <div><strong>AI</strong>: when AI is enabled, an optional instruction runs after the webhook is sent successfully.</div>
       <div>
         <strong>Placeholders</strong>:
         <span class="template-placeholder-list">
@@ -109,6 +109,7 @@
       <div class="template-table-head">
         <div>TITLE</div>
         <div>MESSAGE</div>
+        <div>AI INSTRUCTION</div>
         <div></div>
       </div>
       <div id="alert-template-rows"></div>
@@ -144,7 +145,7 @@
     <div class="manual-alert-confirm-body">
       <div>Webhook URL</div>
       <div id="manual-alert-confirm-url" class="manual-alert-confirm-url"></div>
-      <div class="manual-alert-confirm-note">Telegram will also be sent if credentials are configured.</div>
+      <div id="manual-alert-confirm-note" class="manual-alert-confirm-note">Telegram will also be sent if credentials are configured.</div>
     </div>
     <div class="manual-alert-confirm-actions">
       <button id="manual-alert-confirm-cancel" class="template-btn" type="button">Cancel</button>
@@ -153,10 +154,11 @@
   </section>
   <!--RUNTIME_CONFIG-->
   <script src="/static/state.js?v=2"></script>
-  <script src="/static/ui.js"></script>
-  <script src="/static/chart.js?v=2"></script>
+  <script src="/static/ui.js?v=2"></script>
+  <script src="/static/bgcolor.js?v=2"></script>
+  <script src="/static/chart.js?v=3"></script>
   <script src="/static/measure.js"></script>
-  <script src="/static/data.js?v=2"></script>
+  <script src="/static/data.js?v=4"></script>
   <script src="/static/ws.js?v=2"></script>
   <script src="/static/main.js"></script>
 </body>

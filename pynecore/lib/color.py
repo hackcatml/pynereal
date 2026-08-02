@@ -53,14 +53,14 @@ def b(color: Color) -> int:
     return color.b
 
 
-def t(color: Color) -> int:
+def t(color: Color) -> float:
     """
     Return the transparency of a color
 
     :param color: Color
     :return: The transparency of the color, 0-100 (0: not transparent, 100: invisible)
     """
-    return color.a
+    return color.t
 
 
 # noinspection PyShadowingNames
@@ -73,8 +73,7 @@ def new(color: Color | str, transp: float = 0) -> Color:
     """
     if isinstance(color, str):
         color = Color(color)
-    color.t = transp
-    return color
+    return Color.rgb(color.r, color.g, color.b, transp)
 
 
 # noinspection PyShadowingNames

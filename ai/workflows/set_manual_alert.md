@@ -12,7 +12,8 @@ price trigger.
 5. If the requested template does not exist, ask the user for both its title
    and message format. Preserve the supplied format exactly and pass both custom
    fields so the tool adds the template and trigger in one operation. Do not
-   tell the user to add it through the dashboard.
+   tell the user to add it through the dashboard. Pass `custom_template_ai`
+   only when the user explicitly supplies an AI instruction for the template.
 6. If more than one session matches, ask a concise question using a meaningful
    distinction such as exchange, timeframe, or strategy name. If another value
    is missing or ambiguous, ask for it and stop without calling the setting
@@ -27,3 +28,4 @@ preserves all configured templates. Do not call the deletion tool first.
 
 Do not send the alert immediately. Do not edit `sessions.json` directly. The
 data service persists the trigger and handles price-touch firing and removal.
+An optional template AI instruction runs only after the webhook succeeds.
