@@ -2607,7 +2607,7 @@
       sessions = incoming;
     }
     if (!draggedSessionId) render();
-    if (isCalendarOpen() && calendarSelectedDate) renderCalendarDetails();
+    if (isCalendarOpen() && calendarSelectedDate) renderCalendarAddControls();
   }
 
   function runnerButtons(s) {
