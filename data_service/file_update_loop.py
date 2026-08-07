@@ -24,6 +24,7 @@ from ohlcv_cache import (
     cache_has_data,
     get_last_ts,
     get_min_ts,
+    get_internal_gaps,
     import_from_ohlcv,
     export_to_ohlcv,
     upsert_bars,
@@ -119,6 +120,7 @@ async def file_update_loop(
             print("[data_service] history_since changed; ohlcv will be regenerated from cache")
 
     if cache_ready:
+        timeframe_seconds = int(convert_timeframe(timeframe, to_ms=True) / 1000)
         # Ensure toml exists before using cached data.
         if not toml_path.exists():
             try:
@@ -166,6 +168,60 @@ async def file_update_loop(
                     print(f"[data_service] backfill not needed (desired_ts={desired_ts}, min_ts={min_ts})")
             except Exception as e:
                 print(f"[data_service] history_since backfill skipped: {e}")
+        # Repair missing ranges inside the existing cache. Include the bars on
+        # both sides so partially stored boundary candles are refreshed too.
+        if cache_ready:
+            gap_start_ts = int(desired_dt.timestamp()) if desired_dt is not None else None
+            internal_gaps = await _to_thread_cancel_safe(
+                get_internal_gaps,
+                cache_path,
+                provider,
+                exchange,
+                symbol,
+                timeframe,
+                timeframe_seconds,
+                start_ts=gap_start_ts,
+            )
+            for previous_ts, next_ts in internal_gaps:
+                missing_bars = int((next_ts - previous_ts) / timeframe_seconds) - 1
+                print(
+                    f"[data_service] repairing internal OHLCV gap: "
+                    f"{datetime.fromtimestamp(previous_ts, UTC).isoformat()} -> "
+                    f"{datetime.fromtimestamp(next_ts, UTC).isoformat()} "
+                    f"({missing_bars} missing bars)"
+                )
+                await _to_thread_cancel_safe(
+                    download_history_range_into_cache,
+                    cache_path=cache_path,
+                    provider=provider,
+                    exchange=exchange,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    time_from=datetime.fromtimestamp(previous_ts, UTC),
+                    time_to=datetime.fromtimestamp(next_ts, UTC),
+                )
+            if internal_gaps:
+                remaining_gaps = await _to_thread_cancel_safe(
+                    get_internal_gaps,
+                    cache_path,
+                    provider,
+                    exchange,
+                    symbol,
+                    timeframe,
+                    timeframe_seconds,
+                    start_ts=gap_start_ts,
+                )
+                remaining_bars = sum(
+                    int((next_ts - previous_ts) / timeframe_seconds) - 1
+                    for previous_ts, next_ts in remaining_gaps
+                )
+                if remaining_bars == 0:
+                    print("[data_service] internal OHLCV gap repair completed")
+                else:
+                    print(
+                        f"[data_service] internal OHLCV gap repair left "
+                        f"{remaining_bars} missing bars in {len(remaining_gaps)} ranges"
+                    )
         # Refresh cache from last_ts (include last bar to finalize).
         last_ts = get_last_ts(cache_path, provider, exchange, symbol, timeframe)
         if last_ts is not None:
@@ -177,7 +233,7 @@ async def file_update_loop(
                 symbol=symbol,
                 timeframe=timeframe,
                 time_from=datetime.fromtimestamp(
-                    int(last_ts) - int(convert_timeframe(timeframe, to_ms=True) / 1000),
+                    int(last_ts) - timeframe_seconds,
                     UTC,
                 ),
                 time_to=datetime.now(UTC),
