@@ -162,6 +162,32 @@ internals when an existing script already provides the required data.
 
 ## Evaluation Rules
 
+- For a running strategy or session evaluation, call
+  `get_session_evaluation_context` first. Call it without `session_id` when the
+  user's human-readable description still needs to be resolved, then call it
+  again with the exact matched ID and `wait_for_ready=true`.
+- Use only one ready calculation generation in an evaluation. If the generation
+  changes, recollect the context instead of combining old plots or trades with
+  new OHLCV.
+- Treat `market.confirmed_bars` as calculation evidence and
+  `market.forming_bar` as provisional context only.
+- The exact-session context call automatically reads current positions and
+  recent order history from configured `providers.toml` accounts. Use the
+  returned `account_match` evidence; do not rerun those collectors through shell.
+- When the user explicitly names an account, pass that human-readable name in
+  the context tool's `account` argument. The user-selected account takes
+  precedence even when it has no matching position or orders; never substitute
+  another account automatically.
+- When no account is named, omit `account` and use the tool's deterministic
+  position/order evidence ranking. Treat `ambiguous` and `no_match` as unresolved
+  rather than claiming a real exchange position.
+- Session metadata does not statically identify an account. Account association
+  is request-time evidence and must not be persisted as a session binding.
+- Use `capture_session_chart` only with the exact session and generation returned
+  by the context tool. The image is supporting evidence; structured values remain
+  authoritative when a label or pixel is ambiguous.
+- Do not invent strategy-specific state that is absent from source, plots, logs,
+  orders, and trades.
 - Do not infer a current position, balance, order, or price from stale context.
 - Include the observation time when evaluating live account or market state.
 - State missing or stale evidence explicitly.

@@ -67,7 +67,21 @@ DEFAULT_DEVELOPER_INSTRUCTIONS = (
     "In the final response, do not list the procedure; present the lookup result immediately. "
     "Only when the user explicitly asks to send the result to Telegram, complete the lookup and "
     "then call send_telegram_message with a concise plain-text result. Report successful Telegram "
-    "delivery only when the tool returns success. For requests to check, refresh, add, update, or "
+    "delivery only when the tool returns success. For evaluation or analysis of a running PyneReal "
+    "strategy session, call get_session_evaluation_context before interpreting the strategy. If the "
+    "user names a symbol, company, asset, or strategy rather than an exact internal ID, first call the "
+    "tool without session_id, resolve exactly one human-readable match, and then call it again with "
+    "that ID and wait_for_ready=true. If the user explicitly names a configured account, pass the "
+    "human-readable account name in the account argument; that selection must not be replaced by "
+    "another account. Otherwise omit account so the server matches configured accounts from current "
+    "positions and recent order history. Treat the returned confirmed bars, simulation state, plots, "
+    "trades, source, logs, calculation generation, and warnings as the authoritative session evidence. "
+    "Do not treat the forming bar as confirmed. Use account_match as request-time evidence, respect "
+    "ambiguous or no_match status, and clearly separate simulated state from real account state. Never "
+    "persist or invent a static account binding. Do not invent "
+    "strategy-specific state that is not exposed by source, plots, logs, orders, or trades. When visual "
+    "confirmation would materially improve the evaluation, call capture_session_chart only with the "
+    "exact ready generation returned by get_session_evaluation_context. For requests to check, refresh, add, update, or "
     "remove calendar schedules, first call get_calendar_context. If the user does not name a "
     "session, research every active session. "
     "Resolve company, asset, symbol, exchange, timeframe, or strategy descriptions to the exact "
@@ -209,6 +223,10 @@ class CodexService:
     @property
     def enabled(self) -> bool:
         return not self._disabled
+
+    @property
+    def running(self) -> bool:
+        return self._codex is not None and not self._disabled
 
     async def start(self) -> None:
         async with self._lifecycle_lock:

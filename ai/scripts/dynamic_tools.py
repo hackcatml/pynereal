@@ -7,6 +7,7 @@ from typing import Any
 from .calendar_tool import CalendarTools
 from .file_tools import RestrictedFileTools
 from .manual_alert_tool import ManualAlertTools
+from .session_evaluation_tool import SessionEvaluationTools
 from .telegram_tool import TelegramMessageTool
 
 
@@ -17,6 +18,7 @@ class AIDynamicTools:
         self.file_tools = RestrictedFileTools(project_root)
         self.manual_alert = ManualAlertTools(session_registry)
         self.calendar = CalendarTools(session_registry, calendar_store)
+        self.session_evaluation = SessionEvaluationTools(project_root, session_registry)
         self.telegram = TelegramMessageTool()
 
     @property
@@ -25,16 +27,19 @@ class AIDynamicTools:
             *self.file_tools.specs,
             *self.manual_alert.specs,
             *self.calendar.specs,
+            *self.session_evaluation.specs,
             self.telegram.spec,
         ]
 
     def bind_loop(self, loop: Any) -> None:
         self.manual_alert.bind_loop(loop)
         self.calendar.bind_loop(loop)
+        self.session_evaluation.bind_loop(loop)
 
     def unbind_loop(self) -> None:
         self.manual_alert.unbind_loop()
         self.calendar.unbind_loop()
+        self.session_evaluation.unbind_loop()
 
     def handle_server_request(
         self,
@@ -54,6 +59,8 @@ class AIDynamicTools:
             return self.manual_alert.handle_server_request(method, params)
         if tool in self.calendar.names:
             return self.calendar.handle_server_request(method, params)
+        if tool in self.session_evaluation.names:
+            return self.session_evaluation.handle_server_request(method, params)
         if tool == self.telegram.name:
             return self.telegram.handle_server_request(method, params)
         return self._error_response(f"Unknown AI tool: {tool!r}")
