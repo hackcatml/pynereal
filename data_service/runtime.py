@@ -73,6 +73,7 @@ class Feed:
         self.state = DataState()
         self.tasks: Dict[str, Any] = {}
         self.history_ready_event = asyncio.Event()
+        self.data_integrity_lock = asyncio.Lock()
         self.collector_error: Optional[str] = None
         self._history_start_mtime: Optional[float] = None
         self._history_start_time: Optional[int] = None

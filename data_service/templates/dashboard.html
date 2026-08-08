@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=63" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=69" />
 </head>
 <body>
   <header class="topbar">
@@ -345,7 +345,25 @@
         <div id="settings-error" class="error"></div>
       </div>
       <div class="settings-footer">
+        <button id="settings-cancel" class="btn" type="button" hidden>Cancel</button>
         <button id="settings-save" class="btn btn-primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="integrity-cancel-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-box modal-box-sm" role="dialog" aria-modal="true" aria-labelledby="integrity-cancel-title">
+      <div class="modal-header">
+        <span id="integrity-cancel-title">Cancel data check?</span>
+        <button id="integrity-cancel-close" class="btn" type="button" title="Close" aria-label="Close">&times;</button>
+      </div>
+      <div class="confirm-body">
+        <div id="integrity-cancel-message" class="confirm-message"></div>
+        <div id="integrity-cancel-error" class="error"></div>
+      </div>
+      <div class="confirm-footer">
+        <button id="integrity-cancel-keep" class="btn" type="button">Keep running</button>
+        <button id="integrity-cancel-confirm" class="btn btn-danger-primary" type="button">Cancel check</button>
       </div>
     </div>
   </div>
@@ -461,6 +479,6 @@
     </form>
   </div>
 
-  <script src="/static/dashboard.js?v=70"></script>
+  <script src="/static/dashboard.js?v=76"></script>
 </body>
 </html>

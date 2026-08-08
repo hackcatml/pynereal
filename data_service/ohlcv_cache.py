@@ -182,6 +182,33 @@ def upsert_bars(
             )
 
 
+def delete_bars(
+    db_path: Path,
+    provider: str,
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    timestamps: Iterable[int],
+) -> int:
+    rows = sorted({int(timestamp) for timestamp in timestamps})
+    if not rows:
+        return 0
+    with _CACHE_WRITE_LOCK:
+        with _connect(db_path) as conn:
+            before = conn.total_changes
+            conn.executemany(
+                """
+                DELETE FROM bars
+                WHERE provider = ? AND exchange = ? AND symbol = ? AND timeframe = ? AND ts = ?
+                """,
+                [
+                    (provider, exchange, symbol, timeframe, timestamp)
+                    for timestamp in rows
+                ],
+            )
+            return conn.total_changes - before
+
+
 def import_from_ohlcv(
     db_path: Path,
     provider: str,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import ast
 import json
+import threading
 import time
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -23,6 +24,7 @@ from ai.provider.codex_service import CodexService
 from asset_portfolio import AssetPortfolioError, AssetPortfolioService
 from asset_transfer import AssetTransferError, AssetTransferService
 from calendar_store import CalendarEventStore, CalendarStoreError
+from data_integrity import DataIntegrityCancelled, inspect_data_integrity
 from registry import (
     HistoryNotReadyError,
     SessionExistsError,
@@ -41,6 +43,7 @@ from config import (
 )
 from manual_alerts import send_manual_alert_payload
 from ohlcv_io import make_ccxt_pro_client
+from ohlcv_paths import make_cache_path
 from update_service import UpdateService, UpdateServiceError
 
 # Cache of exchange -> ccxt markets so symbol validation hits the network at most
@@ -697,6 +700,7 @@ def build_control_router(
     r = APIRouter()
     calendar_forecast_runs: dict[str, int] = {}
     calendar_forecast_tasks: dict[str, set[asyncio.Task[Any]]] = {}
+    data_integrity_jobs: dict[str, dict[str, Any]] = {}
 
     @r.get("/api/update/status")
     async def update_status() -> JSONResponse:
@@ -1317,6 +1321,109 @@ def build_control_router(
         except Exception as e:
             return JSONResponse({"error": f"failed to update history_since: {e}"}, status_code=500)
         return JSONResponse({"ok": True, "history_since": value})
+
+    @r.get("/api/sessions/{session_id}/data-integrity")
+    async def check_data_integrity(session_id: str) -> JSONResponse:
+        session = registry.get(session_id)
+        if session is None:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        if not session.feed.history_ready():
+            return JSONResponse({"error": "market data is still preparing"}, status_code=409)
+        spec = session.feed.spec
+        if spec.id in data_integrity_jobs:
+            return JSONResponse({"error": "data integrity operation already running"}, status_code=409)
+        job = {
+            "session_id": session_id,
+            "operation": "check",
+            "cancel_event": threading.Event(),
+            "done_event": asyncio.Event(),
+        }
+        data_integrity_jobs[spec.id] = job
+        try:
+            async with session.feed.data_integrity_lock:
+                report = await asyncio.to_thread(
+                    inspect_data_integrity,
+                    cache_path=make_cache_path(),
+                    provider=spec.provider,
+                    exchange=spec.exchange,
+                    symbol=spec.symbol,
+                    timeframe=spec.timeframe,
+                    start_ts=session.feed.history_start_time(),
+                    cancel_event=job["cancel_event"],
+                )
+        except DataIntegrityCancelled:
+            return JSONResponse({"error": "data integrity check cancelled", "cancelled": True}, status_code=409)
+        except Exception as exc:
+            print(f"[data_integrity] check failed feed={spec.id}: {type(exc).__name__}: {exc}")
+            return JSONResponse(
+                {"error": f"data integrity check failed ({type(exc).__name__})"},
+                status_code=502,
+            )
+        finally:
+            job["done_event"].set()
+            if data_integrity_jobs.get(spec.id) is job:
+                data_integrity_jobs.pop(spec.id, None)
+        return JSONResponse(report)
+
+    @r.post("/api/sessions/{session_id}/data-integrity/repair")
+    async def repair_data_integrity(session_id: str) -> JSONResponse:
+        session = registry.get(session_id)
+        if session is None:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        if not session.feed.history_ready():
+            return JSONResponse({"error": "market data is still preparing"}, status_code=409)
+        spec = session.feed.spec
+        start_ts = session.feed.history_start_time()
+        if spec.id in data_integrity_jobs:
+            return JSONResponse({"error": "data integrity operation already running"}, status_code=409)
+        job = {
+            "session_id": session_id,
+            "operation": "repair",
+            "cancel_event": threading.Event(),
+            "done_event": asyncio.Event(),
+        }
+        data_integrity_jobs[spec.id] = job
+
+        def repair() -> dict:
+            return inspect_data_integrity(
+                cache_path=make_cache_path(),
+                provider=spec.provider,
+                exchange=spec.exchange,
+                symbol=spec.symbol,
+                timeframe=spec.timeframe,
+                start_ts=start_ts,
+                apply_repair=True,
+                cancel_event=job["cancel_event"],
+            )
+
+        try:
+            async with session.feed.data_integrity_lock:
+                report = await registry.repair_data_integrity(session_id, repair)
+        except DataIntegrityCancelled:
+            return JSONResponse({"error": "data integrity repair cancelled", "cancelled": True}, status_code=409)
+        except Exception as exc:
+            print(f"[data_integrity] repair failed feed={spec.id}: {type(exc).__name__}: {exc}")
+            return JSONResponse(
+                {"error": f"data integrity repair failed ({type(exc).__name__})"},
+                status_code=502,
+            )
+        finally:
+            job["done_event"].set()
+            if data_integrity_jobs.get(spec.id) is job:
+                data_integrity_jobs.pop(spec.id, None)
+        return JSONResponse(report)
+
+    @r.post("/api/sessions/{session_id}/data-integrity/cancel")
+    async def cancel_data_integrity(session_id: str) -> JSONResponse:
+        session = registry.get(session_id)
+        if session is None:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        job = data_integrity_jobs.get(session.feed.spec.id)
+        if job is None:
+            return JSONResponse({"ok": True, "cancelled": False})
+        job["cancel_event"].set()
+        await job["done_event"].wait()
+        return JSONResponse({"ok": True, "cancelled": True})
 
     @r.post("/api/sessions/{session_id}/runner/start")
     async def runner_start(session_id: str) -> JSONResponse:
