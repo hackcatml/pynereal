@@ -2817,6 +2817,13 @@
             `<path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path>` +
           `</svg>` +
         `</button>` +
+        `<button class="btn btn-icon data-integrity-btn" data-act="data-integrity" ` +
+        `title="Verify OHLCV data" aria-label="Verify OHLCV data">` +
+          `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">` +
+            `<circle cx="11" cy="11" r="8"></circle>` +
+            `<path d="m21 21-4.3-4.3"></path>` +
+          `</svg>` +
+        `</button>` +
         `<span data-field="history-loading" class="muted">loading</span>` +
         `</span></td>` +
       `<td data-label="Last bar" class="muted">${lastBarCell({})}</td>` +
@@ -2860,6 +2867,7 @@
           toggleDataSinceTooltip(tr);
         }
       } else if (act === "data-edit") openSettings(id, "data-since");
+      else if (act === "data-integrity") openSettings(id, "data-integrity");
       else if (act === "delete") openRemoveConfirm(id);
       else if (act === "logs") openLogs(id);
       else if (act === "webhook-settings") openSettings(id, "webhook");
@@ -4775,21 +4783,192 @@
   });
   // ---- per-session webhook/telegram settings modal ------------------------
   let settingsSession = null;
-  let settingsMode = null; // "webhook" | "telegram"
+  let settingsMode = null; // "webhook" | "telegram" | "data-since" | "data-integrity"
   let settingsOriginalHistorySince = null;
+  let settingsIntegrityAction = null;
+  let settingsIntegrityReport = null;
+  let settingsIntegrityRunning = null; // "check" | "repair"
+  let settingsIntegrityCancelRequested = false;
+  let integrityCancelSubmitting = false;
+
+  function setIntegrityOperation(operation) {
+    settingsIntegrityRunning = operation;
+    const running = Boolean(operation);
+    el("settings-cancel").hidden = !running;
+    el("settings-close").disabled = running;
+    if (running) el("settings-save").hidden = true;
+    if (!running) closeIntegrityCancelConfirm(true);
+  }
+
+  function integrityCount(value) {
+    const count = Number(value);
+    return Number.isFinite(count) ? count.toLocaleString("en-US") : "0";
+  }
+
+  function integrityTime(value) {
+    if (!value) return "-";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? String(value) : formatUtcDate(date);
+  }
+
+  function integrityTimeframeSeconds(timeframe) {
+    const match = /^(\d+)([mhd])$/.exec(String(timeframe || ""));
+    if (!match) return null;
+    const value = Number(match[1]);
+    const multiplier = match[2] === "m" ? 60 : match[2] === "h" ? 3600 : 86400;
+    return value * multiplier;
+  }
+
+  function renderDataIntegrityIntro(id) {
+    const session = sessions.find((item) => sessionId(item) === id) || {};
+    const start = Number(session.data_since_time);
+    const interval = integrityTimeframeSeconds(session.timeframe);
+    const now = Math.floor(Date.now() / 1000);
+    const end = interval ? Math.floor(now / interval) * interval - (2 * interval) : null;
+    const startText = Number.isFinite(start) && start > 0
+      ? formatUtcDate(new Date(start * 1000))
+      : "-";
+    const endText = Number.isFinite(end) && end > 0
+      ? formatUtcDate(new Date(end * 1000))
+      : "-";
+    settingsIntegrityAction = "check";
+    setIntegrityOperation(null);
+    el("settings-fields").innerHTML =
+      `<div class="integrity-intro">` +
+        `<strong>Compare local OHLCV with the exchange</strong>` +
+        `<span>Checks missing candles, different values, invalid OHLCV, and extra local candles.</span>` +
+      `</div>` +
+      `<div class="integrity-section-title integrity-check-range-title">Check range</div>` +
+      `<div class="integrity-summary integrity-check-range">` +
+        `<span>Start candle</span><strong class="mono">${esc(startText)}</strong>` +
+        `<span>End candle</span><strong class="mono">${esc(endText)}</strong>` +
+      `</div>`;
+    const saveBtn = el("settings-save");
+    saveBtn.hidden = false;
+    saveBtn.disabled = false;
+    saveBtn.textContent = "Check";
+  }
+
+  function renderDataIntegrityReport(report) {
+    settingsIntegrityReport = report;
+    const issues = report && report.issues ? report.issues : {};
+    const repaired = Boolean(report && report.repair_applied);
+    const hasIssues = report && report.status === "issues";
+    const noData = report && report.status === "no_data";
+    const statusClass = repaired || (!hasIssues && !noData) ? "verified" : "issues";
+    const statusTitle = repaired
+      ? "Repair completed"
+      : noData ? "No confirmed candles" : hasIssues ? "Issues found" : "Verified";
+    const statusText = repaired
+      ? `${integrityCount(report.imported_reference_bars)} exchange candles were applied.`
+      : noData
+        ? "The local cache does not contain confirmed candles in this data range."
+        : hasIssues
+          ? "Local confirmed candles differ from the exchange reference."
+          : "Local confirmed candles match the exchange reference.";
+    const rangeText = report && report.range_start_time && report.range_end_time
+      ? `${integrityTime(report.range_start_time)} → ${integrityTime(report.range_end_time)}`
+      : "-";
+    const samples = Array.isArray(report && report.samples) ? report.samples : [];
+    const sampleHtml = samples.length
+      ? `<div class="integrity-section-title">Issue samples</div>` +
+        `<div class="integrity-issues">${samples.map((sample) => (
+          `<div class="integrity-issue">` +
+            `<span class="mono">${esc(integrityTime(sample.time || sample.timestamp))}</span>` +
+            `<span>${esc(sample.details || sample.type || "Issue")}</span>` +
+          `</div>`
+        )).join("")}</div>`
+      : "";
+    const zeroVolume = Number(issues.synthetic_zero_volume || 0);
+    el("settings-fields").innerHTML =
+      `<div class="integrity-status ${statusClass}">` +
+        `<span class="integrity-status-mark" aria-hidden="true">${statusClass === "verified" ? "✓" : "!"}</span>` +
+        `<div><strong>${esc(statusTitle)}</strong><span>${esc(statusText)}</span></div>` +
+      `</div>` +
+      `<div class="integrity-section-title">Comparison</div>` +
+      `<div class="integrity-summary">` +
+        `<span>Local candles</span><strong>${integrityCount(report && report.bars_scanned)}</strong>` +
+        `<span>Exchange candles</span><strong>${integrityCount(report && report.reference_bars)}</strong>` +
+        `<span>Missing locally</span><strong>${integrityCount(issues.missing_local)}</strong>` +
+        `<span>Different values</span><strong>${integrityCount(issues.mismatched)}</strong>` +
+        `<span>Invalid OHLCV</span><strong>${integrityCount(issues.invalid)}</strong>` +
+        `<span>Extra local candles</span><strong>${integrityCount(issues.extra_local)}</strong>` +
+      `</div>` +
+      `<div class="integrity-section-title">Range</div>` +
+      `<div class="integrity-range mono">${esc(rangeText)}</div>` +
+      (zeroVolume > 0
+        ? `<div class="muted integrity-note">${integrityCount(zeroVolume)} zero-volume synthetic candles were ignored.</div>`
+        : "") +
+      sampleHtml +
+      `<div class="muted integrity-note">The current candle and the immediately preceding candle are excluded.</div>`;
+
+    setIntegrityOperation(null);
+    const saveBtn = el("settings-save");
+    if (repaired) {
+      settingsIntegrityAction = "verify";
+      saveBtn.hidden = false;
+      saveBtn.textContent = "Verify again";
+    } else if (report && report.repairable) {
+      settingsIntegrityAction = "repair";
+      saveBtn.hidden = false;
+      saveBtn.textContent = "Repair";
+    } else {
+      settingsIntegrityAction = null;
+      saveBtn.hidden = true;
+    }
+    saveBtn.disabled = false;
+  }
+
+  async function loadDataIntegrity(id) {
+    settingsIntegrityAction = null;
+    settingsIntegrityCancelRequested = false;
+    setIntegrityOperation("check");
+    el("settings-fields").innerHTML =
+      `<div class="settings-loading integrity-loading">` +
+        `<span class="settings-spinner" aria-hidden="true"></span>` +
+        `<span>Comparing confirmed candles with exchange data…</span>` +
+      `</div>`;
+    try {
+      const report = await api(`/api/sessions/${encodeURIComponent(id)}/data-integrity`);
+      if (settingsSession !== id || settingsMode !== "data-integrity") return;
+      if (settingsIntegrityCancelRequested) return;
+      renderDataIntegrityReport(report);
+    } catch (e) {
+      if (settingsSession !== id || settingsMode !== "data-integrity") return;
+      if (settingsIntegrityCancelRequested) return;
+      setIntegrityOperation(null);
+      el("settings-fields").innerHTML = "";
+      el("settings-error").textContent = e.message;
+    }
+  }
 
   async function openSettings(id, mode) {
     settingsSession = id;
     settingsMode = mode;
     settingsOriginalHistorySince = null;
+    settingsIntegrityAction = null;
+    settingsIntegrityReport = null;
+    settingsIntegrityRunning = null;
+    settingsIntegrityCancelRequested = false;
     el("settings-error").textContent = "";
+    const saveBtn = el("settings-save");
+    el("settings-cancel").hidden = true;
+    el("settings-close").disabled = false;
+    saveBtn.hidden = false;
+    saveBtn.disabled = false;
+    saveBtn.textContent = "Save";
     el("settings-title").textContent =
       (mode === "webhook" ? "Webhook URL — "
         : mode === "telegram" ? "Telegram bot — "
+        : mode === "data-integrity" ? "Data integrity — "
         : "Data since — ") + id;
     el("settings-fields").innerHTML = "loading…";
     el("settings-modal").classList.remove("hidden");
     lockBodyScroll();
+    if (mode === "data-integrity") {
+      renderDataIntegrityIntro(id);
+      return;
+    }
     if (mode === "data-since") {
       const s = sessions.find((x) => sessionId(x) === id) || {};
       const shared = sessions
@@ -4841,15 +5020,22 @@
     }
   }
 
-  function closeSettings() {
+  function closeSettings(force = false) {
     if (el("settings-modal").classList.contains("hidden")) return;
+    if (settingsIntegrityRunning && !force) return;
     el("settings-modal").classList.add("hidden");
     unlockBodyScroll();
     const saveBtn = el("settings-save");
-    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Save"; }
+    if (saveBtn) { saveBtn.hidden = false; saveBtn.disabled = false; saveBtn.textContent = "Save"; }
+    el("settings-cancel").hidden = true;
+    el("settings-close").disabled = false;
     settingsSession = null;
     settingsMode = null;
     settingsOriginalHistorySince = null;
+    settingsIntegrityAction = null;
+    settingsIntegrityReport = null;
+    settingsIntegrityRunning = null;
+    settingsIntegrityCancelRequested = false;
   }
 
   function setDataSinceLoading(on) {
@@ -4866,6 +5052,47 @@
 
   async function saveSettings() {
     if (!settingsSession) return;
+    if (settingsMode === "data-integrity") {
+      const sid = settingsSession;
+      if (settingsIntegrityAction === "check" || settingsIntegrityAction === "verify") {
+        el("settings-error").textContent = "";
+        await loadDataIntegrity(sid);
+        return;
+      }
+      if (settingsIntegrityAction !== "repair") return;
+      const saveBtn = el("settings-save");
+      settingsIntegrityCancelRequested = false;
+      setIntegrityOperation("repair");
+      el("settings-error").textContent = "";
+      el("settings-fields").innerHTML =
+        `<div class="settings-loading integrity-loading">` +
+          `<span class="settings-spinner" aria-hidden="true"></span>` +
+          `<span>Repairing local OHLCV data…</span>` +
+        `</div>`;
+      try {
+        const report = await api(
+          `/api/sessions/${encodeURIComponent(sid)}/data-integrity/repair`,
+          { method: "POST" },
+        );
+        if (settingsSession === sid && settingsMode === "data-integrity") {
+          if (settingsIntegrityCancelRequested) return;
+          renderDataIntegrityReport(report);
+        }
+      } catch (e) {
+        if (settingsSession === sid && settingsMode === "data-integrity") {
+          if (settingsIntegrityCancelRequested) return;
+          setIntegrityOperation(null);
+          if (settingsIntegrityReport) renderDataIntegrityReport(settingsIntegrityReport);
+          el("settings-error").textContent = e.message;
+          if (!settingsIntegrityReport) {
+            saveBtn.hidden = false;
+            saveBtn.disabled = false;
+            saveBtn.textContent = "Repair";
+          }
+        }
+      }
+      return;
+    }
     if (settingsMode === "data-since") {
       const inputEl = el("settings-history-since");
       const value = (inputEl ? inputEl.value : "").trim();
@@ -4915,10 +5142,77 @@
     }
   }
 
-  el("settings-close").addEventListener("click", closeSettings);
+  function closeIntegrityCancelConfirm(force = false) {
+    if (integrityCancelSubmitting && !force) return;
+    const modal = el("integrity-cancel-modal");
+    if (modal.classList.contains("hidden")) return;
+    modal.classList.add("hidden");
+    modal.setAttribute("aria-hidden", "true");
+    el("integrity-cancel-error").textContent = "";
+  }
+
+  function openIntegrityCancelConfirm() {
+    const operation = settingsIntegrityRunning;
+    if (!operation || !settingsSession) return;
+    const repair = operation === "repair";
+    integrityCancelSubmitting = false;
+    el("integrity-cancel-title").textContent = repair ? "Cancel repair?" : "Cancel data check?";
+    el("integrity-cancel-message").textContent = repair
+      ? "The repair will be stopped. Any cache write already in progress will finish safely before cancellation."
+      : "The exchange download and candle comparison will be stopped.";
+    el("integrity-cancel-confirm").textContent = repair ? "Cancel repair" : "Cancel check";
+    el("integrity-cancel-confirm").disabled = false;
+    el("integrity-cancel-keep").disabled = false;
+    el("integrity-cancel-close").disabled = false;
+    el("integrity-cancel-error").textContent = "";
+    const modal = el("integrity-cancel-modal");
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+  }
+
+  async function confirmIntegrityCancel() {
+    if (!settingsIntegrityRunning || !settingsSession || integrityCancelSubmitting) return;
+    const sid = settingsSession;
+    integrityCancelSubmitting = true;
+    settingsIntegrityCancelRequested = true;
+    el("integrity-cancel-confirm").disabled = true;
+    el("integrity-cancel-keep").disabled = true;
+    el("integrity-cancel-close").disabled = true;
+    el("integrity-cancel-confirm").textContent = "Cancelling…";
+    const loadingText = el("settings-fields").querySelector(".integrity-loading span:last-child");
+    if (loadingText) loadingText.textContent = "Cancelling operation…";
+    try {
+      await api(`/api/sessions/${encodeURIComponent(sid)}/data-integrity/cancel`, {
+        method: "POST",
+      });
+    } catch (e) {
+      settingsIntegrityCancelRequested = false;
+      integrityCancelSubmitting = false;
+      el("integrity-cancel-error").textContent = e.message;
+      el("integrity-cancel-confirm").disabled = false;
+      el("integrity-cancel-keep").disabled = false;
+      el("integrity-cancel-close").disabled = false;
+      el("integrity-cancel-confirm").textContent = settingsIntegrityRunning === "repair"
+        ? "Cancel repair"
+        : "Cancel check";
+      return;
+    }
+    integrityCancelSubmitting = false;
+    closeIntegrityCancelConfirm(true);
+    closeSettings(true);
+  }
+
+  el("settings-close").addEventListener("click", () => closeSettings());
+  el("settings-cancel").addEventListener("click", openIntegrityCancelConfirm);
   el("settings-save").addEventListener("click", saveSettings);
   el("settings-modal").addEventListener("click", (e) => {
     if (e.target === el("settings-modal")) closeSettings();
+  });
+  el("integrity-cancel-close").addEventListener("click", () => closeIntegrityCancelConfirm());
+  el("integrity-cancel-keep").addEventListener("click", () => closeIntegrityCancelConfirm());
+  el("integrity-cancel-confirm").addEventListener("click", confirmIntegrityCancel);
+  el("integrity-cancel-modal").addEventListener("click", (e) => {
+    if (e.target === el("integrity-cancel-modal")) closeIntegrityCancelConfirm();
   });
   el("remove-close").addEventListener("click", closeRemoveConfirm);
   el("remove-cancel").addEventListener("click", closeRemoveConfirm);
@@ -4929,6 +5223,10 @@
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
+    if (!el("integrity-cancel-modal").classList.contains("hidden")) {
+      closeIntegrityCancelConfirm();
+      return;
+    }
     closeHubMenu();
     if (isCalendarOpen()) closeCalendar();
     if (isAssetTransferOpen()) closeAssetTransfer();
