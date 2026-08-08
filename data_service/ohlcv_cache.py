@@ -99,6 +99,46 @@ def get_min_ts(
         return row[0] if row and row[0] is not None else None
 
 
+def get_internal_gaps(
+    db_path: Path,
+    provider: str,
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    interval_seconds: int,
+    start_ts: int | None = None,
+) -> list[tuple[int, int]]:
+    """Return adjacent cached timestamps whose distance exceeds one interval."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            WITH ordered AS (
+                SELECT
+                    ts,
+                    LAG(ts) OVER (ORDER BY ts) AS previous_ts
+                FROM bars
+                WHERE provider = ? AND exchange = ? AND symbol = ? AND timeframe = ?
+            )
+            SELECT previous_ts, ts
+            FROM ordered
+            WHERE previous_ts IS NOT NULL
+              AND ts - previous_ts > ?
+              AND (? IS NULL OR ts > ?)
+            ORDER BY previous_ts
+            """,
+            (
+                provider,
+                exchange,
+                symbol,
+                timeframe,
+                interval_seconds,
+                start_ts,
+                start_ts,
+            ),
+        ).fetchall()
+    return [(int(previous_ts), int(next_ts)) for previous_ts, next_ts in rows]
+
+
 def upsert_bars(
     db_path: Path,
     provider: str,
@@ -140,6 +180,33 @@ def upsert_bars(
                 """,
                 rows,
             )
+
+
+def delete_bars(
+    db_path: Path,
+    provider: str,
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    timestamps: Iterable[int],
+) -> int:
+    rows = sorted({int(timestamp) for timestamp in timestamps})
+    if not rows:
+        return 0
+    with _CACHE_WRITE_LOCK:
+        with _connect(db_path) as conn:
+            before = conn.total_changes
+            conn.executemany(
+                """
+                DELETE FROM bars
+                WHERE provider = ? AND exchange = ? AND symbol = ? AND timeframe = ? AND ts = ?
+                """,
+                [
+                    (provider, exchange, symbol, timeframe, timestamp)
+                    for timestamp in rows
+                ],
+            )
+            return conn.total_changes - before
 
 
 def import_from_ohlcv(

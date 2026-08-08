@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, UTC
 import struct
 import time
-from typing import Optional
+from typing import Callable, Optional
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -91,29 +91,52 @@ def download_history_range_into_cache(
     with TemporaryDirectory() as tmp_dir:
         ohlv_dir = Path(tmp_dir)
         try:
-            provider_module = __import__(f"pynecore.providers.{provider}", fromlist=[""])
-            provider_class = getattr(
-                provider_module,
-                [p for p in dir(provider_module) if p.endswith("Provider")][0],
-            )
-            provider_instance = provider_class(
-                symbol=f"{exchange}:{symbol}".upper(),
-                timeframe=convert_timeframe(timeframe),
+            ohlcv_path = download_history_range_to_file(
+                provider=provider,
+                exchange=exchange,
+                symbol=symbol,
+                timeframe=timeframe,
+                time_from=time_from,
+                time_to=time_to,
                 ohlv_dir=ohlv_dir,
-                config_dir=app_state.config_dir,
             )
-            with provider_instance:
-                provider_instance.download_ohlcv(
-                    time_from=time_from.replace(tzinfo=UTC),
-                    time_to=time_to.replace(tzinfo=UTC),
-                    on_progress=None,
-                )
-            assert provider_instance.ohlcv_path is not None
-            import_from_ohlcv(cache_path, provider, exchange, symbol, timeframe, provider_instance.ohlcv_path)
+            import_from_ohlcv(cache_path, provider, exchange, symbol, timeframe, ohlcv_path)
             ok = True
         except Exception as e:
             print(f"[data_service] download_range failed: {e}")
     return ok
+
+
+def download_history_range_to_file(
+    *,
+    provider: str,
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    time_from: datetime,
+    time_to: datetime,
+    ohlv_dir: Path,
+    on_progress: Callable[[datetime], None] | None = None,
+) -> Path:
+    provider_module = __import__(f"pynecore.providers.{provider}", fromlist=[""])
+    provider_class = getattr(
+        provider_module,
+        [p for p in dir(provider_module) if p.endswith("Provider")][0],
+    )
+    provider_instance = provider_class(
+        symbol=f"{exchange}:{symbol}".upper(),
+        timeframe=convert_timeframe(timeframe),
+        ohlv_dir=ohlv_dir,
+        config_dir=app_state.config_dir,
+    )
+    with provider_instance:
+        provider_instance.download_ohlcv(
+            time_from=time_from.replace(tzinfo=UTC),
+            time_to=time_to.replace(tzinfo=UTC),
+            on_progress=on_progress,
+        )
+    assert provider_instance.ohlcv_path is not None
+    return provider_instance.ohlcv_path
 
 
 def _ohlcv_float(value: float) -> float:
