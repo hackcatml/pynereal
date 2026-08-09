@@ -53,6 +53,7 @@ class SessionRegistry:
         self.ai_instruction_handler: Optional[
             Callable[[Session, dict], Awaitable[None]]
         ] = None
+        self.strategy_evaluation_enabled = False
 
     # ------------------------------------------------------------------
     # Queries
@@ -96,6 +97,11 @@ class SessionRegistry:
         self.ai_instruction_handler = handler
         for session in self.sessions.values():
             session.on_ai_instruction = handler
+
+    def set_strategy_evaluation_enabled(self, enabled: bool) -> None:
+        self.strategy_evaluation_enabled = bool(enabled)
+        for session in self.sessions.values():
+            session.strategy_evaluation_enabled = self.strategy_evaluation_enabled
 
     def _schedule_logo_resolution(self, session: Session) -> None:
         task = self.logo_tasks.pop(session.spec.id, None)
@@ -259,7 +265,11 @@ class SessionRegistry:
         if len(self.sessions) >= MAX_SESSIONS:
             raise SessionLimitError(f"max {MAX_SESSIONS} sessions reached")
         feed = self._get_or_create_feed(spec)
-        session = Session(spec, feed)
+        session = Session(
+            spec,
+            feed,
+            strategy_evaluation_enabled=self.strategy_evaluation_enabled,
+        )
         session.on_status_change = self.notify_hub
         session.on_spec_change = self._persist_and_notify
         session.on_ai_instruction = self.ai_instruction_handler

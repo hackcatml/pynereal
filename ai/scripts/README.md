@@ -149,3 +149,24 @@ Its `percentage` uses the signed exchange `returnOnEquity` value and falls back
 to signed unrealized PnL divided by initial margin when that value is missing.
 Supplying `--dex` limits the query to that DEX through CCXT's REST endpoint.
 Use `--include-closed` only when zero-size records are needed for diagnostics.
+
+## Recent order history
+
+`order_history.py` reads recent orders for one unified session symbol across
+configured accounts. It uses read-only CCXT order endpoints, returns normalized
+orders without raw exchange payloads, and reports unsupported account/symbol
+combinations as unavailable.
+
+```bash
+# Every configured account that supports this symbol
+python ai/scripts/order_history.py --symbol CL/USDT:USDT --market-type linear
+
+# One explicitly selected account
+python ai/scripts/order_history.py --account bitget_sub2 \
+  --symbol CL/USDT:USDT --market-type linear
+```
+
+Dashboard session evaluation invokes this collector together with `position.py`.
+An explicitly named account is used as-is. Otherwise, current same-symbol
+positions and recent same-symbol orders are used to rank configured accounts;
+the match is not persisted in session configuration.

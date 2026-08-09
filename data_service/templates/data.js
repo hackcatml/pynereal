@@ -242,7 +242,8 @@ App.data = {
             }
           }
         } else if (msg.type === "trade_close") {
-          const markerKey = `close_${msg.time}_${msg.id}`;
+          const closeOrderId = msg.exit_id || msg.id;
+          const markerKey = `close_${msg.time}_${closeOrderId}`;
           if (!collections.markerKeys.has(markerKey)) {
             collections.markers.push({
               time: msg.time,
@@ -255,7 +256,7 @@ App.data = {
             collections.markerKeys.add(markerKey);
 
             if (msg.price != null) {
-              const priceKey = `close_${msg.time}_${msg.id}`;
+              const priceKey = `close_${msg.time}_${closeOrderId}`;
               if (!collections.closePriceKeys.has(priceKey)) {
                 collections.closeMarkerData.push({ time: msg.time, value: msg.price });
                 collections.closePriceKeys.add(priceKey);

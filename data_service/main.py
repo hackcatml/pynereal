@@ -169,6 +169,7 @@ async def main() -> None:
         await codex_service.start()
     except Exception as e:
         print(f"[ai] Codex app-server startup failed: {e}")
+    registry.set_strategy_evaluation_enabled(codex_service.running)
     app = build_app(
         registry,
         codex_service,

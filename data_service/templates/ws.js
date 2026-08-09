@@ -165,7 +165,8 @@ App.ws = {
             return;
           }
 
-          const markerKey = `close_${msg.time}_${msg.id}`;
+          const closeOrderId = msg.exit_id || msg.id;
+          const markerKey = `close_${msg.time}_${closeOrderId}`;
           if (collections.markerKeys.has(markerKey)) {
             return;
           }
@@ -181,7 +182,7 @@ App.ws = {
           collections.markerKeys.add(markerKey);
 
           if (msg.price != null && Number.isFinite(Number(msg.price)) && Number.isFinite(Number(msg.time))) {
-            const priceKey = `close_${msg.time}_${msg.id}`;
+            const priceKey = `close_${msg.time}_${closeOrderId}`;
             if (!collections.closePriceKeys.has(priceKey)) {
               collections.closeMarkerData.push({ time: Number(msg.time), value: Number(msg.price) });
               collections.closePriceKeys.add(priceKey);

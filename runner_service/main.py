@@ -19,6 +19,7 @@ import numpy as np
 import websockets
 
 from appendable_iter import AppendableIterable
+from strategy_snapshot import build_strategy_snapshot
 from pynecore.cli.app import app_state
 from pynecore.core.ohlcv_file import OHLCVReader
 from pynecore.core.exchange_policy import normalize_exchange_name, tradingview_hides_zero_volume
@@ -269,6 +270,7 @@ def on_close_event(trade, runner=None):
         "price": float(trade.exit_price),
         "size": float(trade.size),
         "id": trade.entry_id,
+        "exit_id": trade.exit_id if trade.exit_id else "",
         "comment": trade.exit_comment if trade.exit_comment else "",
         "profit": float(trade.profit)
     }
@@ -528,6 +530,28 @@ def get_runner_candle(runner: ScriptRunner, index: int) -> OHLCV | None:
     if not candles or index < 0 or index >= len(candles):
         return None
     return candles[index]
+
+
+async def send_strategy_snapshot(
+    ws,
+    runner: ScriptRunner,
+    *,
+    phase: str,
+    calculated_through: int | None,
+    calculation_generation_id: str,
+) -> None:
+    try:
+        source_hashes = compute_script_hashes(SCRIPT_PATH)
+        event = build_strategy_snapshot(
+            runner,
+            phase=phase,
+            calculated_through=calculated_through,
+            calculation_generation_id=calculation_generation_id,
+            source_hashes=source_hashes,
+        )
+        await ws.send(json.dumps(event))
+    except Exception as e:
+        print(f"[runner] Failed to send strategy snapshot: {e}")
 
 
 def bar_list_to_ohlcv(bar: list) -> OHLCV:
@@ -941,6 +965,20 @@ async def main():
                 except Exception as e:
                     print(f"[runner] Failed to send plot options: {e}")
 
+            if msg.get("strategy_evaluation_enabled"):
+                processed_bar = get_runner_candle(runner, runner.bar_index)
+                await send_strategy_snapshot(
+                    ws,
+                    runner,
+                    phase="prerun",
+                    calculated_through=(
+                        int(processed_bar.timestamp) if processed_bar is not None else None
+                    ),
+                    calculation_generation_id=str(
+                        msg.get("calculation_generation_id") or ""
+                    ),
+                )
+
             if mtype == "prerun_ready":
                 # confirmed_bar_and_new_bar가 있다면 new bar ts를 추적에 사용
                 confirmed_bar_and_new_bar = msg.get("confirmed_bar_and_new_bar")
@@ -1103,6 +1141,17 @@ async def main():
                         # print(f"[runner] Sent plot_options: {plot_options}")
                     except Exception as e:
                         print(f"[runner] Failed to send plot options: {e}")
+
+                if msg.get("strategy_evaluation_enabled"):
+                    await send_strategy_snapshot(
+                        ws,
+                        ctx.runner,
+                        phase="run_ready",
+                        calculated_through=int(confirmed_ohlcv.timestamp),
+                        calculation_generation_id=str(
+                            msg.get("calculation_generation_id") or ""
+                        ),
+                    )
 
             # Remove the script_module using destroy() (required). If you don't remove it,
             # the ScriptRunner will reuse the previous candle data even when reloading the script.

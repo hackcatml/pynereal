@@ -5,12 +5,14 @@ import json
 import uuid
 from collections import deque
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from fastapi import WebSocket
 
 from config import FeedSpec, SessionSpec
+from pynecore.core.exchange_policy import tradingview_hides_zero_volume
 from log_utils import log_with_time
 from manual_alerts import build_manual_alert_payload, send_manual_alert_payload
 from ohlcv_paths import make_ohlcv_paths, runtime_output_dir
@@ -102,7 +104,15 @@ class Feed:
     async def emit_event(self, payload: dict) -> None:
         # prerun_ready / run_ready fan out to every runner subscribed to this feed.
         for session in list(self.subscribers.values()):
-            await session.send_to_runners(payload)
+            if session.runner_count <= 0:
+                continue
+            session_payload = dict(payload)
+            if session.strategy_evaluation_enabled:
+                generation_id = await session.begin_calculation(session_payload)
+                if generation_id is not None:
+                    session_payload["calculation_generation_id"] = generation_id
+                    session_payload["strategy_evaluation_enabled"] = True
+            await session.send_to_runners(session_payload)
 
     def history_ready(self) -> bool:
         return self.history_ready_event.is_set()
@@ -155,9 +165,16 @@ class Feed:
 # strategies on the same BTC market).
 # ======================================================================
 class Session:
-    def __init__(self, spec: SessionSpec, feed: Feed) -> None:
+    def __init__(
+        self,
+        spec: SessionSpec,
+        feed: Feed,
+        *,
+        strategy_evaluation_enabled: bool = False,
+    ) -> None:
         self.spec = spec
         self.feed = feed
+        self.strategy_evaluation_enabled = strategy_evaluation_enabled
         self.paths = SessionPaths.build(spec.id)
 
         self.ws_manager = WSManager(on_disconnect=self._cleanup_client)
@@ -171,6 +188,14 @@ class Session:
         # ready = "running" (green).
         self.runner_ready = False
         self.history_resync_pending = False
+        self.calculation_generation_id = uuid.uuid4().hex
+        self.calculation_status = "stopped"
+        self.calculation_latest_confirmed_bar: int | None = None
+        self.calculated_through: int | None = None
+        self.calculation_updated_at = datetime.now(UTC).isoformat()
+        self.strategy_snapshot: dict[str, Any] | None = None
+        self.strategy_snapshot_generation_id: str | None = None
+        self._calculation_condition = asyncio.Condition()
         self.chart_info: Dict[str, Any] = {
             "exchange": spec.exchange,
             "symbol": spec.symbol,
@@ -209,6 +234,121 @@ class Session:
             except Exception:
                 pass
 
+    @staticmethod
+    def _event_confirmed_bar_time(event: dict[str, Any]) -> int | None:
+        bars = event.get("confirmed_bar_and_new_bar")
+        if not isinstance(bars, list) or not bars:
+            return None
+        confirmed = bars[0]
+        if not isinstance(confirmed, (list, tuple)) or not confirmed:
+            return None
+        try:
+            return int(confirmed[0] // 1000)
+        except (TypeError, ValueError):
+            return None
+
+    def _event_confirmed_bar_is_hidden(self, event: dict[str, Any]) -> bool:
+        bars = event.get("confirmed_bar_and_new_bar")
+        if not isinstance(bars, list) or not bars:
+            return False
+        confirmed = bars[0]
+        if not isinstance(confirmed, (list, tuple)) or len(confirmed) < 6:
+            return False
+        if not tradingview_hides_zero_volume(self.spec.exchange):
+            return False
+        try:
+            return float(confirmed[5]) == 0.0
+        except (TypeError, ValueError):
+            return False
+
+    async def begin_calculation(self, event: dict[str, Any] | None = None) -> str | None:
+        event = event or {}
+        if self._event_confirmed_bar_is_hidden(event):
+            return None
+        target = self._event_confirmed_bar_time(event)
+        async with self._calculation_condition:
+            self.calculation_generation_id = uuid.uuid4().hex
+            self.calculation_status = (
+                "starting" if event.get("type") == "runner_start" else "prerun"
+            )
+            self.calculation_latest_confirmed_bar = target
+            self.calculated_through = None
+            self.calculation_updated_at = datetime.now(UTC).isoformat()
+            self.strategy_snapshot = None
+            self.strategy_snapshot_generation_id = None
+            self._calculation_condition.notify_all()
+            return self.calculation_generation_id
+
+    async def set_calculation_stopped(self) -> None:
+        async with self._calculation_condition:
+            self.calculation_status = "stopped"
+            self.calculation_updated_at = datetime.now(UTC).isoformat()
+            self._calculation_condition.notify_all()
+
+    async def apply_strategy_snapshot(self, event: dict[str, Any]) -> bool:
+        event_generation_id = str(event.get("calculation_generation_id") or "")
+        try:
+            calculated_through = int(event["calculated_through"])
+        except (KeyError, TypeError, ValueError):
+            calculated_through = None
+        snapshot = dict(event)
+        snapshot.pop("type", None)
+        async with self._calculation_condition:
+            if event_generation_id != self.calculation_generation_id:
+                return False
+            if self.calculation_latest_confirmed_bar is None:
+                self.calculation_latest_confirmed_bar = calculated_through
+            self.calculated_through = calculated_through
+            self.strategy_snapshot = snapshot
+            self.strategy_snapshot_generation_id = self.calculation_generation_id
+            target = self.calculation_latest_confirmed_bar
+            if calculated_through is not None and (target is None or calculated_through >= target):
+                self.calculation_status = "ready"
+            else:
+                self.calculation_status = "prerun"
+            self.calculation_updated_at = datetime.now(UTC).isoformat()
+            self._calculation_condition.notify_all()
+            return True
+
+    def calculation_state_payload(self) -> dict[str, Any]:
+        return {
+            "status": self.calculation_status,
+            "generation_id": self.calculation_generation_id,
+            "calculated_through": self.calculated_through,
+            "latest_confirmed_bar": self.calculation_latest_confirmed_bar,
+            "snapshot_generation_id": self.strategy_snapshot_generation_id,
+            "updated_at": self.calculation_updated_at,
+        }
+
+    def calculation_ready(self) -> bool:
+        target = self.calculation_latest_confirmed_bar
+        return bool(
+            self.calculation_status == "ready"
+            and self.strategy_snapshot is not None
+            and self.strategy_snapshot_generation_id == self.calculation_generation_id
+            and self.calculated_through is not None
+            and (target is None or self.calculated_through >= target)
+        )
+
+    async def wait_for_calculation_ready(self, timeout: float) -> bool:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, timeout)
+        async with self._calculation_condition:
+            while not self.calculation_ready():
+                if self.runner_count <= 0 or self.calculation_status == "stopped":
+                    return False
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return False
+                try:
+                    await asyncio.wait_for(
+                        self._calculation_condition.wait(),
+                        timeout=remaining,
+                    )
+                except asyncio.TimeoutError:
+                    return False
+            return True
+
     # ------------------------------------------------------------------
     # WebSocket lifecycle
     # ------------------------------------------------------------------
@@ -228,6 +368,7 @@ class Session:
             if self.runner_count <= 0:
                 self.runner_count = 0
                 self.runner_ready = False
+                await self.set_calculation_stopped()
                 await self.send_to_charts({"type": "runner_disconnected"})
             await self._notify_status()
 
@@ -249,6 +390,8 @@ class Session:
         if msg_type == "client_hello":
             role = event.get("role")
             if role == "runner":
+                if self.strategy_evaluation_enabled:
+                    await self.begin_calculation({"type": "runner_start"})
                 # Replay the feed's pending after-history prerun only after the
                 # client identifies as a runner. Until then it receives no live
                 # bars, so long pre_run cannot build up a chart-message backlog.
@@ -258,6 +401,11 @@ class Session:
                     pending_prerun_event = dict(pending_prerun_event)
                     if self.history_resync_pending:
                         pending_prerun_event["history_resync"] = True
+                    if self.strategy_evaluation_enabled:
+                        generation_id = await self.begin_calculation(pending_prerun_event)
+                        if generation_id is not None:
+                            pending_prerun_event["calculation_generation_id"] = generation_id
+                            pending_prerun_event["strategy_evaluation_enabled"] = True
                     await ws_manager.send(ws, pending_prerun_event)
 
                 self.client_roles[ws] = role
@@ -284,6 +432,11 @@ class Session:
             self.runner_ready = True
             self.history_resync_pending = False
             await self._notify_status()
+
+        elif msg_type == "strategy_snapshot":
+            if self.client_roles.get(ws) != "runner":
+                return
+            await self.apply_strategy_snapshot(event)
 
         elif msg_type == "last_bar_open_fix":
             last_bar_index = event.get("last_bar_index", -1)
@@ -639,6 +792,8 @@ class Session:
             "history_ready": feed.history_ready(),
             "data_since_time": feed.history_start_time(),
             "runner_connected": self.runner_count > 0,
+            "runner_ready": self.runner_ready,
+            "calculation": self.calculation_state_payload(),
             "last_bar_time": feed.last_bar_time(),
             "last_price": feed.last_price(),
         }
