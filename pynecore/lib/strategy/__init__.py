@@ -661,11 +661,14 @@ class Position:
                     # Modify sizes
                     self.size += size
                     # Handle too small sizes because of floating point inaccuracy and rounding
-                    if _size_round(self.size) == 0.0:
+                    position_flat = _size_round(self.size) == 0.0
+                    if position_flat:
                         size -= self.size
                         self.size = 0.0
                     self.sign = 0.0 if self.size == 0.0 else 1.0 if self.size > 0.0 else -1.0
                     trade.size += size
+                    if position_flat:
+                        trade.size = 0.0
                     order.size -= size
 
                     # Cancel exit orders for closed trades (TradingView behavior)
@@ -833,14 +836,14 @@ class Position:
 
     def _dispatch_order_notifications(self, order: Order) -> None:
         if not realtime_trade() and order.alert_message:
-            alert(order.alert_message)
+            alert(order.alert_message, _dispatch_callback=False)
         elif realtime_trade() and not pre_run():
             # print(f"order.bar_index: {order.bar_index}, last_bar_index: {last_bar_index()}")
             # Real time trade 에서는 최종 봉이 확정되고 새로운 봉이 생길때에만
             # alert 및 AI instruction을 전달함.
             if order.bar_index == last_bar_index() - 1:
                 if order.alert_message:
-                    alert(order.alert_message)
+                    alert(order.alert_message, _dispatch_callback=False)
                 if order.alert_message and self.on_alert_callback:
                     try:
                         self.on_alert_callback(order.alert_message)
@@ -1329,15 +1332,17 @@ class Position:
 # noinspection PyProtectedMember
 def _size_round(qty: float) -> float:
     """
-    Round size to the nearest possible value
+    Round a size down to the nearest tradable lot.
 
     :param qty: The quantity to round
     :return: The rounded quantity
     """
     rfactor = syminfo._size_round_factor  # noqa
-    qrf = int(abs(qty) * rfactor * 10.0) * 0.1  # We need to floor to one decimal place
+    scaled = abs(qty) * rfactor
+    nearest = round(scaled)
+    lots = nearest if abs(scaled - nearest) <= scaled * 1e-12 + 1e-9 else int(scaled)
     sign = 1 if qty > 0 else -1
-    return sign * int(qrf) / rfactor
+    return sign * lots / rfactor
 
 
 # noinspection PyShadowingNames
@@ -1425,12 +1430,13 @@ def close(id: str, comment: str | NA[str] = na_str, qty: float | NA[float] = na_
         return
 
     if isinstance(qty, NA):
-        size = -position.size * (qty_percent * 0.01) if not isinstance(qty_percent, NA) \
-            else -position.size
+        if not isinstance(qty_percent, NA):
+            size = _size_round(-position.size * (qty_percent * 0.01))
+        else:
+            size = -position.size
     else:
-        size = -position.sign * qty
+        size = _size_round(-position.sign * qty)
 
-    size = _size_round(size)
     if size == 0.0:
         return
 
@@ -1458,7 +1464,10 @@ def close(id: str, comment: str | NA[str] = na_str, qty: float | NA[float] = na_
 
 
 # noinspection PyProtectedMember,PyShadowingNames
-def close_all(comment: str | NA[str] = na_str, alert_message: str | NA[str] = na_str, immediately: bool = False):
+def close_all(comment: str | NA[str] = na_str, alert_message: str | NA[str] = na_str,
+              immediately: bool = False,
+              record: bool = False, record_data: str | None = None,
+              ai: str | NA[str] = na_str):
     """
     Creates an order to close an open position completely, regardless of the identifiers of the entry
     orders that opened or added to it.
@@ -1466,6 +1475,9 @@ def close_all(comment: str | NA[str] = na_str, alert_message: str | NA[str] = na
     :param comment: Additional notes on the filled order
     :param alert_message: Custom text for the alert that fires when an order fills
     :param immediately: If true, the closing order executes on the same tick when the strategy places it
+    :param record: Whether to record the close data or not
+    :param record_data: Extra data to record
+    :param ai: Instruction sent to the configured AI service when the order fills
     """
     if lib._lib_semaphore:
         return
@@ -1475,13 +1487,26 @@ def close_all(comment: str | NA[str] = na_str, alert_message: str | NA[str] = na
         return
 
     exit_id = 'Close position order'
+    bar_time = lib._time
+    alert_message = f'{{"timestamp": {bar_time}, "message": {alert_message}}}' if alert_message else None
+    ai_instruction = None if isinstance(ai, NA) else str(ai).strip() or None
     order = Order(None, -position.size, exit_id=exit_id, order_type=_order_type_close,
-                  comment=comment, alert_message=alert_message)
+                  comment=None if isinstance(comment, NA) else comment,
+                  alert_message=None if isinstance(alert_message, NA) else alert_message,
+                  ai_instruction=ai_instruction)
 
     # Add order to position (this will handle orderbook and exit_orders)
     position._add_order(order)
     if immediately:
         position.fill_order(order, position.c, position.h, position.l)
+
+    if record:
+        record_message = (f'{{"time": {str(datetime.fromtimestamp(int(bar_time / 1000)))}, '
+                          f'"bar": {order.bar_index}, '
+                          f'"comment": "{comment}", '
+                          f'"alert": {alert_message}, '
+                          f'"data": {record_data}}}')
+        write_record(record_message)
 
 
 # noinspection PyProtectedMember,PyShadowingNames,PyShadowingBuiltins

@@ -3,7 +3,7 @@
 """
 from pynecore import Persistent
 from pynecore.lib import script, close, ta, strategy, time, plot, color, na, plotchar, request, syminfo, low, barmerge, \
-    log, bar_index, is_na, bgcolor
+    log, bar_index, is_na, bgcolor, alert
 from pynecore.types import Series
 
 
@@ -29,6 +29,12 @@ def main():
     macro_low = request.security(syminfo.tickerid, '1D', low[2], lookahead=barmerge.lookahead_on)
     _, _, bb_5_lower = request.security(syminfo.tickerid, '5', ta.bb(close, 20, 2), lookahead=barmerge.lookahead_on)
 
+    # alert() example
+    # Use alert() for a notification that must not create or modify a strategy order.
+    # In realtime trade, it is suppressed during pre_run and sends Webhook/Telegram
+    # only when called on the latest confirmed bar. A regular pyne run prints historical alerts.
+    # alert("Custom alert", alert.freq_once_per_bar_close)
+
     # Execute the strategy
     if not entered1 and rsi < 70 and (time - lastTpTime) >= 1 * 60 * 1000 * 2:
         entered1 = True
@@ -42,12 +48,14 @@ def main():
                            f"at {close * 1.002}. If the close all template does not exist, create it "
                            'with {"signal": "CLOSE TP3"}. Send the result to Telegram.'
                        ))
+        # alert("Long condition confirmed", alert.freq_once_per_bar_close)
 
     if entered1 and (time - entered1Time) >= 1 * 60 * 1000 * 2:
         entered1 = False
         lastTpTime = time
         strategy.close("Long 1", alert_message=f'{{"signal": "Close 1"}}',
                         comment=f"Close 1 at price: {close}", record=False)
+        # alert("Close condition confirmed", alert.freq_once_per_bar_close)
 
     # Plot Example
     # plot(avgEntry if entered1 else na, title="avgEntry", color=color.yellow, linewidth=1, style=plot.style_cross)
