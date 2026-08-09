@@ -30,11 +30,21 @@ read-only evidence.
    `matched`; report `ambiguous` or `no_match` without guessing. Do not rerun the
    account collectors through shell.
 5. Verify that timestamps, symbols, position sides, and quantities agree across
-   the collected sources.
+   the collected sources. For live-risk exposure and unrealized PnL, use the
+   aggregate average-cost fields. Keep the Pine FIFO fields for trade attribution
+   and backtest statistics; do not treat a difference between those bases as a
+   broken strategy state or mix aggregate unrealized PnL into Pine equity. A
+   script-specific variable such as `avgEntry` is supplemental, not the generic
+   evaluation basis. Calculate continuous holding time only from
+   `position_lifecycle`, and determine an entry ID's remaining quantity from
+   `entry_open_ledger`, not from surviving FIFO trade rows.
 6. Evaluate exposure, trade history, drawdown/run-up, active orders, plotted
    levels, invalidation conditions, and plausible response choices. Infer a
-   strategy-specific entry stage or regime only when the returned source, plots,
-   logs, orders, or trades support it.
+   strategy-specific entry stage or regime only from explicit, source-supported
+   state in logs or plots. Do not use an `open_trades` entry ID as the stage:
+   Pine FIFO attribution can leave a later entry's trade row after that entry's
+   strategy quantity has already been closed. If explicit state is unavailable,
+   report the stage as unknown.
 
 ## Response
 

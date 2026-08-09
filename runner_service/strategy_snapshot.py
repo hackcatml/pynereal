@@ -11,7 +11,7 @@ from pynecore.core.strategy_stats import calculate_strategy_statistics
 from pynecore.types.na import NA
 
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.2"
 MAX_OPEN_TRADES = 500
 MAX_CLOSED_TRADES = 200
 MAX_ACTIVE_ORDERS = 500
@@ -208,6 +208,126 @@ def _risk_payload(position: Any) -> dict[str, Any]:
     ))
 
 
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _numbers_match(actual: Any, expected: float | None) -> bool:
+    actual_number = _finite_number(actual)
+    if actual_number is None or expected is None:
+        return actual_number is None and expected is None
+    return math.isclose(
+        actual_number,
+        expected,
+        rel_tol=1e-9,
+        abs_tol=max(1e-9, abs(expected) * 1e-9),
+    )
+
+
+def _open_trade_ledger(
+    position: Any,
+    open_trades: list[Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    net_size = 0.0
+    gross_size = 0.0
+    entry_cost = 0.0
+    valid_trades: list[tuple[float, float]] = []
+    for trade in open_trades:
+        size = _finite_number(getattr(trade, "size", None))
+        entry_price = _finite_number(getattr(trade, "entry_price", None))
+        if size is None or entry_price is None:
+            continue
+        net_size += size
+        gross_size += abs(size)
+        entry_cost += abs(size) * entry_price
+        valid_trades.append((size, entry_price))
+
+    weighted_average_price = entry_cost / gross_size if gross_size else None
+    current_price = _finite_number(getattr(position, "c", None))
+    unrealized_pnl = (
+        sum(size * (current_price - entry_price) for size, entry_price in valid_trades)
+        if current_price is not None
+        else None
+    )
+    if not open_trades:
+        unrealized_pnl = 0.0
+
+    ledger = {
+        "accounting_basis": "pine_fifo_open_trade_ledger",
+        "trade_count": len(open_trades),
+        "valid_trade_count": len(valid_trades),
+        "net_size": net_size,
+        "gross_size": gross_size,
+        "entry_cost": entry_cost,
+        "weighted_average_price": weighted_average_price,
+        "unrealized_pnl": unrealized_pnl,
+    }
+    checks = {
+        "position_size_matches": _numbers_match(
+            getattr(position, "size", None), net_size
+        ),
+        "entry_cost_matches": _numbers_match(
+            getattr(position, "entry_summ", None), entry_cost
+        ),
+        "average_price_matches": _numbers_match(
+            getattr(position, "avg_price", None), weighted_average_price
+        ),
+        "unrealized_pnl_matches": _numbers_match(
+            getattr(position, "openprofit", None), unrealized_pnl
+        ),
+    }
+    consistency_warnings: list[str] = []
+    if len(valid_trades) != len(open_trades):
+        consistency_warnings.append(
+            "Some open trades could not be included in ledger calculations."
+        )
+    labels = {
+        "position_size_matches": "Position size differs from the open-trade ledger.",
+        "entry_cost_matches": "Entry cost differs from the open-trade ledger.",
+        "average_price_matches": "Pine FIFO average price differs from the open-trade ledger.",
+        "unrealized_pnl_matches": "Pine FIFO unrealized PnL differs from the open-trade ledger.",
+    }
+    for key, message in labels.items():
+        if not checks[key]:
+            consistency_warnings.append(message)
+    return ledger, {**checks, "warnings": consistency_warnings}
+
+
+def _position_lifecycle(position: Any, calculated_through: int | None) -> dict[str, Any]:
+    size = _finite_number(getattr(position, "size", None)) or 0.0
+    opened_at_ms = getattr(position, "position_open_time", None)
+    opened_bar_index = getattr(position, "position_open_bar_index", None)
+    if not size or not isinstance(opened_at_ms, int):
+        return {
+            "accounting_basis": "continuous_non_flat_position",
+            "opened_at_ms": None,
+            "opened_at_iso": None,
+            "opened_bar_index": None,
+            "holding_duration_seconds": 0,
+        }
+
+    opened_at_seconds = opened_at_ms / 1000.0
+    holding_duration_seconds = None
+    if isinstance(calculated_through, int):
+        holding_duration_seconds = max(
+            0,
+            int(calculated_through - opened_at_seconds),
+        )
+    return {
+        "accounting_basis": "continuous_non_flat_position",
+        "opened_at_ms": opened_at_ms,
+        "opened_at_iso": datetime.fromtimestamp(opened_at_seconds, UTC).isoformat(),
+        "opened_bar_index": _json_value(opened_bar_index),
+        "holding_duration_seconds": holding_duration_seconds,
+    }
+
+
 def _curve_with_current_value(runner: Any, position: Any) -> list[float]:
     raw_curve = getattr(runner, "equity_curve", [])
     curve = raw_curve if isinstance(raw_curve, list) else list(raw_curve)
@@ -321,6 +441,12 @@ def build_strategy_snapshot(
     if orders_truncated:
         warnings.append("Active orders were truncated in the wire snapshot.")
 
+    open_trade_ledger, consistency = _open_trade_ledger(position, open_trades_all)
+    warnings.extend(
+        f"Strategy state inconsistency: {warning}"
+        for warning in consistency["warnings"]
+    )
+
     curve = _curve_with_current_value(runner, position)
     try:
         statistics = asdict(calculate_strategy_statistics(
@@ -347,6 +473,7 @@ def build_strategy_snapshot(
                 "size",
                 "sign",
                 "avg_price",
+                "aggregate_avg_price",
                 "entry_equity",
                 "entry_summ",
             )),
@@ -354,6 +481,7 @@ def build_strategy_snapshot(
         "pnl": _selected_fields(position, (
             "netprofit",
             "openprofit",
+            "aggregate_openprofit",
             "grossprofit",
             "grossloss",
             "cum_profit",
@@ -368,6 +496,28 @@ def build_strategy_snapshot(
             "losing": int(getattr(position, "losstrades", 0)),
         },
         "open_trades": [_trade_payload(trade) for trade in open_trades],
+        "open_trade_ledger": open_trade_ledger,
+        "entry_open_ledger": _json_value(
+            getattr(position, "_entry_open_ledger", {})
+        ),
+        "position_lifecycle": _position_lifecycle(position, calculated_through),
+        "accounting": {
+            "pine_fifo": {
+                "average_price_field": "position.avg_price",
+                "unrealized_pnl_field": "pnl.openprofit",
+            },
+            "aggregate": {
+                "average_price_field": "position.aggregate_avg_price",
+                "unrealized_pnl_field": "pnl.aggregate_openprofit",
+                "preferred_for_live_risk": True,
+                "included_in_strategy_equity": False,
+            },
+            "entry_bound": {
+                "remaining_quantity_field": "entry_open_ledger",
+                "preferred_for_entry_specific_remaining_quantity": True,
+            },
+        },
+        "consistency": consistency,
         "recent_closed_trades": [_trade_payload(trade) for trade in closed_trades],
         "active_orders": pending_orders,
         "risk": _risk_payload(position),

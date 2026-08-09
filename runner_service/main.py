@@ -270,6 +270,7 @@ def on_close_event(trade, runner=None):
         "price": float(trade.exit_price),
         "size": float(trade.size),
         "id": trade.entry_id,
+        "exit_id": trade.exit_id if trade.exit_id else "",
         "comment": trade.exit_comment if trade.exit_comment else "",
         "profit": float(trade.profit)
     }
