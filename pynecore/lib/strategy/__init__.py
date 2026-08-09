@@ -1464,7 +1464,10 @@ def close(id: str, comment: str | NA[str] = na_str, qty: float | NA[float] = na_
 
 
 # noinspection PyProtectedMember,PyShadowingNames
-def close_all(comment: str | NA[str] = na_str, alert_message: str | NA[str] = na_str, immediately: bool = False):
+def close_all(comment: str | NA[str] = na_str, alert_message: str | NA[str] = na_str,
+              immediately: bool = False,
+              record: bool = False, record_data: str | None = None,
+              ai: str | NA[str] = na_str):
     """
     Creates an order to close an open position completely, regardless of the identifiers of the entry
     orders that opened or added to it.
@@ -1472,6 +1475,9 @@ def close_all(comment: str | NA[str] = na_str, alert_message: str | NA[str] = na
     :param comment: Additional notes on the filled order
     :param alert_message: Custom text for the alert that fires when an order fills
     :param immediately: If true, the closing order executes on the same tick when the strategy places it
+    :param record: Whether to record the close data or not
+    :param record_data: Extra data to record
+    :param ai: Instruction sent to the configured AI service when the order fills
     """
     if lib._lib_semaphore:
         return
@@ -1481,13 +1487,26 @@ def close_all(comment: str | NA[str] = na_str, alert_message: str | NA[str] = na
         return
 
     exit_id = 'Close position order'
+    bar_time = lib._time
+    alert_message = f'{{"timestamp": {bar_time}, "message": {alert_message}}}' if alert_message else None
+    ai_instruction = None if isinstance(ai, NA) else str(ai).strip() or None
     order = Order(None, -position.size, exit_id=exit_id, order_type=_order_type_close,
-                  comment=comment, alert_message=alert_message)
+                  comment=None if isinstance(comment, NA) else comment,
+                  alert_message=None if isinstance(alert_message, NA) else alert_message,
+                  ai_instruction=ai_instruction)
 
     # Add order to position (this will handle orderbook and exit_orders)
     position._add_order(order)
     if immediately:
         position.fill_order(order, position.c, position.h, position.l)
+
+    if record:
+        record_message = (f'{{"time": {str(datetime.fromtimestamp(int(bar_time / 1000)))}, '
+                          f'"bar": {order.bar_index}, '
+                          f'"comment": "{comment}", '
+                          f'"alert": {alert_message}, '
+                          f'"data": {record_data}}}')
+        write_record(record_message)
 
 
 # noinspection PyProtectedMember,PyShadowingNames,PyShadowingBuiltins
