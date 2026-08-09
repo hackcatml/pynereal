@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import json
 import os
 import shutil
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any
@@ -31,6 +33,7 @@ _READY_WAIT_SECONDS = 480.0
 _BRIDGE_TIMEOUT_SECONDS = 500.0
 _CAPTURE_TIMEOUT_SECONDS = 40.0
 _ACCOUNT_COLLECTOR_TIMEOUT_SECONDS = 180.0
+_MAX_CACHED_TURNS = 8
 
 
 class SessionEvaluationToolError(ValueError):
@@ -344,12 +347,18 @@ class SessionEvaluationBridge:
             "image_path": str(capture_path),
         }
 
-    @staticmethod
-    def _browser_executable() -> str | None:
+    def _browser_executable(self) -> str | None:
         candidates = [
             os.environ.get("PYNEREAL_CHROME_PATH"),
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            str(
+                self._project_root
+                / ".runtime"
+                / "chrome-for-testing"
+                / "chrome-linux64"
+                / "chrome"
+            ),
             shutil.which("google-chrome"),
             shutil.which("google-chrome-stable"),
             shutil.which("chromium"),
@@ -391,6 +400,8 @@ class SessionEvaluationBridge:
             f"--screenshot={output_path}",
             url,
         ]
+        if sys.platform.startswith("linux"):
+            command.insert(2, "--no-sandbox")
         completed = subprocess.run(
             command,
             stdout=subprocess.PIPE,
@@ -410,6 +421,8 @@ class SessionEvaluationBridge:
 class SessionEvaluationTools:
     def __init__(self, project_root: Path, registry: Any) -> None:
         self.bridge = SessionEvaluationBridge(project_root, registry)
+        self._turn_cache: OrderedDict[str, dict[str, dict[str, Any]]] = OrderedDict()
+        self._turn_cache_lock = threading.Lock()
 
     @property
     def names(self) -> set[str]:
@@ -430,7 +443,9 @@ class SessionEvaluationTools:
                     "market bars, simulation state, trades, plots, source, and logs are returned. "
                     "The exact-session call also reads configured account positions and recent "
                     "orders. Pass account only when the user explicitly names one; otherwise the "
-                    "tool returns a deterministic evidence-based account match."
+                    "tool returns a deterministic evidence-based account match. Call the session "
+                    "list at most once and each exact session at most once per user turn; repeated "
+                    "calls return the first snapshot from that turn."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -474,7 +489,8 @@ class SessionEvaluationTools:
                     "Capture the local chart for a ready session context as a PNG image. Use only "
                     "the exact session_id and generation_id returned by "
                     "get_session_evaluation_context. The server validates the local URL and rejects "
-                    "stale generations."
+                    "stale generations. Capture a session generation at most once per user turn; "
+                    "repeated calls return the first image from that turn."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -505,6 +521,8 @@ class SessionEvaluationTools:
 
     def unbind_loop(self) -> None:
         self.bridge.unbind_loop()
+        with self._turn_cache_lock:
+            self._turn_cache.clear()
 
     def handle_server_request(
         self,
@@ -516,8 +534,21 @@ class SessionEvaluationTools:
         tool = params.get("tool")
         if tool not in self.names:
             return {}
+        turn_id: str | None = None
+        arguments: dict[str, Any] = {}
         try:
             arguments = self._validate(tool, params.get("arguments"))
+            raw_turn_id = params.get("turnId")
+            turn_id = raw_turn_id if isinstance(raw_turn_id, str) and raw_turn_id else None
+            cache_key = self._turn_cache_key(tool, arguments)
+            if turn_id:
+                cached = self._cached_response(turn_id, cache_key)
+                if cached is not None:
+                    print(
+                        f"[ai] session tool reused turn={turn_id[-8:]} "
+                        f"tool={tool} session={arguments.get('session_id') or 'list'}"
+                    )
+                    return cached
             operation = "context" if tool == _CONTEXT_TOOL_NAME else "capture"
             result = self.bridge.execute(operation, arguments)
             if operation == "capture":
@@ -525,15 +556,25 @@ class SessionEvaluationTools:
                 image_url = "data:image/png;base64," + base64.b64encode(
                     image_path.read_bytes()
                 ).decode("ascii")
-                return {
+                response = {
                     "success": True,
                     "contentItems": [
                         {"type": "inputText", "text": json.dumps(result, ensure_ascii=False)},
                         {"type": "inputImage", "imageUrl": image_url},
                     ],
                 }
-            return self._tool_response(True, result)
+            else:
+                response = self._tool_response(True, result)
+            if turn_id:
+                self._cache_response(turn_id, cache_key, response)
+            return response
         except SessionEvaluationToolError as exc:
+            if (
+                turn_id
+                and tool == _CAPTURE_TOOL_NAME
+                and "generation" in str(exc).lower()
+            ):
+                self._invalidate_session_cache(turn_id, arguments.get("session_id"))
             return self._tool_response(False, {"error": str(exc)})
         except Exception as exc:
             print(f"[ai] Session evaluation tool failed: {type(exc).__name__}")
@@ -541,6 +582,48 @@ class SessionEvaluationTools:
                 False,
                 {"error": f"Session evaluation failed ({type(exc).__name__})"},
             )
+
+    @staticmethod
+    def _turn_cache_key(tool: str, arguments: dict[str, Any]) -> str:
+        session_id = arguments.get("session_id") or "list"
+        if tool == _CAPTURE_TOOL_NAME:
+            return f"{tool}:{session_id}:{arguments.get('generation_id')}"
+        return f"{tool}:{session_id}:{arguments.get('account') or 'auto'}"
+
+    def _cached_response(self, turn_id: str, cache_key: str) -> dict[str, Any] | None:
+        with self._turn_cache_lock:
+            turn = self._turn_cache.get(turn_id)
+            if turn is None or cache_key not in turn:
+                return None
+            self._turn_cache.move_to_end(turn_id)
+            return copy.deepcopy(turn[cache_key])
+
+    def _cache_response(
+        self,
+        turn_id: str,
+        cache_key: str,
+        response: dict[str, Any],
+    ) -> None:
+        with self._turn_cache_lock:
+            turn = self._turn_cache.setdefault(turn_id, {})
+            turn[cache_key] = copy.deepcopy(response)
+            self._turn_cache.move_to_end(turn_id)
+            while len(self._turn_cache) > _MAX_CACHED_TURNS:
+                self._turn_cache.popitem(last=False)
+
+    def _invalidate_session_cache(self, turn_id: str, session_id: Any) -> None:
+        if not isinstance(session_id, str) or not session_id:
+            return
+        prefixes = (
+            f"{_CONTEXT_TOOL_NAME}:{session_id}:",
+            f"{_CAPTURE_TOOL_NAME}:{session_id}:",
+        )
+        with self._turn_cache_lock:
+            turn = self._turn_cache.get(turn_id)
+            if turn is None:
+                return
+            for key in [key for key in turn if key.startswith(prefixes)]:
+                turn.pop(key, None)
 
     @staticmethod
     def _validate(tool: str, raw_arguments: Any) -> dict[str, Any]:

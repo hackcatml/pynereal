@@ -166,6 +166,11 @@ internals when an existing script already provides the required data.
   `get_session_evaluation_context` first. Call it without `session_id` when the
   user's human-readable description still needs to be resolved, then call it
   again with the exact matched ID and `wait_for_ready=true`.
+- Within one user turn, call the session list at most once, call the exact
+  session context at most once, and capture that session generation at most
+  once. Reuse the returned evidence instead of refreshing it during the same
+  evaluation. Recollect only when the tool explicitly rejects a stale or
+  changed generation.
 - Use only one ready calculation generation in an evaluation. If the generation
   changes, recollect the context instead of combining old plots or trades with
   new OHLCV.

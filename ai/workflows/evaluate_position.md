@@ -21,9 +21,12 @@ read-only evidence.
    `wait_for_ready=true`. Pass `account=<human-readable account>` only when the
    user explicitly names one. If pre-run is active, wait for it instead of
    reading a partial generation. Treat confirmed bars and the engine simulation
-   snapshot as authoritative; keep the forming bar separate.
+   snapshot as authoritative; keep the forming bar separate. Call the session
+   list and exact-session context only once each in the user turn, then reuse
+   that snapshot unless the tool rejects its generation.
 3. When visual confirmation is useful, call `capture_session_chart` with the
-   exact ready generation returned by the context tool.
+   exact ready generation returned by the context tool. Capture it only once in
+   the user turn and reuse that image.
 4. Read `account_match` from the same context response. The server already
    queried current positions and recent order history. A user-selected account
    is authoritative. Without one, accept the automatic match only when status is
