@@ -661,11 +661,14 @@ class Position:
                     # Modify sizes
                     self.size += size
                     # Handle too small sizes because of floating point inaccuracy and rounding
-                    if _size_round(self.size) == 0.0:
+                    position_flat = _size_round(self.size) == 0.0
+                    if position_flat:
                         size -= self.size
                         self.size = 0.0
                     self.sign = 0.0 if self.size == 0.0 else 1.0 if self.size > 0.0 else -1.0
                     trade.size += size
+                    if position_flat:
+                        trade.size = 0.0
                     order.size -= size
 
                     # Cancel exit orders for closed trades (TradingView behavior)
@@ -1329,15 +1332,17 @@ class Position:
 # noinspection PyProtectedMember
 def _size_round(qty: float) -> float:
     """
-    Round size to the nearest possible value
+    Round a size down to the nearest tradable lot.
 
     :param qty: The quantity to round
     :return: The rounded quantity
     """
     rfactor = syminfo._size_round_factor  # noqa
-    qrf = int(abs(qty) * rfactor * 10.0) * 0.1  # We need to floor to one decimal place
+    scaled = abs(qty) * rfactor
+    nearest = round(scaled)
+    lots = nearest if abs(scaled - nearest) <= scaled * 1e-12 + 1e-9 else int(scaled)
     sign = 1 if qty > 0 else -1
-    return sign * int(qrf) / rfactor
+    return sign * lots / rfactor
 
 
 # noinspection PyShadowingNames
@@ -1425,12 +1430,13 @@ def close(id: str, comment: str | NA[str] = na_str, qty: float | NA[float] = na_
         return
 
     if isinstance(qty, NA):
-        size = -position.size * (qty_percent * 0.01) if not isinstance(qty_percent, NA) \
-            else -position.size
+        if not isinstance(qty_percent, NA):
+            size = _size_round(-position.size * (qty_percent * 0.01))
+        else:
+            size = -position.size
     else:
-        size = -position.sign * qty
+        size = _size_round(-position.sign * qty)
 
-    size = _size_round(size)
     if size == 0.0:
         return
 
