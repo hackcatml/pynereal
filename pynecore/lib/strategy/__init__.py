@@ -833,14 +833,14 @@ class Position:
 
     def _dispatch_order_notifications(self, order: Order) -> None:
         if not realtime_trade() and order.alert_message:
-            alert(order.alert_message)
+            alert(order.alert_message, _dispatch_callback=False)
         elif realtime_trade() and not pre_run():
             # print(f"order.bar_index: {order.bar_index}, last_bar_index: {last_bar_index()}")
             # Real time trade 에서는 최종 봉이 확정되고 새로운 봉이 생길때에만
             # alert 및 AI instruction을 전달함.
             if order.bar_index == last_bar_index() - 1:
                 if order.alert_message:
-                    alert(order.alert_message)
+                    alert(order.alert_message, _dispatch_callback=False)
                 if order.alert_message and self.on_alert_callback:
                     try:
                         self.on_alert_callback(order.alert_message)
