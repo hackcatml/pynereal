@@ -78,7 +78,7 @@ async def fix_missing_bars_loop(
     timeframe: str,
     state: DataState,
     check_interval_sec: float = 0.1,
-    time_sync_interval_sec: float = 30.0,
+    time_sync_interval_sec: float = 10 * 60,
 ) -> None:
     tf_ms = convert_timeframe(timeframe, to_ms=True)
     grace_ms = 0.2 * 1000

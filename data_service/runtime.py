@@ -107,7 +107,14 @@ class Feed:
             if session.runner_count <= 0:
                 continue
             session_payload = dict(payload)
-            if session.strategy_evaluation_enabled:
+            if (
+                session.strategy_evaluation_enabled
+                and payload.get("type") in {
+                    "prerun_ready",
+                    "prerun_ready_after_history_download",
+                    "run_ready",
+                }
+            ):
                 generation_id = await session.begin_calculation(session_payload)
                 if generation_id is not None:
                     session_payload["calculation_generation_id"] = generation_id
@@ -508,10 +515,23 @@ class Session:
             self.plot_options.update(event.get("data", {}))
             confirmed_bar_index = event.get("confirmed_bar_index", -1)
             confirmed_bar_time = event.get("confirmed_bar_time")
+            plot_values = event.get("values")
 
             if self.plot_options and (confirmed_bar_time is not None or confirmed_bar_index >= 0):
                 try:
-                    if plot_path.exists():
+                    if isinstance(plot_values, dict) and confirmed_bar_time is not None:
+                        for title, options in self.plot_options.items():
+                            kind = str(options.get("kind") or "line")
+                            await self.send_to_charts({
+                                "type": "plot_data",
+                                "title": title,
+                                "kind": kind,
+                                "time": int(confirmed_bar_time),
+                                "value": _plot_wire_value(plot_values.get(title), kind),
+                            })
+                    elif plot_path.exists():
+                        # Backward-compatible fallback for runners that do not include
+                        # current values in the plot_options event.
                         from pynecore.core.csv_file import CSVReader
                         with CSVReader(plot_path) as reader:
                             candle = None

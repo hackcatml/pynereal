@@ -24,6 +24,7 @@ from ai.scripts.asset import (
     read_provider_config,
     remove_binance_earn_receipts,
 )
+from schedule_utils import seconds_until_post_bar_task_slot
 
 
 _LOCAL_QUOTES = {
@@ -634,6 +635,17 @@ class AssetPortfolioService:
     async def _market_refresh_loop(self) -> None:
         first_refresh = True
         while not self._market_stop.is_set():
+            post_bar_delay = seconds_until_post_bar_task_slot()
+            if post_bar_delay > 0.0:
+                try:
+                    await asyncio.wait_for(
+                        self._market_stop.wait(),
+                        timeout=post_bar_delay,
+                    )
+                except TimeoutError:
+                    pass
+                if self._market_stop.is_set():
+                    break
             try:
                 await self._refresh_market_cache()
             except Exception as exc:
