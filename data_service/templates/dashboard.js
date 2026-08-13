@@ -1730,27 +1730,38 @@
       : number < 0 ? "account-pnl-negative" : "";
   }
 
-  function positionRealizedPnlCell(position) {
+  function updatePositionRealizedPnlCell(cell, position) {
     const value = position.realized_pnl === null || position.realized_pnl === undefined
       ? Number.NaN
       : Number(position.realized_pnl);
-    if (!Number.isFinite(value)) return positionTableCell("—", "", "Realized PnL");
-    const cell = positionTableCell("", positionPnlClass(value), "Realized PnL");
-    const button = document.createElement("button");
-    button.className = "position-pnl-value";
-    button.type = "button";
-    button.textContent = formatSignedPositionNumber(value);
-    button.title = "Show realized PnL calculation";
-    button.setAttribute("aria-haspopup", "dialog");
-    button.setAttribute("aria-expanded", "false");
+    if (!Number.isFinite(value)) {
+      if (activePositionPnlButton && cell.contains(activePositionPnlButton)) {
+        closePositionPnlPopover();
+      }
+      setClass(cell, "");
+      setText(cell, "—");
+      cell.title = "—";
+      return;
+    }
+    setClass(cell, positionPnlClass(value));
+    let button = cell.querySelector(".position-pnl-value");
+    if (!button) {
+      button = document.createElement("button");
+      button.className = "position-pnl-value";
+      button.type = "button";
+      button.title = "Show realized PnL calculation";
+      button.setAttribute("aria-haspopup", "dialog");
+      button.setAttribute("aria-expanded", "false");
+      cell.replaceChildren(button);
+    }
+    setText(button, formatSignedPositionNumber(value));
     const breakdown = position.realized_pnl_breakdown;
     button.dataset.positionPnl = JSON.stringify(
       breakdown && typeof breakdown === "object"
         ? breakdown
         : { gross_pnl: null, fees: null, net_pnl: value, complete: false },
     );
-    cell.appendChild(button);
-    return cell;
+    cell.title = button.textContent;
   }
 
   let activePositionPnlButton = null;
@@ -1814,6 +1825,125 @@
     popover.style.top = `${top}px`;
   }
 
+  function positionRowKey(position) {
+    return JSON.stringify([
+      position.account || "",
+      position.exchange || "",
+      position.market_scope || "",
+      position.dex || "",
+      position.symbol || "",
+      position.side || "",
+    ]);
+  }
+
+  function createPositionRow() {
+    const row = document.createElement("tr");
+    const fields = [
+      ["account", "Account", "account-table-account"],
+      ["symbol", "Symbol", "account-table-symbol"],
+      ["side", "Side", ""],
+      ["size", "Size", ""],
+      ["entry", "Entry", ""],
+      ["mark", "Mark", ""],
+      ["unrealized", "Unrealized PnL", ""],
+      ["realized", "Realized PnL", ""],
+      ["return", "Return", ""],
+      ["leverage", "Leverage", ""],
+      ["liquidation", "Liquidation", ""],
+    ];
+    const cells = {};
+    fields.forEach(([field, label, className]) => {
+      const cell = positionTableCell("", className, label);
+      cell.dataset.positionField = field;
+      cells[field] = cell;
+      row.appendChild(cell);
+    });
+    row.positionCells = cells;
+    return row;
+  }
+
+  function updatePositionCell(cell, text, className = "") {
+    setClass(cell, className);
+    setText(cell, text);
+    cell.title = text;
+  }
+
+  function updatePositionRow(row, position) {
+    const cells = row.positionCells;
+    const accountName = String(position.account || "—");
+    const exchangeName = String(position.exchange || "").toUpperCase();
+    const accountIdentity = JSON.stringify([
+      accountName,
+      exchangeName,
+      position.exchange_logo_url || "",
+    ]);
+    if (cells.account.dataset.identity !== accountIdentity) {
+      const exchangeLogo = logoImg(
+        position.exchange_logo_url,
+        exchangeName,
+        "exchange-logo",
+      );
+      setHTML(
+        cells.account,
+        `${exchangeLogo}<span class="account-table-account-name">${esc(accountName)}</span>`,
+      );
+      cells.account.dataset.identity = accountIdentity;
+    }
+    cells.account.title = accountName;
+
+    const symbolText = String(position.symbol || "—");
+    const scopeText = String(position.market_scope || position.dex || "");
+    const symbolIdentity = JSON.stringify([symbolText, scopeText]);
+    if (cells.symbol.dataset.identity !== symbolIdentity) {
+      cells.symbol.replaceChildren(document.createTextNode(symbolText));
+      if (scopeText) {
+        const scope = document.createElement("small");
+        scope.textContent = scopeText;
+        cells.symbol.appendChild(scope);
+      }
+      cells.symbol.dataset.identity = symbolIdentity;
+    }
+    cells.symbol.title = symbolText;
+
+    const sideText = String(position.side || "—");
+    const sideClass = sideText.toLowerCase() === "long"
+      ? "account-position-long"
+      : sideText.toLowerCase() === "short" ? "account-position-short" : "";
+    const pnl = position.unrealized_pnl === null || position.unrealized_pnl === undefined
+      ? Number.NaN
+      : Number(position.unrealized_pnl);
+    const pnlClass = positionPnlClass(pnl);
+    const percentage = position.percentage === null || position.percentage === undefined
+      ? Number.NaN
+      : Number(position.percentage);
+    const percentageText = Number.isFinite(percentage)
+      ? `${percentage > 0 ? "+" : ""}${formatPositionNumber(percentage, 2)}%`
+      : "—";
+
+    updatePositionCell(cells.side, sideText, sideClass);
+    updatePositionCell(cells.size, formatPositionNumber(position.quantity ?? position.contracts));
+    updatePositionCell(cells.entry, formatPositionNumber(position.entry_price));
+    updatePositionCell(cells.mark, formatPositionNumber(position.mark_price));
+    updatePositionCell(
+      cells.unrealized,
+      Number.isFinite(pnl)
+        ? `${pnl > 0 ? "+" : ""}${formatPositionNumber(pnl, 4)}`
+        : "—",
+      pnlClass,
+    );
+    updatePositionRealizedPnlCell(cells.realized, position);
+    updatePositionCell(cells.return, percentageText, pnlClass);
+    updatePositionCell(
+      cells.leverage,
+      position.leverage !== null
+        && position.leverage !== undefined
+        && Number.isFinite(Number(position.leverage))
+        ? `${formatPositionNumber(position.leverage, 2)}x`
+        : "—",
+    );
+    updatePositionCell(cells.liquidation, formatPositionNumber(position.liquidation_price));
+  }
+
   function renderPositions(payload) {
     const observedAt = Date.parse(payload.collected_at || "");
     if (Number.isFinite(observedAt) && observedAt < positionsObservedAt) return;
@@ -1861,87 +1991,24 @@
     el("positions-table-wrap").classList.toggle("hidden", positions.length === 0);
 
     const tableBody = el("positions-table-body");
-    tableBody.replaceChildren();
-    positions.forEach((position) => {
-      const row = document.createElement("tr");
-      const accountName = String(position.account || "—");
-      const exchangeName = String(position.exchange || "").toUpperCase();
-      const account = positionTableCell("", "account-table-account", "Account");
-      account.title = accountName;
-      const exchangeLogo = logoImg(
-        position.exchange_logo_url,
-        exchangeName,
-        "exchange-logo",
-      );
-      setHTML(
-        account,
-        `${exchangeLogo}<span class="account-table-account-name">${esc(accountName)}</span>`,
-      );
-      account.dataset.label = "Account";
-
-      const symbol = positionTableCell(
-        String(position.symbol || "—"),
-        "account-table-symbol",
-        "Symbol",
-      );
-      const scopeText = String(position.market_scope || position.dex || "");
-      if (scopeText) {
-        const scope = document.createElement("small");
-        scope.textContent = scopeText;
-        symbol.appendChild(scope);
+    const existingRows = new Map(
+      Array.from(tableBody.children).map((row) => [row.dataset.positionKey || "", row]),
+    );
+    positions.forEach((position, index) => {
+      const key = positionRowKey(position);
+      let row = existingRows.get(key);
+      if (!row) row = createPositionRow();
+      row.dataset.positionKey = key;
+      updatePositionRow(row, position);
+      const currentRow = tableBody.children[index];
+      if (currentRow !== row) tableBody.insertBefore(row, currentRow || null);
+      existingRows.delete(key);
+    });
+    existingRows.forEach((row) => {
+      if (activePositionPnlButton && row.contains(activePositionPnlButton)) {
+        closePositionPnlPopover();
       }
-
-      const sideText = String(position.side || "—");
-      const sideClass = sideText.toLowerCase() === "long"
-        ? "account-position-long"
-        : sideText.toLowerCase() === "short" ? "account-position-short" : "";
-      const pnl = position.unrealized_pnl === null || position.unrealized_pnl === undefined
-        ? Number.NaN
-        : Number(position.unrealized_pnl);
-      const pnlClass = positionPnlClass(pnl);
-      const percentage = position.percentage === null || position.percentage === undefined
-        ? Number.NaN
-        : Number(position.percentage);
-      const percentageText = Number.isFinite(percentage)
-        ? `${percentage > 0 ? "+" : ""}${formatPositionNumber(percentage, 2)}%`
-        : "—";
-
-      row.append(
-        account,
-        symbol,
-        positionTableCell(sideText, sideClass, "Side"),
-        positionTableCell(
-          formatPositionNumber(position.quantity ?? position.contracts),
-          "",
-          "Size",
-        ),
-        positionTableCell(formatPositionNumber(position.entry_price), "", "Entry"),
-        positionTableCell(formatPositionNumber(position.mark_price), "", "Mark"),
-        positionTableCell(
-          Number.isFinite(pnl)
-            ? `${pnl > 0 ? "+" : ""}${formatPositionNumber(pnl, 4)}`
-            : "—",
-          pnlClass,
-          "Unrealized PnL",
-        ),
-        positionRealizedPnlCell(position),
-        positionTableCell(percentageText, pnlClass, "Return"),
-        positionTableCell(
-          position.leverage !== null
-            && position.leverage !== undefined
-            && Number.isFinite(Number(position.leverage))
-            ? `${formatPositionNumber(position.leverage, 2)}x`
-            : "—",
-          "",
-          "Leverage",
-        ),
-        positionTableCell(
-          formatPositionNumber(position.liquidation_price),
-          "",
-          "Liquidation",
-        ),
-      );
-      tableBody.appendChild(row);
+      row.remove();
     });
 
     const errorContainer = el("positions-account-errors");
@@ -2704,7 +2771,8 @@
       const menu = el("hub-account-menu");
       const expanded = el("hub-account-toggle").getAttribute("aria-expanded") === "true";
       el("hub-account-toggle").setAttribute("aria-expanded", String(!expanded));
-      menu.classList.toggle("hidden", expanded);
+      menu.classList.toggle("open", !expanded);
+      menu.setAttribute("aria-hidden", String(expanded));
     });
     el("hub-account-menu").addEventListener("click", (event) => {
       const button = event.target && event.target.closest
@@ -2717,7 +2785,8 @@
       const menu = el("hub-history-menu");
       const expanded = el("hub-history-toggle").getAttribute("aria-expanded") === "true";
       el("hub-history-toggle").setAttribute("aria-expanded", String(!expanded));
-      menu.classList.toggle("hidden", expanded);
+      menu.classList.toggle("open", !expanded);
+      menu.setAttribute("aria-hidden", String(expanded));
     });
     el("hub-update-button").addEventListener("click", checkForUpdate);
     el("update-close").addEventListener("click", closeUpdateModal);

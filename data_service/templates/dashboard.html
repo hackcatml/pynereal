@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=82" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=84" />
 </head>
 <body>
   <header class="topbar">
@@ -44,7 +44,7 @@
           <path d="m9 18 6-6-6-6" />
         </svg>
       </button>
-      <div id="hub-account-menu" class="hub-submenu hidden">
+      <div id="hub-account-menu" class="hub-submenu" aria-hidden="true">
         <button class="hub-submenu-item" type="button" data-account-view="assets">
           <span class="hub-submenu-emoji" aria-hidden="true">
             <svg class="hub-submenu-glyph" viewBox="0 0 24 24" aria-hidden="true">
@@ -89,7 +89,7 @@
             <path d="m9 18 6-6-6-6" />
           </svg>
         </button>
-        <div id="hub-history-menu" class="hub-subsubmenu hidden">
+        <div id="hub-history-menu" class="hub-subsubmenu" aria-hidden="true">
           <button class="hub-subsubmenu-item" type="button" data-account-view="position-history">Position History</button>
           <button class="hub-subsubmenu-item" type="button" data-account-view="orders">Order History</button>
         </div>
@@ -273,8 +273,11 @@
       <nav class="account-tabs" aria-label="Account views">
         <button class="account-tab active" type="button" data-account-view="assets">Assets</button>
         <button class="account-tab" type="button" data-account-view="positions">Positions</button>
-        <button class="account-tab" type="button" data-account-view="position-history">Position History</button>
-        <button class="account-tab account-tab-order-history" type="button" data-account-view="orders"
+        <button class="account-tab account-tab-history" type="button" data-account-view="position-history"
+                aria-label="Position History">
+          <span>Position</span><span>History</span>
+        </button>
+        <button class="account-tab account-tab-history" type="button" data-account-view="orders"
                 aria-label="Order History">
           <span>Order</span><span>History</span>
         </button>
@@ -624,6 +627,6 @@
     </form>
   </div>
 
-  <script src="/static/dashboard.js?v=90"></script>
+  <script src="/static/dashboard.js?v=92"></script>
 </body>
 </html>
