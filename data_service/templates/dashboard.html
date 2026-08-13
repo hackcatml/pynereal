@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=69" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=82" />
 </head>
 <body>
   <header class="topbar">
@@ -31,12 +31,78 @@
       <button id="hub-menu-close" class="hub-menu-close" type="button" aria-label="Close menu">&times;</button>
     </div>
     <nav class="hub-menu-nav" aria-label="Hub menu">
-      <button id="hub-assets-open" class="hub-menu-item" type="button">
-        <span class="hub-menu-emoji" aria-hidden="true">&#x1f4b0;</span>
-        <span>Assets</span>
+      <button id="hub-account-toggle" class="hub-menu-item hub-menu-parent" type="button"
+              aria-expanded="false" aria-controls="hub-account-menu">
+        <span class="hub-menu-emoji" aria-hidden="true">
+          <svg class="hub-menu-glyph" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+            <circle cx="12" cy="7" r="4" />
+          </svg>
+        </span>
+        <span>Account</span>
+        <svg class="hub-menu-parent-chevron" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="m9 18 6-6-6-6" />
+        </svg>
       </button>
+      <div id="hub-account-menu" class="hub-submenu hidden">
+        <button class="hub-submenu-item" type="button" data-account-view="assets">
+          <span class="hub-submenu-emoji" aria-hidden="true">
+            <svg class="hub-submenu-glyph" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 3h6l-1.3 3.3h-3.4z" />
+              <path d="M10 6.3C6 8.5 4 11.5 4 15A6 6 0 0 0 10 21H14A6 6 0 0 0 20 15C20 11.5 18 8.5 14 6.3" />
+              <path d="M13.4 11.4a2 2 0 0 0-3.4.5c0 1.7 3.4 1 3.4 2.7a2 2 0 0 1-3.4.5" />
+              <line x1="12" y1="9.7" x2="12" y2="16.3" />
+            </svg>
+          </span>
+          <span>Assets</span>
+        </button>
+        <button class="hub-submenu-item" type="button" data-account-view="positions">
+          <span class="hub-submenu-emoji" aria-hidden="true">
+            <svg class="hub-submenu-glyph" viewBox="0 0 24 24" aria-hidden="true">
+              <line x1="6" y1="20" x2="6" y2="14" />
+              <line x1="12" y1="20" x2="12" y2="4" />
+              <line x1="18" y1="20" x2="18" y2="10" />
+            </svg>
+          </span>
+          <span>Positions</span>
+        </button>
+        <button class="hub-submenu-item" type="button" data-account-view="pnl">
+          <span class="hub-submenu-emoji" aria-hidden="true">
+            <svg class="hub-submenu-glyph" viewBox="0 0 24 24" aria-hidden="true">
+              <polyline points="3 17 9 11 13 15 21 7" />
+              <polyline points="15 7 21 7 21 13" />
+            </svg>
+          </span>
+          <span>PnL</span>
+        </button>
+        <button id="hub-history-toggle" class="hub-submenu-item hub-submenu-parent" type="button"
+                aria-expanded="false" aria-controls="hub-history-menu">
+          <span class="hub-submenu-emoji" aria-hidden="true">
+            <svg class="hub-submenu-glyph" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+              <path d="M3 3v5h5" />
+              <path d="M12 7v5l4 2" />
+            </svg>
+          </span>
+          <span>History</span>
+          <svg class="hub-submenu-parent-chevron" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m9 18 6-6-6-6" />
+          </svg>
+        </button>
+        <div id="hub-history-menu" class="hub-subsubmenu hidden">
+          <button class="hub-subsubmenu-item" type="button" data-account-view="position-history">Position History</button>
+          <button class="hub-subsubmenu-item" type="button" data-account-view="orders">Order History</button>
+        </div>
+      </div>
       <button id="hub-calendar-open" class="hub-menu-item" type="button">
-        <span class="hub-menu-emoji" aria-hidden="true">&#x1f4c5;</span>
+        <span class="hub-menu-emoji" aria-hidden="true">
+          <svg class="hub-menu-glyph" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="18" rx="2" />
+            <line x1="3" y1="10" x2="21" y2="10" />
+            <line x1="8" y1="2" x2="8" y2="6" />
+            <line x1="16" y1="2" x2="16" y2="6" />
+          </svg>
+        </span>
         <span>Calendar</span>
       </button>
     </nav>
@@ -189,7 +255,7 @@
               <path d="m12 19-7-7 7-7" />
             </svg>
           </button>
-          <span id="assets-title">Assets</span>
+          <span id="assets-title">Account</span>
         </div>
         <div class="modal-actions">
           <button id="assets-refresh" class="btn btn-icon" type="button"
@@ -204,7 +270,18 @@
           <button id="assets-close" class="btn" type="button" title="Close" aria-label="Close">&times;</button>
         </div>
       </div>
-      <div class="assets-body">
+      <nav class="account-tabs" aria-label="Account views">
+        <button class="account-tab active" type="button" data-account-view="assets">Assets</button>
+        <button class="account-tab" type="button" data-account-view="positions">Positions</button>
+        <button class="account-tab" type="button" data-account-view="position-history">Position History</button>
+        <button class="account-tab account-tab-order-history" type="button" data-account-view="orders"
+                aria-label="Order History">
+          <span>Order</span><span>History</span>
+        </button>
+        <button class="account-tab" type="button" data-account-view="pnl">PnL</button>
+      </nav>
+      <section id="account-assets-view" class="account-view">
+        <div id="assets-body" class="assets-body">
         <section id="assets-summary" class="assets-summary hidden" aria-label="Asset summary">
           <div>
             <span class="assets-summary-label">Total assets</span>
@@ -215,7 +292,7 @@
             <span id="assets-updated"></span>
           </div>
         </section>
-        <div id="assets-loading" class="assets-state">
+        <div id="assets-loading" class="assets-state hidden">
           <span class="assets-spinner" aria-hidden="true"></span>
           <span>Loading account assets...</span>
         </div>
@@ -224,6 +301,74 @@
           No exchange accounts are configured in providers.toml.
         </div>
         <div id="assets-portfolios" class="assets-portfolios"></div>
+        </div>
+      </section>
+      <section id="account-positions-view" class="account-view hidden">
+        <div class="account-view-body">
+          <section id="positions-summary" class="account-summary hidden" aria-label="Position summary">
+            <div>
+              <span class="account-summary-label">Open positions</span>
+              <strong id="positions-open-count">0</strong>
+            </div>
+            <div class="account-summary-meta">
+              <span id="positions-account-count"></span>
+              <span id="positions-updated"></span>
+            </div>
+          </section>
+          <div id="positions-loading" class="assets-state">
+            <span class="assets-spinner" aria-hidden="true"></span>
+            <span>Loading positions...</span>
+          </div>
+          <div id="positions-error" class="assets-state assets-state-error hidden" role="alert"></div>
+          <div id="positions-empty" class="assets-state hidden">No open positions.</div>
+          <div id="positions-table-wrap" class="account-table-wrap hidden">
+            <table class="account-table">
+              <thead>
+                <tr>
+                  <th>Account</th>
+                  <th>Symbol</th>
+                  <th>Side</th>
+                  <th>Size</th>
+                  <th>Entry</th>
+                  <th>Mark</th>
+                  <th>Unrealized PnL</th>
+                  <th>Realized PnL</th>
+                  <th>Return</th>
+                  <th>Leverage</th>
+                  <th>Liquidation</th>
+                </tr>
+              </thead>
+              <tbody id="positions-table-body"></tbody>
+            </table>
+          </div>
+          <div id="positions-account-errors" class="account-errors hidden"></div>
+        </div>
+      </section>
+      <section id="account-position-history-view" class="account-view hidden">
+        <div class="account-view-body account-view-empty">No position history available.</div>
+      </section>
+      <section id="account-orders-view" class="account-view hidden">
+        <div class="account-view-body account-view-empty">No order history available.</div>
+      </section>
+      <section id="account-pnl-view" class="account-view hidden">
+        <div class="account-view-body account-view-empty">No PnL history available.</div>
+      </section>
+      <div id="position-pnl-popover" class="position-pnl-popover hidden" role="dialog"
+           aria-label="Realized PnL calculation">
+        <strong>Realized PnL</strong>
+        <div class="position-pnl-row">
+          <span>Total PnL</span>
+          <span id="position-pnl-gross" class="mono"></span>
+        </div>
+        <div class="position-pnl-row">
+          <span>Fees</span>
+          <span id="position-pnl-fees" class="mono"></span>
+        </div>
+        <div class="position-pnl-row position-pnl-net-row">
+          <span>Net PnL</span>
+          <span id="position-pnl-net" class="mono"></span>
+        </div>
+        <div id="position-pnl-note" class="position-pnl-note hidden"></div>
       </div>
     </div>
   </div>
@@ -479,6 +624,6 @@
     </form>
   </div>
 
-  <script src="/static/dashboard.js?v=76"></script>
+  <script src="/static/dashboard.js?v=90"></script>
 </body>
 </html>

@@ -35,6 +35,8 @@ def _coalesce_key(payload: Any) -> Optional[tuple]:
         return ("bar", data.get("time"))
     if t == "sessions":
         return ("sessions",)
+    if t == "account.positions":
+        return ("account.positions",)
     return None
 
 

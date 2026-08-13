@@ -21,6 +21,7 @@ from pynecore.core.csv_file import CSVReader
 import ccxt.pro as ccxtpro
 
 from ai.provider.codex_service import CodexService
+from account_data import AccountDataError, AccountDataService
 from asset_portfolio import AssetPortfolioError, AssetPortfolioService
 from asset_transfer import AssetTransferError, AssetTransferService
 from calendar_store import CalendarEventStore, CalendarStoreError
@@ -693,6 +694,7 @@ def build_control_router(
     registry: SessionRegistry,
     codex_service: CodexService,
     calendar_store: CalendarEventStore,
+    account_data_service: AccountDataService,
     asset_portfolio_service: AssetPortfolioService,
     asset_transfer_service: AssetTransferService,
     update_service: UpdateService,
@@ -730,10 +732,19 @@ def build_control_router(
         return JSONResponse(result, status_code=202)
 
     @r.get("/api/assets")
+    @r.get("/api/account/assets")
     async def get_assets(refresh: bool = False) -> JSONResponse:
         try:
             result = await asset_portfolio_service.snapshot(force=refresh)
         except AssetPortfolioError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+        return JSONResponse(result)
+
+    @r.get("/api/account/positions")
+    async def get_account_positions(refresh: bool = False) -> JSONResponse:
+        try:
+            result = await account_data_service.positions(force=refresh)
+        except AccountDataError as exc:
             return JSONResponse({"error": str(exc)}, status_code=503)
         return JSONResponse(result)
 

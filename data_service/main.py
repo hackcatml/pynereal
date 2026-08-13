@@ -13,6 +13,7 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from ai.provider.codex_service import CodexService
+from account_data import AccountDataService
 from asset_portfolio import AssetPortfolioService
 from asset_transfer import AssetTransferService
 from calendar_store import CalendarEventStore
@@ -36,6 +37,7 @@ def build_app(
     registry: SessionRegistry,
     codex_service: CodexService,
     calendar_store: CalendarEventStore,
+    account_data_service: AccountDataService,
     asset_portfolio_service: AssetPortfolioService,
     asset_transfer_service: AssetTransferService,
     update_service: UpdateService,
@@ -47,6 +49,7 @@ def build_app(
             registry,
             codex_service,
             calendar_store,
+            account_data_service,
             asset_portfolio_service,
             asset_transfer_service,
             update_service,
@@ -72,6 +75,17 @@ def build_app(
             await registry.hub_ws.disconnect(ws)
         except Exception:
             await registry.hub_ws.disconnect(ws)
+
+    @app.websocket("/ws/account")
+    async def account_ws(ws: WebSocket):
+        await account_data_service.connect_live(ws)
+        try:
+            while True:
+                await ws.receive_text()
+        except WebSocketDisconnect:
+            await account_data_service.disconnect_live(ws)
+        except Exception:
+            await account_data_service.disconnect_live(ws)
 
     @app.websocket("/ws/{session_id}")
     async def session_ws(ws: WebSocket, session_id: str):
@@ -147,6 +161,9 @@ async def main() -> None:
     asset_portfolio_service = AssetPortfolioService(
         _PROJECT_ROOT / "workdir" / "config" / "providers.toml"
     )
+    account_data_service = AccountDataService(
+        _PROJECT_ROOT / "workdir" / "config" / "providers.toml"
+    )
     asset_transfer_service = AssetTransferService(
         _PROJECT_ROOT / "workdir" / "config" / "providers.toml"
     )
@@ -174,6 +191,7 @@ async def main() -> None:
         registry,
         codex_service,
         calendar_store,
+        account_data_service,
         asset_portfolio_service,
         asset_transfer_service,
         update_service,
@@ -218,9 +236,12 @@ async def main() -> None:
             await registry.shutdown()
         finally:
             try:
-                await asset_portfolio_service.close()
+                await account_data_service.close()
             finally:
-                await codex_service.close()
+                try:
+                    await asset_portfolio_service.close()
+                finally:
+                    await codex_service.close()
     if update_shutdown.is_set():
         update_service.apply_and_restart()
 

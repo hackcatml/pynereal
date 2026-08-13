@@ -52,11 +52,22 @@
     hyperliquid: new Set(["spot", "swap"]),
   };
   let assetsRequestSeq = 0;
+  const assetsRefreshIntervalMs = 10000;
+  let assetsRefreshTimer = null;
   let assetsOpenTimer = null;
   let assetsCloseTimer = null;
   let assetsHaveData = false;
   let assetsPayload = null;
   let selectedAssetExchange = null;
+  let accountView = "assets";
+  let positionsRequestSeq = 0;
+  let positionsHaveData = false;
+  let positionsPayload = null;
+  let positionsObservedAt = 0;
+  let accountPositionsWs = null;
+  let accountPositionsReconnectTimer = null;
+  let accountPositionsKeepaliveTimer = null;
+  let accountPositionsGeneration = 0;
   let assetTransferRequestSeq = 0;
   let assetTransferContext = null;
   let assetTransferReview = null;
@@ -450,6 +461,26 @@
     return !el("assets-modal").classList.contains("hidden");
   }
 
+  function clearAssetsRefreshTimer() {
+    if (assetsRefreshTimer === null) return;
+    clearTimeout(assetsRefreshTimer);
+    assetsRefreshTimer = null;
+  }
+
+  function scheduleAssetsRefresh() {
+    clearAssetsRefreshTimer();
+    if (
+      !isAssetsOpen()
+      || accountView !== "assets"
+      || document.visibilityState !== "visible"
+    ) return;
+    assetsRefreshTimer = window.setTimeout(() => {
+      assetsRefreshTimer = null;
+      if (!isAssetsOpen() || accountView !== "assets") return;
+      loadAssets(true);
+    }, assetsRefreshIntervalMs);
+  }
+
   function finishAssetsOpening() {
     if (assetsOpenTimer !== null) {
       clearTimeout(assetsOpenTimer);
@@ -472,17 +503,17 @@
     box.style.transform = "";
     box.style.transition = "";
     modal.setAttribute("aria-hidden", "true");
+    clearAssetsRefreshTimer();
+    closeAccountPositionsSocket();
     assetsCloseTimer = null;
     assetsOpenTimer = null;
     unlockBodyScroll();
   }
 
-  async function openAssets() {
+  async function openAccount(view = "assets") {
     closeHubMenu();
     closeAiChat();
-    selectedAssetExchange = null;
-    el("assets-title").textContent = "Assets";
-    el("assets-back").classList.add("hidden");
+    if (view === "assets") selectedAssetExchange = null;
     if (assetsCloseTimer !== null) {
       clearTimeout(assetsCloseTimer);
       assetsCloseTimer = null;
@@ -507,17 +538,21 @@
     box.style.transition = "";
     modal.setAttribute("aria-hidden", "false");
     lockBodyScroll();
-    await loadAssets(false);
+    await switchAccountView(view, { load: true });
   }
 
   function closeAssets(options = {}) {
     if (!isAssetsOpen()) return;
     closeAssetTransfer();
+    closePositionPnlPopover();
     const modal = el("assets-modal");
     if (modal.classList.contains("assets-closing")) return;
     const fromDrag = options && options.fromDrag === true;
     finishAssetsOpening();
+    clearAssetsRefreshTimer();
     assetsRequestSeq += 1;
+    setAssetsLoading(false);
+    positionsRequestSeq += 1;
     if (!mobileHubQuery.matches) {
       finishAssetsClose();
       return;
@@ -536,6 +571,60 @@
     }
     modal.classList.add("assets-closing");
     assetsCloseTimer = window.setTimeout(finishAssetsClose, 220);
+  }
+
+  const accountViewTitles = {
+    assets: "Assets",
+    positions: "Positions",
+    "position-history": "Position History",
+    orders: "Order History",
+    pnl: "PnL",
+  };
+
+  async function switchAccountView(view, options = {}) {
+    if (!Object.prototype.hasOwnProperty.call(accountViewTitles, view)) return;
+    if (accountView === "assets" && view !== "assets") {
+      clearAssetsRefreshTimer();
+      assetsRequestSeq += 1;
+      setAssetsLoading(false);
+    }
+    if (accountView === "positions" && view !== "positions") {
+      positionsRequestSeq += 1;
+      closeAccountPositionsSocket();
+      closePositionPnlPopover();
+    }
+    accountView = view;
+    document.querySelectorAll("[data-account-view]").forEach((button) => {
+      if (!button.classList.contains("account-tab")) return;
+      const active = button.dataset.accountView === view;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+    });
+    Object.keys(accountViewTitles).forEach((name) => {
+      el(`account-${name}-view`).classList.toggle("hidden", name !== view);
+    });
+
+    const assetsSelected = view === "assets" && selectedAssetExchange;
+    el("assets-back").classList.toggle("hidden", !assetsSelected);
+    el("assets-refresh").classList.toggle(
+      "hidden",
+      !new Set(["assets", "positions"]).has(view),
+    );
+    el("assets-refresh").title = view === "positions"
+      ? "Refresh positions"
+      : "Refresh assets";
+    el("assets-refresh").setAttribute("aria-label", el("assets-refresh").title);
+    el("assets-title").textContent = accountViewTitles[view];
+    if (view === "assets" && assetsPayload) renderAssetsView();
+    if (!options.load) {
+      if (view === "assets") scheduleAssetsRefresh();
+      return;
+    }
+    if (view === "assets") await loadAssets(false);
+    else if (view === "positions") {
+      await loadPositions(false);
+      connectAccountPositions();
+    }
   }
 
   function formatAssetValue(value, currency, compact = false) {
@@ -1566,8 +1655,10 @@
   }
 
   function setAssetsLoading(loading, preserveContent = false) {
-    el("assets-refresh").disabled = loading;
-    el("assets-refresh").classList.toggle("assets-refreshing", loading);
+    if (accountView === "assets") {
+      el("assets-refresh").disabled = loading;
+      el("assets-refresh").classList.toggle("assets-refreshing", loading);
+    }
     el("assets-loading").classList.toggle("hidden", !loading || preserveContent);
     if (loading) el("assets-error").classList.add("hidden");
     if (loading && !preserveContent) {
@@ -1579,15 +1670,16 @@
   }
 
   async function loadAssets(force) {
+    clearAssetsRefreshTimer();
     const seq = ++assetsRequestSeq;
-    const preserveContent = Boolean(force && assetsHaveData);
+    const preserveContent = assetsHaveData;
     setAssetsLoading(true, preserveContent);
     try {
-      const payload = await api(`/api/assets${force ? "?refresh=true" : ""}`);
-      if (seq !== assetsRequestSeq || !isAssetsOpen()) return;
+      const payload = await api(`/api/account/assets${force ? "?refresh=true" : ""}`);
+      if (seq !== assetsRequestSeq || !isAssetsOpen() || accountView !== "assets") return;
       renderAssets(payload);
     } catch (error) {
-      if (seq !== assetsRequestSeq || !isAssetsOpen()) return;
+      if (seq !== assetsRequestSeq || !isAssetsOpen() || accountView !== "assets") return;
       const errorElement = el("assets-error");
       errorElement.textContent = `${error.message}\nUse refresh to try again.`;
       errorElement.classList.remove("hidden");
@@ -1596,8 +1688,384 @@
         el("assets-portfolios").replaceChildren();
       }
     } finally {
-      if (seq === assetsRequestSeq) setAssetsLoading(false);
+      if (seq === assetsRequestSeq) {
+        setAssetsLoading(false);
+        scheduleAssetsRefresh();
+      }
     }
+  }
+
+  function formatPositionNumber(value, maximumFractionDigits = 6) {
+    if (value === null || value === undefined || value === "" || typeof value === "boolean") {
+      return "—";
+    }
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "—";
+    return number.toLocaleString(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits,
+    });
+  }
+
+  function positionTableCell(text, className = "", label = "") {
+    const cell = document.createElement("td");
+    cell.textContent = text;
+    if (className) cell.className = className;
+    if (label) cell.dataset.label = label;
+    cell.title = text;
+    return cell;
+  }
+
+  function formatSignedPositionNumber(value, maximumFractionDigits = 4) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "Unavailable";
+    return `${number > 0 ? "+" : ""}${formatPositionNumber(number, maximumFractionDigits)}`;
+  }
+
+  function positionPnlClass(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "";
+    return number > 0
+      ? "account-pnl-positive"
+      : number < 0 ? "account-pnl-negative" : "";
+  }
+
+  function positionRealizedPnlCell(position) {
+    const value = position.realized_pnl === null || position.realized_pnl === undefined
+      ? Number.NaN
+      : Number(position.realized_pnl);
+    if (!Number.isFinite(value)) return positionTableCell("—", "", "Realized PnL");
+    const cell = positionTableCell("", positionPnlClass(value), "Realized PnL");
+    const button = document.createElement("button");
+    button.className = "position-pnl-value";
+    button.type = "button";
+    button.textContent = formatSignedPositionNumber(value);
+    button.title = "Show realized PnL calculation";
+    button.setAttribute("aria-haspopup", "dialog");
+    button.setAttribute("aria-expanded", "false");
+    const breakdown = position.realized_pnl_breakdown;
+    button.dataset.positionPnl = JSON.stringify(
+      breakdown && typeof breakdown === "object"
+        ? breakdown
+        : { gross_pnl: null, fees: null, net_pnl: value, complete: false },
+    );
+    cell.appendChild(button);
+    return cell;
+  }
+
+  let activePositionPnlButton = null;
+
+  function closePositionPnlPopover() {
+    if (activePositionPnlButton) {
+      activePositionPnlButton.setAttribute("aria-expanded", "false");
+      activePositionPnlButton = null;
+    }
+    const popover = el("position-pnl-popover");
+    if (popover) popover.classList.add("hidden");
+  }
+
+  function showPositionPnlPopover(button) {
+    if (activePositionPnlButton === button) {
+      closePositionPnlPopover();
+      return;
+    }
+    let breakdown;
+    try {
+      breakdown = JSON.parse(button.dataset.positionPnl || "{}");
+    } catch {
+      breakdown = {};
+    }
+    closePositionPnlPopover();
+    activePositionPnlButton = button;
+    button.setAttribute("aria-expanded", "true");
+
+    const gross = Number(breakdown.gross_pnl);
+    const fees = Number(breakdown.fees);
+    const net = Number(breakdown.net_pnl);
+    const complete = breakdown.complete === true
+      && Number.isFinite(gross)
+      && Number.isFinite(fees)
+      && Number.isFinite(net);
+    setText(el("position-pnl-gross"), complete ? formatSignedPositionNumber(gross) : "Unavailable");
+    setText(el("position-pnl-fees"), complete ? formatPositionNumber(fees, 4) : "Unavailable");
+    setText(el("position-pnl-net"), formatSignedPositionNumber(net));
+    setClass(el("position-pnl-net"), `mono ${positionPnlClass(net)}`.trim());
+    el("position-pnl-note").classList.toggle("hidden", complete);
+    if (!complete) {
+      setText(
+        el("position-pnl-note"),
+        "The exchange reports net realized PnL without a fee breakdown.",
+      );
+    }
+
+    const popover = el("position-pnl-popover");
+    popover.classList.remove("hidden");
+    const buttonRect = button.getBoundingClientRect();
+    const popoverRect = popover.getBoundingClientRect();
+    const left = Math.min(
+      Math.max(12, buttonRect.right - popoverRect.width),
+      window.innerWidth - popoverRect.width - 12,
+    );
+    let top = buttonRect.bottom + 8;
+    if (top + popoverRect.height > window.innerHeight - 12) {
+      top = Math.max(12, buttonRect.top - popoverRect.height - 8);
+    }
+    popover.style.left = `${left}px`;
+    popover.style.top = `${top}px`;
+  }
+
+  function renderPositions(payload) {
+    const observedAt = Date.parse(payload.collected_at || "");
+    if (Number.isFinite(observedAt) && observedAt < positionsObservedAt) return;
+    if (Number.isFinite(observedAt)) positionsObservedAt = observedAt;
+    positionsPayload = payload;
+    positionsHaveData = true;
+    const results = Array.isArray(payload.results) ? payload.results : [];
+    const positions = [];
+    const errors = [];
+    results.forEach((result) => {
+      if (result && result.status === "ok") {
+        (Array.isArray(result.positions) ? result.positions : []).forEach((position) => {
+          positions.push({
+            ...position,
+            account: result.account || "",
+            exchange: result.exchange || "",
+            exchange_logo_url: result.exchange_logo_url || "",
+          });
+        });
+        return;
+      }
+      const error = result && result.error && result.error.message;
+      errors.push(
+        `${result && result.account || "Unknown account"}: ${error || "Position data unavailable"}`,
+      );
+    });
+
+    const summary = payload.summary || {};
+    el("positions-open-count").textContent = String(positions.length);
+    el("positions-account-count").textContent =
+      `${Number(summary.succeeded || 0)} of ${Number(summary.accounts || 0)} accounts`;
+    el("positions-updated").textContent = Number.isFinite(observedAt)
+      ? `Updated ${new Date(observedAt).toLocaleString("en-US", {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        })}${payload.live ? " · live" : payload.cached ? " · cached" : ""}`
+      : "";
+    el("positions-summary").classList.remove("hidden");
+    el("positions-empty").textContent = Number(summary.accounts || 0) === 0
+      ? "No exchange accounts are configured in providers.toml."
+      : "No open positions.";
+    el("positions-empty").classList.toggle("hidden", positions.length !== 0);
+    el("positions-table-wrap").classList.toggle("hidden", positions.length === 0);
+
+    const tableBody = el("positions-table-body");
+    tableBody.replaceChildren();
+    positions.forEach((position) => {
+      const row = document.createElement("tr");
+      const accountName = String(position.account || "—");
+      const exchangeName = String(position.exchange || "").toUpperCase();
+      const account = positionTableCell("", "account-table-account", "Account");
+      account.title = accountName;
+      const exchangeLogo = logoImg(
+        position.exchange_logo_url,
+        exchangeName,
+        "exchange-logo",
+      );
+      setHTML(
+        account,
+        `${exchangeLogo}<span class="account-table-account-name">${esc(accountName)}</span>`,
+      );
+      account.dataset.label = "Account";
+
+      const symbol = positionTableCell(
+        String(position.symbol || "—"),
+        "account-table-symbol",
+        "Symbol",
+      );
+      const scopeText = String(position.market_scope || position.dex || "");
+      if (scopeText) {
+        const scope = document.createElement("small");
+        scope.textContent = scopeText;
+        symbol.appendChild(scope);
+      }
+
+      const sideText = String(position.side || "—");
+      const sideClass = sideText.toLowerCase() === "long"
+        ? "account-position-long"
+        : sideText.toLowerCase() === "short" ? "account-position-short" : "";
+      const pnl = position.unrealized_pnl === null || position.unrealized_pnl === undefined
+        ? Number.NaN
+        : Number(position.unrealized_pnl);
+      const pnlClass = positionPnlClass(pnl);
+      const percentage = position.percentage === null || position.percentage === undefined
+        ? Number.NaN
+        : Number(position.percentage);
+      const percentageText = Number.isFinite(percentage)
+        ? `${percentage > 0 ? "+" : ""}${formatPositionNumber(percentage, 2)}%`
+        : "—";
+
+      row.append(
+        account,
+        symbol,
+        positionTableCell(sideText, sideClass, "Side"),
+        positionTableCell(
+          formatPositionNumber(position.quantity ?? position.contracts),
+          "",
+          "Size",
+        ),
+        positionTableCell(formatPositionNumber(position.entry_price), "", "Entry"),
+        positionTableCell(formatPositionNumber(position.mark_price), "", "Mark"),
+        positionTableCell(
+          Number.isFinite(pnl)
+            ? `${pnl > 0 ? "+" : ""}${formatPositionNumber(pnl, 4)}`
+            : "—",
+          pnlClass,
+          "Unrealized PnL",
+        ),
+        positionRealizedPnlCell(position),
+        positionTableCell(percentageText, pnlClass, "Return"),
+        positionTableCell(
+          position.leverage !== null
+            && position.leverage !== undefined
+            && Number.isFinite(Number(position.leverage))
+            ? `${formatPositionNumber(position.leverage, 2)}x`
+            : "—",
+          "",
+          "Leverage",
+        ),
+        positionTableCell(
+          formatPositionNumber(position.liquidation_price),
+          "",
+          "Liquidation",
+        ),
+      );
+      tableBody.appendChild(row);
+    });
+
+    const errorContainer = el("positions-account-errors");
+    errorContainer.replaceChildren();
+    errors.forEach((message) => {
+      const item = document.createElement("div");
+      item.textContent = message;
+      errorContainer.appendChild(item);
+    });
+    errorContainer.classList.toggle("hidden", errors.length === 0);
+  }
+
+  function setPositionsLoading(loading, preserveContent = false) {
+    if (accountView === "positions") {
+      el("assets-refresh").disabled = loading;
+      el("assets-refresh").classList.toggle("assets-refreshing", loading);
+    }
+    el("positions-loading").classList.toggle("hidden", !loading || preserveContent);
+    if (loading) el("positions-error").classList.add("hidden");
+    if (loading && !preserveContent) {
+      positionsPayload = null;
+      el("positions-summary").classList.add("hidden");
+      el("positions-empty").classList.add("hidden");
+      el("positions-table-wrap").classList.add("hidden");
+      el("positions-account-errors").classList.add("hidden");
+      el("positions-table-body").replaceChildren();
+    }
+  }
+
+  async function loadPositions(force) {
+    const seq = ++positionsRequestSeq;
+    const preserveContent = positionsHaveData;
+    setPositionsLoading(true, preserveContent);
+    try {
+      const payload = await api(`/api/account/positions${force ? "?refresh=true" : ""}`);
+      if (seq !== positionsRequestSeq || !isAssetsOpen() || accountView !== "positions") return;
+      renderPositions(payload);
+    } catch (error) {
+      if (seq !== positionsRequestSeq || !isAssetsOpen() || accountView !== "positions") return;
+      el("positions-error").textContent = `${error.message}\nUse refresh to try again.`;
+      el("positions-error").classList.remove("hidden");
+      if (!preserveContent) {
+        el("positions-summary").classList.add("hidden");
+        el("positions-table-wrap").classList.add("hidden");
+      }
+    } finally {
+      if (seq === positionsRequestSeq) setPositionsLoading(false);
+    }
+  }
+
+  function clearAccountPositionsTimers() {
+    if (accountPositionsReconnectTimer !== null) {
+      clearTimeout(accountPositionsReconnectTimer);
+      accountPositionsReconnectTimer = null;
+    }
+    if (accountPositionsKeepaliveTimer !== null) {
+      clearInterval(accountPositionsKeepaliveTimer);
+      accountPositionsKeepaliveTimer = null;
+    }
+  }
+
+  function closeAccountPositionsSocket() {
+    accountPositionsGeneration += 1;
+    clearAccountPositionsTimers();
+    const ws = accountPositionsWs;
+    accountPositionsWs = null;
+    if (ws) {
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+        try { ws.close(); } catch {}
+      }
+    }
+  }
+
+  function connectAccountPositions(generation = accountPositionsGeneration) {
+    if (
+      generation !== accountPositionsGeneration
+      || !isAssetsOpen()
+      || accountView !== "positions"
+      || document.visibilityState === "hidden"
+    ) return;
+    if (
+      accountPositionsWs
+      && [WebSocket.OPEN, WebSocket.CONNECTING].includes(accountPositionsWs.readyState)
+    ) return;
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(`${proto}//${location.host}/ws/account`);
+    accountPositionsWs = ws;
+    ws.onopen = () => {
+      if (ws !== accountPositionsWs || generation !== accountPositionsGeneration) return;
+      accountPositionsKeepaliveTimer = setInterval(() => {
+        if (ws === accountPositionsWs && ws.readyState === WebSocket.OPEN) ws.send("ping");
+      }, 15000);
+    };
+    ws.onmessage = (event) => {
+      if (
+        ws !== accountPositionsWs
+        || generation !== accountPositionsGeneration
+        || !isAssetsOpen()
+        || accountView !== "positions"
+      ) return;
+      try {
+        const message = JSON.parse(event.data);
+        if (message.type === "account.positions" && message.payload) {
+          renderPositions(message.payload);
+        }
+      } catch {}
+    };
+    ws.onclose = () => {
+      if (ws !== accountPositionsWs || generation !== accountPositionsGeneration) return;
+      accountPositionsWs = null;
+      clearAccountPositionsTimers();
+      if (!isAssetsOpen() || accountView !== "positions") return;
+      accountPositionsReconnectTimer = setTimeout(
+        () => connectAccountPositions(generation),
+        1500,
+      );
+    };
+    ws.onerror = () => {
+      try { ws.close(); } catch {}
+    };
   }
 
   async function loadCalendarEvents() {
@@ -2232,7 +2700,25 @@
     el("hub-menu-close").addEventListener("click", closeHubMenu);
     el("hub-menu-backdrop").addEventListener("click", closeHubMenu);
     el("hub-calendar-open").addEventListener("click", openCalendar);
-    el("hub-assets-open").addEventListener("click", openAssets);
+    el("hub-account-toggle").addEventListener("click", () => {
+      const menu = el("hub-account-menu");
+      const expanded = el("hub-account-toggle").getAttribute("aria-expanded") === "true";
+      el("hub-account-toggle").setAttribute("aria-expanded", String(!expanded));
+      menu.classList.toggle("hidden", expanded);
+    });
+    el("hub-account-menu").addEventListener("click", (event) => {
+      const button = event.target && event.target.closest
+        ? event.target.closest("[data-account-view]")
+        : null;
+      if (!button) return;
+      openAccount(String(button.dataset.accountView || "assets"));
+    });
+    el("hub-history-toggle").addEventListener("click", () => {
+      const menu = el("hub-history-menu");
+      const expanded = el("hub-history-toggle").getAttribute("aria-expanded") === "true";
+      el("hub-history-toggle").setAttribute("aria-expanded", String(!expanded));
+      menu.classList.toggle("hidden", expanded);
+    });
     el("hub-update-button").addEventListener("click", checkForUpdate);
     el("update-close").addEventListener("click", closeUpdateModal);
     el("update-cancel").addEventListener("click", closeUpdateModal);
@@ -2366,17 +2852,129 @@
     }
     initMobileHubMenuSwipe();
     initMobileCalendarGestures();
+    const accountTabs = document.querySelector(".account-tabs");
+    function accountTabFromEvent(event) {
+      return event.target && event.target.closest
+        ? event.target.closest("[data-account-view]")
+        : null;
+    }
+    accountTabs.addEventListener("pointerdown", (event) => {
+      if (!event.isPrimary || (event.pointerType === "mouse" && event.button !== 0)) return;
+      const button = accountTabFromEvent(event);
+      if (!button) return;
+      switchAccountView(String(button.dataset.accountView || "assets"), { load: true });
+    });
+    accountTabs.addEventListener("click", (event) => {
+      const button = accountTabFromEvent(event);
+      if (!button) return;
+      const view = String(button.dataset.accountView || "assets");
+      if (view !== accountView) switchAccountView(view, { load: true });
+    });
     el("assets-close").addEventListener("click", closeAssets);
     el("assets-back").addEventListener("click", () => {
       selectedAssetExchange = null;
       renderAssetsView();
       el("assets-body").scrollTop = 0;
     });
-    el("assets-refresh").addEventListener("click", () => loadAssets(true));
+    el("assets-refresh").addEventListener("click", () => {
+      if (accountView === "positions") loadPositions(true);
+      else if (accountView === "assets") loadAssets(true);
+    });
     const assetsModal = el("assets-modal");
     assetsModal.addEventListener("click", (event) => {
       if (event.target === assetsModal) closeAssets();
     });
+    const positionsTableBody = el("positions-table-body");
+    let positionPnlGesture = null;
+    let suppressPositionPnlClick = false;
+    let suppressPositionPnlClickTimer = null;
+
+    function togglePositionPnlPopover(button) {
+      if (activePositionPnlButton) closePositionPnlPopover();
+      else showPositionPnlPopover(button);
+    }
+
+    function suppressNextPositionPnlClick() {
+      suppressPositionPnlClick = true;
+      if (suppressPositionPnlClickTimer !== null) {
+        clearTimeout(suppressPositionPnlClickTimer);
+      }
+      suppressPositionPnlClickTimer = window.setTimeout(() => {
+        suppressPositionPnlClick = false;
+        suppressPositionPnlClickTimer = null;
+      }, 500);
+    }
+
+    positionsTableBody.addEventListener("pointerdown", (event) => {
+      if (!event.isPrimary || (event.pointerType === "mouse" && event.button !== 0)) return;
+      const button = event.target && event.target.closest
+        ? event.target.closest(".position-pnl-value")
+        : null;
+      if (!button) return;
+      event.stopPropagation();
+      positionPnlGesture = {
+        button,
+        pointerId: event.pointerId,
+        startedAt: performance.now(),
+        startX: event.clientX,
+        startY: event.clientY,
+        moved: false,
+      };
+    });
+    positionsTableBody.addEventListener("pointermove", (event) => {
+      const gesture = positionPnlGesture;
+      if (!gesture || gesture.pointerId !== event.pointerId || gesture.moved) return;
+      if (
+        Math.abs(event.clientX - gesture.startX) > 10
+        || Math.abs(event.clientY - gesture.startY) > 10
+      ) {
+        gesture.moved = true;
+        closePositionPnlPopover();
+      }
+    }, { passive: true });
+    positionsTableBody.addEventListener("pointerup", (event) => {
+      const gesture = positionPnlGesture;
+      if (!gesture || gesture.pointerId !== event.pointerId) return;
+      positionPnlGesture = null;
+      suppressNextPositionPnlClick();
+      if (gesture.moved || performance.now() - gesture.startedAt > 450) return;
+      event.preventDefault();
+      event.stopPropagation();
+      togglePositionPnlPopover(gesture.button);
+    });
+    positionsTableBody.addEventListener("pointercancel", (event) => {
+      if (positionPnlGesture && positionPnlGesture.pointerId === event.pointerId) {
+        positionPnlGesture = null;
+      }
+    });
+    positionsTableBody.addEventListener("click", (event) => {
+      const button = event.target && event.target.closest
+        ? event.target.closest(".position-pnl-value")
+        : null;
+      if (!button) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (suppressPositionPnlClick) {
+        suppressPositionPnlClick = false;
+        if (suppressPositionPnlClickTimer !== null) {
+          clearTimeout(suppressPositionPnlClickTimer);
+          suppressPositionPnlClickTimer = null;
+        }
+        return;
+      }
+      togglePositionPnlPopover(button);
+    });
+    positionsTableBody.addEventListener("scroll", () => {
+      if (positionPnlGesture) positionPnlGesture.moved = true;
+      closePositionPnlPopover();
+    }, { passive: true });
+    document.addEventListener("pointerdown", (event) => {
+      if (!activePositionPnlButton) return;
+      const target = event.target && event.target.closest ? event.target : null;
+      if (target && target.closest("#position-pnl-popover")) return;
+      closePositionPnlPopover();
+    }, { passive: true });
+    window.addEventListener("resize", closePositionPnlPopover, { passive: true });
     el("asset-transfer-close").addEventListener("click", closeAssetTransfer);
     el("asset-transfer-back").addEventListener("click", () => {
       if (assetTransferMode === "review") {
@@ -5642,10 +6240,20 @@
   }
 
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") rebuildHub();
-    else closeForBackground();
+    if (document.visibilityState === "visible") {
+      rebuildHub();
+      connectAccountPositions();
+      scheduleAssetsRefresh();
+    } else {
+      clearAssetsRefreshTimer();
+      closeForBackground();
+      closeAccountPositionsSocket();
+    }
   });
-  window.addEventListener("online", rebuildHub);
+  window.addEventListener("online", () => {
+    rebuildHub();
+    connectAccountPositions();
+  });
 
   initHubMenuCalendar();
   initSessionReordering();
