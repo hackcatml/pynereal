@@ -5,6 +5,7 @@ import copy
 import math
 import queue
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -33,10 +34,16 @@ from position import (  # noqa: E402
     normalize_position,
 )
 
+from account_service.cache import AccountCache  # noqa: E402
+from account_service.history import normalize_fill, normalize_order  # noqa: E402
 from account_service.positions import collect_positions_snapshot  # noqa: E402
+from data_service.schedule_utils import (  # noqa: E402
+    seconds_until_post_bar_task_window,
+)
 
 
 EMIT_INTERVAL_SECONDS = 0.25
+PERSIST_INTERVAL_SECONDS = 1.0
 RECONCILE_INTERVAL_SECONDS = 300.0
 
 
@@ -63,6 +70,7 @@ class LivePositionState:
     def __init__(self, snapshot: dict[str, Any]) -> None:
         self.snapshot = copy.deepcopy(snapshot)
         self.dirty = asyncio.Event()
+        self.persist_dirty = asyncio.Event()
         self.sequence = 0
 
     def replace(self, snapshot: dict[str, Any]) -> None:
@@ -72,6 +80,7 @@ class LivePositionState:
     def mark_dirty(self) -> None:
         self.sequence += 1
         self.dirty.set()
+        self.persist_dirty.set()
 
     def result(self, account_name: str) -> dict[str, Any] | None:
         for result in self.snapshot.get("results", []):
@@ -213,6 +222,122 @@ class LivePositionState:
         return payload
 
 
+class AccountHistoryBuffer:
+    def __init__(self) -> None:
+        self.dirty = asyncio.Event()
+        self._orders: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+        self._fills: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+
+    def add_orders(
+        self,
+        account: str,
+        exchange: str,
+        orders: list[dict[str, Any]],
+        market_scope: str,
+    ) -> None:
+        changed = False
+        for raw_order in orders:
+            if not isinstance(raw_order, dict):
+                continue
+            payload = normalize_order(raw_order)
+            key = (
+                account,
+                exchange,
+                market_scope,
+                str(payload.get("symbol") or ""),
+                str(payload.get("id") or ""),
+            )
+            previous = self._orders.get(key)
+            if previous is not None:
+                previous_timestamp = _number(
+                    previous["payload"].get("updated_timestamp")
+                )
+                timestamp = _number(payload.get("updated_timestamp"))
+                if (
+                    previous_timestamp is not None
+                    and timestamp is not None
+                    and timestamp < previous_timestamp
+                ):
+                    continue
+            self._orders[key] = {
+                "account": account,
+                "exchange": exchange,
+                "market_scope": market_scope,
+                "payload": payload,
+            }
+            changed = True
+        if changed:
+            self.dirty.set()
+
+    def add_fills(
+        self,
+        account: str,
+        exchange: str,
+        fills: list[dict[str, Any]],
+        market_scope: str,
+    ) -> None:
+        changed = False
+        for raw_fill in fills:
+            if not isinstance(raw_fill, dict):
+                continue
+            payload = normalize_fill(raw_fill)
+            key = (
+                account,
+                exchange,
+                market_scope,
+                str(payload.get("symbol") or ""),
+                str(payload.get("id") or ""),
+            )
+            self._fills[key] = {
+                "account": account,
+                "exchange": exchange,
+                "market_scope": market_scope,
+                "payload": payload,
+            }
+            changed = True
+        if changed:
+            self.dirty.set()
+
+    def drain(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        orders = list(self._orders.values())
+        fills = list(self._fills.values())
+        self._orders.clear()
+        self._fills.clear()
+        return orders, fills
+
+    def restore(
+        self,
+        orders: list[dict[str, Any]],
+        fills: list[dict[str, Any]],
+    ) -> None:
+        for record in orders:
+            payload = record.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            key = (
+                str(record.get("account") or ""),
+                str(record.get("exchange") or ""),
+                str(record.get("market_scope") or ""),
+                str(payload.get("symbol") or ""),
+                str(payload.get("id") or ""),
+            )
+            self._orders.setdefault(key, record)
+        for record in fills:
+            payload = record.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            key = (
+                str(record.get("account") or ""),
+                str(record.get("exchange") or ""),
+                str(record.get("market_scope") or ""),
+                str(payload.get("symbol") or ""),
+                str(payload.get("id") or ""),
+            )
+            self._fills.setdefault(key, record)
+        if orders or fills:
+            self.dirty.set()
+
+
 def _calculate_unrealized_pnl(
     position: dict[str, Any],
     mark_price: float,
@@ -330,6 +455,148 @@ def _subscriptions(
             for dex, symbols in grouped_dexes.items()
         ]
     return [(None, {}, None, None)]
+
+
+def _history_subscriptions(account: ExchangeAccount) -> list[tuple[dict[str, Any], str]]:
+    if account.exchange_id == "binance":
+        return [
+            ({"type": "future", "subType": "linear"}, "usd_m"),
+            ({"type": "delivery", "subType": "inverse"}, "coin_m"),
+        ]
+    if account.exchange_id == "bitget":
+        options = account.config.get("options")
+        options = options if isinstance(options, dict) else {}
+        if bool(account.config.get("uta") or options.get("uta")):
+            return [({"uta": True}, "uta")]
+        return [
+            (
+                {
+                    "type": "swap",
+                    "subType": "linear",
+                    "productType": "USDT-FUTURES",
+                },
+                "USDT-FUTURES",
+            ),
+            (
+                {
+                    "type": "swap",
+                    "subType": "linear",
+                    "productType": "USDC-FUTURES",
+                },
+                "USDC-FUTURES",
+            ),
+            (
+                {
+                    "type": "swap",
+                    "subType": "inverse",
+                    "productType": "COIN-FUTURES",
+                },
+                "COIN-FUTURES",
+            ),
+        ]
+    return [({}, "")]
+
+
+async def _watch_private_orders(
+    exchange: Any,
+    account: ExchangeAccount,
+    history: AccountHistoryBuffer,
+    params: dict[str, Any],
+    market_scope: str,
+    stop: asyncio.Event,
+) -> None:
+    delay = 1.0
+    secrets = secret_values(account.config)
+    while not stop.is_set():
+        try:
+            orders = await exchange.watch_orders(None, params=params)
+            if isinstance(orders, list):
+                history.add_orders(
+                    account.name,
+                    account.exchange_id,
+                    orders,
+                    market_scope,
+                )
+            delay = 1.0
+        except asyncio.CancelledError:
+            raise
+        except (
+            ccxt.ArgumentsRequired,
+            ccxt.AuthenticationError,
+            ccxt.BadRequest,
+            ccxt.NotSupported,
+            ccxt.PermissionDenied,
+        ) as exc:
+            print(
+                f"[account] {account.name} order stream unavailable: "
+                f"{type(exc).__name__}: {redact_error(exc, secrets)}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        except Exception as exc:
+            print(
+                f"[account] {account.name} order stream error: "
+                f"{type(exc).__name__}: {redact_error(exc, secrets)}",
+                file=sys.stderr,
+                flush=True,
+            )
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=delay)
+            except TimeoutError:
+                pass
+            delay = min(delay * 2, 30.0)
+
+
+async def _watch_private_fills(
+    exchange: Any,
+    account: ExchangeAccount,
+    history: AccountHistoryBuffer,
+    params: dict[str, Any],
+    market_scope: str,
+    stop: asyncio.Event,
+) -> None:
+    delay = 1.0
+    secrets = secret_values(account.config)
+    while not stop.is_set():
+        try:
+            fills = await exchange.watch_my_trades(None, params=params)
+            if isinstance(fills, list):
+                history.add_fills(
+                    account.name,
+                    account.exchange_id,
+                    fills,
+                    market_scope,
+                )
+            delay = 1.0
+        except asyncio.CancelledError:
+            raise
+        except (
+            ccxt.ArgumentsRequired,
+            ccxt.AuthenticationError,
+            ccxt.BadRequest,
+            ccxt.NotSupported,
+            ccxt.PermissionDenied,
+        ) as exc:
+            print(
+                f"[account] {account.name} fill stream unavailable: "
+                f"{type(exc).__name__}: {redact_error(exc, secrets)}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        except Exception as exc:
+            print(
+                f"[account] {account.name} fill stream error: "
+                f"{type(exc).__name__}: {redact_error(exc, secrets)}",
+                file=sys.stderr,
+                flush=True,
+            )
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=delay)
+            except TimeoutError:
+                pass
+            delay = min(delay * 2, 30.0)
 
 
 async def _watch_private_positions(
@@ -459,6 +726,7 @@ async def _ticker_supervisor(
 async def _watch_account(
     account: ExchangeAccount,
     state: LivePositionState,
+    history: AccountHistoryBuffer,
     stop: asyncio.Event,
 ) -> None:
     exchange = None
@@ -488,6 +756,30 @@ async def _watch_account(
                 )
             )
         tasks.append(asyncio.create_task(_ticker_supervisor(exchange, account, state, stop)))
+        if exchange.has.get("watchOrders"):
+            for params, market_scope in _history_subscriptions(account):
+                tasks.append(asyncio.create_task(
+                    _watch_private_orders(
+                        exchange,
+                        account,
+                        history,
+                        params,
+                        market_scope,
+                        stop,
+                    )
+                ))
+        if exchange.has.get("watchMyTrades"):
+            for params, market_scope in _history_subscriptions(account):
+                tasks.append(asyncio.create_task(
+                    _watch_private_fills(
+                        exchange,
+                        account,
+                        history,
+                        params,
+                        market_scope,
+                        stop,
+                    )
+                ))
         await stop.wait()
     except asyncio.CancelledError:
         raise
@@ -533,6 +825,67 @@ async def _emit_updates(state: LivePositionState, output_queue: Any, stop: async
                 pass
 
 
+async def _persist_updates(
+    state: LivePositionState,
+    cache: AccountCache,
+    executor: ThreadPoolExecutor,
+    stop: asyncio.Event,
+) -> None:
+    loop = asyncio.get_running_loop()
+    while not stop.is_set():
+        await state.persist_dirty.wait()
+        state.persist_dirty.clear()
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=PERSIST_INTERVAL_SECONDS)
+            break
+        except TimeoutError:
+            pass
+        try:
+            await loop.run_in_executor(
+                executor,
+                cache.apply_positions_snapshot,
+                state.payload(),
+            )
+        except Exception as exc:
+            print(
+                f"[account] position cache write failed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+
+async def _persist_history_updates(
+    history: AccountHistoryBuffer,
+    cache: AccountCache,
+    executor: ThreadPoolExecutor,
+    stop: asyncio.Event,
+) -> None:
+    loop = asyncio.get_running_loop()
+    while not stop.is_set():
+        await history.dirty.wait()
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=PERSIST_INTERVAL_SECONDS)
+            break
+        except TimeoutError:
+            pass
+        history.dirty.clear()
+        orders, fills = history.drain()
+        try:
+            await loop.run_in_executor(
+                executor,
+                cache.apply_history_batch,
+                orders,
+                fills,
+            )
+        except Exception as exc:
+            history.restore(orders, fills)
+            print(
+                f"[account] history cache write failed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+
 async def _reconcile(
     config_path: str,
     state: LivePositionState,
@@ -544,6 +897,13 @@ async def _reconcile(
             break
         except TimeoutError:
             pass
+        post_bar_delay = seconds_until_post_bar_task_window()
+        if post_bar_delay > 0.0:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=post_bar_delay)
+                break
+            except TimeoutError:
+                pass
         try:
             snapshot = await asyncio.to_thread(collect_positions_snapshot, config_path)
             state.replace(snapshot)
@@ -557,6 +917,7 @@ async def _reconcile(
 
 async def _run_positions_stream(
     config_path: str,
+    cache_path: str,
     output_queue: Any,
     stop_event: Any,
     initial_snapshot: dict[str, Any] | None,
@@ -567,6 +928,12 @@ async def _run_positions_stream(
     )
     state = LivePositionState(snapshot)
     state.mark_dirty()
+    history = AccountHistoryBuffer()
+    cache = AccountCache(Path(cache_path))
+    cache_executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="account-cache-writer",
+    )
     data = read_provider_config(Path(config_path))
     accounts = configured_accounts(data)
     stop = asyncio.Event()
@@ -576,12 +943,16 @@ async def _run_positions_stream(
         stop.set()
 
     tasks = [
-        asyncio.create_task(_watch_account(account, state, stop))
+        asyncio.create_task(_watch_account(account, state, history, stop))
         for account in accounts
     ]
     tasks.extend(
         [
             asyncio.create_task(_emit_updates(state, output_queue, stop)),
+            asyncio.create_task(_persist_updates(state, cache, cache_executor, stop)),
+            asyncio.create_task(
+                _persist_history_updates(history, cache, cache_executor, stop)
+            ),
             asyncio.create_task(_reconcile(config_path, state, stop)),
             asyncio.create_task(watch_parent_stop()),
         ]
@@ -593,10 +964,42 @@ async def _run_positions_stream(
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(
+                cache_executor,
+                cache.apply_positions_snapshot,
+                state.payload(),
+            )
+        except Exception as exc:
+            print(
+                f"[account] final position cache write failed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+        orders, fills = history.drain()
+        if orders or fills:
+            try:
+                await loop.run_in_executor(
+                    cache_executor,
+                    cache.apply_history_batch,
+                    orders,
+                    fills,
+                )
+            except Exception as exc:
+                print(
+                    f"[account] final history cache write failed: "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        await loop.run_in_executor(cache_executor, cache.close)
+        cache_executor.shutdown(wait=True, cancel_futures=True)
 
 
 def run_positions_stream(
     config_path: str,
+    cache_path: str,
     output_queue: Any,
     stop_event: Any,
     initial_snapshot: dict[str, Any] | None = None,
@@ -605,6 +1008,7 @@ def run_positions_stream(
         asyncio.run(
             _run_positions_stream(
                 config_path,
+                cache_path,
                 output_queue,
                 stop_event,
                 initial_snapshot,
@@ -614,7 +1018,7 @@ def run_positions_stream(
         pass
     except Exception as exc:
         print(
-            f"[account] live position process stopped: {type(exc).__name__}",
+            f"[account] live account process stopped: {type(exc).__name__}",
             file=sys.stderr,
             flush=True,
         )

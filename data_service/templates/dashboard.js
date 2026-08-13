@@ -477,7 +477,7 @@
     assetsRefreshTimer = window.setTimeout(() => {
       assetsRefreshTimer = null;
       if (!isAssetsOpen() || accountView !== "assets") return;
-      loadAssets(true);
+      loadAssets(true, true);
     }, assetsRefreshIntervalMs);
   }
 
@@ -1669,13 +1669,16 @@
     }
   }
 
-  async function loadAssets(force) {
+  async function loadAssets(force, autoRefresh = false) {
     clearAssetsRefreshTimer();
     const seq = ++assetsRequestSeq;
     const preserveContent = assetsHaveData;
     setAssetsLoading(true, preserveContent);
     try {
-      const payload = await api(`/api/account/assets${force ? "?refresh=true" : ""}`);
+      const query = force
+        ? `?refresh=true${autoRefresh ? "&auto_refresh=true" : ""}`
+        : "";
+      const payload = await api(`/api/account/assets${query}`);
       if (seq !== assetsRequestSeq || !isAssetsOpen() || accountView !== "assets") return;
       renderAssets(payload);
     } catch (error) {

@@ -35,6 +35,7 @@ from registry import (
     SessionRegistry,
 )
 from runtime import Session
+from schedule_utils import seconds_until_bar_boundary_guard_end
 from config import (
     SessionSpec,
     default_webhook_url,
@@ -733,7 +734,14 @@ def build_control_router(
 
     @r.get("/api/assets")
     @r.get("/api/account/assets")
-    async def get_assets(refresh: bool = False) -> JSONResponse:
+    async def get_assets(
+        refresh: bool = False,
+        auto_refresh: bool = False,
+    ) -> JSONResponse:
+        if refresh and auto_refresh:
+            delay = seconds_until_bar_boundary_guard_end()
+            if delay > 0.0:
+                await asyncio.sleep(delay)
         try:
             result = await asset_portfolio_service.snapshot(force=refresh)
         except AssetPortfolioError as exc:

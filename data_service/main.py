@@ -162,7 +162,8 @@ async def main() -> None:
         _PROJECT_ROOT / "workdir" / "config" / "providers.toml"
     )
     account_data_service = AccountDataService(
-        _PROJECT_ROOT / "workdir" / "config" / "providers.toml"
+        _PROJECT_ROOT / "workdir" / "config" / "providers.toml",
+        cache_path=_PROJECT_ROOT / "workdir" / "data" / "cache" / "account_cache.sqlite",
     )
     asset_transfer_service = AssetTransferService(
         _PROJECT_ROOT / "workdir" / "config" / "providers.toml"
@@ -199,6 +200,10 @@ async def main() -> None:
 
     await registry.start_all(specs)
     await asset_portfolio_service.start()
+    try:
+        await account_data_service.start()
+    except Exception as exc:
+        print(f"[account] service startup failed: {type(exc).__name__}: {exc}")
     heartbeat = asyncio.create_task(_hub_status_heartbeat(registry))
 
     server = uvicorn.Server(

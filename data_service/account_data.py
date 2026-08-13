@@ -35,11 +35,17 @@ class AccountDataService:
         self,
         config_path: Path,
         *,
+        cache_path: Path | None = None,
         cache_ttl_seconds: float = 10.0,
         executor_factory: Callable[[], Executor] | None = None,
         positions_collector: Callable[[str], dict[str, Any]] = collect_positions_snapshot,
     ) -> None:
         self.config_path = config_path.resolve()
+        self.cache_path = (
+            cache_path
+            if cache_path is not None
+            else self.config_path.parent.parent / "data" / "cache" / "account_cache.sqlite"
+        ).resolve()
         self.cache_ttl_seconds = cache_ttl_seconds
         self._executor_factory = executor_factory or self._new_process_executor
         self._positions_collector = positions_collector
@@ -121,6 +127,9 @@ class AccountDataService:
     async def disconnect_live(self, ws: Any) -> None:
         await self.live_ws.disconnect(ws)
 
+    async def start(self) -> None:
+        await self._ensure_live_stream()
+
     async def _ensure_live_stream(self) -> None:
         async with self._live_lock:
             if self._live_process is not None and self._live_process.is_alive():
@@ -132,6 +141,7 @@ class AccountDataService:
                 target=run_positions_stream,
                 args=(
                     str(self.config_path),
+                    str(self.cache_path),
                     self._live_output,
                     self._live_stop,
                     copy.deepcopy(self._positions),
