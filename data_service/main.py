@@ -235,7 +235,11 @@ async def main() -> None:
         if update_finish_task is not None:
             update_finish_task.cancel()
             shutdown_tasks.append(update_finish_task)
-        await asyncio.gather(*shutdown_tasks, return_exceptions=True)
+        try:
+            await asyncio.gather(*shutdown_tasks, return_exceptions=True)
+        except asyncio.CancelledError:
+            # Ctrl-C can cancel this wait while child services still need to close.
+            pass
         heartbeat.cancel()
         try:
             await registry.shutdown()

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=84" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=103" />
 </head>
 <body>
   <header class="topbar">
@@ -267,7 +267,7 @@
               <path d="M3 21v-5h5" />
             </svg>
           </button>
-          <button id="assets-close" class="btn" type="button" title="Close" aria-label="Close">&times;</button>
+          <button id="assets-close" class="btn btn-icon" type="button" title="Close" aria-label="Close">&times;</button>
         </div>
       </div>
       <nav class="account-tabs" aria-label="Account views">
@@ -324,34 +324,118 @@
           </div>
           <div id="positions-error" class="assets-state assets-state-error hidden" role="alert"></div>
           <div id="positions-empty" class="assets-state hidden">No open positions.</div>
-          <div id="positions-table-wrap" class="account-table-wrap hidden">
-            <table class="account-table">
-              <thead>
-                <tr>
-                  <th>Account</th>
-                  <th>Symbol</th>
-                  <th>Side</th>
-                  <th>Size</th>
-                  <th>Entry</th>
-                  <th>Mark</th>
-                  <th>Unrealized PnL</th>
-                  <th>Realized PnL</th>
-                  <th>Return</th>
-                  <th>Leverage</th>
-                  <th>Liquidation</th>
-                </tr>
-              </thead>
-              <tbody id="positions-table-body"></tbody>
-            </table>
-          </div>
+          <div id="positions-list" class="account-history-record-list account-positions-list hidden"></div>
           <div id="positions-account-errors" class="account-errors hidden"></div>
         </div>
       </section>
-      <section id="account-position-history-view" class="account-view hidden">
-        <div class="account-view-body account-view-empty">No position history available.</div>
+      <section id="account-position-history-view" class="account-view account-history-view hidden">
+        <div class="account-view-body">
+          <div class="account-history-navigation">
+            <button id="position-history-back" class="btn btn-icon account-history-back hidden"
+                    type="button" title="Back" aria-label="Back">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M19 12H5"></path><path d="m12 19-7-7 7-7"></path>
+              </svg>
+            </button>
+            <div>
+              <strong id="position-history-navigation-title">Exchanges</strong>
+              <span id="position-history-navigation-subtitle">Choose an exchange</span>
+            </div>
+          </div>
+          <div id="position-history-groups" class="account-history-groups"></div>
+          <div id="position-history-loading" class="assets-state hidden">
+            <span class="assets-spinner" aria-hidden="true"></span>
+            <span>Loading position history...</span>
+          </div>
+          <div id="position-history-error" class="assets-state assets-state-error hidden" role="alert"></div>
+          <div id="position-history-empty" class="assets-state hidden">No position history.</div>
+          <div id="position-history-details" class="account-history-details hidden">
+          <form id="position-history-filters"
+                class="account-history-filters account-history-detail-filters">
+            <div class="script-select account-history-select" id="position-history-account-control">
+              <select id="position-history-account" class="script-native-select"
+                      tabindex="-1" aria-hidden="true">
+                <option value="">All accounts</option>
+              </select>
+              <button type="button" class="script-select-button" id="position-history-account-button"
+                      aria-haspopup="listbox" aria-expanded="false" aria-label="Filter by account">
+                <span class="script-select-label" id="position-history-account-label">All accounts</span>
+                <span class="script-select-chevron" aria-hidden="true">&#9662;</span>
+              </button>
+              <div class="script-select-options hidden" id="position-history-account-options"
+                   role="listbox"></div>
+            </div>
+          </form>
+          <div id="position-history-meta" class="account-history-meta hidden"></div>
+          <div id="position-history-table-wrap" class="account-history-list-wrap hidden">
+            <div id="position-history-table-body" class="account-history-record-list"></div>
+          </div>
+          <div class="account-history-more">
+            <button id="position-history-more" class="btn hidden" type="button">Load more</button>
+          </div>
+          </div>
+        </div>
       </section>
-      <section id="account-orders-view" class="account-view hidden">
-        <div class="account-view-body account-view-empty">No order history available.</div>
+      <section id="account-orders-view" class="account-view account-history-view hidden">
+        <div class="account-view-body">
+          <div class="account-history-navigation">
+            <button id="order-history-back" class="btn btn-icon account-history-back hidden"
+                    type="button" title="Back" aria-label="Back">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M19 12H5"></path><path d="m12 19-7-7 7-7"></path>
+              </svg>
+            </button>
+            <div>
+              <strong id="order-history-navigation-title">Exchanges</strong>
+              <span id="order-history-navigation-subtitle">Choose an exchange</span>
+            </div>
+          </div>
+          <div id="order-history-groups" class="account-history-groups"></div>
+          <div id="order-history-loading" class="assets-state hidden">
+            <span class="assets-spinner" aria-hidden="true"></span>
+            <span>Loading order history...</span>
+          </div>
+          <div id="order-history-error" class="assets-state assets-state-error hidden" role="alert"></div>
+          <div id="order-history-empty" class="assets-state hidden">No order history.</div>
+          <div id="order-history-details" class="account-history-details hidden">
+          <form id="order-history-filters"
+                class="account-history-filters account-history-detail-filters account-order-detail-filters">
+            <div class="script-select account-history-select" id="order-history-account-control">
+              <select id="order-history-account" class="script-native-select"
+                      tabindex="-1" aria-hidden="true">
+                <option value="">All accounts</option>
+              </select>
+              <button type="button" class="script-select-button" id="order-history-account-button"
+                      aria-haspopup="listbox" aria-expanded="false" aria-label="Filter by account">
+                <span class="script-select-label" id="order-history-account-label">All accounts</span>
+                <span class="script-select-chevron" aria-hidden="true">&#9662;</span>
+              </button>
+              <div class="script-select-options hidden" id="order-history-account-options"
+                   role="listbox"></div>
+            </div>
+            <div class="script-select account-history-select" id="order-history-status-control">
+              <select id="order-history-status" class="script-native-select"
+                      tabindex="-1" aria-hidden="true">
+                <option value="">All statuses</option>
+              </select>
+              <button type="button" class="script-select-button" id="order-history-status-button"
+                      aria-haspopup="listbox" aria-expanded="false" aria-label="Filter by order status">
+                <span class="script-select-label" id="order-history-status-label">All statuses</span>
+                <span class="script-select-chevron" aria-hidden="true">&#9662;</span>
+              </button>
+              <div class="script-select-options hidden" id="order-history-status-options"
+                   role="listbox"></div>
+            </div>
+          </form>
+          <div id="order-history-meta" class="account-history-meta hidden"></div>
+          <div id="order-history-table-wrap" class="account-history-list-wrap hidden">
+            <div id="order-history-table-body" class="account-history-record-list"></div>
+          </div>
+          <div class="account-history-more">
+            <button id="order-history-more" class="btn hidden" type="button">Load more</button>
+          </div>
+          </div>
+        </div>
       </section>
       <section id="account-pnl-view" class="account-view hidden">
         <div class="account-view-body account-view-empty">No PnL history available.</div>
@@ -627,6 +711,6 @@
     </form>
   </div>
 
-  <script src="/static/dashboard.js?v=92"></script>
+  <script src="/static/dashboard.js?v=111"></script>
 </body>
 </html>

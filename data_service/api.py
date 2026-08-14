@@ -756,6 +756,102 @@ def build_control_router(
             return JSONResponse({"error": str(exc)}, status_code=503)
         return JSONResponse(result)
 
+    @r.post("/api/account/history/refresh")
+    async def refresh_account_history(
+        payload: dict = Body(default_factory=dict),
+    ) -> JSONResponse:
+        values: dict[str, str] = {}
+        for field in ("kind", "account", "exchange", "symbol"):
+            value = payload.get(field, "")
+            if not isinstance(value, str):
+                return JSONResponse(
+                    {"error": f"{field} must be a string"},
+                    status_code=400,
+                )
+            values[field] = value
+        if values["kind"].strip().lower() not in {"order", "position"}:
+            return JSONResponse(
+                {"error": "kind must be order or position"},
+                status_code=400,
+            )
+        try:
+            result = await account_data_service.refresh_history(**values)
+        except AccountDataError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+        return JSONResponse(result)
+
+    @r.get("/api/account/position-history")
+    async def get_account_position_history(
+        cursor: str | None = None,
+        limit: int = 50,
+        account: str = "",
+        exchange: str = "",
+        symbol: str = "",
+        exact_market: bool = False,
+    ) -> JSONResponse:
+        try:
+            result = await account_data_service.position_history(
+                cursor=cursor,
+                limit=limit,
+                account=account,
+                exchange=exchange,
+                symbol=symbol,
+                exact_market=exact_market,
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except AccountDataError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+        return JSONResponse(result)
+
+    @r.get("/api/account/position-history/groups")
+    async def get_account_position_history_groups(
+        exchange: str = "",
+    ) -> JSONResponse:
+        try:
+            result = await account_data_service.position_history_groups(
+                exchange=exchange,
+            )
+        except AccountDataError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+        return JSONResponse(result)
+
+    @r.get("/api/account/orders")
+    async def get_account_orders(
+        cursor: str | None = None,
+        limit: int = 50,
+        account: str = "",
+        exchange: str = "",
+        symbol: str = "",
+        status: str = "",
+        exact_market: bool = False,
+    ) -> JSONResponse:
+        try:
+            result = await account_data_service.order_history(
+                cursor=cursor,
+                limit=limit,
+                account=account,
+                exchange=exchange,
+                symbol=symbol,
+                status=status,
+                exact_market=exact_market,
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except AccountDataError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+        return JSONResponse(result)
+
+    @r.get("/api/account/orders/groups")
+    async def get_account_order_groups(exchange: str = "") -> JSONResponse:
+        try:
+            result = await account_data_service.order_history_groups(
+                exchange=exchange,
+            )
+        except AccountDataError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+        return JSONResponse(result)
+
     @r.get("/api/assets/transfer/options")
     async def get_asset_transfer_options(
         exchange: str,

@@ -47,14 +47,14 @@ def collect_positions_snapshot(config_path: str) -> dict[str, Any]:
         include_closed=False,
         all_derivative_scopes=True,
     )
-    worker_count = min(4, len(accounts))
-    with ThreadPoolExecutor(
-        max_workers=worker_count,
-        thread_name_prefix="account-position",
-    ) as executor:
-        futures = [
-            executor.submit(
-                collect_one,
+    bitget_accounts = [account for account in accounts if account.exchange_id == "bitget"]
+    account_groups = ([bitget_accounts] if bitget_accounts else []) + [
+        [account] for account in accounts if account.exchange_id != "bitget"
+    ]
+
+    def collect_group(group: list[Any]) -> list[dict[str, Any]]:
+        return [
+            collect_one(
                 account.name,
                 account.exchange_id,
                 "swap",
@@ -62,9 +62,19 @@ def collect_positions_snapshot(config_path: str) -> dict[str, Any]:
                 args,
                 log_progress=False,
             )
-            for account in accounts
+            for account in group
         ]
-        results = [future.result() for future in futures]
+
+    with ThreadPoolExecutor(
+        max_workers=min(4, len(account_groups)),
+        thread_name_prefix="account-position",
+    ) as executor:
+        results_by_account = {
+            result["account"]: result
+            for group_results in executor.map(collect_group, account_groups)
+            for result in group_results
+        }
+        results = [results_by_account[account.name] for account in accounts]
 
     succeeded = sum(result.get("status") == "ok" for result in results)
     return {

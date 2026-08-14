@@ -635,6 +635,7 @@ def bitget_position_scopes(
 
 def fetch_bitget_positions_with_retry(
     exchange: ccxt.Exchange,
+    account_name: str,
     product_type: str,
     symbols: list[str] | None,
     attempts: int,
@@ -675,7 +676,7 @@ def fetch_bitget_positions_with_retry(
                 raise
             delay = min(2 ** (attempt - 1), 4)
             eprint(
-                f"[position] bitget {product_type} fetch failed "
+                f"[position] {account_name}/bitget {product_type} fetch failed "
                 f"({attempt}/{attempts}): {type(exc).__name__}: "
                 f"{redact_error(exc, secrets)}; retrying in {delay}s"
             )
@@ -945,6 +946,7 @@ def collect_one(
             for product_type in product_types:
                 positions = fetch_bitget_positions_with_retry(
                     exchange,
+                    account_name,
                     product_type,
                     args.symbols or None,
                     args.attempts,

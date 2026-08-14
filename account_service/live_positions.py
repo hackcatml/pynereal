@@ -5,6 +5,7 @@ import copy
 import math
 import queue
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -29,15 +30,28 @@ from asset import (  # noqa: E402
 )
 from position import (  # noqa: E402
     binance_position_matches_scope,
+    configure_hyperliquid_dex_markets,
     is_open_position,
     normalize_hyperliquid_position,
     normalize_position,
 )
 
+from account_service.backfill import (  # noqa: E402
+    account_history_backfill_loop,
+    account_history_symbols,
+    backfill_account_once,
+    hyperliquid_dexes,
+    manual_history_refresh_timing,
+)
 from account_service.cache import AccountCache  # noqa: E402
-from account_service.history import normalize_fill, normalize_order  # noqa: E402
+from account_service.history import (  # noqa: E402
+    normalize_fill,
+    normalize_order,
+    okx_history_market_scope,
+)
 from account_service.positions import collect_positions_snapshot  # noqa: E402
 from data_service.schedule_utils import (  # noqa: E402
+    seconds_until_manual_refresh_guard_end,
     seconds_until_post_bar_task_window,
 )
 
@@ -69,12 +83,23 @@ def _number(value: Any) -> float | None:
 class LivePositionState:
     def __init__(self, snapshot: dict[str, Any]) -> None:
         self.snapshot = copy.deepcopy(snapshot)
+        self.refresh_revision = 0
         self.dirty = asyncio.Event()
         self.persist_dirty = asyncio.Event()
         self.sequence = 0
 
-    def replace(self, snapshot: dict[str, Any]) -> None:
+    def replace(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        refresh_revision: int | None = None,
+    ) -> None:
         self.snapshot = copy.deepcopy(snapshot)
+        if refresh_revision is not None:
+            self.refresh_revision = max(
+                self.refresh_revision,
+                refresh_revision,
+            )
         self.mark_dirty()
 
     def mark_dirty(self) -> None:
@@ -209,6 +234,7 @@ class LivePositionState:
         payload["cached"] = False
         payload["live"] = True
         payload["sequence"] = self.sequence
+        payload["_refresh_revision"] = self.refresh_revision
         payload["summary"] = {
             "accounts": len(results),
             "succeeded": len(successful),
@@ -227,6 +253,8 @@ class AccountHistoryBuffer:
         self.dirty = asyncio.Event()
         self._orders: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
         self._fills: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+        self._positions: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        self._cursors: dict[tuple[str, str, str, str], dict[str, Any]] = {}
 
     def add_orders(
         self,
@@ -240,10 +268,17 @@ class AccountHistoryBuffer:
             if not isinstance(raw_order, dict):
                 continue
             payload = normalize_order(raw_order)
+            resolved_scope = market_scope
+            if exchange == "okx":
+                resolved_scope = (
+                    okx_history_market_scope(raw_order)
+                    or okx_history_market_scope(payload)
+                    or market_scope
+                )
             key = (
                 account,
                 exchange,
-                market_scope,
+                resolved_scope,
                 str(payload.get("symbol") or ""),
                 str(payload.get("id") or ""),
             )
@@ -262,7 +297,8 @@ class AccountHistoryBuffer:
             self._orders[key] = {
                 "account": account,
                 "exchange": exchange,
-                "market_scope": market_scope,
+                "market_scope": resolved_scope,
+                "source": "live",
                 "payload": payload,
             }
             changed = True
@@ -281,34 +317,136 @@ class AccountHistoryBuffer:
             if not isinstance(raw_fill, dict):
                 continue
             payload = normalize_fill(raw_fill)
+            resolved_scope = market_scope
+            if exchange == "okx":
+                resolved_scope = (
+                    okx_history_market_scope(raw_fill)
+                    or okx_history_market_scope(payload)
+                    or market_scope
+                )
             key = (
                 account,
                 exchange,
-                market_scope,
+                resolved_scope,
                 str(payload.get("symbol") or ""),
                 str(payload.get("id") or ""),
             )
             self._fills[key] = {
                 "account": account,
                 "exchange": exchange,
-                "market_scope": market_scope,
+                "market_scope": resolved_scope,
+                "source": "live",
                 "payload": payload,
             }
             changed = True
         if changed:
             self.dirty.set()
 
-    def drain(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def add_backfill(
+        self,
+        *,
+        orders: list[dict[str, Any]],
+        fills: list[dict[str, Any]],
+        positions: list[dict[str, Any]],
+        cursors: list[dict[str, Any]],
+    ) -> None:
+        self.add_orders_from_records(orders)
+        self.add_fills_from_records(fills)
+        for record in positions:
+            key = (
+                str(record.get("account") or ""),
+                str(record.get("exchange") or ""),
+                str(record.get("position_key") or ""),
+                str(record.get("closed_at") or ""),
+            )
+            self._positions[key] = record
+        for record in cursors:
+            key = (
+                str(record.get("account") or ""),
+                str(record.get("exchange") or ""),
+                str(record.get("stream") or ""),
+                str(record.get("market_scope") or ""),
+            )
+            self._cursors[key] = record
+        if positions or cursors:
+            self.dirty.set()
+
+    def add_orders_from_records(self, records: list[dict[str, Any]]) -> None:
+        changed = False
+        for record in records:
+            payload = record.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            key = (
+                str(record.get("account") or ""),
+                str(record.get("exchange") or ""),
+                str(record.get("market_scope") or ""),
+                str(payload.get("symbol") or ""),
+                str(payload.get("id") or ""),
+            )
+            previous = self._orders.get(key)
+            if previous is not None:
+                previous_timestamp = _number(
+                    previous["payload"].get("updated_timestamp")
+                )
+                timestamp = _number(payload.get("updated_timestamp"))
+                if (
+                    previous_timestamp is not None
+                    and (timestamp is None or timestamp < previous_timestamp)
+                ):
+                    continue
+                if previous.get("source") == "live":
+                    record = {**record, "source": "live"}
+            self._orders[key] = record
+            changed = True
+        if changed:
+            self.dirty.set()
+
+    def add_fills_from_records(self, records: list[dict[str, Any]]) -> None:
+        changed = False
+        for record in records:
+            payload = record.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            key = (
+                str(record.get("account") or ""),
+                str(record.get("exchange") or ""),
+                str(record.get("market_scope") or ""),
+                str(payload.get("symbol") or ""),
+                str(payload.get("id") or ""),
+            )
+            previous = self._fills.get(key)
+            if previous is not None and previous.get("source") == "live":
+                continue
+            self._fills[key] = record
+            changed = True
+        if changed:
+            self.dirty.set()
+
+    def drain(
+        self,
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+    ]:
         orders = list(self._orders.values())
         fills = list(self._fills.values())
+        positions = list(self._positions.values())
+        cursors = list(self._cursors.values())
         self._orders.clear()
         self._fills.clear()
-        return orders, fills
+        self._positions.clear()
+        self._cursors.clear()
+        return orders, fills, positions, cursors
 
     def restore(
         self,
         orders: list[dict[str, Any]],
         fills: list[dict[str, Any]],
+        positions: list[dict[str, Any]],
+        cursors: list[dict[str, Any]],
     ) -> None:
         for record in orders:
             payload = record.get("payload")
@@ -334,7 +472,23 @@ class AccountHistoryBuffer:
                 str(payload.get("id") or ""),
             )
             self._fills.setdefault(key, record)
-        if orders or fills:
+        for record in positions:
+            key = (
+                str(record.get("account") or ""),
+                str(record.get("exchange") or ""),
+                str(record.get("position_key") or ""),
+                str(record.get("closed_at") or ""),
+            )
+            self._positions.setdefault(key, record)
+        for record in cursors:
+            key = (
+                str(record.get("account") or ""),
+                str(record.get("exchange") or ""),
+                str(record.get("stream") or ""),
+                str(record.get("market_scope") or ""),
+            )
+            self._cursors.setdefault(key, record)
+        if orders or fills or positions or cursors:
             self.dirty.set()
 
 
@@ -727,6 +881,11 @@ async def _watch_account(
     account: ExchangeAccount,
     state: LivePositionState,
     history: AccountHistoryBuffer,
+    config_path: str,
+    cached_symbols: set[str],
+    cursors: dict[tuple[str, str, str, str], str],
+    backfill_semaphore: asyncio.Semaphore,
+    backfill_lock: asyncio.Lock,
     stop: asyncio.Event,
 ) -> None:
     exchange = None
@@ -734,6 +893,17 @@ async def _watch_account(
     secrets = secret_values(account.config)
     try:
         exchange = _build_live_exchange(account)
+        known_symbols = account_history_symbols(
+            config_path,
+            account.exchange_id,
+            state.positions(account.name),
+            cached_symbols,
+        )
+        if account.exchange_id == "hyperliquid":
+            configure_hyperliquid_dex_markets(
+                exchange,
+                hyperliquid_dexes(known_symbols),
+            )
         await exchange.load_markets()
         if not exchange.has.get("watchPositions"):
             raise ccxt.NotSupported(f"{account.exchange_id} does not support watchPositions")
@@ -780,6 +950,20 @@ async def _watch_account(
                         stop,
                     )
                 ))
+        tasks.append(asyncio.create_task(
+            account_history_backfill_loop(
+                exchange,
+                account,
+                config_path,
+                lambda: state.positions(account.name),
+                cached_symbols,
+                history,
+                cursors,
+                backfill_semaphore,
+                backfill_lock,
+                stop,
+            )
+        ))
         await stop.wait()
     except asyncio.CancelledError:
         raise
@@ -869,16 +1053,18 @@ async def _persist_history_updates(
         except TimeoutError:
             pass
         history.dirty.clear()
-        orders, fills = history.drain()
+        orders, fills, positions, cursors = history.drain()
         try:
             await loop.run_in_executor(
                 executor,
                 cache.apply_history_batch,
                 orders,
                 fills,
+                positions,
+                cursors,
             )
         except Exception as exc:
-            history.restore(orders, fills)
+            history.restore(orders, fills, positions, cursors)
             print(
                 f"[account] history cache write failed: {type(exc).__name__}: {exc}",
                 file=sys.stderr,
@@ -915,10 +1101,243 @@ async def _reconcile(
             )
 
 
+async def _refresh_history_from_parent(
+    request: dict[str, Any],
+    *,
+    config_path: str,
+    state: LivePositionState,
+    accounts: list[ExchangeAccount],
+    cached_symbols: dict[str, set[str]],
+    cursors: dict[tuple[str, str, str, str], str],
+    backfill_semaphore: asyncio.Semaphore,
+    backfill_locks: dict[str, asyncio.Lock],
+    cache: AccountCache,
+    cache_executor: ThreadPoolExecutor,
+    stop: asyncio.Event,
+) -> dict[str, Any]:
+    kind = str(request.get("kind") or "").strip().lower()
+    if kind not in {"order", "position"}:
+        raise ValueError("history kind must be order or position")
+    account_filter = str(request.get("account") or "").strip().lower()
+    requested_accounts = {
+        str(name).strip().lower()
+        for name in request.get("accounts", [])
+        if isinstance(name, str) and name.strip()
+    }
+    exchange_filter = str(request.get("exchange") or "").strip().lower()
+    requested_symbol = str(request.get("symbol") or "").strip().upper()
+    selected_accounts = [
+        account
+        for account in accounts
+        if (not account_filter or account_filter in account.name.lower())
+        and (not requested_accounts or account.name.lower() in requested_accounts)
+        and (not exchange_filter or account.exchange_id == exchange_filter)
+    ]
+    if not selected_accounts:
+        raise ValueError("no configured account matches the history refresh scope")
+
+    loop = asyncio.get_running_loop()
+    results: list[dict[str, Any]] = []
+    for account in selected_accounts:
+        exchange = None
+        started_at = time.monotonic()
+        try:
+            post_bar_delay = seconds_until_manual_refresh_guard_end()
+            if post_bar_delay > 0.0:
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=post_bar_delay)
+                    raise asyncio.CancelledError
+                except TimeoutError:
+                    pass
+            exchange = _build_live_exchange(account)
+            known = (
+                {requested_symbol}
+                if requested_symbol
+                else account_history_symbols(
+                    config_path,
+                    account.exchange_id,
+                    state.positions(account.name),
+                    set(cached_symbols.get(account.exchange_id, set())),
+                )
+            )
+            if account.exchange_id == "hyperliquid":
+                configure_hyperliquid_dex_markets(
+                    exchange,
+                    hyperliquid_dexes(known),
+                )
+            await exchange.load_markets()
+
+            refreshed_cursors = dict(cursors)
+            async with backfill_semaphore:
+                async with backfill_locks[account.name]:
+                    with manual_history_refresh_timing():
+                        batch = await backfill_account_once(
+                            exchange,
+                            account,
+                            known,
+                            refreshed_cursors,
+                            stop,
+                            include_orders=kind == "order",
+                            include_fills=kind == "position",
+                            include_positions=kind == "position",
+                            target_symbol=requested_symbol or None,
+                            discover_symbols=False,
+                        )
+                    # A scoped manual refresh must not advance the account-wide
+                    # cursors used by the periodic full-history backfill.
+                    batch["cursors"] = []
+                    post_bar_delay = seconds_until_manual_refresh_guard_end()
+                    if post_bar_delay > 0.0:
+                        try:
+                            await asyncio.wait_for(
+                                stop.wait(),
+                                timeout=post_bar_delay,
+                            )
+                            raise asyncio.CancelledError
+                        except TimeoutError:
+                            pass
+                    await loop.run_in_executor(
+                        cache_executor,
+                        cache.apply_history_batch,
+                        batch["orders"],
+                        batch["fills"],
+                        batch["positions"],
+                        batch["cursors"],
+                    )
+            result = {
+                "account": account.name,
+                "exchange": account.exchange_id,
+                "status": "ok",
+                "orders": len(batch["orders"]),
+                "fills": len(batch["fills"]),
+                "positions": len(batch["positions"]),
+                "elapsed_seconds": round(time.monotonic() - started_at, 3),
+            }
+            print(
+                f"[account] manual history refresh completed | "
+                f"kind={kind} account={account.name} "
+                f"exchange={account.exchange_id} "
+                f"symbol={requested_symbol or '*'} "
+                f"orders={result['orders']} fills={result['fills']} "
+                f"positions={result['positions']} "
+                f"elapsed={result['elapsed_seconds']:.1f}s",
+                flush=True,
+            )
+            results.append(result)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            message = redact_error(exc, secret_values(account.config))
+            print(
+                f"[account] {account.name} manual history refresh failed: "
+                f"{type(exc).__name__}: {message}",
+                file=sys.stderr,
+                flush=True,
+            )
+            results.append({
+                "account": account.name,
+                "exchange": account.exchange_id,
+                "status": "error",
+                "error": {
+                    "type": type(exc).__name__,
+                    "message": str(message)[:500],
+                },
+            })
+        finally:
+            if exchange is not None:
+                try:
+                    await exchange.close()
+                except Exception:
+                    pass
+
+    succeeded = sum(result["status"] == "ok" for result in results)
+    return {
+        "status": "ok" if succeeded else "error",
+        "results": results,
+        "summary": {
+            "requested": len(results),
+            "succeeded": succeeded,
+            "failed": len(results) - succeeded,
+        },
+    }
+
+
+async def _put_control_message(output_queue: Any, payload: dict[str, Any]) -> None:
+    try:
+        await asyncio.to_thread(output_queue.put, payload, True, 5.0)
+    except (queue.Full, ValueError, OSError):
+        pass
+
+
+async def _apply_parent_messages(
+    state: LivePositionState,
+    input_queue: Any,
+    control_output_queue: Any,
+    *,
+    config_path: str,
+    accounts: list[ExchangeAccount],
+    cached_symbols: dict[str, set[str]],
+    cursors: dict[tuple[str, str, str, str], str],
+    backfill_semaphore: asyncio.Semaphore,
+    backfill_locks: dict[str, asyncio.Lock],
+    cache: AccountCache,
+    cache_executor: ThreadPoolExecutor,
+    stop: asyncio.Event,
+) -> None:
+    while not stop.is_set():
+        try:
+            message = await asyncio.to_thread(input_queue.get, True, 1.0)
+        except queue.Empty:
+            continue
+        if not isinstance(message, dict):
+            continue
+        if message.get("type") == "history.refresh":
+            request_id = str(message.get("request_id") or "")
+            try:
+                result = await _refresh_history_from_parent(
+                    message,
+                    config_path=config_path,
+                    state=state,
+                    accounts=accounts,
+                    cached_symbols=cached_symbols,
+                    cursors=cursors,
+                    backfill_semaphore=backfill_semaphore,
+                    backfill_locks=backfill_locks,
+                    cache=cache,
+                    cache_executor=cache_executor,
+                    stop=stop,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                result = {
+                    "status": "error",
+                    "error": {
+                        "type": type(exc).__name__,
+                        "message": str(exc).replace("\n", " ")[:500],
+                    },
+                }
+            await _put_control_message(control_output_queue, {
+                "type": "history.refresh.result",
+                "request_id": request_id,
+                "payload": result,
+            })
+            continue
+        snapshot = message.get("snapshot")
+        if not isinstance(snapshot, dict):
+            continue
+        revision = message.get("revision")
+        if isinstance(revision, bool) or not isinstance(revision, int):
+            continue
+        state.replace(snapshot, refresh_revision=revision)
+
+
 async def _run_positions_stream(
     config_path: str,
     cache_path: str,
     output_queue: Any,
+    control_output_queue: Any,
+    input_queue: Any,
     stop_event: Any,
     initial_snapshot: dict[str, Any] | None,
 ) -> None:
@@ -934,8 +1353,19 @@ async def _run_positions_stream(
         max_workers=1,
         thread_name_prefix="account-cache-writer",
     )
+    loop = asyncio.get_running_loop()
+    cursors = await loop.run_in_executor(cache_executor, cache.sync_cursors)
+    known_symbols = await loop.run_in_executor(
+        cache_executor,
+        cache.known_history_symbols,
+    )
+    backfill_semaphore = asyncio.Semaphore(2)
     data = read_provider_config(Path(config_path))
     accounts = configured_accounts(data)
+    backfill_locks = {
+        account.name: asyncio.Lock()
+        for account in accounts
+    }
     stop = asyncio.Event()
 
     async def watch_parent_stop() -> None:
@@ -943,7 +1373,17 @@ async def _run_positions_stream(
         stop.set()
 
     tasks = [
-        asyncio.create_task(_watch_account(account, state, history, stop))
+        asyncio.create_task(_watch_account(
+            account,
+            state,
+            history,
+            config_path,
+            set(known_symbols.get(account.exchange_id, set())),
+            cursors,
+            backfill_semaphore,
+            backfill_locks[account.name],
+            stop,
+        ))
         for account in accounts
     ]
     tasks.extend(
@@ -954,6 +1394,20 @@ async def _run_positions_stream(
                 _persist_history_updates(history, cache, cache_executor, stop)
             ),
             asyncio.create_task(_reconcile(config_path, state, stop)),
+            asyncio.create_task(_apply_parent_messages(
+                state,
+                input_queue,
+                control_output_queue,
+                config_path=config_path,
+                accounts=accounts,
+                cached_symbols=known_symbols,
+                cursors=cursors,
+                backfill_semaphore=backfill_semaphore,
+                backfill_locks=backfill_locks,
+                cache=cache,
+                cache_executor=cache_executor,
+                stop=stop,
+            )),
             asyncio.create_task(watch_parent_stop()),
         ]
     )
@@ -964,7 +1418,6 @@ async def _run_positions_stream(
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        loop = asyncio.get_running_loop()
         try:
             await loop.run_in_executor(
                 cache_executor,
@@ -977,14 +1430,16 @@ async def _run_positions_stream(
                 file=sys.stderr,
                 flush=True,
             )
-        orders, fills = history.drain()
-        if orders or fills:
+        orders, fills, positions, cursor_records = history.drain()
+        if orders or fills or positions or cursor_records:
             try:
                 await loop.run_in_executor(
                     cache_executor,
                     cache.apply_history_batch,
                     orders,
                     fills,
+                    positions,
+                    cursor_records,
                 )
             except Exception as exc:
                 print(
@@ -1001,6 +1456,8 @@ def run_positions_stream(
     config_path: str,
     cache_path: str,
     output_queue: Any,
+    control_output_queue: Any,
+    input_queue: Any,
     stop_event: Any,
     initial_snapshot: dict[str, Any] | None = None,
 ) -> None:
@@ -1010,6 +1467,8 @@ def run_positions_stream(
                 config_path,
                 cache_path,
                 output_queue,
+                control_output_queue,
+                input_queue,
                 stop_event,
                 initial_snapshot,
             )
@@ -1025,5 +1484,9 @@ def run_positions_stream(
     finally:
         try:
             output_queue.put_nowait(None)
+        except Exception:
+            pass
+        try:
+            control_output_queue.put_nowait(None)
         except Exception:
             pass
