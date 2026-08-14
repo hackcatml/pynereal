@@ -23,6 +23,7 @@ async def watch_trades_loop(
     timeframe: str,
     state: DataState,
     on_bar: Callable[[list], Awaitable[None]],
+    on_trades: Callable[[list], None] | None = None,
     market_type: str = "",
 ) -> None:
     ex = make_ccxt_pro_client(ccxt, exchange_name, market_type=market_type, symbol=symbol)
@@ -42,6 +43,9 @@ async def watch_trades_loop(
             try:
                 ws_trades = await ex.watch_trades(symbol, since, None, {})
                 bar_to_push = None
+
+                if on_trades is not None:
+                    on_trades(ws_trades)
 
                 async with state.lock:
                     state.collected_trades.extend(ws_trades)

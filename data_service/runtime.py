@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from collections import deque
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from ws_manager import WSManager
 
 _MAX_AI_INSTRUCTION_CHARS = 4_000
 _MAX_PROCESSED_AI_INSTRUCTION_EVENTS = 500
+_MAX_RECENT_RAW_TRADE_KEYS = 10_000
 
 
 def _plot_wire_value(value: Any, kind: str) -> float | int | None:
@@ -79,12 +81,16 @@ class Feed:
         self.collector_error: Optional[str] = None
         self._history_start_mtime: Optional[float] = None
         self._history_start_time: Optional[int] = None
-        self._last_broadcast_close: Optional[float] = None
+        self._raw_trade_sequence = 0
+        self._last_raw_trade_price: Optional[float] = None
+        self._last_raw_trade_time_ms: Optional[int] = None
+        self._raw_trade_stream_started = False
+        self._recent_raw_trade_keys: deque[tuple[Any, ...]] = deque()
+        self._recent_raw_trade_key_set: set[tuple[Any, ...]] = set()
         # session_id -> Session
         self.subscribers: Dict[str, "Session"] = {}
 
     async def broadcast_bar(self, bar: list) -> None:
-        prev_price = self._last_broadcast_close
         payload = {
             "type": "bar",
             "data": {
@@ -96,10 +102,83 @@ class Feed:
                 "volume": float(bar[5]),
             },
         }
-        self._last_broadcast_close = payload["data"]["close"]
         for session in list(self.subscribers.values()):
-            await session.maybe_fire_manual_alert_trigger(payload["data"], prev_price)
             await session.send_to_charts(payload)
+
+    @staticmethod
+    def _raw_trade_key(trade: dict[str, Any]) -> tuple[Any, ...]:
+        trade_id = trade.get("id")
+        if trade_id is not None and str(trade_id) != "":
+            return ("id", str(trade_id))
+        return (
+            "values",
+            trade.get("timestamp"),
+            trade.get("price"),
+            trade.get("amount"),
+            trade.get("side"),
+            trade.get("order"),
+        )
+
+    def _remember_raw_trade_key(self, key: tuple[Any, ...]) -> bool:
+        if key in self._recent_raw_trade_key_set:
+            return False
+        if len(self._recent_raw_trade_keys) >= _MAX_RECENT_RAW_TRADE_KEYS:
+            expired = self._recent_raw_trade_keys.popleft()
+            self._recent_raw_trade_key_set.discard(expired)
+        self._recent_raw_trade_keys.append(key)
+        self._recent_raw_trade_key_set.add(key)
+        return True
+
+    def raw_trade_cursor(self) -> tuple[int, float | None, int | None]:
+        return (
+            self._raw_trade_sequence,
+            self._last_raw_trade_price,
+            self._last_raw_trade_time_ms,
+        )
+
+    def broadcast_trades(self, trades: list) -> None:
+        initial_batch = not self._raw_trade_stream_started
+        new_trades: list[tuple[int, dict[str, Any]]] = []
+        for index, trade in enumerate(trades):
+            if not isinstance(trade, dict):
+                continue
+            if not self._remember_raw_trade_key(self._raw_trade_key(trade)):
+                continue
+            new_trades.append((index, trade))
+
+        def sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int]:
+            index, trade = item
+            try:
+                timestamp = int(trade.get("timestamp"))
+            except (TypeError, ValueError):
+                timestamp = 0
+            return timestamp, index
+
+        new_trades.sort(key=sort_key)
+        for _, trade in new_trades:
+            try:
+                price = float(trade.get("price"))
+            except (TypeError, ValueError):
+                continue
+            try:
+                trade_time_ms = int(trade.get("timestamp"))
+            except (TypeError, ValueError):
+                trade_time_ms = None
+
+            self._raw_trade_sequence += 1
+            self._last_raw_trade_price = price
+            if trade_time_ms is not None:
+                self._last_raw_trade_time_ms = trade_time_ms
+            for session in list(self.subscribers.values()):
+                if not session.spec.manual_alert_triggers:
+                    continue
+                session.maybe_fire_manual_alert_trade(
+                    price=price,
+                    trade_time_ms=trade_time_ms,
+                    sequence=self._raw_trade_sequence,
+                    initial_batch=initial_batch,
+                )
+        self._raw_trade_stream_started = True
 
     async def emit_event(self, payload: dict) -> None:
         # prerun_ready / run_ready fan out to every runner subscribed to this feed.
@@ -221,7 +300,8 @@ class Session:
         self._processed_ai_instruction_ids: set[str] = set()
         self._processed_ai_instruction_order: deque[str] = deque()
         self._manual_alert_trigger_sending_ids: set[str] = set()
-        self._manual_alert_trigger_last_bar_time: dict[str, int] = {}
+        self._manual_alert_trigger_gates: dict[str, dict[str, Any]] = {}
+        self.reset_manual_alert_trigger_gate()
 
     @property
     def ohlcv_path(self) -> Path:
@@ -625,9 +705,44 @@ class Session:
     def manual_alert_triggers_payload(self) -> list[dict]:
         return [dict(t) for t in self.spec.manual_alert_triggers]
 
+    @staticmethod
+    def _manual_alert_trigger_signature(trigger: dict) -> str:
+        return json.dumps(
+            {
+                "price": trigger.get("price"),
+                "template": trigger.get("template"),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+
     def reset_manual_alert_trigger_gate(self) -> None:
-        self._manual_alert_trigger_last_bar_time.clear()
-        self._manual_alert_trigger_sending_ids.clear()
+        sequence, last_price, last_trade_time_ms = self.feed.raw_trade_cursor()
+        armed_at_ms = int(time.time() * 1000)
+        active_ids: set[str] = set()
+        gates: dict[str, dict[str, Any]] = {}
+        for trigger in self.spec.manual_alert_triggers:
+            if not trigger.get("enabled"):
+                continue
+            trigger_id = str(trigger.get("id") or "")
+            if not trigger_id:
+                continue
+            active_ids.add(trigger_id)
+            signature = self._manual_alert_trigger_signature(trigger)
+            previous = self._manual_alert_trigger_gates.get(trigger_id)
+            if previous is not None and previous.get("signature") == signature:
+                gates[trigger_id] = previous
+                continue
+            gates[trigger_id] = {
+                "signature": signature,
+                "armed_sequence": sequence,
+                "armed_at_ms": armed_at_ms,
+                "last_price": last_price,
+                "last_trade_time_ms": last_trade_time_ms,
+            }
+        self._manual_alert_trigger_gates = gates
+        self._manual_alert_trigger_sending_ids.intersection_update(active_ids)
 
     async def push_manual_alert_trigger(self) -> None:
         await self.send_to_charts({
@@ -647,13 +762,13 @@ class Session:
             return Path(self.spec.script_name).stem
         return None
 
-    def _manual_alert_trigger_touched(self, bar: dict, prev_price: float | None,
+    @staticmethod
+    def _manual_alert_trigger_touched(prev_price: float | None, market_price: float,
                                       trigger_price: float) -> bool:
-        close = float(bar.get("close"))
         if prev_price is None:
-            prev_price = float(bar.get("open", close))
-        low = min(float(prev_price), close)
-        high = max(float(prev_price), close)
+            return market_price == trigger_price
+        low = min(float(prev_price), market_price)
+        high = max(float(prev_price), market_price)
         return low <= trigger_price <= high
 
     def _remove_manual_alert_trigger(self, trigger_id: str) -> bool:
@@ -662,6 +777,7 @@ class Session:
         if len(remaining) == len(triggers):
             return False
         self.spec = self.spec.with_manual_alert_triggers(remaining)
+        self._manual_alert_trigger_gates.pop(trigger_id, None)
         return True
 
     async def _discard_manual_alert_trigger(self, trigger_id: str) -> None:
@@ -709,31 +825,65 @@ class Session:
             if trigger_id:
                 self._manual_alert_trigger_sending_ids.discard(trigger_id)
 
-    async def maybe_fire_manual_alert_trigger(self, bar: dict, prev_price: float | None) -> None:
-        try:
-            bar_time = int(bar.get("time"))
-            market_price = float(bar.get("close"))
-        except (TypeError, ValueError):
-            return
-
+    def maybe_fire_manual_alert_trade(
+        self,
+        *,
+        price: float,
+        trade_time_ms: int | None,
+        sequence: int,
+        initial_batch: bool,
+    ) -> None:
         for trigger in self.spec.manual_alert_triggers:
             if not trigger.get("enabled"):
                 continue
             trigger_id = str(trigger.get("id") or "")
             if not trigger_id or trigger_id in self._manual_alert_trigger_sending_ids:
                 continue
+            gate = self._manual_alert_trigger_gates.get(trigger_id)
+            if gate is None or sequence <= int(gate.get("armed_sequence", 0)):
+                continue
             try:
                 trigger_price = float(trigger.get("price"))
             except (TypeError, ValueError):
                 continue
-            if self._manual_alert_trigger_last_bar_time.get(trigger_id) == bar_time:
+
+            last_trade_time_ms = gate.get("last_trade_time_ms")
+            if (
+                trade_time_ms is not None
+                and last_trade_time_ms is not None
+                and trade_time_ms < int(last_trade_time_ms)
+            ):
                 continue
-            if not self._manual_alert_trigger_touched(bar, prev_price, trigger_price):
+            armed_at_ms = int(gate.get("armed_at_ms", 0))
+            if trade_time_ms is not None and trade_time_ms < armed_at_ms:
+                gate["last_price"] = price
+                gate["last_trade_time_ms"] = trade_time_ms
+                continue
+            if initial_batch and trade_time_ms is None:
+                gate["last_price"] = price
                 continue
 
-            self._manual_alert_trigger_last_bar_time[trigger_id] = bar_time
+            previous_price = gate.get("last_price")
+            gate["last_price"] = price
+            if trade_time_ms is not None:
+                gate["last_trade_time_ms"] = trade_time_ms
+            if not self._manual_alert_trigger_touched(previous_price, price, trigger_price):
+                continue
+
+            event_time = (
+                trade_time_ms // 1000
+                if trade_time_ms is not None
+                else int(time.time())
+            )
             self._manual_alert_trigger_sending_ids.add(trigger_id)
-            asyncio.create_task(self._send_manual_alert_trigger(dict(trigger), trigger_price, market_price, bar_time))
+            asyncio.create_task(
+                self._send_manual_alert_trigger(
+                    dict(trigger),
+                    trigger_price,
+                    price,
+                    event_time,
+                )
+            )
 
     async def dispatch_manual_alert_ai_instruction(
         self,
