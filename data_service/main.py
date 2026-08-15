@@ -182,6 +182,7 @@ async def main() -> None:
         ai_enabled=lambda: codex_service.enabled,
         request_shutdown=update_shutdown.set,
     )
+    await asyncio.to_thread(update_service.sync_dependencies_after_legacy_update)
     registry.set_ai_instruction_handler(codex_service.handle_strategy_instruction)
     try:
         await codex_service.start()

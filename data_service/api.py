@@ -9,7 +9,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-from fastapi import APIRouter, Body, Request
+from fastapi import APIRouter, Body, File, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from markdown_it import MarkdownIt
 
@@ -22,6 +22,11 @@ import ccxt.pro as ccxtpro
 
 from ai.provider.codex_service import CodexService
 from account_data import AccountDataError, AccountDataService
+from account_service.csv_import import (
+    MAX_IMPORT_FILE_BYTES,
+    MAX_IMPORT_FILES,
+    MAX_IMPORT_TOTAL_BYTES,
+)
 from asset_portfolio import AssetPortfolioError, AssetPortfolioService
 from asset_transfer import AssetTransferError, AssetTransferService
 from calendar_store import CalendarEventStore, CalendarStoreError
@@ -780,6 +785,95 @@ def build_control_router(
             return JSONResponse({"error": str(exc)}, status_code=503)
         return JSONResponse(result)
 
+    @r.post("/api/account/history/import/preview")
+    async def preview_account_history_import(
+        files: list[UploadFile] = File(...),
+    ) -> JSONResponse:
+        if not files or len(files) > MAX_IMPORT_FILES:
+            return JSONResponse(
+                {"error": f"select between 1 and {MAX_IMPORT_FILES} CSV files"},
+                status_code=400,
+            )
+        uploads: list[tuple[str, bytes]] = []
+        total_size = 0
+        try:
+            for upload in files:
+                content = await upload.read(MAX_IMPORT_FILE_BYTES + 1)
+                if len(content) > MAX_IMPORT_FILE_BYTES:
+                    return JSONResponse(
+                        {"error": f"CSV is too large: {upload.filename or 'upload.csv'}"},
+                        status_code=413,
+                    )
+                total_size += len(content)
+                if total_size > MAX_IMPORT_TOTAL_BYTES:
+                    return JSONResponse(
+                        {"error": "combined CSV upload is too large"},
+                        status_code=413,
+                    )
+                uploads.append((upload.filename or "upload.csv", content))
+        finally:
+            for upload in files:
+                await upload.close()
+        try:
+            result = await account_data_service.preview_history_import(uploads)
+        except AccountDataError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse(result)
+
+    @r.post("/api/account/history/import/commit")
+    async def commit_account_history_import(
+        payload: dict = Body(default_factory=dict),
+    ) -> JSONResponse:
+        try:
+            result = await account_data_service.commit_history_import(payload)
+        except AccountDataError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse(result, status_code=202)
+
+    @r.delete("/api/account/history/import/previews/{preview_id}/files/{file_id}")
+    async def remove_account_history_import_preview_file(
+        preview_id: str,
+        file_id: str,
+    ) -> JSONResponse:
+        try:
+            result = await account_data_service.remove_history_import_preview_file(
+                preview_id,
+                file_id,
+            )
+        except AccountDataError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        return JSONResponse(result)
+
+    @r.get("/api/account/history/import/jobs/{job_id}")
+    async def get_account_history_import_job(job_id: str) -> JSONResponse:
+        try:
+            result = account_data_service.history_import_job(job_id)
+        except AccountDataError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        return JSONResponse(result)
+
+    @r.get("/api/account/history/imports")
+    async def get_account_history_imports(limit: int = 100) -> JSONResponse:
+        try:
+            result = await account_data_service.history_imports(limit=limit)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except AccountDataError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+        return JSONResponse(result)
+
+    @r.post("/api/account/history/imports/{import_id}/retry-enrichment")
+    async def retry_account_history_import_enrichment(
+        import_id: str,
+    ) -> JSONResponse:
+        try:
+            result = await account_data_service.retry_history_import_enrichment(
+                import_id
+            )
+        except AccountDataError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse(result, status_code=202)
+
     @r.get("/api/account/position-history")
     async def get_account_position_history(
         cursor: str | None = None,
@@ -854,13 +948,24 @@ def build_control_router(
 
     @r.get("/api/account/pnl")
     async def get_account_pnl(
-        days: int = 90,
+        days: str = "90",
         account: str = "",
         exchange: str = "",
     ) -> JSONResponse:
+        normalized_days: int | None
+        if days.strip().lower() == "all":
+            normalized_days = None
+        else:
+            try:
+                normalized_days = int(days)
+            except ValueError:
+                return JSONResponse(
+                    {"error": "days must be 7, 30, 90, or all"},
+                    status_code=400,
+                )
         try:
             result = await account_data_service.pnl(
-                days=days,
+                days=normalized_days,
                 account=account,
                 exchange=exchange,
             )

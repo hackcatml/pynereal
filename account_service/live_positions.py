@@ -7,6 +7,7 @@ import queue
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,9 @@ from account_service.backfill import (  # noqa: E402
     manual_history_refresh_timing,
 )
 from account_service.cache import AccountCache  # noqa: E402
+from account_service.csv_import import (  # noqa: E402
+    fetch_hyperliquid_historical_orders,
+)
 from account_service.history import (  # noqa: E402
     normalize_fill,
     normalize_order,
@@ -1269,6 +1273,198 @@ async def _put_control_message(output_queue: Any, payload: dict[str, Any]) -> No
         pass
 
 
+async def _import_history_from_parent(
+    request: dict[str, Any],
+    *,
+    accounts: list[ExchangeAccount],
+    cache: AccountCache,
+    cache_executor: ThreadPoolExecutor,
+    stop: asyncio.Event,
+) -> dict[str, Any]:
+    batch = request.get("batch")
+    if not isinstance(batch, dict):
+        raise ValueError("history import batch is missing")
+    imports = batch.get("imports")
+    imports = imports if isinstance(imports, list) else []
+    if not imports:
+        raise ValueError("history import contains no files")
+
+    account_map = {account.name: account for account in accounts}
+    manifests_by_import: dict[str, dict[str, Any]] = {}
+    hyperliquid_imports: dict[str, list[dict[str, Any]]] = {}
+    for manifest in imports:
+        if not isinstance(manifest, dict):
+            raise ValueError("history import manifest is invalid")
+        import_id = str(manifest.get("import_id") or "").strip()
+        account_name = str(manifest.get("account") or "").strip()
+        exchange_id = str(manifest.get("exchange") or "").strip().lower()
+        account = account_map.get(account_name)
+        if not import_id or account is None or account.exchange_id != exchange_id:
+            raise ValueError("history import account does not match providers.toml")
+        manifests_by_import[import_id] = manifest
+        if exchange_id == "hyperliquid":
+            hyperliquid_imports.setdefault(account_name, []).append(manifest)
+
+    for category in ("orders", "fills", "positions", "pnl_events"):
+        records = batch.get(category)
+        records = records if isinstance(records, list) else []
+        batch[category] = records
+        for record in records:
+            if not isinstance(record, dict):
+                raise ValueError("history import record is invalid")
+            import_id = str(record.get("import_id") or "").strip()
+            manifest = manifests_by_import.get(import_id)
+            if (
+                manifest is None
+                or record.get("account") != manifest.get("account")
+                or record.get("exchange") != manifest.get("exchange")
+            ):
+                raise ValueError("history import record does not match its manifest")
+
+    for account_name, account_imports in hyperliquid_imports.items():
+        account = account_map[account_name]
+        wallet_address = str(account.config.get("walletAddress") or "").strip()
+        anchor = account_imports[0]
+        try:
+            orders, warnings = await asyncio.to_thread(
+                fetch_hyperliquid_historical_orders,
+                wallet_address,
+                account_name,
+                str(anchor.get("import_id") or ""),
+            )
+            batch["orders"].extend(orders)
+            for manifest in account_imports:
+                manifest_warnings = manifest.setdefault("warnings", [])
+                if isinstance(manifest_warnings, list):
+                    manifest_warnings.extend(
+                        warning for warning in warnings if warning not in manifest_warnings
+                    )
+                if warnings:
+                    manifest["status"] = "partial"
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            message = redact_error(exc, secret_values(account.config))
+            warning = f"Hyperliquid Order History could not be enriched: {message}"
+            for manifest in account_imports:
+                manifest["status"] = "partial"
+                manifest_warnings = manifest.setdefault("warnings", [])
+                if isinstance(manifest_warnings, list) and warning not in manifest_warnings:
+                    manifest_warnings.append(warning)
+
+    post_bar_delay = seconds_until_manual_refresh_guard_end()
+    if post_bar_delay > 0.0:
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=post_bar_delay)
+            raise asyncio.CancelledError
+        except TimeoutError:
+            pass
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        cache_executor,
+        partial(
+            cache.apply_history_batch,
+            batch["orders"],
+            batch["fills"],
+            batch["positions"],
+            [],
+            pnl_events=batch["pnl_events"],
+            imports=imports,
+        ),
+    )
+    return result or {"status": "ok", "imports": [], "summary": {}}
+
+
+async def _retry_history_enrichment_from_parent(
+    request: dict[str, Any],
+    *,
+    accounts: list[ExchangeAccount],
+    cache: AccountCache,
+    cache_executor: ThreadPoolExecutor,
+    stop: asyncio.Event,
+) -> dict[str, Any]:
+    import_id = str(request.get("import_id") or "").strip()
+    if not import_id:
+        raise ValueError("history import ID is missing")
+    loop = asyncio.get_running_loop()
+    manifest = await loop.run_in_executor(
+        cache_executor,
+        cache.csv_import,
+        import_id,
+    )
+    if not isinstance(manifest, dict) or manifest.get("exchange") != "hyperliquid":
+        raise ValueError("Hyperliquid history import was not found")
+    account_name = str(manifest.get("account") or "")
+    account = next((item for item in accounts if item.name == account_name), None)
+    if account is None or account.exchange_id != "hyperliquid":
+        raise ValueError("history import account does not match providers.toml")
+
+    previous_warnings = manifest.get("warnings")
+    previous_warnings = previous_warnings if isinstance(previous_warnings, list) else []
+    retained_warnings = [
+        str(warning)
+        for warning in previous_warnings
+        if not str(warning).startswith("Hyperliquid Order History could not be enriched:")
+        and not str(warning).startswith("Hyperliquid returned 2,000 historical orders;")
+    ]
+    try:
+        orders, warnings = await asyncio.to_thread(
+            fetch_hyperliquid_historical_orders,
+            str(account.config.get("walletAddress") or ""),
+            account_name,
+            import_id,
+        )
+        post_bar_delay = seconds_until_manual_refresh_guard_end()
+        if post_bar_delay > 0.0:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=post_bar_delay)
+                raise asyncio.CancelledError
+            except TimeoutError:
+                pass
+        await loop.run_in_executor(
+            cache_executor,
+            cache.apply_history_batch,
+            orders,
+            [],
+        )
+        combined_warnings = [*retained_warnings, *warnings]
+        await loop.run_in_executor(
+            cache_executor,
+            partial(
+                cache.update_csv_import_status,
+                import_id,
+                status="partial" if warnings else "imported",
+                warnings=combined_warnings,
+            ),
+        )
+        return {
+            "status": "ok",
+            "summary": {"orders": len(orders)},
+            "imports": [{
+                "import_id": import_id,
+                "status": "partial" if warnings else "imported",
+                "warnings": combined_warnings,
+            }],
+        }
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        message = redact_error(exc, secret_values(account.config))
+        warning = f"Hyperliquid Order History could not be enriched: {message}"
+        combined_warnings = [*retained_warnings, warning]
+        await loop.run_in_executor(
+            cache_executor,
+            partial(
+                cache.update_csv_import_status,
+                import_id,
+                status="partial",
+                warnings=combined_warnings,
+            ),
+        )
+        raise
+
+
 async def _apply_parent_messages(
     state: LivePositionState,
     input_queue: Any,
@@ -1319,6 +1515,58 @@ async def _apply_parent_messages(
                 }
             await _put_control_message(control_output_queue, {
                 "type": "history.refresh.result",
+                "request_id": request_id,
+                "payload": result,
+            })
+            continue
+        if message.get("type") == "history.import":
+            request_id = str(message.get("request_id") or "")
+            try:
+                result = await _import_history_from_parent(
+                    message,
+                    accounts=accounts,
+                    cache=cache,
+                    cache_executor=cache_executor,
+                    stop=stop,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                result = {
+                    "status": "error",
+                    "error": {
+                        "type": type(exc).__name__,
+                        "message": str(exc).replace("\n", " ")[:500],
+                    },
+                }
+            await _put_control_message(control_output_queue, {
+                "type": "history.import.result",
+                "request_id": request_id,
+                "payload": result,
+            })
+            continue
+        if message.get("type") == "history.enrichment":
+            request_id = str(message.get("request_id") or "")
+            try:
+                result = await _retry_history_enrichment_from_parent(
+                    message,
+                    accounts=accounts,
+                    cache=cache,
+                    cache_executor=cache_executor,
+                    stop=stop,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                result = {
+                    "status": "error",
+                    "error": {
+                        "type": type(exc).__name__,
+                        "message": str(exc).replace("\n", " ")[:500],
+                    },
+                }
+            await _put_control_message(control_output_queue, {
+                "type": "history.enrichment.result",
                 "request_id": request_id,
                 "payload": result,
             })

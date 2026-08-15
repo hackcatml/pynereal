@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=110" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=112" />
 </head>
 <body>
   <header class="topbar">
@@ -92,6 +92,7 @@
         <div id="hub-history-menu" class="hub-subsubmenu" aria-hidden="true">
           <button class="hub-subsubmenu-item" type="button" data-account-view="position-history">Position History</button>
           <button class="hub-subsubmenu-item" type="button" data-account-view="orders">Order History</button>
+          <button class="hub-subsubmenu-item" type="button" data-account-view="import-history">Import History</button>
         </div>
       </div>
       <button id="hub-calendar-open" class="hub-menu-item" type="button">
@@ -281,6 +282,10 @@
                 aria-label="Order History">
           <span>Order</span><span>History</span>
         </button>
+        <button class="account-tab account-tab-history" type="button" data-account-view="import-history"
+                aria-label="Import History">
+          <span>Import</span><span>History</span>
+        </button>
         <button class="account-tab" type="button" data-account-view="pnl">PnL</button>
       </nav>
       <section id="account-assets-view" class="account-view">
@@ -437,6 +442,43 @@
           </div>
         </div>
       </section>
+      <section id="account-import-history-view" class="account-view account-history-import-view hidden">
+        <div class="account-view-body history-import-body">
+          <div class="history-import-heading">
+            <div>
+              <strong>Import exchange history</strong>
+              <span>Merge exported CSV history into Position History, Order History, and PnL.</span>
+            </div>
+          </div>
+          <input id="history-import-files" class="hidden" type="file" accept=".csv,text/csv" multiple />
+          <button id="history-import-dropzone" class="history-import-dropzone" type="button">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 16V4"></path><path d="m7 9 5-5 5 5"></path>
+              <path d="M5 20h14"></path>
+            </svg>
+            <span>Choose or drop CSV files</span>
+            <small>Binance, Bitget, OKX, and Hyperliquid exports</small>
+          </button>
+          <div id="history-import-loading" class="assets-state hidden">
+            <span class="assets-spinner" aria-hidden="true"></span>
+            <span id="history-import-loading-text">Inspecting CSV files...</span>
+          </div>
+          <div id="history-import-error" class="assets-state assets-state-error hidden" role="alert"></div>
+          <div id="history-import-preview" class="history-import-preview hidden"></div>
+          <div id="history-import-actions" class="history-import-actions hidden">
+            <span id="history-import-status" aria-live="polite"></span>
+            <button id="history-import-submit" class="btn btn-primary" type="button">Import</button>
+          </div>
+          <section class="history-import-log">
+            <div class="history-import-log-heading">
+              <strong>Previous imports</strong>
+              <span id="history-import-log-count"></span>
+            </div>
+            <div id="history-import-log-empty" class="assets-state hidden">No CSV history has been imported.</div>
+            <div id="history-import-log-list" class="history-import-log-list"></div>
+          </section>
+        </div>
+      </section>
       <section id="account-pnl-view" class="account-view hidden">
         <div class="account-view-body pnl-view-body">
           <section id="pnl-summary" class="account-summary pnl-summary hidden" aria-label="PnL summary">
@@ -453,6 +495,7 @@
             <button type="button" data-pnl-days="7" aria-pressed="false">7D</button>
             <button type="button" data-pnl-days="30" aria-pressed="false">30D</button>
             <button class="active" type="button" data-pnl-days="90" aria-pressed="true">90D</button>
+            <button type="button" data-pnl-days="all" aria-pressed="false">All</button>
           </div>
           <div id="pnl-loading" class="assets-state">
             <span class="assets-spinner" aria-hidden="true"></span>
@@ -737,6 +780,6 @@
     </form>
   </div>
 
-  <script src="/static/dashboard.js?v=118"></script>
+  <script src="/static/dashboard.js?v=120"></script>
 </body>
 </html>

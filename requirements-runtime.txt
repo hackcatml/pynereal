@@ -1,0 +1,9 @@
+python-dateutil
+dotenv
+flask
+pandas
+numpy
+uvicorn[standard]
+fastapi
+python-multipart
+tomlkit

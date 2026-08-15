@@ -295,6 +295,8 @@ def _normalized_fee(payload: dict[str, Any]) -> tuple[Decimal, str | None]:
 
 
 def hyperliquid_market_scope(symbol: str) -> str:
+    if "/" in symbol and ":" not in symbol:
+        return "spot"
     base = symbol.split("/", 1)[0].strip()
     if "-" not in base:
         return "default"

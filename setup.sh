@@ -199,7 +199,7 @@ _setup_main() {
   python -m pip install --upgrade setuptools || return 1
 
   python -m pip install -e ".[all]" || return 1
-  python -m pip install python-dateutil dotenv flask pandas numpy 'uvicorn[standard]' fastapi tomlkit || return 1
+  python -m pip install -r requirements-runtime.txt || return 1
 
   _setup_ai_sandbox
   _setup_ai_chart_capture

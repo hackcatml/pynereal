@@ -73,6 +73,12 @@
   let pnlRefreshTimer = null;
   let pnlListSizeFrame = null;
   const historyCustomSelects = {};
+  let historyImportPreview = null;
+  let historyImportSelections = {};
+  let historyImportBusy = false;
+  let historyImportJobTimer = null;
+  let historyImportLogLoaded = false;
+  let historyImportStatusText = "";
   let positionHistoryRequestSeq = 0;
   let positionHistoryHaveData = false;
   let positionHistoryRows = [];
@@ -644,6 +650,7 @@
     positions: "Positions",
     "position-history": "Position History",
     orders: "Order History",
+    "import-history": "Import History",
     pnl: "PnL",
   };
 
@@ -682,6 +689,7 @@
     const isAccountHistoryView = (
       view === "position-history"
       || view === "orders"
+      || view === "import-history"
       || view === "pnl"
     );
     const deferAccountHeight = animateAccountHeight && isAccountHistoryView && Boolean(options.load);
@@ -691,10 +699,12 @@
       if (Math.abs(endHeight - accountStartHeight) <= 1) return;
       accountBox.style.height = `${accountStartHeight}px`;
       void accountBox.offsetHeight; // reflow to lock the start height
+      accountBox.classList.add("flip-animating");
       accountBox.style.height = `${endHeight}px`;
       const onHeightEnd = (event) => {
         if (event.target !== accountBox || event.propertyName !== "height") return;
         accountBox.removeEventListener("transitionend", onHeightEnd);
+        accountBox.classList.remove("flip-animating");
         accountBox.style.height = "";
       };
       accountBox.addEventListener("transitionend", onHeightEnd);
@@ -783,6 +793,7 @@
     }
     else if (view === "position-history") await loadPositionHistory(false);
     else if (view === "orders") await loadOrderHistory(false);
+    else if (view === "import-history") await loadHistoryImports(true);
     else if (view === "pnl") await loadPnl();
     if (deferAccountHeight) {
       if (isAssetsOpen() && accountView === view) runAccountHeightTween();
@@ -2666,10 +2677,18 @@
       );
     }
     const partial = visibleResults.some((result) => result && result.complete !== true);
-    el("pnl-coverage-note").textContent = partial
-      ? "* Unavailable PnL values are excluded. Funding and borrow interest are not included."
-      : "Funding and borrow interest are not included.";
-    el("pnl-coverage-note").classList.toggle("hidden", results.length === 0);
+    const coverage = pnlPayload.summary || {};
+    const unavailable = [];
+    if (coverage.funding_available !== true) unavailable.push("funding");
+    if (coverage.borrow_interest_available !== true) unavailable.push("borrow interest");
+    const notes = [];
+    if (partial) notes.push("Unavailable PnL values are excluded");
+    if (unavailable.length) notes.push(`${unavailable.join(" and ")} are not included`);
+    el("pnl-coverage-note").textContent = notes.length ? `* ${notes.join(". ")}.` : "";
+    el("pnl-coverage-note").classList.toggle(
+      "hidden",
+      results.length === 0 || notes.length === 0,
+    );
     el("pnl-loading").classList.add("hidden");
     updatePnlListSizing();
     historyFlipCommit();
@@ -2723,7 +2742,334 @@
     }
   }
 
-  function formatAccountHistoryDate(value, includeSeconds = false) {
+  function setHistoryImportLoading(loading, text = "") {
+    historyImportBusy = loading;
+    el("history-import-loading").classList.toggle("hidden", !loading);
+    if (text) el("history-import-loading-text").textContent = text;
+    el("history-import-dropzone").disabled = loading;
+    renderHistoryImportActions();
+  }
+
+  function historyImportTypeLabel(value) {
+    return String(value || "")
+      .split("_")
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" ");
+  }
+
+  function historyImportSelectMarkup(fileId, field, options, selected, emptyLabel) {
+    const selectedLabel = options.includes(selected) ? selected : emptyLabel;
+    const optionMarkup = options.length
+      ? options.map((value) => (
+        `<button type="button" class="history-import-select-option${value === selected ? " selected" : ""}" `
+        + `data-history-import-option="${esc(fileId)}" data-field="${esc(field)}" `
+        + `data-value="${esc(value)}" role="option" aria-selected="${value === selected}">`
+        + `${esc(value)}</button>`
+      )).join("")
+      : `<div class="script-select-empty">${esc(emptyLabel)}</div>`;
+    return `<div class="history-import-select" data-history-import-select-wrap="${esc(fileId)}:${esc(field)}">`
+      + `<button type="button" class="history-import-select-button" `
+      + `data-history-import-select="${esc(fileId)}" data-field="${esc(field)}" `
+      + `aria-haspopup="listbox" aria-expanded="false">`
+      + `<span>${esc(selectedLabel)}</span><span aria-hidden="true">&#9662;</span></button>`
+      + `<div class="history-import-select-options hidden" role="listbox">${optionMarkup}</div>`
+      + `</div>`;
+  }
+
+  function closeHistoryImportSelects(except = null) {
+    document.querySelectorAll(".history-import-select").forEach((control) => {
+      if (control === except) return;
+      control.classList.remove("open");
+      const button = control.querySelector(".history-import-select-button");
+      const options = control.querySelector(".history-import-select-options");
+      if (button) button.setAttribute("aria-expanded", "false");
+      if (options) options.classList.add("hidden");
+    });
+  }
+
+  function historyImportReady() {
+    if (!historyImportPreview || historyImportBusy) return false;
+    const files = Array.isArray(historyImportPreview.files) ? historyImportPreview.files : [];
+    return files.length > 0 && files.every((file) => {
+      const selection = historyImportSelections[file.file_id] || {};
+      return Boolean(
+        selection.account
+        && selection.source_timezone
+        && selection.timezone_confirmed,
+      );
+    });
+  }
+
+  function renderHistoryImportActions() {
+    const hasPreview = Boolean(
+      historyImportPreview
+      && Array.isArray(historyImportPreview.files)
+      && historyImportPreview.files.length,
+    );
+    el("history-import-actions").classList.toggle("hidden", !hasPreview);
+    el("history-import-submit").disabled = !historyImportReady();
+    el("history-import-status").textContent = historyImportStatusText;
+  }
+
+  function renderHistoryImportPreview() {
+    const container = el("history-import-preview");
+    const files = historyImportPreview && Array.isArray(historyImportPreview.files)
+      ? historyImportPreview.files
+      : [];
+    container.classList.toggle("hidden", !files.length);
+    if (!files.length) {
+      container.replaceChildren();
+      renderHistoryImportActions();
+      return;
+    }
+    const timezoneOptions = Array.isArray(historyImportPreview.timezone_options)
+      ? historyImportPreview.timezone_options
+      : [];
+    container.innerHTML = files.map((file) => {
+      const selection = historyImportSelections[file.file_id] || {};
+      const accounts = Array.isArray(file.account_candidates) ? file.account_candidates : [];
+      const warnings = Array.isArray(file.warnings) ? file.warnings : [];
+      const range = file.first_occurred_at && file.last_occurred_at
+        ? `${formatAccountHistoryDate(file.first_occurred_at, false, true)} – ${formatAccountHistoryDate(file.last_occurred_at, false, true)}`
+        : "No dated rows";
+      return `<article class="history-import-file" data-history-import-file="${esc(file.file_id)}">`
+        + `<header><div><strong title="${esc(file.name)}">${esc(file.name)}</strong>`
+        + `<span>${esc(file.exchange)} · ${esc(historyImportTypeLabel(file.file_type))}</span></div>`
+        + `<aside><b>${Number(file.row_count || 0).toLocaleString()} rows</b>`
+        + `<button type="button" class="btn btn-icon history-import-remove" `
+        + `data-history-import-remove="${esc(file.file_id)}" title="Remove file" aria-label="Remove file">&times;</button>`
+        + `</aside></header>`
+        + `<div class="history-import-range"><span>Coverage</span><strong>${esc(range)}</strong></div>`
+        + `<div class="history-import-fields">`
+        + `<label><span>Account</span>${historyImportSelectMarkup(
+          file.file_id,
+          "account",
+          accounts,
+          selection.account || "",
+          accounts.length ? "Select account" : "No configured account",
+        )}</label>`
+        + `<label><span>Source timezone</span>${historyImportSelectMarkup(
+          file.file_id,
+          "source_timezone",
+          timezoneOptions,
+          selection.source_timezone || "",
+          "Select timezone",
+        )}</label>`
+        + `</div>`
+        + `<label class="history-import-confirm"><input type="checkbox" `
+        + `data-history-import-timezone-confirm="${esc(file.file_id)}" `
+        + `${selection.timezone_confirmed ? "checked" : ""} />`
+        + `<span>Timezone confirmed as ${esc(selection.source_timezone || "not selected")}</span></label>`
+        + (warnings.length
+          ? `<div class="history-import-warnings">${warnings.map((warning) => `<span>${esc(warning)}</span>`).join("")}</div>`
+          : "")
+        + `</article>`;
+    }).join("");
+    renderHistoryImportActions();
+  }
+
+  function renderHistoryImportLog(payload) {
+    const results = payload && Array.isArray(payload.results) ? payload.results : [];
+    el("history-import-log-count").textContent = results.length
+      ? `${Number(payload.total || results.length).toLocaleString()} files`
+      : "";
+    el("history-import-log-empty").classList.toggle("hidden", results.length > 0);
+    el("history-import-log-list").innerHTML = results.map((item) => {
+      const warningCount = Array.isArray(item.warnings) ? item.warnings.length : 0;
+      const coverage = item.first_occurred_at && item.last_occurred_at
+        ? `${formatAccountHistoryDate(item.first_occurred_at, false, true)} – ${formatAccountHistoryDate(item.last_occurred_at, false, true)}`
+        : "No dated rows";
+      return `<div class="history-import-log-row">`
+        + `<span class="history-import-log-logo">${logoImg(item.exchange_logo_url, item.exchange, "exchange-logo")}</span>`
+        + `<span><strong title="${esc(item.original_name)}">${esc(item.original_name)}</strong>`
+        + `<small>${esc(item.account)} · ${esc(historyImportTypeLabel(item.file_type))} · ${Number(item.row_count || 0).toLocaleString()} rows</small>`
+        + `<small>${esc(coverage)}</small></span>`
+        + `<span class="history-import-log-actions"><span class="history-import-log-status ${item.status === "partial" ? "partial" : ""}">`
+        + `${esc(item.status || "imported")}${warningCount ? ` · ${warningCount} warning${warningCount === 1 ? "" : "s"}` : ""}`
+        + `</span>`
+        + (item.enrichment_retry_available
+          ? `<button type="button" class="btn btn-icon" data-history-import-retry="${esc(item.import_id)}" title="Retry Hyperliquid Order History" aria-label="Retry Hyperliquid Order History">`
+            + `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.7-6L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15.7 6L3 16"></path><path d="M3 21v-5h5"></path></svg></button>`
+          : "")
+        + `</span></div>`;
+    }).join("");
+  }
+
+  async function loadHistoryImports(force = false) {
+    if (historyImportLogLoaded && !force) return;
+    try {
+      const payload = await api("/api/account/history/imports?limit=100");
+      historyImportLogLoaded = true;
+      renderHistoryImportLog(payload);
+      const activeJobs = Array.isArray(payload.active_jobs) ? payload.active_jobs : [];
+      if (activeJobs.length && historyImportJobTimer === null && !historyImportBusy) {
+        const job = activeJobs[activeJobs.length - 1];
+        const mode = job.kind === "enrichment" ? "enrichment" : "import";
+        historyImportStatusText = mode === "enrichment"
+          ? "Refreshing Hyperliquid Order History..."
+          : "Merging history into the account cache...";
+        setHistoryImportLoading(true, historyImportStatusText);
+        pollHistoryImportJob(job.job_id, mode);
+      }
+    } catch (error) {
+      el("history-import-error").textContent = error.message;
+      el("history-import-error").classList.remove("hidden");
+    }
+  }
+
+  async function previewHistoryImport(fileList) {
+    const files = Array.from(fileList || []);
+    if (!files.length || historyImportBusy) return;
+    historyImportPreview = null;
+    historyImportSelections = {};
+    historyImportStatusText = "";
+    el("history-import-error").classList.add("hidden");
+    renderHistoryImportPreview();
+    setHistoryImportLoading(true, "Inspecting CSV files...");
+    const body = new FormData();
+    files.forEach((file) => body.append("files", file, file.name));
+    try {
+      const payload = await api("/api/account/history/import/preview", {
+        method: "POST",
+        body,
+      });
+      historyImportPreview = payload;
+      (payload.files || []).forEach((file) => {
+        historyImportSelections[file.file_id] = {
+          account: file.suggested_account || "",
+          source_timezone: file.source_timezone || "",
+          timezone_confirmed: false,
+        };
+      });
+      renderHistoryImportPreview();
+    } catch (error) {
+      el("history-import-error").textContent = error.message;
+      el("history-import-error").classList.remove("hidden");
+    } finally {
+      el("history-import-files").value = "";
+      setHistoryImportLoading(false);
+    }
+  }
+
+  async function removeHistoryImportPreviewFile(fileId) {
+    if (!historyImportPreview || historyImportBusy || !fileId) return;
+    el("history-import-error").classList.add("hidden");
+    setHistoryImportLoading(true, "Removing CSV file...");
+    try {
+      await api(
+        `/api/account/history/import/previews/${encodeURIComponent(historyImportPreview.preview_id)}`
+          + `/files/${encodeURIComponent(fileId)}`,
+        { method: "DELETE" },
+      );
+      historyImportPreview.files = (historyImportPreview.files || []).filter(
+        (file) => file.file_id !== fileId,
+      );
+      delete historyImportSelections[fileId];
+      if (!historyImportPreview.files.length) historyImportPreview = null;
+      historyImportStatusText = "";
+      renderHistoryImportPreview();
+    } catch (error) {
+      el("history-import-error").textContent = error.message;
+      el("history-import-error").classList.remove("hidden");
+    } finally {
+      setHistoryImportLoading(false);
+    }
+  }
+
+  function pollHistoryImportJob(jobId, mode = "import") {
+    if (historyImportJobTimer !== null) clearTimeout(historyImportJobTimer);
+    historyImportJobTimer = window.setTimeout(async () => {
+      historyImportJobTimer = null;
+      try {
+        const job = await api(`/api/account/history/import/jobs/${encodeURIComponent(jobId)}`);
+        if (job.status === "completed") {
+          const summary = job.summary || {};
+          historyImportStatusText = mode === "enrichment"
+            ? `${Number(summary.orders || 0).toLocaleString()} Hyperliquid orders refreshed`
+            : `${Number(summary.imported || 0)} imported · ${Number(summary.already_imported || 0)} already imported`;
+          setHistoryImportLoading(false);
+          if (mode === "import") {
+            historyImportPreview = null;
+            historyImportSelections = {};
+            historyImportStatusText = "";
+            renderHistoryImportPreview();
+          }
+          historyImportLogLoaded = false;
+          positionHistoryGroupsHaveData = false;
+          orderHistoryGroupsHaveData = false;
+          pnlHaveData = false;
+          await loadHistoryImports(true);
+          return;
+        }
+        if (job.status === "failed") {
+          throw new Error(job.error || "History import failed");
+        }
+        historyImportStatusText = job.status === "queued"
+          ? "Waiting for Account Worker..."
+          : mode === "enrichment"
+            ? "Refreshing Hyperliquid Order History..."
+            : "Merging history into the account cache...";
+        renderHistoryImportActions();
+        pollHistoryImportJob(jobId, mode);
+      } catch (error) {
+        historyImportStatusText = "";
+        setHistoryImportLoading(false);
+        el("history-import-error").textContent = error.message;
+        el("history-import-error").classList.remove("hidden");
+      }
+    }, 900);
+  }
+
+  async function submitHistoryImport() {
+    if (!historyImportReady()) return;
+    historyImportStatusText = "Preparing normalized history...";
+    el("history-import-error").classList.add("hidden");
+    setHistoryImportLoading(true, "Preparing import...");
+    try {
+      const payload = await api("/api/account/history/import/commit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          preview_id: historyImportPreview.preview_id,
+          files: historyImportPreview.files.map((file) => ({
+            file_id: file.file_id,
+            ...historyImportSelections[file.file_id],
+          })),
+        }),
+      });
+      historyImportStatusText = "Waiting for Account Worker...";
+      el("history-import-loading-text").textContent = "Importing history...";
+      renderHistoryImportActions();
+      pollHistoryImportJob(payload.job_id);
+    } catch (error) {
+      setHistoryImportLoading(false);
+      historyImportStatusText = "";
+      el("history-import-error").textContent = error.message;
+      el("history-import-error").classList.remove("hidden");
+    }
+  }
+
+  async function retryHistoryImportEnrichment(importId) {
+    if (!importId || historyImportBusy) return;
+    historyImportStatusText = "Preparing Hyperliquid Order History refresh...";
+    el("history-import-error").classList.add("hidden");
+    setHistoryImportLoading(true, "Refreshing Hyperliquid Order History...");
+    try {
+      const payload = await api(
+        `/api/account/history/imports/${encodeURIComponent(importId)}/retry-enrichment`,
+        { method: "POST" },
+      );
+      pollHistoryImportJob(payload.job_id, "enrichment");
+    } catch (error) {
+      setHistoryImportLoading(false);
+      historyImportStatusText = "";
+      el("history-import-error").textContent = error.message;
+      el("history-import-error").classList.remove("hidden");
+    }
+  }
+
+  function formatAccountHistoryDate(value, includeSeconds = false, includeYear = false) {
     const timestamp = Date.parse(String(value || ""));
     if (!Number.isFinite(timestamp)) return "—";
     const options = {
@@ -2733,6 +3079,7 @@
       minute: "2-digit",
       hour12: false,
     };
+    if (includeYear) options.year = "numeric";
     if (includeSeconds) options.second = "2-digit";
     return new Date(timestamp).toLocaleString("en-US", options);
   }
@@ -3052,10 +3399,12 @@
     if (Math.abs(end - start) <= 1) return;
     box.style.height = `${start}px`;
     void box.offsetHeight; // reflow to lock the start height
+    box.classList.add("flip-animating");
     box.style.height = `${end}px`;
     const onEnd = (event) => {
       if (event.target !== box || event.propertyName !== "height") return;
       box.removeEventListener("transitionend", onEnd);
+      box.classList.remove("flip-animating");
       box.style.height = "";
     };
     box.addEventListener("transitionend", onEnd);
@@ -4500,6 +4849,84 @@
         switchAccountView(view, { load: true, animate: true });
       }
     });
+    el("history-import-dropzone").addEventListener("click", () => {
+      if (!historyImportBusy) el("history-import-files").click();
+    });
+    el("history-import-dropzone").addEventListener("dragover", (event) => {
+      event.preventDefault();
+      if (!historyImportBusy) el("history-import-dropzone").classList.add("dragover");
+    });
+    el("history-import-dropzone").addEventListener("dragleave", () => {
+      el("history-import-dropzone").classList.remove("dragover");
+    });
+    el("history-import-dropzone").addEventListener("drop", (event) => {
+      event.preventDefault();
+      el("history-import-dropzone").classList.remove("dragover");
+      if (!historyImportBusy) previewHistoryImport(event.dataTransfer && event.dataTransfer.files);
+    });
+    el("history-import-files").addEventListener("change", (event) => {
+      previewHistoryImport(event.target.files);
+    });
+    el("history-import-preview").addEventListener("click", (event) => {
+      const removeButton = event.target && event.target.closest
+        ? event.target.closest("[data-history-import-remove]")
+        : null;
+      if (removeButton) {
+        removeHistoryImportPreviewFile(String(removeButton.dataset.historyImportRemove || ""));
+        return;
+      }
+      const option = event.target && event.target.closest
+        ? event.target.closest("[data-history-import-option]")
+        : null;
+      if (option) {
+        const fileId = String(option.dataset.historyImportOption || "");
+        const field = String(option.dataset.field || "");
+        if (historyImportSelections[fileId] && ["account", "source_timezone"].includes(field)) {
+          historyImportSelections[fileId][field] = String(option.dataset.value || "");
+          if (field === "source_timezone") {
+            historyImportSelections[fileId].timezone_confirmed = false;
+          }
+          closeHistoryImportSelects();
+          renderHistoryImportPreview();
+        }
+        return;
+      }
+      const button = event.target && event.target.closest
+        ? event.target.closest("[data-history-import-select]")
+        : null;
+      if (!button) return;
+      const control = button.closest(".history-import-select");
+      const options = control && control.querySelector(".history-import-select-options");
+      if (!control || !options) return;
+      const willOpen = options.classList.contains("hidden");
+      closeHistoryImportSelects(control);
+      control.classList.toggle("open", willOpen);
+      options.classList.toggle("hidden", !willOpen);
+      button.setAttribute("aria-expanded", String(willOpen));
+    });
+    el("history-import-preview").addEventListener("change", (event) => {
+      const checkbox = event.target && event.target.closest
+        ? event.target.closest("[data-history-import-timezone-confirm]")
+        : null;
+      if (!checkbox) return;
+      const fileId = String(checkbox.dataset.historyImportTimezoneConfirm || "");
+      if (!historyImportSelections[fileId]) return;
+      historyImportSelections[fileId].timezone_confirmed = checkbox.checked;
+      renderHistoryImportActions();
+    });
+    el("history-import-submit").addEventListener("click", submitHistoryImport);
+    el("history-import-log-list").addEventListener("click", (event) => {
+      const button = event.target && event.target.closest
+        ? event.target.closest("[data-history-import-retry]")
+        : null;
+      if (!button) return;
+      retryHistoryImportEnrichment(String(button.dataset.historyImportRetry || ""));
+    });
+    document.addEventListener("click", (event) => {
+      if (!event.target || !event.target.closest(".history-import-select")) {
+        closeHistoryImportSelects();
+      }
+    });
     el("assets-close").addEventListener("click", closeAssets);
     el("assets-back").addEventListener("click", () => {
       if (accountView === "pnl") {
@@ -4521,13 +4948,16 @@
     });
     document.querySelectorAll("[data-pnl-days]").forEach((button) => {
       button.addEventListener("click", () => {
-        const days = Number(button.dataset.pnlDays);
-        if (!Number.isInteger(days) || days === pnlPeriodDays) return;
+        const rawDays = String(button.dataset.pnlDays || "");
+        const days = rawDays === "all" ? "all" : Number(rawDays);
+        if ((days !== "all" && !Number.isInteger(days)) || days === pnlPeriodDays) return;
         pnlPeriodDays = days;
         // keep the current rows (preserveContent) so the list updates in place
         // via syncPnlList's keyed diff instead of clearing → no empty flash
         document.querySelectorAll("[data-pnl-days]").forEach((candidate) => {
-          const active = Number(candidate.dataset.pnlDays) === pnlPeriodDays;
+          const candidateRaw = String(candidate.dataset.pnlDays || "");
+          const candidateDays = candidateRaw === "all" ? "all" : Number(candidateRaw);
+          const active = candidateDays === pnlPeriodDays;
           candidate.classList.toggle("active", active);
           candidate.setAttribute("aria-pressed", String(active));
         });

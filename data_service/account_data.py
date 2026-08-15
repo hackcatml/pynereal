@@ -4,23 +4,59 @@ import asyncio
 import copy
 import multiprocessing
 import queue
+import shutil
+import tempfile
 import time
 from collections.abc import Callable
 from concurrent.futures import Executor, ProcessPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from account_service.cache import AccountCache
+from account_service.csv_import import (
+    MAX_IMPORT_FILE_BYTES,
+    MAX_IMPORT_FILES,
+    MAX_IMPORT_TOTAL_BYTES,
+    TIMEZONE_CONFIRMATION_WARNING,
+    HistoryCsvError,
+    build_history_import_batch,
+    preview_history_files,
+)
 from account_service.live_positions import run_positions_stream
 from account_service.positions import collect_positions_snapshot
+from ai.scripts.asset import (
+    ExchangeAccount,
+    build_exchange,
+    configured_accounts,
+    read_provider_config,
+)
 from tv_logos import exchange_logo_url
 from ws_manager import WSManager
 
 
 class AccountDataError(RuntimeError):
     pass
+
+
+def _fetch_okx_account_uid(account: ExchangeAccount) -> str:
+    configured_uid = str(account.config.get("uid") or "").strip()
+    if configured_uid:
+        return configured_uid
+    exchange = build_exchange("okx", account.config, 10_000, None)
+    try:
+        response = exchange.privateGetAccountConfig({})
+        rows = response.get("data") if isinstance(response, dict) else None
+        data = rows[0] if isinstance(rows, list) and rows else {}
+        return str(data.get("uid") or "").strip() if isinstance(data, dict) else ""
+    except Exception:
+        return ""
+    finally:
+        try:
+            exchange.close()
+        except Exception:
+            pass
 
 
 def _add_exchange_logos(payload: dict[str, Any]) -> dict[str, Any]:
@@ -54,6 +90,7 @@ class AccountDataService:
         self._executor_factory = executor_factory or self._new_process_executor
         self._positions_collector = positions_collector
         self._executor: Executor | None = None
+        self._import_executor: Executor | None = None
         self._positions: dict[str, Any] | None = None
         self._positions_at = 0.0
         self._positions_lock = asyncio.Lock()
@@ -66,6 +103,13 @@ class AccountDataService:
         self._live_reader: asyncio.Task[None] | None = None
         self._live_control_reader: asyncio.Task[None] | None = None
         self._history_refresh_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._history_import_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._history_import_previews: dict[str, dict[str, Any]] = {}
+        self._history_import_jobs: dict[str, dict[str, Any]] = {}
+        self._history_import_tasks: dict[str, asyncio.Task[None]] = {}
+        self._history_import_root: Path | None = None
+        self._okx_account_uid_cache: dict[str, str] = {}
+        self._okx_account_uid_lock = asyncio.Lock()
         self._positions_revision = 0
         self.live_ws = WSManager()
 
@@ -80,6 +124,37 @@ class AccountDataService:
         if self._executor is None:
             self._executor = self._executor_factory()
         return self._executor
+
+    def _ensure_import_executor(self) -> Executor:
+        if self._import_executor is None:
+            self._import_executor = self._executor_factory()
+        return self._import_executor
+
+    async def _okx_account_uids(
+        self,
+        accounts: list[ExchangeAccount],
+    ) -> dict[str, str]:
+        okx_accounts = [account for account in accounts if account.exchange_id == "okx"]
+        async with self._okx_account_uid_lock:
+            missing = [
+                account
+                for account in okx_accounts
+                if account.name not in self._okx_account_uid_cache
+            ]
+            if missing:
+                resolved = await asyncio.gather(*(
+                    asyncio.to_thread(_fetch_okx_account_uid, account)
+                    for account in missing
+                ))
+                self._okx_account_uid_cache.update(
+                    (account.name, uid)
+                    for account, uid in zip(missing, resolved, strict=True)
+                )
+            return {
+                account.name: self._okx_account_uid_cache.get(account.name, "")
+                for account in okx_accounts
+                if self._okx_account_uid_cache.get(account.name)
+            }
 
     def _positions_cache_valid(self) -> bool:
         return (
@@ -231,7 +306,7 @@ class AccountDataService:
     async def pnl(
         self,
         *,
-        days: int = 90,
+        days: int | None = 90,
         account: str = "",
         exchange: str = "",
     ) -> dict[str, Any]:
@@ -261,13 +336,21 @@ class AccountDataService:
             for result in results
             if isinstance(result, dict) and result.get("account")
         }
+        funding_available = any(
+            isinstance(result, dict) and result.get("funding") is not None
+            for result in results
+        )
+        borrow_interest_available = any(
+            isinstance(result, dict) and result.get("borrow_interest") is not None
+            for result in results
+        )
         return {
             "schema_version": "1.0",
             "collected_at": str(payload.get("to") or ""),
             "read_only": True,
             "cached": True,
             "period": {
-                "days": int(payload.get("days") or days),
+                "days": payload.get("days"),
                 "from": payload.get("from"),
                 "to": payload.get("to"),
             },
@@ -276,10 +359,428 @@ class AccountDataService:
             "summary": {
                 "accounts": len(accounts),
                 "rows": len(results),
-                "funding_available": False,
-                "borrow_interest_available": False,
+                "funding_available": funding_available,
+                "borrow_interest_available": borrow_interest_available,
             },
         }
+
+    def _cleanup_history_import_state(self) -> None:
+        now = time.monotonic()
+        expired_previews = [
+            preview_id
+            for preview_id, preview in self._history_import_previews.items()
+            if float(preview.get("expires_monotonic") or 0.0) <= now
+        ]
+        for preview_id in expired_previews:
+            preview = self._history_import_previews.pop(preview_id, None)
+            if preview is not None:
+                shutil.rmtree(str(preview.get("directory") or ""), ignore_errors=True)
+
+        expired_jobs = [
+            job_id
+            for job_id, job in self._history_import_jobs.items()
+            if job.get("status") in {"completed", "failed"}
+            and now - float(job.get("finished_monotonic") or now) > 24 * 60 * 60
+        ]
+        for job_id in expired_jobs:
+            self._history_import_jobs.pop(job_id, None)
+
+    @staticmethod
+    def _public_import_job(job: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: copy.deepcopy(value)
+            for key, value in job.items()
+            if key not in {"finished_monotonic"}
+        }
+
+    async def preview_history_import(
+        self,
+        uploads: list[tuple[str, bytes]],
+    ) -> dict[str, Any]:
+        self._cleanup_history_import_state()
+        if not uploads or len(uploads) > MAX_IMPORT_FILES:
+            raise AccountDataError(
+                f"select between 1 and {MAX_IMPORT_FILES} CSV files"
+            )
+        total_size = sum(len(content) for _, content in uploads)
+        if total_size > MAX_IMPORT_TOTAL_BYTES:
+            raise AccountDataError(
+                f"combined CSV size exceeds {MAX_IMPORT_TOTAL_BYTES // (1024 * 1024)} MB"
+            )
+
+        if self._history_import_root is None:
+            self._history_import_root = Path(
+                tempfile.mkdtemp(prefix="pynereal-history-import-")
+            )
+        preview_id = uuid4().hex
+        directory = self._history_import_root / preview_id
+        directory.mkdir(parents=True, exist_ok=False)
+        specs: list[dict[str, Any]] = []
+        try:
+            for original_name, content in uploads:
+                name = Path(str(original_name or "")).name.strip()
+                if not name or Path(name).suffix.lower() != ".csv":
+                    raise AccountDataError("only CSV files can be imported")
+                if len(content) > MAX_IMPORT_FILE_BYTES:
+                    raise AccountDataError(
+                        f"CSV exceeds {MAX_IMPORT_FILE_BYTES // (1024 * 1024)} MB: {name}"
+                    )
+                file_id = uuid4().hex
+                path = directory / f"{file_id}.csv"
+                await asyncio.to_thread(path.write_bytes, content)
+                specs.append({"file_id": file_id, "name": name, "path": str(path)})
+
+            loop = asyncio.get_running_loop()
+            preview = await loop.run_in_executor(
+                self._ensure_import_executor(),
+                preview_history_files,
+                specs,
+            )
+            provider_data = await asyncio.to_thread(
+                read_provider_config,
+                self.config_path,
+            )
+            accounts = configured_accounts(provider_data)
+            okx_account_uids = await self._okx_account_uids(accounts) if any(
+                str(item.get("exchange") or "") == "okx"
+                for item in preview.get("files", [])
+                if isinstance(item, dict)
+            ) else {}
+            candidates_by_exchange: dict[str, list[str]] = {}
+            for account in accounts:
+                candidates_by_exchange.setdefault(account.exchange_id, []).append(
+                    account.name
+                )
+
+            preview_files = preview.get("files")
+            preview_files = preview_files if isinstance(preview_files, list) else []
+            stored_files: dict[str, dict[str, Any]] = {}
+            specs_by_id = {str(item["file_id"]): item for item in specs}
+            for file_preview in preview_files:
+                file_id = str(file_preview.get("file_id") or "")
+                exchange_id = str(file_preview.get("exchange") or "")
+                candidates = sorted(candidates_by_exchange.get(exchange_id, []))
+                file_preview["account_candidates"] = candidates
+                source_uid = str(file_preview.get("source_account_uid") or "")
+                uid_matches = [
+                    account_name
+                    for account_name in candidates
+                    if source_uid and okx_account_uids.get(account_name) == source_uid
+                ]
+                file_preview["suggested_account"] = uid_matches[0] if len(
+                    uid_matches
+                ) == 1 else candidates[0] if len(candidates) == 1 else ""
+                stored_files[file_id] = {
+                    **copy.deepcopy(file_preview),
+                    "path": specs_by_id[file_id]["path"],
+                }
+            if len(stored_files) != len(specs):
+                raise AccountDataError("not every selected file could be previewed")
+
+            expires_at = datetime.now(UTC) + timedelta(minutes=30)
+            self._history_import_previews[preview_id] = {
+                "preview_id": preview_id,
+                "directory": str(directory),
+                "files": stored_files,
+                "timezone_options": preview.get("timezone_options", []),
+                "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+                "expires_monotonic": time.monotonic() + 30 * 60,
+            }
+            return {
+                "preview_id": preview_id,
+                "expires_at": self._history_import_previews[preview_id]["expires_at"],
+                "files": preview_files,
+                "timezone_options": preview.get("timezone_options", []),
+            }
+        except AccountDataError:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
+        except (HistoryCsvError, ValueError) as exc:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise AccountDataError(str(exc)[:500]) from exc
+        except Exception as exc:
+            shutil.rmtree(directory, ignore_errors=True)
+            message = str(exc).replace("\n", " ").strip()
+            raise AccountDataError(message[:500] or type(exc).__name__) from exc
+
+    async def remove_history_import_preview_file(
+        self,
+        preview_id: str,
+        file_id: str,
+    ) -> dict[str, Any]:
+        self._cleanup_history_import_state()
+        preview = self._history_import_previews.get(str(preview_id or "").strip())
+        if preview is None:
+            raise AccountDataError("history import preview expired or was not found")
+        files = preview.get("files")
+        files = files if isinstance(files, dict) else {}
+        file_preview = files.pop(str(file_id or "").strip(), None)
+        if not isinstance(file_preview, dict):
+            raise AccountDataError("history import preview file was not found")
+        path = Path(str(file_preview.get("path") or ""))
+        if path.is_file():
+            await asyncio.to_thread(path.unlink)
+        if not files:
+            self._history_import_previews.pop(str(preview_id).strip(), None)
+            await asyncio.to_thread(
+                shutil.rmtree,
+                str(preview.get("directory") or ""),
+                True,
+            )
+        return {"ok": True, "remaining": len(files)}
+
+    async def commit_history_import(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._cleanup_history_import_state()
+        preview_id = str(payload.get("preview_id") or "").strip()
+        preview = self._history_import_previews.get(preview_id)
+        if preview is None:
+            raise AccountDataError("history import preview expired or was not found")
+        selections = payload.get("files")
+        selections = selections if isinstance(selections, list) else []
+        selection_map = {
+            str(item.get("file_id") or ""): item
+            for item in selections
+            if isinstance(item, dict) and item.get("file_id")
+        }
+        preview_files = preview["files"]
+        if set(selection_map) != set(preview_files):
+            raise AccountDataError("confirm the account and timezone for every CSV file")
+
+        batch_id = uuid4().hex
+        specs: list[dict[str, Any]] = []
+        for file_id, file_preview in preview_files.items():
+            selection = selection_map[file_id]
+            account_name = str(selection.get("account") or "").strip()
+            if account_name not in file_preview.get("account_candidates", []):
+                raise AccountDataError(
+                    f"select a configured {file_preview['exchange']} account for "
+                    f"{file_preview['name']}"
+                )
+            source_timezone = str(selection.get("source_timezone") or "").strip()
+            if not source_timezone:
+                raise AccountDataError(f"select the source timezone for {file_preview['name']}")
+            if selection.get("timezone_confirmed") is not True:
+                raise AccountDataError(
+                    f"confirm the source timezone for {file_preview['name']}"
+                )
+            specs.append({
+                "file_id": file_id,
+                "name": file_preview["name"],
+                "path": file_preview["path"],
+                "account": account_name,
+                "source_timezone": source_timezone,
+                "timezone_confirmed": True,
+                "import_id": uuid4().hex,
+                "batch_id": batch_id,
+            })
+
+        loop = asyncio.get_running_loop()
+        try:
+            batch = await loop.run_in_executor(
+                self._ensure_import_executor(),
+                build_history_import_batch,
+                specs,
+            )
+        except (HistoryCsvError, ValueError) as exc:
+            raise AccountDataError(str(exc)[:500]) from exc
+        except Exception as exc:
+            message = str(exc).replace("\n", " ").strip()
+            raise AccountDataError(message[:500] or type(exc).__name__) from exc
+
+        job_id = uuid4().hex
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        job = {
+            "job_id": job_id,
+            "batch_id": batch_id,
+            "kind": "import",
+            "status": "queued",
+            "created_at": now,
+            "updated_at": now,
+            "file_count": len(specs),
+            "summary": None,
+            "imports": [],
+            "error": None,
+        }
+        self._history_import_jobs[job_id] = job
+        task = asyncio.create_task(self._run_history_import_job(job_id, batch))
+        self._history_import_tasks[job_id] = task
+        task.add_done_callback(lambda _task, key=job_id: self._history_import_tasks.pop(key, None))
+        return self._public_import_job(job)
+
+    async def _run_history_import_job(
+        self,
+        job_id: str,
+        batch: dict[str, Any],
+    ) -> None:
+        job = self._history_import_jobs[job_id]
+        job["status"] = "running"
+        job["updated_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        request_id = uuid4().hex
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._history_import_waiters[request_id] = waiter
+        try:
+            await self._ensure_live_stream()
+            process = self._live_process
+            input_queue = self._live_input
+            if process is None or not process.is_alive() or input_queue is None:
+                raise AccountDataError("account worker is not available")
+            await asyncio.to_thread(input_queue.put, {
+                "type": "history.import",
+                "request_id": request_id,
+                "batch": batch,
+            }, True, 10.0)
+            result = await asyncio.wait_for(asyncio.shield(waiter), timeout=600.0)
+            if result.get("status") != "ok":
+                error = result.get("error")
+                error = error if isinstance(error, dict) else {}
+                raise AccountDataError(
+                    str(error.get("message") or "history import failed")[:500]
+                )
+            job["status"] = "completed"
+            job["summary"] = result.get("summary")
+            job["imports"] = result.get("imports", [])
+        except asyncio.CancelledError:
+            job["status"] = "failed"
+            job["error"] = "history import was cancelled"
+            raise
+        except Exception as exc:
+            job["status"] = "failed"
+            job["error"] = str(exc).replace("\n", " ")[:500]
+        finally:
+            self._history_import_waiters.pop(request_id, None)
+            if not waiter.done():
+                waiter.cancel()
+            job["updated_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+            job["finished_monotonic"] = time.monotonic()
+
+    def history_import_job(self, job_id: str) -> dict[str, Any]:
+        self._cleanup_history_import_state()
+        job = self._history_import_jobs.get(job_id)
+        if job is None:
+            raise AccountDataError("history import job was not found")
+        return self._public_import_job(job)
+
+    async def retry_history_import_enrichment(
+        self,
+        import_id: str,
+    ) -> dict[str, Any]:
+        try:
+            manifest = await asyncio.to_thread(
+                AccountCache(self.cache_path).csv_import,
+                import_id,
+            )
+        except Exception as exc:
+            message = str(exc).replace("\n", " ").strip()
+            raise AccountDataError(message[:500] or type(exc).__name__) from exc
+        if not isinstance(manifest, dict) or manifest.get("exchange") != "hyperliquid":
+            raise AccountDataError("Hyperliquid history import was not found")
+
+        job_id = uuid4().hex
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        job = {
+            "job_id": job_id,
+            "batch_id": str(manifest.get("batch_id") or ""),
+            "kind": "enrichment",
+            "status": "queued",
+            "created_at": now,
+            "updated_at": now,
+            "file_count": 1,
+            "summary": None,
+            "imports": [],
+            "error": None,
+        }
+        self._history_import_jobs[job_id] = job
+        task = asyncio.create_task(
+            self._run_history_enrichment_job(job_id, import_id)
+        )
+        self._history_import_tasks[job_id] = task
+        task.add_done_callback(
+            lambda _task, key=job_id: self._history_import_tasks.pop(key, None)
+        )
+        return self._public_import_job(job)
+
+    async def _run_history_enrichment_job(
+        self,
+        job_id: str,
+        import_id: str,
+    ) -> None:
+        job = self._history_import_jobs[job_id]
+        job["status"] = "running"
+        job["updated_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        request_id = uuid4().hex
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._history_import_waiters[request_id] = waiter
+        try:
+            await self._ensure_live_stream()
+            process = self._live_process
+            input_queue = self._live_input
+            if process is None or not process.is_alive() or input_queue is None:
+                raise AccountDataError("account worker is not available")
+            await asyncio.to_thread(input_queue.put, {
+                "type": "history.enrichment",
+                "request_id": request_id,
+                "import_id": import_id,
+            }, True, 10.0)
+            result = await asyncio.wait_for(asyncio.shield(waiter), timeout=600.0)
+            if result.get("status") != "ok":
+                error = result.get("error")
+                error = error if isinstance(error, dict) else {}
+                raise AccountDataError(
+                    str(error.get("message") or "history enrichment failed")[:500]
+                )
+            job["status"] = "completed"
+            job["summary"] = result.get("summary")
+            job["imports"] = result.get("imports", [])
+        except asyncio.CancelledError:
+            job["status"] = "failed"
+            job["error"] = "history enrichment was cancelled"
+            raise
+        except Exception as exc:
+            job["status"] = "failed"
+            job["error"] = str(exc).replace("\n", " ")[:500]
+        finally:
+            self._history_import_waiters.pop(request_id, None)
+            if not waiter.done():
+                waiter.cancel()
+            job["updated_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+            job["finished_monotonic"] = time.monotonic()
+
+    async def history_imports(self, *, limit: int = 100) -> dict[str, Any]:
+        try:
+            payload = await asyncio.to_thread(
+                AccountCache(self.cache_path).csv_imports,
+                limit=limit,
+            )
+        except ValueError:
+            raise
+        except Exception as exc:
+            message = str(exc).replace("\n", " ").strip()
+            raise AccountDataError(message[:500] or type(exc).__name__) from exc
+        for result in payload.get("results", []):
+            if isinstance(result, dict):
+                warnings = result.get("warnings")
+                if isinstance(warnings, list):
+                    result["warnings"] = [
+                        warning
+                        for warning in warnings
+                        if warning != TIMEZONE_CONFIRMATION_WARNING
+                    ]
+                result["exchange_logo_url"] = exchange_logo_url(
+                    str(result.get("exchange") or "")
+                )
+                result["enrichment_retry_available"] = (
+                    result.get("exchange") == "hyperliquid"
+                    and result.get("status") == "partial"
+                )
+        self._cleanup_history_import_state()
+        payload["active_jobs"] = [
+            self._public_import_job(job)
+            for job in self._history_import_jobs.values()
+            if job.get("status") in {"queued", "running"}
+        ]
+        return payload
 
     async def refresh_history(
         self,
@@ -482,16 +983,28 @@ class AccountDataService:
         while True:
             message = await asyncio.to_thread(output.get)
             if message is None:
-                for waiter in self._history_refresh_waiters.values():
+                waiters = [
+                    *self._history_refresh_waiters.values(),
+                    *self._history_import_waiters.values(),
+                ]
+                for waiter in waiters:
                     if not waiter.done():
                         waiter.set_exception(AccountDataError("account worker stopped"))
                 return
             if not isinstance(message, dict):
                 continue
-            if message.get("type") != "history.refresh.result":
+            message_type = message.get("type")
+            if message_type == "history.refresh.result":
+                waiter_map = self._history_refresh_waiters
+            elif message_type in {
+                "history.import.result",
+                "history.enrichment.result",
+            }:
+                waiter_map = self._history_import_waiters
+            else:
                 continue
             request_id = str(message.get("request_id") or "")
-            waiter = self._history_refresh_waiters.get(request_id)
+            waiter = waiter_map.get(request_id)
             payload = message.get("payload")
             if waiter is None or waiter.done() or not isinstance(payload, dict):
                 continue
@@ -513,8 +1026,12 @@ class AccountDataService:
         self._live_control_output = None
         self._live_input = None
         self._positions_revision = 0
-        waiters = list(self._history_refresh_waiters.values())
+        waiters = [
+            *self._history_refresh_waiters.values(),
+            *self._history_import_waiters.values(),
+        ]
         self._history_refresh_waiters.clear()
+        self._history_import_waiters.clear()
         for waiter in waiters:
             if not waiter.done():
                 waiter.set_exception(AccountDataError("account worker stopped"))
@@ -548,8 +1065,30 @@ class AccountDataService:
             await asyncio.to_thread(input_queue.join_thread)
 
     async def close(self) -> None:
+        import_tasks = list(self._history_import_tasks.values())
+        self._history_import_tasks.clear()
+        for task in import_tasks:
+            task.cancel()
+        if import_tasks:
+            await asyncio.gather(*import_tasks, return_exceptions=True)
         await self._close_live_stream()
         executor = self._executor
         self._executor = None
         if executor is not None:
             await asyncio.to_thread(executor.shutdown, wait=True, cancel_futures=True)
+        import_executor = self._import_executor
+        self._import_executor = None
+        if import_executor is not None:
+            await asyncio.to_thread(
+                import_executor.shutdown,
+                wait=True,
+                cancel_futures=True,
+            )
+        if self._history_import_root is not None:
+            await asyncio.to_thread(
+                shutil.rmtree,
+                self._history_import_root,
+                True,
+            )
+            self._history_import_root = None
+        self._history_import_previews.clear()

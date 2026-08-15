@@ -130,11 +130,15 @@ def _new_pnl_bucket(
         "unrealized_pnl": Decimal(0),
         "gross_realized_pnl": Decimal(0),
         "fees": Decimal(0),
+        "funding": Decimal(0),
+        "borrow_interest": Decimal(0),
         "closed_positions": 0,
         "open_positions": 0,
         "realized_complete": True,
         "unrealized_complete": True,
         "fee_breakdown_complete": True,
+        "funding_available": False,
+        "borrow_interest_available": False,
     }
 
 
@@ -165,8 +169,16 @@ def _serialize_pnl_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
             and bucket["unrealized_complete"]
         ),
         "fee_breakdown_complete": bucket["fee_breakdown_complete"],
-        "funding": None,
-        "borrow_interest": None,
+        "funding": (
+            float(bucket["funding"])
+            if bucket["funding_available"]
+            else None
+        ),
+        "borrow_interest": (
+            float(bucket["borrow_interest"])
+            if bucket["borrow_interest_available"]
+            else None
+        ),
     }
 
 
@@ -197,6 +209,8 @@ class AccountCache:
         self._rebuild_hyperliquid_position_history(connection)
         self._repair_replaced_derived_position_history(connection)
         self._repair_okx_intermediate_position_history(connection)
+        self._repair_okx_csv_position_pnl(connection)
+        self._repair_csv_position_history(connection)
         connection.commit()
         return connection
 
@@ -315,6 +329,25 @@ class AccountCache:
                 PRIMARY KEY (account, exchange, stream, market_scope)
             );
 
+            CREATE TABLE IF NOT EXISTS csv_imports (
+                import_id TEXT PRIMARY KEY,
+                batch_id TEXT NOT NULL,
+                file_hash TEXT NOT NULL,
+                original_name TEXT NOT NULL,
+                account TEXT NOT NULL,
+                exchange TEXT NOT NULL,
+                file_type TEXT NOT NULL,
+                market_scope TEXT NOT NULL DEFAULT '',
+                source_timezone TEXT NOT NULL,
+                row_count INTEGER NOT NULL,
+                first_occurred_at TEXT,
+                last_occurred_at TEXT,
+                status TEXT NOT NULL,
+                warnings_json TEXT NOT NULL DEFAULT '[]',
+                imported_at TEXT NOT NULL,
+                UNIQUE (account, exchange, file_type, file_hash)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_current_positions_symbol
                 ON current_positions (exchange, symbol);
             CREATE INDEX IF NOT EXISTS idx_position_history_closed
@@ -331,6 +364,8 @@ class AccountCache:
                 ON fills (occurred_at DESC, account);
             CREATE INDEX IF NOT EXISTS idx_pnl_events_occurred
                 ON pnl_events (occurred_at DESC, account);
+            CREATE INDEX IF NOT EXISTS idx_csv_imports_imported
+                ON csv_imports (imported_at DESC);
             """
         )
         AccountCache._ensure_column(
@@ -602,6 +637,88 @@ class AccountCache:
         )
 
     @staticmethod
+    def _repair_csv_position_history(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            DELETE FROM position_history
+            WHERE source NOT LIKE 'csv:%'
+              AND EXISTS (
+                  SELECT 1
+                  FROM position_history AS csv_row
+                  WHERE csv_row.source LIKE 'csv:%'
+                    AND csv_row.account = position_history.account
+                    AND csv_row.exchange = position_history.exchange
+                    AND csv_row.market_scope = position_history.market_scope
+                    AND csv_row.symbol = position_history.symbol
+                    AND (
+                        LOWER(csv_row.side) = LOWER(position_history.side)
+                        OR (
+                            position_history.exchange = 'okx'
+                            AND (
+                                LOWER(csv_row.side) IN ('', 'net')
+                                OR LOWER(position_history.side) IN ('', 'net')
+                            )
+                        )
+                    )
+                    AND ABS(
+                        (julianday(csv_row.opened_at)
+                         - julianday(position_history.opened_at)) * 86400.0
+                    ) <= 2.0
+                    AND ABS(
+                        (julianday(csv_row.closed_at)
+                         - julianday(position_history.closed_at)) * 86400.0
+                    ) <= 2.0
+              )
+            """
+        )
+
+    @staticmethod
+    def _repair_okx_csv_position_pnl(connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            """
+            SELECT id, payload_json
+            FROM position_history
+            WHERE exchange = 'okx' AND source = 'csv:okx'
+            """
+        ).fetchall()
+        for row in rows:
+            payload = _payload_object(row["payload_json"])
+            breakdown = payload.get("realized_pnl_breakdown")
+            if not isinstance(breakdown, dict):
+                continue
+            gross = _decimal(breakdown.get("gross_pnl"))
+            trading_fee = _decimal(breakdown.get("trading_fee"))
+            funding = _decimal(breakdown.get("funding"))
+            liquidation_fee = _decimal(breakdown.get("liquidation_fee"))
+            if any(
+                value is None
+                for value in (gross, trading_fee, funding, liquidation_fee)
+            ):
+                continue
+            net = gross + trading_fee + funding + liquidation_fee
+            fees = gross - net
+            net_text = format(net, "f")
+            fees_text = format(fees, "f")
+            if (
+                payload.get("realized_pnl") == net_text
+                and breakdown.get("fees") == fees_text
+                and breakdown.get("net_pnl") == net_text
+                and breakdown.get("complete") is True
+            ):
+                continue
+            payload["realized_pnl"] = net_text
+            breakdown.update({
+                "gross_pnl": format(gross, "f"),
+                "fees": fees_text,
+                "net_pnl": net_text,
+                "complete": True,
+            })
+            connection.execute(
+                "UPDATE position_history SET payload_json = ? WHERE id = ?",
+                (_json(payload), row["id"]),
+            )
+
+    @staticmethod
     def _rebuild_fill_position_history(
         connection: sqlite3.Connection,
         exchange: str,
@@ -740,6 +857,20 @@ class AccountCache:
         connection: sqlite3.Connection,
         groups: set[tuple[str, str, str]] | None = None,
     ) -> None:
+        if groups is None:
+            groups = {
+                (str(row["account"]), str(row["market_scope"]), str(row["symbol"]))
+                for row in connection.execute(
+                    """
+                    SELECT DISTINCT account, market_scope, symbol
+                    FROM fills
+                    WHERE exchange = 'hyperliquid'
+                      AND market_scope != 'spot' AND symbol != ''
+                    """
+                )
+            }
+        else:
+            groups = {group for group in groups if group[1] != "spot"}
         AccountCache._rebuild_fill_position_history(
             connection,
             "hyperliquid",
@@ -916,17 +1047,73 @@ class AccountCache:
         fills: list[dict[str, Any]],
         positions: list[dict[str, Any]] | None = None,
         cursors: list[dict[str, Any]] | None = None,
-    ) -> None:
+        pnl_events: list[dict[str, Any]] | None = None,
+        imports: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
         positions = positions or []
         cursors = cursors or []
-        if not orders and not fills and not positions and not cursors:
-            return
+        pnl_events = pnl_events or []
+        imports = imports or []
+        if not orders and not fills and not positions and not cursors and not pnl_events and not imports:
+            return None
         connection = self._connect()
         connection.execute("BEGIN IMMEDIATE")
         touched_binance_fills: set[tuple[str, str, str]] = set()
         touched_hyperliquid_fills: set[tuple[str, str, str]] = set()
         try:
+            accepted_imports: set[str] = set()
+            import_results: list[dict[str, Any]] = []
+            pending_import_keys: dict[tuple[str, str, str, str], str] = {}
+            for manifest in imports:
+                import_id = str(manifest.get("import_id") or "").strip()
+                account = str(manifest.get("account") or "").strip()
+                exchange = str(manifest.get("exchange") or "").strip()
+                file_type = str(manifest.get("file_type") or "").strip()
+                file_hash = str(manifest.get("file_hash") or "").strip()
+                if not all((import_id, account, exchange, file_type, file_hash)):
+                    continue
+                import_key = (account, exchange, file_type, file_hash)
+                pending_import_id = pending_import_keys.get(import_key)
+                if pending_import_id is not None:
+                    import_results.append({
+                        "import_id": import_id,
+                        "status": "already_imported",
+                        "existing_import_id": pending_import_id,
+                        "name": str(manifest.get("original_name") or ""),
+                    })
+                    continue
+                existing = connection.execute(
+                    """
+                    SELECT import_id
+                    FROM csv_imports
+                    WHERE account = ? AND exchange = ?
+                      AND file_type = ? AND file_hash = ?
+                    """,
+                    (account, exchange, file_type, file_hash),
+                ).fetchone()
+                if existing is not None:
+                    import_results.append({
+                        "import_id": import_id,
+                        "status": "already_imported",
+                        "existing_import_id": str(existing["import_id"]),
+                        "name": str(manifest.get("original_name") or ""),
+                    })
+                    continue
+                accepted_imports.add(import_id)
+                pending_import_keys[import_key] = import_id
+                import_results.append({
+                    "import_id": import_id,
+                    "status": "imported",
+                    "name": str(manifest.get("original_name") or ""),
+                })
+
+            def record_allowed(record: dict[str, Any]) -> bool:
+                import_id = str(record.get("import_id") or "").strip()
+                return not imports or not import_id or import_id in accepted_imports
+
             for record in orders:
+                if not record_allowed(record):
+                    continue
                 payload = record.get("payload")
                 if not isinstance(payload, dict):
                     continue
@@ -1005,6 +1192,8 @@ class AccountCache:
                     ),
                 )
             for record in fills:
+                if not record_allowed(record):
+                    continue
                 payload = record.get("payload")
                 if not isinstance(payload, dict):
                     continue
@@ -1066,12 +1255,14 @@ class AccountCache:
                 )
                 if exchange == "binance":
                     touched_binance_fills.add((account, market_scope, symbol))
-                elif exchange == "hyperliquid":
+                elif exchange == "hyperliquid" and market_scope != "spot":
                     touched_hyperliquid_fills.add(
                         (account, market_scope, symbol),
                     )
 
             for record in positions:
+                if not record_allowed(record):
+                    continue
                 payload = record.get("payload")
                 if not isinstance(payload, dict):
                     continue
@@ -1146,6 +1337,40 @@ class AccountCache:
                         updated_at,
                     ),
                 )
+            for record in pnl_events:
+                if not record_allowed(record):
+                    continue
+                payload = record.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                account = str(record.get("account") or "").strip()
+                exchange = str(record.get("exchange") or "").strip()
+                event_id = str(record.get("event_id") or "").strip()
+                event_type = str(record.get("event_type") or "").strip()
+                if not all((account, exchange, event_id, event_type)):
+                    continue
+                connection.execute(
+                    """
+                    INSERT INTO pnl_events (
+                        account, exchange, event_id, event_type,
+                        symbol, occurred_at, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(account, exchange, event_id, event_type)
+                    DO UPDATE SET
+                        symbol = excluded.symbol,
+                        occurred_at = excluded.occurred_at,
+                        payload_json = excluded.payload_json
+                    """,
+                    (
+                        account,
+                        exchange,
+                        event_id,
+                        event_type,
+                        str(record.get("symbol") or ""),
+                        str(record.get("occurred_at") or "") or None,
+                        _json(payload),
+                    ),
+                )
             if touched_binance_fills:
                 self._rebuild_binance_position_history(
                     connection,
@@ -1156,7 +1381,63 @@ class AccountCache:
                     connection,
                     touched_hyperliquid_fills,
                 )
+            if positions or touched_binance_fills or touched_hyperliquid_fills:
+                self._repair_csv_position_history(connection)
+
+            imported_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+            for manifest in imports:
+                import_id = str(manifest.get("import_id") or "").strip()
+                if import_id not in accepted_imports:
+                    continue
+                warnings = manifest.get("warnings")
+                warnings = warnings if isinstance(warnings, list) else []
+                connection.execute(
+                    """
+                    INSERT INTO csv_imports (
+                        import_id, batch_id, file_hash, original_name,
+                        account, exchange, file_type, market_scope,
+                        source_timezone, row_count, first_occurred_at,
+                        last_occurred_at, status, warnings_json, imported_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        import_id,
+                        str(manifest.get("batch_id") or import_id),
+                        str(manifest.get("file_hash") or ""),
+                        str(manifest.get("original_name") or ""),
+                        str(manifest.get("account") or ""),
+                        str(manifest.get("exchange") or ""),
+                        str(manifest.get("file_type") or ""),
+                        str(manifest.get("market_scope") or ""),
+                        str(manifest.get("source_timezone") or ""),
+                        int(manifest.get("row_count") or 0),
+                        manifest.get("first_occurred_at"),
+                        manifest.get("last_occurred_at"),
+                        (
+                            "partial"
+                            if str(manifest.get("status") or "") == "partial"
+                            else "imported"
+                        ),
+                        _json(warnings),
+                        imported_at,
+                    ),
+                )
             connection.commit()
+            return {
+                "status": "ok",
+                "imports": import_results,
+                "summary": {
+                    "imported": sum(item["status"] == "imported" for item in import_results),
+                    "already_imported": sum(
+                        item["status"] == "already_imported"
+                        for item in import_results
+                    ),
+                    "orders": sum(record_allowed(record) for record in orders),
+                    "fills": sum(record_allowed(record) for record in fills),
+                    "positions": sum(record_allowed(record) for record in positions),
+                    "pnl_events": sum(record_allowed(record) for record in pnl_events),
+                },
+            }
         except BaseException:
             connection.rollback()
             raise
@@ -1167,7 +1448,9 @@ class AccountCache:
             "position_history",
             "orders",
             "fills",
+            "pnl_events",
             "account_sync_status",
+            "csv_imports",
         }:
             raise ValueError(f"unsupported account cache table: {table}")
         connection = self._connect()
@@ -1198,16 +1481,21 @@ class AccountCache:
     def pnl_summary(
         self,
         *,
-        days: int = 90,
+        days: int | None = 90,
         account: str = "",
         exchange: str = "",
     ) -> dict[str, Any]:
-        if isinstance(days, bool) or not 1 <= days <= 365:
+        if days is not None and (
+            isinstance(days, bool) or not 1 <= days <= 365
+        ):
             raise ValueError("days must be between 1 and 365")
 
         now = datetime.now(UTC)
-        since = now - timedelta(days=days)
-        since_text = since.isoformat().replace("+00:00", "Z")
+        since_text = (
+            (now - timedelta(days=days)).isoformat().replace("+00:00", "Z")
+            if days is not None
+            else None
+        )
         filters: list[str] = []
         params: list[str] = []
         for column, value in (("account", account), ("exchange", exchange)):
@@ -1227,14 +1515,40 @@ class AccountCache:
                 "totals": [],
             }
         try:
-            history_rows = connection.execute(
-                f"""
-                SELECT account, exchange, symbol, payload_json
-                FROM position_history
-                WHERE closed_at >= ?{common_filter}
-                """,
-                [since_text, *params],
-            ).fetchall()
+            if since_text is None:
+                history_rows = connection.execute(
+                    f"""
+                    SELECT account, exchange, symbol, payload_json
+                    FROM position_history
+                    WHERE 1 = 1{common_filter}
+                    """,
+                    params,
+                ).fetchall()
+                event_rows = connection.execute(
+                    f"""
+                    SELECT account, exchange, symbol, occurred_at, payload_json
+                    FROM pnl_events
+                    WHERE 1 = 1{common_filter}
+                    """,
+                    params,
+                ).fetchall()
+            else:
+                history_rows = connection.execute(
+                    f"""
+                    SELECT account, exchange, symbol, payload_json
+                    FROM position_history
+                    WHERE closed_at >= ?{common_filter}
+                    """,
+                    [since_text, *params],
+                ).fetchall()
+                event_rows = connection.execute(
+                    f"""
+                    SELECT account, exchange, symbol, occurred_at, payload_json
+                    FROM pnl_events
+                    WHERE occurred_at >= ?{common_filter}
+                    """,
+                    [since_text, *params],
+                ).fetchall()
             current_rows = connection.execute(
                 f"""
                 SELECT account, exchange, symbol, payload_json
@@ -1248,10 +1562,17 @@ class AccountCache:
 
         buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
 
-        def bucket_for(row: sqlite3.Row, payload: dict[str, Any]) -> dict[str, Any]:
+        def bucket_for(
+            row: sqlite3.Row,
+            payload: dict[str, Any],
+            currency_override: str = "",
+        ) -> dict[str, Any]:
             account_name = str(row["account"])
             exchange_id = str(row["exchange"])
-            currency = _settlement_currency(str(row["symbol"]), payload)
+            currency = currency_override or _settlement_currency(
+                str(row["symbol"]),
+                payload,
+            )
             key = (account_name, exchange_id, currency)
             return buckets.setdefault(
                 key,
@@ -1278,6 +1599,26 @@ class AccountCache:
             else:
                 bucket["fee_breakdown_complete"] = False
 
+        for row in event_rows:
+            payload = _payload_object(row["payload_json"])
+            if payload.get("count_in_pnl") is not True:
+                continue
+            amount = _decimal(payload.get("amount"))
+            currency = str(payload.get("currency") or "").strip().upper()
+            component = str(payload.get("component") or "").strip().lower()
+            if amount is None or not currency:
+                continue
+            bucket = bucket_for(row, payload, currency)
+            bucket["realized_pnl"] += amount
+            if component == "funding":
+                bucket["funding"] += amount
+                bucket["funding_available"] = True
+            elif component == "borrow_interest":
+                bucket["borrow_interest"] += amount
+                bucket["borrow_interest_available"] = True
+            elif component == "trading_fee":
+                bucket["fees"] += -amount
+
         for row in current_rows:
             payload = _payload_object(row["payload_json"])
             bucket = bucket_for(row, payload)
@@ -1300,6 +1641,8 @@ class AccountCache:
                 "unrealized_pnl",
                 "gross_realized_pnl",
                 "fees",
+                "funding",
+                "borrow_interest",
             ):
                 total[field] += bucket[field]
             for field in ("closed_positions", "open_positions"):
@@ -1310,6 +1653,8 @@ class AccountCache:
                 "fee_breakdown_complete",
             ):
                 total[field] = total[field] and bucket[field]
+            for field in ("funding_available", "borrow_interest_available"):
+                total[field] = total[field] or bucket[field]
 
         ordered_buckets = sorted(
             buckets.values(),
@@ -1327,6 +1672,90 @@ class AccountCache:
             "results": [_serialize_pnl_bucket(item) for item in ordered_buckets],
             "totals": [_serialize_pnl_bucket(item) for item in ordered_totals],
         }
+
+    def csv_imports(self, *, limit: int = 100) -> dict[str, Any]:
+        if isinstance(limit, bool) or not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500")
+        connection = self._read_connection()
+        if connection is None:
+            return {"results": [], "total": 0}
+        try:
+            total = int(connection.execute("SELECT COUNT(*) FROM csv_imports").fetchone()[0])
+            rows = connection.execute(
+                """
+                SELECT import_id, batch_id, original_name, account, exchange,
+                       file_type, market_scope, source_timezone, row_count,
+                       first_occurred_at, last_occurred_at, status,
+                       warnings_json, imported_at
+                FROM csv_imports
+                ORDER BY imported_at DESC, original_name
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        finally:
+            connection.close()
+        results = []
+        for row in rows:
+            item = dict(row)
+            try:
+                warnings = json.loads(str(item.pop("warnings_json") or "[]"))
+            except json.JSONDecodeError:
+                warnings = []
+            item["warnings"] = warnings if isinstance(warnings, list) else []
+            results.append(item)
+        return {"results": results, "total": total}
+
+    def csv_import(self, import_id: str) -> dict[str, Any] | None:
+        normalized_id = import_id.strip()
+        if not normalized_id:
+            return None
+        connection = self._read_connection()
+        if connection is None:
+            return None
+        try:
+            row = connection.execute(
+                "SELECT * FROM csv_imports WHERE import_id = ?",
+                (normalized_id,),
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            return None
+        result = dict(row)
+        try:
+            warnings = json.loads(str(result.pop("warnings_json") or "[]"))
+        except json.JSONDecodeError:
+            warnings = []
+        result["warnings"] = warnings if isinstance(warnings, list) else []
+        return result
+
+    def update_csv_import_status(
+        self,
+        import_id: str,
+        *,
+        status: str,
+        warnings: list[str],
+    ) -> None:
+        if status not in {"imported", "partial"}:
+            raise ValueError("unsupported CSV import status")
+        connection = self._connect()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = connection.execute(
+                """
+                UPDATE csv_imports
+                SET status = ?, warnings_json = ?
+                WHERE import_id = ?
+                """,
+                (status, _json(warnings), import_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("CSV import was not found")
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
 
     def _history_groups(
         self,
