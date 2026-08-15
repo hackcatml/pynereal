@@ -852,6 +852,24 @@ def build_control_router(
             return JSONResponse({"error": str(exc)}, status_code=503)
         return JSONResponse(result)
 
+    @r.get("/api/account/pnl")
+    async def get_account_pnl(
+        days: int = 90,
+        account: str = "",
+        exchange: str = "",
+    ) -> JSONResponse:
+        try:
+            result = await account_data_service.pnl(
+                days=days,
+                account=account,
+                exchange=exchange,
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except AccountDataError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+        return JSONResponse(result)
+
     @r.get("/api/assets/transfer/options")
     async def get_asset_transfer_options(
         exchange: str,

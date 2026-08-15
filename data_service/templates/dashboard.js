@@ -64,6 +64,14 @@
   let positionsHaveData = false;
   let positionsPayload = null;
   let positionsObservedAt = 0;
+  let pnlRequestSeq = 0;
+  let pnlHaveData = false;
+  let pnlPayload = null;
+  let selectedPnlExchange = null;
+  let pnlPeriodDays = 90;
+  const pnlRefreshIntervalMs = 10000;
+  let pnlRefreshTimer = null;
+  let pnlListSizeFrame = null;
   const historyCustomSelects = {};
   let positionHistoryRequestSeq = 0;
   let positionHistoryHaveData = false;
@@ -505,6 +513,26 @@
     }, assetsRefreshIntervalMs);
   }
 
+  function clearPnlRefreshTimer() {
+    if (pnlRefreshTimer === null) return;
+    clearTimeout(pnlRefreshTimer);
+    pnlRefreshTimer = null;
+  }
+
+  function schedulePnlRefresh() {
+    clearPnlRefreshTimer();
+    if (
+      !isAssetsOpen()
+      || accountView !== "pnl"
+      || document.visibilityState !== "visible"
+    ) return;
+    pnlRefreshTimer = window.setTimeout(() => {
+      pnlRefreshTimer = null;
+      if (!isAssetsOpen() || accountView !== "pnl") return;
+      loadPnl();
+    }, pnlRefreshIntervalMs);
+  }
+
   function finishAssetsOpening() {
     if (assetsOpenTimer !== null) {
       clearTimeout(assetsOpenTimer);
@@ -528,6 +556,7 @@
     box.style.transition = "";
     modal.setAttribute("aria-hidden", "true");
     clearAssetsRefreshTimer();
+    clearPnlRefreshTimer();
     closeAccountPositionsSocket();
     assetsCloseTimer = null;
     assetsOpenTimer = null;
@@ -539,6 +568,7 @@
     closeHubMenu();
     closeAiChat();
     if (view === "assets") selectedAssetExchange = null;
+    if (view === "pnl") selectedPnlExchange = null;
     if (!wasOpen && accountView === view && view === "position-history") {
       resetHistoryNavigation("position");
     }
@@ -581,11 +611,14 @@
     const fromDrag = options && options.fromDrag === true;
     finishAssetsOpening();
     clearAssetsRefreshTimer();
+    clearPnlRefreshTimer();
     assetsRequestSeq += 1;
     setAssetsLoading(false);
     positionsRequestSeq += 1;
     positionHistoryRequestSeq += 1;
     orderHistoryRequestSeq += 1;
+    pnlRequestSeq += 1;
+    setPnlLoading(false);
     if (!mobileHubQuery.matches) {
       finishAssetsClose();
       return;
@@ -624,6 +657,9 @@
     if (view === "orders") {
       return orderHistoryNavigation.level !== "exchanges";
     }
+    if (view === "pnl") {
+      return Boolean(selectedPnlExchange);
+    }
     return false;
   }
 
@@ -643,7 +679,11 @@
     // right after the view swap is the (empty) reset state — animating to it
     // then jumping to the loaded height is the snap the user sees. For those we
     // hold the old height through the reload and tween once to the final height.
-    const isAccountHistoryView = view === "position-history" || view === "orders";
+    const isAccountHistoryView = (
+      view === "position-history"
+      || view === "orders"
+      || view === "pnl"
+    );
     const deferAccountHeight = animateAccountHeight && isAccountHistoryView && Boolean(options.load);
     const runAccountHeightTween = () => {
       accountBox.style.height = "";
@@ -675,6 +715,11 @@
     if (accountView === "orders" && view !== "orders") {
       orderHistoryRequestSeq += 1;
     }
+    if (accountView === "pnl" && view !== "pnl") {
+      clearPnlRefreshTimer();
+      pnlRequestSeq += 1;
+      setPnlLoading(false);
+    }
     if (previousView !== view && view === "position-history") {
       resetHistoryNavigation("position");
     }
@@ -683,6 +728,7 @@
     }
     if (previousView === view && accountViewIsDrilledIn(view)) {
       if (view === "assets") selectedAssetExchange = null;
+      else if (view === "pnl") selectedPnlExchange = null;
       else resetHistoryNavigation(view === "position-history" ? "position" : "order");
     }
     accountView = view;
@@ -704,24 +750,30 @@
       }
     }
 
-    const assetsSelected = view === "assets" && selectedAssetExchange;
-    el("assets-back").classList.toggle("hidden", !assetsSelected);
+    const accountDetailSelected = (
+      (view === "assets" && selectedAssetExchange)
+      || (view === "pnl" && selectedPnlExchange)
+    );
+    el("assets-back").classList.toggle("hidden", !accountDetailSelected);
     el("assets-refresh").classList.toggle(
       "hidden",
-      !new Set(["assets", "positions", "position-history", "orders"]).has(view),
+      !new Set(["assets", "positions", "position-history", "orders", "pnl"]).has(view),
     );
     const refreshTitles = {
       assets: "Refresh assets",
       positions: "Refresh positions",
       "position-history": "Refresh position history",
       orders: "Refresh order history",
+      pnl: "Refresh PnL",
     };
     el("assets-refresh").title = refreshTitles[view] || "Refresh";
     el("assets-refresh").setAttribute("aria-label", el("assets-refresh").title);
     el("assets-title").textContent = accountViewTitles[view];
     if (view === "assets" && assetsPayload) renderAssetsView();
+    if (view === "pnl" && pnlPayload) renderPnlView();
     if (!options.load) {
       if (view === "assets") scheduleAssetsRefresh();
+      if (view === "pnl") schedulePnlRefresh();
       return;
     }
     if (view === "assets") await loadAssets(false);
@@ -731,6 +783,7 @@
     }
     else if (view === "position-history") await loadPositionHistory(false);
     else if (view === "orders") await loadOrderHistory(false);
+    else if (view === "pnl") await loadPnl();
     if (deferAccountHeight) {
       if (isAssetsOpen() && accountView === view) runAccountHeightTween();
       else accountBox.style.height = ""; // switched away or closed mid-load
@@ -1758,7 +1811,7 @@
           day: "numeric",
           hour: "2-digit",
           minute: "2-digit",
-        })}${payload.cached ? " · cached" : ""}`
+        })}`
       : "";
     renderAssetsView();
     assetsHaveData = true;
@@ -2277,6 +2330,399 @@
     }
   }
 
+  function formatPnlValue(value, currency) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "—";
+    return `${number > 0 ? "+" : ""}${number.toLocaleString(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: Math.abs(number) > 0 && Math.abs(number) < 1 ? 6 : 2,
+    })} ${currency || ""}`.trim();
+  }
+
+  function pnlRowKey(record) {
+    return [record.exchange, record.account, record.currency].join("|");
+  }
+
+  function syncPnlTotals(container, totals, className = "pnl-summary-value") {
+    const existing = new Map(
+      Array.from(container.children).map((node) => [node.dataset.currency || "", node]),
+    );
+    totals.forEach((total, index) => {
+      const currency = String(total.currency || "UNKNOWN");
+      let value = existing.get(currency);
+      if (!value) {
+        value = document.createElement("strong");
+        value.dataset.currency = currency;
+      }
+      value.className = `${className} ${positionPnlClass(total.net_pnl)}`.trim();
+      value.textContent = `${formatPnlValue(total.net_pnl, currency)}${
+        total.complete === true ? "" : "*"
+      }`;
+      const current = container.children[index];
+      if (current !== value) container.insertBefore(value, current || null);
+      existing.delete(currency);
+    });
+    existing.forEach((node) => node.remove());
+  }
+
+  function groupPnlByExchange(results) {
+    const groups = new Map();
+    results.forEach((record) => {
+      const exchange = String(record.exchange || "unknown");
+      let group = groups.get(exchange);
+      if (!group) {
+        group = {
+          exchange,
+          exchange_logo_url: record.exchange_logo_url || "",
+          accounts: new Set(),
+          rows: [],
+          totals: new Map(),
+        };
+        groups.set(exchange, group);
+      }
+      group.accounts.add(String(record.account || ""));
+      group.rows.push(record);
+      const currency = String(record.currency || "UNKNOWN");
+      let total = group.totals.get(currency);
+      if (!total) {
+        total = { currency, net_pnl: 0, complete: true };
+        group.totals.set(currency, total);
+      }
+      const net = Number(record.net_pnl);
+      if (Number.isFinite(net)) total.net_pnl += net;
+      else total.complete = false;
+      total.complete = total.complete && record.complete === true;
+    });
+    return Array.from(groups.values())
+      .map((group) => ({
+        ...group,
+        account_count: Array.from(group.accounts).filter(Boolean).length,
+        totals: Array.from(group.totals.values()).sort((left, right) => (
+          left.currency.localeCompare(right.currency)
+        )),
+      }))
+      .sort((left, right) => left.exchange.localeCompare(right.exchange));
+  }
+
+  function createPnlExchangeRow() {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "pnl-exchange-row";
+    const identity = document.createElement("span");
+    identity.className = "pnl-exchange-identity";
+    const logo = document.createElement("span");
+    logo.className = "pnl-exchange-logo";
+    const copy = document.createElement("span");
+    copy.className = "assets-exchange-identity";
+    const title = document.createElement("span");
+    title.className = "assets-exchange-title";
+    const accounts = document.createElement("span");
+    accounts.className = "assets-exchange-accounts";
+    copy.append(title, accounts);
+    identity.append(logo, copy);
+    const totals = document.createElement("span");
+    totals.className = "pnl-exchange-totals";
+    const chevron = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    chevron.classList.add("assets-exchange-chevron");
+    chevron.setAttribute("viewBox", "0 0 24 24");
+    chevron.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", "m9 18 6-6-6-6");
+    chevron.appendChild(path);
+    row.append(identity, totals, chevron);
+    row.pnlNodes = { logo, title, accounts, totals };
+    row.addEventListener("click", () => {
+      selectedPnlExchange = row.dataset.pnlExchange || null;
+      renderPnlView();
+      scrollPnlToTop();
+    });
+    return row;
+  }
+
+  function updatePnlExchangeRow(row, group) {
+    row.dataset.pnlKey = `exchange:${group.exchange}`;
+    row.dataset.pnlExchange = group.exchange;
+    row.setAttribute("aria-label", `Show ${assetExchangeLabel(group.exchange)} PnL details`);
+    const nodes = row.pnlNodes;
+    const exchangeName = String(group.exchange || "").toUpperCase();
+    const logoIdentity = `${group.exchange_logo_url || ""}|${exchangeName}`;
+    if (nodes.logo.dataset.identity !== logoIdentity) {
+      setHTML(nodes.logo, logoImg(group.exchange_logo_url, exchangeName, "exchange-logo"));
+      nodes.logo.querySelectorAll("[title]").forEach((node) => node.removeAttribute("title"));
+      nodes.logo.dataset.identity = logoIdentity;
+    }
+    nodes.title.textContent = assetExchangeLabel(group.exchange);
+    nodes.accounts.textContent =
+      `${group.account_count} account${group.account_count === 1 ? "" : "s"}`;
+    syncPnlTotals(nodes.totals, group.totals, "pnl-exchange-total");
+  }
+
+  function createPnlRecord() {
+    const row = document.createElement("article");
+    row.className = "account-history-record account-pnl-record";
+
+    const header = document.createElement("div");
+    header.className = "account-history-record-header";
+    const identity = document.createElement("div");
+    identity.className = "account-history-record-identity";
+    const logo = document.createElement("span");
+    logo.className = "account-position-live-logo";
+    identity.appendChild(logo);
+    const copy = document.createElement("div");
+    copy.className = "account-history-record-copy";
+    const account = document.createElement("div");
+    account.className = "account-history-record-symbol";
+    const accountName = document.createElement("strong");
+    const currency = document.createElement("span");
+    account.append(accountName, currency);
+    const partial = document.createElement("span");
+    partial.className = "account-pnl-partial hidden";
+    partial.textContent = "Partial data";
+    account.appendChild(partial);
+    const exchange = document.createElement("small");
+    copy.append(account, exchange);
+    identity.appendChild(copy);
+
+    const trailing = document.createElement("div");
+    trailing.className = "account-history-record-trailing";
+    const trailingLabel = document.createElement("span");
+    trailingLabel.textContent = "Net PnL";
+    const trailingValue = document.createElement("strong");
+    trailing.append(trailingLabel, trailingValue);
+    header.append(identity, trailing);
+
+    const metrics = document.createElement("div");
+    metrics.className = "account-history-record-metrics";
+    const makeMetric = (label) => {
+      const metric = createHistoryMetric(label, "");
+      metrics.appendChild(metric);
+      return metric.querySelector("strong");
+    };
+    row.pnlNodes = {
+      logo,
+      accountName,
+      currency,
+      partial,
+      exchange,
+      trailingValue,
+      realized: makeMetric("Realized"),
+      unrealized: makeMetric("Unrealized"),
+      fees: makeMetric("Fees"),
+      closed: makeMetric("Closed"),
+      open: makeMetric("Open"),
+    };
+    row.append(header, metrics);
+    return row;
+  }
+
+  function updatePnlRecord(row, record) {
+    row.dataset.pnlKey = `account:${pnlRowKey(record)}`;
+    const nodes = row.pnlNodes;
+    const exchangeName = String(record.exchange || "").toUpperCase();
+    const logoIdentity = `${record.exchange_logo_url || ""}|${exchangeName}`;
+    if (nodes.logo.dataset.identity !== logoIdentity) {
+      setHTML(nodes.logo, logoImg(record.exchange_logo_url, exchangeName, "exchange-logo"));
+      nodes.logo.querySelectorAll("[title]").forEach((node) => node.removeAttribute("title"));
+      nodes.logo.dataset.identity = logoIdentity;
+    }
+    nodes.accountName.textContent = String(record.account || "—");
+    nodes.currency.textContent = String(record.currency || "");
+    nodes.partial.classList.toggle("hidden", record.complete === true);
+    nodes.exchange.textContent = exchangeName || "—";
+    nodes.trailingValue.textContent = formatPnlValue(record.net_pnl, record.currency);
+    nodes.trailingValue.className = positionPnlClass(record.net_pnl);
+    const feeAdjustment = record.fees === null || record.fees === undefined
+      ? null
+      : -Number(record.fees);
+    const values = [
+      [nodes.realized, record.realized_pnl, formatPnlValue(record.realized_pnl, record.currency)],
+      [nodes.unrealized, record.unrealized_pnl, formatPnlValue(record.unrealized_pnl, record.currency)],
+      [
+        nodes.fees,
+        feeAdjustment,
+        feeAdjustment === null ? "—" : formatPnlValue(feeAdjustment, record.currency),
+      ],
+    ];
+    values.forEach(([node, value, text]) => {
+      node.textContent = text;
+      node.className = value === null ? "" : positionPnlClass(value);
+    });
+    nodes.closed.textContent = formatPositionNumber(record.closed_positions, 0);
+    nodes.open.textContent = formatPositionNumber(record.open_positions, 0);
+  }
+
+  function syncPnlList(items, keyFor, createRow, updateRow) {
+    const list = el("pnl-list");
+    const existing = new Map(
+      Array.from(list.children).map((row) => [row.dataset.pnlKey || "", row]),
+    );
+    items.forEach((item, index) => {
+      const key = keyFor(item);
+      let row = existing.get(key);
+      if (!row) row = createRow();
+      updateRow(row, item);
+      const current = list.children[index];
+      if (current !== row) list.insertBefore(row, current || null);
+      existing.delete(key);
+    });
+    existing.forEach((row) => row.remove());
+  }
+
+  function scrollPnlToTop() {
+    el("pnl-list").scrollTop = 0;
+    const body = el("account-pnl-view").querySelector(".account-view-body");
+    if (body) body.scrollTop = 0;
+  }
+
+  function updatePnlListSizing() {
+    const list = el("pnl-list");
+    if (!list) return;
+    if (
+      mobileHubQuery.matches
+      || !isAssetsOpen()
+      || accountView !== "pnl"
+      || list.classList.contains("hidden")
+    ) {
+      list.classList.remove("pnl-list-sized", "pnl-list-scrollable");
+      list.style.removeProperty("--pnl-list-height");
+      return;
+    }
+    const rows = Array.from(list.children);
+    if (!rows.length) {
+      list.classList.remove("pnl-list-sized", "pnl-list-scrollable");
+      list.style.removeProperty("--pnl-list-height");
+      return;
+    }
+    const visibleRows = rows.slice(0, 5);
+    const style = getComputedStyle(list);
+    const borders = Number.parseFloat(style.borderTopWidth || "0")
+      + Number.parseFloat(style.borderBottomWidth || "0");
+    const height = visibleRows.reduce((sum, row) => sum + row.offsetHeight, borders);
+    list.classList.add("pnl-list-sized");
+    list.classList.toggle("pnl-list-scrollable", rows.length > 5);
+    list.style.setProperty("--pnl-list-height", `${Math.ceil(height)}px`);
+  }
+
+  function schedulePnlListSizing() {
+    if (pnlListSizeFrame !== null) cancelAnimationFrame(pnlListSizeFrame);
+    pnlListSizeFrame = requestAnimationFrame(() => {
+      pnlListSizeFrame = null;
+      updatePnlListSizing();
+    });
+  }
+
+  function renderPnlView() {
+    if (!pnlPayload) return;
+    const results = Array.isArray(pnlPayload.results) ? pnlPayload.results : [];
+    const groups = groupPnlByExchange(results);
+    let selected = selectedPnlExchange
+      ? groups.find((group) => group.exchange === selectedPnlExchange)
+      : null;
+    if (selectedPnlExchange && !selected) {
+      selectedPnlExchange = null;
+      selected = null;
+    }
+    const visibleResults = selected ? selected.rows : results;
+    const totals = selected
+      ? selected.totals
+      : (Array.isArray(pnlPayload.totals) ? pnlPayload.totals : []);
+    const totalsElement = el("pnl-summary-totals");
+    syncPnlTotals(totalsElement, totals);
+    const accountCount = selected
+      ? selected.account_count
+      : Number((pnlPayload.summary || {}).accounts || 0);
+    el("pnl-summary-counts").textContent =
+      `${selected ? "" : `${groups.length} exchanges · `}${accountCount} accounts`;
+    const collectedAt = Date.parse(pnlPayload.collected_at || "");
+    el("pnl-updated").textContent = Number.isFinite(collectedAt)
+      ? `Updated ${new Date(collectedAt).toLocaleString("en-US", {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        })}`
+      : "";
+    el("assets-back").classList.toggle("hidden", !selected);
+    el("assets-title").textContent = selected
+      ? `${assetExchangeLabel(selected.exchange)} PnL`
+      : "PnL";
+    el("pnl-summary").classList.toggle("hidden", results.length === 0);
+    el("pnl-empty").classList.toggle("hidden", results.length !== 0);
+    el("pnl-list").classList.toggle("hidden", results.length === 0);
+    el("pnl-list").classList.toggle("pnl-exchange-overview", !selected);
+    if (selected) {
+      syncPnlList(
+        visibleResults,
+        (record) => `account:${pnlRowKey(record)}`,
+        createPnlRecord,
+        updatePnlRecord,
+      );
+    } else {
+      syncPnlList(
+        groups,
+        (group) => `exchange:${group.exchange}`,
+        createPnlExchangeRow,
+        updatePnlExchangeRow,
+      );
+    }
+    const partial = visibleResults.some((result) => result && result.complete !== true);
+    el("pnl-coverage-note").textContent = partial
+      ? "* Unavailable PnL values are excluded. Funding and borrow interest are not included."
+      : "Funding and borrow interest are not included.";
+    el("pnl-coverage-note").classList.toggle("hidden", results.length === 0);
+    el("pnl-loading").classList.add("hidden");
+    updatePnlListSizing();
+    historyFlipCommit();
+  }
+
+  function renderPnl(payload) {
+    pnlPayload = payload;
+    pnlHaveData = true;
+    renderPnlView();
+  }
+
+  function setPnlLoading(loading, preserveContent = false) {
+    if (accountView === "pnl") {
+      el("assets-refresh").disabled = loading;
+      el("assets-refresh").classList.toggle("assets-refreshing", loading);
+    }
+    el("pnl-loading").classList.toggle("hidden", !loading || preserveContent);
+    if (loading) el("pnl-error").classList.add("hidden");
+    if (loading && !preserveContent) {
+      pnlPayload = null;
+      el("pnl-summary").classList.add("hidden");
+      el("pnl-empty").classList.add("hidden");
+      el("pnl-list").classList.add("hidden");
+      el("pnl-coverage-note").classList.add("hidden");
+      el("pnl-list").replaceChildren();
+    }
+  }
+
+  async function loadPnl() {
+    clearPnlRefreshTimer();
+    const seq = ++pnlRequestSeq;
+    const preserveContent = pnlHaveData;
+    setPnlLoading(true, preserveContent);
+    try {
+      const payload = await api(`/api/account/pnl?days=${pnlPeriodDays}`);
+      if (seq !== pnlRequestSeq || !isAssetsOpen() || accountView !== "pnl") return;
+      renderPnl(payload);
+    } catch (error) {
+      if (seq !== pnlRequestSeq || !isAssetsOpen() || accountView !== "pnl") return;
+      el("pnl-error").textContent = `${error.message}\nUse refresh to try again.`;
+      el("pnl-error").classList.remove("hidden");
+      if (!preserveContent) {
+        el("pnl-summary").classList.add("hidden");
+        el("pnl-list").classList.add("hidden");
+      }
+    } finally {
+      if (seq === pnlRequestSeq) {
+        setPnlLoading(false);
+        schedulePnlRefresh();
+      }
+    }
+  }
+
   function formatAccountHistoryDate(value, includeSeconds = false) {
     const timestamp = Date.parse(String(value || ""));
     if (!Number.isFinite(timestamp)) return "—";
@@ -2566,10 +3012,10 @@
     return row;
   }
 
-  // Smoothly animate the modal-box height across a history content change
-  // (navigation between exchange/symbol/detail levels, or a filter reload).
-  // begin() pins the current height before the swap; commit() (called from the
-  // render) releases to the natural height and transitions between the two.
+  // Smoothly animate the modal-box height across an account content change
+  // (history exchange/symbol/detail navigation, a history filter reload, or a
+  // PnL period change). begin() pins the current height before the swap;
+  // commit() (from the render) releases to the natural height and transitions.
   let historyFlipHeight = null;
   let historyFlipTimer = null;
 
@@ -4056,6 +4502,12 @@
     });
     el("assets-close").addEventListener("click", closeAssets);
     el("assets-back").addEventListener("click", () => {
+      if (accountView === "pnl") {
+        selectedPnlExchange = null;
+        renderPnlView();
+        scrollPnlToTop();
+        return;
+      }
       selectedAssetExchange = null;
       renderAssetsView();
       el("assets-body").scrollTop = 0;
@@ -4064,7 +4516,24 @@
       if (accountView === "positions") loadPositions(true);
       else if (accountView === "position-history") loadPositionHistory(false, true);
       else if (accountView === "orders") loadOrderHistory(false, true);
+      else if (accountView === "pnl") loadPnl();
       else if (accountView === "assets") loadAssets(true);
+    });
+    document.querySelectorAll("[data-pnl-days]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const days = Number(button.dataset.pnlDays);
+        if (!Number.isInteger(days) || days === pnlPeriodDays) return;
+        pnlPeriodDays = days;
+        // keep the current rows (preserveContent) so the list updates in place
+        // via syncPnlList's keyed diff instead of clearing → no empty flash
+        document.querySelectorAll("[data-pnl-days]").forEach((candidate) => {
+          const active = Number(candidate.dataset.pnlDays) === pnlPeriodDays;
+          candidate.classList.toggle("active", active);
+          candidate.setAttribute("aria-pressed", String(active));
+        });
+        historyFlipBegin();
+        loadPnl();
+      });
     });
     el("position-history-filters").addEventListener("submit", (event) => {
       event.preventDefault();
@@ -4168,6 +4637,7 @@
       closePositionPnlPopover();
     }, { passive: true });
     window.addEventListener("resize", closePositionPnlPopover, { passive: true });
+    window.addEventListener("resize", schedulePnlListSizing, { passive: true });
     el("asset-transfer-close").addEventListener("click", closeAssetTransfer);
     el("asset-transfer-back").addEventListener("click", () => {
       if (assetTransferMode === "review") {
@@ -7437,8 +7907,10 @@
       rebuildHub();
       connectAccountPositions();
       scheduleAssetsRefresh();
+      schedulePnlRefresh();
     } else {
       clearAssetsRefreshTimer();
+      clearPnlRefreshTimer();
       closeForBackground();
       closeAccountPositionsSocket();
     }

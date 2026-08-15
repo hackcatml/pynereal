@@ -228,6 +228,59 @@ class AccountDataService:
             raise AccountDataError(message[:500] or type(exc).__name__) from exc
         return self._history_group_response(groups, exchange=exchange)
 
+    async def pnl(
+        self,
+        *,
+        days: int = 90,
+        account: str = "",
+        exchange: str = "",
+    ) -> dict[str, Any]:
+        try:
+            payload = await asyncio.to_thread(
+                AccountCache(self.cache_path).pnl_summary,
+                days=days,
+                account=account,
+                exchange=exchange,
+            )
+        except ValueError:
+            raise
+        except Exception as exc:
+            message = str(exc).replace("\n", " ").strip()
+            raise AccountDataError(message[:500] or type(exc).__name__) from exc
+
+        results = payload.get("results")
+        results = results if isinstance(results, list) else []
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            result["exchange_logo_url"] = exchange_logo_url(
+                str(result.get("exchange") or "")
+            )
+        accounts = {
+            str(result.get("account") or "")
+            for result in results
+            if isinstance(result, dict) and result.get("account")
+        }
+        return {
+            "schema_version": "1.0",
+            "collected_at": str(payload.get("to") or ""),
+            "read_only": True,
+            "cached": True,
+            "period": {
+                "days": int(payload.get("days") or days),
+                "from": payload.get("from"),
+                "to": payload.get("to"),
+            },
+            "totals": payload.get("totals", []),
+            "results": results,
+            "summary": {
+                "accounts": len(accounts),
+                "rows": len(results),
+                "funding_available": False,
+                "borrow_interest_available": False,
+            },
+        }
+
     async def refresh_history(
         self,
         *,

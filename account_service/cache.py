@@ -3,7 +3,8 @@ from __future__ import annotations
 import base64
 import json
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +87,87 @@ def _payload_object(value: Any) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _decimal(value: Any) -> Decimal | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return result if result.is_finite() else None
+
+
+def _settlement_currency(symbol: str, payload: dict[str, Any]) -> str:
+    breakdown = payload.get("realized_pnl_breakdown")
+    if isinstance(breakdown, dict):
+        currency = str(breakdown.get("currency") or "").strip().upper()
+        if currency:
+            return currency
+    normalized = symbol.strip().upper()
+    if ":" in normalized:
+        settlement = normalized.rsplit(":", 1)[1].split("-", 1)[0]
+        if settlement:
+            return settlement
+    if "/" in normalized:
+        quote = normalized.split("/", 1)[1].split(":", 1)[0].split("-", 1)[0]
+        if quote:
+            return quote
+    return "UNKNOWN"
+
+
+def _new_pnl_bucket(
+    account: str,
+    exchange: str,
+    currency: str,
+) -> dict[str, Any]:
+    return {
+        "account": account,
+        "exchange": exchange,
+        "currency": currency,
+        "realized_pnl": Decimal(0),
+        "unrealized_pnl": Decimal(0),
+        "gross_realized_pnl": Decimal(0),
+        "fees": Decimal(0),
+        "closed_positions": 0,
+        "open_positions": 0,
+        "realized_complete": True,
+        "unrealized_complete": True,
+        "fee_breakdown_complete": True,
+    }
+
+
+def _serialize_pnl_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
+    realized = bucket["realized_pnl"]
+    unrealized = bucket["unrealized_pnl"]
+    return {
+        "account": bucket["account"],
+        "exchange": bucket["exchange"],
+        "currency": bucket["currency"],
+        "realized_pnl": float(realized),
+        "unrealized_pnl": float(unrealized),
+        "net_pnl": float(realized + unrealized),
+        "gross_realized_pnl": (
+            float(bucket["gross_realized_pnl"])
+            if bucket["fee_breakdown_complete"]
+            else None
+        ),
+        "fees": (
+            float(bucket["fees"])
+            if bucket["fee_breakdown_complete"]
+            else None
+        ),
+        "closed_positions": bucket["closed_positions"],
+        "open_positions": bucket["open_positions"],
+        "complete": (
+            bucket["realized_complete"]
+            and bucket["unrealized_complete"]
+        ),
+        "fee_breakdown_complete": bucket["fee_breakdown_complete"],
+        "funding": None,
+        "borrow_interest": None,
+    }
 
 
 class AccountCache:
@@ -1112,6 +1194,139 @@ class AccountCache:
             ):
                 symbols.setdefault(str(row["exchange"]), set()).add(str(row["symbol"]))
         return symbols
+
+    def pnl_summary(
+        self,
+        *,
+        days: int = 90,
+        account: str = "",
+        exchange: str = "",
+    ) -> dict[str, Any]:
+        if isinstance(days, bool) or not 1 <= days <= 365:
+            raise ValueError("days must be between 1 and 365")
+
+        now = datetime.now(UTC)
+        since = now - timedelta(days=days)
+        since_text = since.isoformat().replace("+00:00", "Z")
+        filters: list[str] = []
+        params: list[str] = []
+        for column, value in (("account", account), ("exchange", exchange)):
+            normalized = value.strip().lower()
+            if normalized:
+                filters.append(f"LOWER({column}) = ?")
+                params.append(normalized)
+        common_filter = f" AND {' AND '.join(filters)}" if filters else ""
+
+        connection = self._read_connection()
+        if connection is None:
+            return {
+                "from": since_text,
+                "to": now.isoformat().replace("+00:00", "Z"),
+                "days": days,
+                "results": [],
+                "totals": [],
+            }
+        try:
+            history_rows = connection.execute(
+                f"""
+                SELECT account, exchange, symbol, payload_json
+                FROM position_history
+                WHERE closed_at >= ?{common_filter}
+                """,
+                [since_text, *params],
+            ).fetchall()
+            current_rows = connection.execute(
+                f"""
+                SELECT account, exchange, symbol, payload_json
+                FROM current_positions
+                WHERE 1 = 1{common_filter}
+                """,
+                params,
+            ).fetchall()
+        finally:
+            connection.close()
+
+        buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+        def bucket_for(row: sqlite3.Row, payload: dict[str, Any]) -> dict[str, Any]:
+            account_name = str(row["account"])
+            exchange_id = str(row["exchange"])
+            currency = _settlement_currency(str(row["symbol"]), payload)
+            key = (account_name, exchange_id, currency)
+            return buckets.setdefault(
+                key,
+                _new_pnl_bucket(account_name, exchange_id, currency),
+            )
+
+        for row in history_rows:
+            payload = _payload_object(row["payload_json"])
+            bucket = bucket_for(row, payload)
+            bucket["closed_positions"] += 1
+            realized = _decimal(payload.get("realized_pnl"))
+            if realized is None:
+                bucket["realized_complete"] = False
+            else:
+                bucket["realized_pnl"] += realized
+
+            breakdown = payload.get("realized_pnl_breakdown")
+            breakdown = breakdown if isinstance(breakdown, dict) else {}
+            gross = _decimal(breakdown.get("gross_pnl"))
+            fees = _decimal(breakdown.get("fees"))
+            if breakdown.get("complete") is True and gross is not None and fees is not None:
+                bucket["gross_realized_pnl"] += gross
+                bucket["fees"] += fees
+            else:
+                bucket["fee_breakdown_complete"] = False
+
+        for row in current_rows:
+            payload = _payload_object(row["payload_json"])
+            bucket = bucket_for(row, payload)
+            bucket["open_positions"] += 1
+            unrealized = _decimal(payload.get("unrealized_pnl"))
+            if unrealized is None:
+                bucket["unrealized_complete"] = False
+            else:
+                bucket["unrealized_pnl"] += unrealized
+
+        totals: dict[str, dict[str, Any]] = {}
+        for bucket in buckets.values():
+            currency = str(bucket["currency"])
+            total = totals.setdefault(
+                currency,
+                _new_pnl_bucket("", "", currency),
+            )
+            for field in (
+                "realized_pnl",
+                "unrealized_pnl",
+                "gross_realized_pnl",
+                "fees",
+            ):
+                total[field] += bucket[field]
+            for field in ("closed_positions", "open_positions"):
+                total[field] += bucket[field]
+            for field in (
+                "realized_complete",
+                "unrealized_complete",
+                "fee_breakdown_complete",
+            ):
+                total[field] = total[field] and bucket[field]
+
+        ordered_buckets = sorted(
+            buckets.values(),
+            key=lambda item: (
+                item["exchange"].lower(),
+                item["account"].lower(),
+                item["currency"],
+            ),
+        )
+        ordered_totals = sorted(totals.values(), key=lambda item: item["currency"])
+        return {
+            "from": since_text,
+            "to": now.isoformat().replace("+00:00", "Z"),
+            "days": days,
+            "results": [_serialize_pnl_bucket(item) for item in ordered_buckets],
+            "totals": [_serialize_pnl_bucket(item) for item in ordered_totals],
+        }
 
     def _history_groups(
         self,

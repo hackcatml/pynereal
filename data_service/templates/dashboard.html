@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=103" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=110" />
 </head>
 <body>
   <header class="topbar">
@@ -438,7 +438,33 @@
         </div>
       </section>
       <section id="account-pnl-view" class="account-view hidden">
-        <div class="account-view-body account-view-empty">No PnL history available.</div>
+        <div class="account-view-body pnl-view-body">
+          <section id="pnl-summary" class="account-summary pnl-summary hidden" aria-label="PnL summary">
+            <div>
+              <span class="account-summary-label">Net PnL</span>
+              <div id="pnl-summary-totals" class="pnl-summary-totals"></div>
+            </div>
+            <div class="account-summary-meta">
+              <span id="pnl-summary-counts"></span>
+              <span id="pnl-updated"></span>
+            </div>
+          </section>
+          <div class="pnl-period-control" role="group" aria-label="PnL period">
+            <button type="button" data-pnl-days="7" aria-pressed="false">7D</button>
+            <button type="button" data-pnl-days="30" aria-pressed="false">30D</button>
+            <button class="active" type="button" data-pnl-days="90" aria-pressed="true">90D</button>
+          </div>
+          <div id="pnl-loading" class="assets-state">
+            <span class="assets-spinner" aria-hidden="true"></span>
+            <span>Loading PnL...</span>
+          </div>
+          <div id="pnl-error" class="assets-state assets-state-error hidden" role="alert"></div>
+          <div id="pnl-empty" class="assets-state hidden">No PnL data.</div>
+          <div id="pnl-list" class="account-history-record-list pnl-list hidden"></div>
+          <div id="pnl-coverage-note" class="pnl-coverage-note hidden">
+            Funding and borrow interest are not included.
+          </div>
+        </div>
       </section>
       <div id="position-pnl-popover" class="position-pnl-popover hidden" role="dialog"
            aria-label="Realized PnL calculation">
@@ -711,6 +737,6 @@
     </form>
   </div>
 
-  <script src="/static/dashboard.js?v=111"></script>
+  <script src="/static/dashboard.js?v=118"></script>
 </body>
 </html>

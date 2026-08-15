@@ -1607,6 +1607,10 @@ tr:last-child td { border-bottom: none; }
   display: flex;
   flex-direction: column;
 }
+#account-pnl-view {
+  display: flex;
+  flex-direction: column;
+}
 .assets-body {
   flex: 1;
   min-height: 0;
@@ -1649,12 +1653,155 @@ tr:last-child td { border-bottom: none; }
   font-size: 24px;
   font-variant-numeric: tabular-nums;
 }
+.account-summary strong.account-pnl-positive { color: #4ed69c; }
+.account-summary strong.account-pnl-negative { color: #ff7f79; }
 .account-summary-meta {
   display: grid;
   gap: 4px;
   color: var(--muted);
   font-size: 11px;
   text-align: right;
+}
+.pnl-view-body {
+  flex: 1;
+  height: auto;
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+.pnl-summary-totals {
+  display: grid;
+  gap: 3px;
+}
+.pnl-summary-value {
+  display: block;
+  white-space: nowrap;
+}
+.account-history-record-symbol .account-pnl-partial { color: #f2cc60; }
+.pnl-period-control {
+  display: inline-flex;
+  align-self: flex-start;
+  margin: 0 0 12px 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #0d1117;
+}
+.pnl-period-control button {
+  min-width: 44px;
+  height: 27px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.pnl-period-control button.active {
+  background: #26313e;
+  color: #f2f5f8;
+}
+.pnl-period-control button:focus-visible {
+  outline: 2px solid #58a6ff;
+  outline-offset: 1px;
+}
+.pnl-list {
+  flex: 1 1 0;
+  height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  min-height: 180px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: #0d1117;
+  overscroll-behavior: contain;
+}
+.account-pnl-record { animation: none; }
+.pnl-list.pnl-exchange-overview {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #11161d;
+}
+.pnl-exchange-row {
+  appearance: none;
+  width: 100%;
+  min-height: 68px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 18px;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 0;
+  border-bottom: 1px solid #222a34;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 120ms ease;
+}
+.pnl-exchange-row:last-child { border-bottom: 0; }
+.pnl-exchange-row:hover { background: #171e27; }
+.pnl-exchange-row:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid #58a6ff;
+  outline-offset: -2px;
+}
+.pnl-exchange-identity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+}
+.pnl-exchange-logo {
+  display: inline-flex;
+  flex: none;
+}
+.pnl-exchange-totals {
+  display: grid;
+  gap: 4px;
+  justify-items: end;
+  font-variant-numeric: tabular-nums;
+}
+.pnl-exchange-total {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.pnl-coverage-note {
+  padding: 10px 2px 0;
+  color: var(--muted);
+  font-size: 10px;
+  text-align: right;
+}
+@media (min-width: 721px) {
+  .pnl-list.pnl-list-sized {
+    flex: 0 0 auto;
+    height: var(--pnl-list-height);
+    min-height: 0;
+    overflow-y: hidden;
+  }
+  .pnl-list.pnl-list-sized.pnl-list-scrollable { overflow-y: auto; }
+}
+@media (hover: hover) and (pointer: fine) {
+  .pnl-list {
+    scrollbar-color: #3a4350 #0b0e13;
+    scrollbar-width: thin;
+  }
+  .pnl-list::-webkit-scrollbar { width: 10px; }
+  .pnl-list::-webkit-scrollbar-track { background: #0b0e13; }
+  .pnl-list::-webkit-scrollbar-thumb {
+    border: 2px solid #0b0e13;
+    border-radius: 999px;
+    background: #3a4350;
+  }
 }
 .account-table-wrap {
   overflow: auto;
@@ -2032,12 +2179,14 @@ tr:last-child td { border-bottom: none; }
   to { opacity: 1; }
 }
 .account-history-record,
-.account-history-group-row {
+.account-history-group-row,
+.pnl-exchange-row {
   animation: accountHistoryFadeIn 180ms ease both;
 }
 @media (prefers-reduced-motion: reduce) {
   .account-history-record,
-  .account-history-group-row { animation: none; }
+  .account-history-group-row,
+  .pnl-exchange-row { animation: none; }
 }
 .account-history-record {
   display: grid;
@@ -3618,6 +3767,16 @@ tr:last-child td { border-bottom: none; }
     padding: 12px;
     padding-bottom: calc(18px + env(safe-area-inset-bottom, 0px));
   }
+  .pnl-view-body {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .pnl-list {
+    flex: none;
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+  }
   .account-history-navigation {
     min-height: 39px;
     margin-bottom: 9px;
@@ -3677,6 +3836,10 @@ tr:last-child td { border-bottom: none; }
     background: transparent;
   }
   .account-history-record { gap: 10px; padding: 14px 2px; }
+  .account-pnl-record {
+    padding-right: 20px;
+    padding-left: 20px;
+  }
   .account-history-record-header { gap: 12px; align-items: flex-start; }
   .account-history-record-symbol { gap: 5px; }
   .account-history-record-symbol strong { font-size: 13px; }
