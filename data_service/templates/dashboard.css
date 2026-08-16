@@ -1769,6 +1769,15 @@ tr:last-child td { border-bottom: none; }
     display: grid;
   }
 }
+@media (max-width: 720px) {
+  .history-import-heading { position: relative; }
+  .history-import-help { position: static; }
+  .history-import-help-popover {
+    right: 0;
+    left: 0;
+    width: auto;
+  }
+}
 .history-import-dropzone {
   appearance: none;
   width: 100%;
