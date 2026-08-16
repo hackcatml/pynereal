@@ -99,6 +99,34 @@ def _decimal(value: Any) -> Decimal | None:
     return result if result.is_finite() else None
 
 
+def _iso_timestamp(value: Any) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _fill_amount_and_cost(payload: dict[str, Any]) -> tuple[Decimal, Decimal] | None:
+    amount = _decimal(payload.get("amount"))
+    if amount is None:
+        return None
+    cost = _decimal(payload.get("cost"))
+    if cost is None:
+        price = _decimal(payload.get("price"))
+        if price is None:
+            return None
+        cost = price * amount
+    return amount, cost
+
+
+def _decimal_close(left: Decimal, right: Decimal, relative: Decimal) -> bool:
+    tolerance = max(Decimal("0.000000001"), abs(left) * relative)
+    return abs(left - right) <= tolerance
+
+
 def _settlement_currency(symbol: str, payload: dict[str, Any]) -> str:
     breakdown = payload.get("realized_pnl_breakdown")
     if isinstance(breakdown, dict):
@@ -205,12 +233,15 @@ class AccountCache:
         self._repair_bitget_position_history(connection)
         self._repair_okx_history_scopes(connection)
         self._repair_hyperliquid_history_scopes(connection)
+        self._repair_hyperliquid_csv_fill_overlaps(connection)
         self._rebuild_binance_position_history(connection)
         self._rebuild_hyperliquid_position_history(connection)
         self._repair_replaced_derived_position_history(connection)
         self._repair_okx_intermediate_position_history(connection)
         self._repair_okx_csv_position_pnl(connection)
+        self._repair_bitget_csv_position_pnl(connection)
         self._repair_csv_position_history(connection)
+        self._allocate_position_funding(connection)
         connection.commit()
         return connection
 
@@ -531,6 +562,147 @@ class AccountCache:
                     )
 
     @staticmethod
+    def _repair_hyperliquid_csv_fill_overlaps(
+        connection: sqlite3.Connection,
+    ) -> set[tuple[str, str, str]]:
+        rows = connection.execute(
+            """
+            SELECT rowid AS storage_id, account, market_scope, symbol,
+                   side, occurred_at, source, payload_json
+            FROM fills
+            WHERE exchange = 'hyperliquid'
+            ORDER BY occurred_at, rowid
+            """
+        ).fetchall()
+        csv_groups: dict[tuple[str, str, str, int], list[dict[str, Any]]] = {}
+        native_rows: list[dict[str, Any]] = []
+        for row in rows:
+            occurred = _iso_timestamp(row["occurred_at"])
+            payload = _payload_object(row["payload_json"])
+            totals = _fill_amount_and_cost(payload)
+            if occurred is None or totals is None:
+                continue
+            item = {
+                "storage_id": int(row["storage_id"]),
+                "account": str(row["account"]),
+                "market_scope": str(row["market_scope"]),
+                "symbol": str(row["symbol"]),
+                "side": str(row["side"]),
+                "occurred": occurred,
+                "payload": payload,
+                "amount": totals[0],
+                "cost": totals[1],
+            }
+            if str(row["source"]).startswith("csv:"):
+                key = (
+                    item["account"],
+                    item["symbol"],
+                    item["side"],
+                    int(occurred),
+                )
+                csv_groups.setdefault(key, []).append(item)
+            else:
+                native_rows.append(item)
+
+        consumed_native: set[int] = set()
+        aliases: dict[tuple[str, str], tuple[str, str]] = {}
+        deleted_native: list[int] = []
+        affected: set[tuple[str, str, str]] = set()
+        for (account, csv_symbol, side, occurred_second), csv_rows in csv_groups.items():
+            csv_amount = sum(
+                (item["amount"] for item in csv_rows),
+                Decimal(0),
+            )
+            csv_cost = sum(
+                (item["cost"] for item in csv_rows),
+                Decimal(0),
+            )
+            candidates: dict[str, list[dict[str, Any]]] = {}
+            for item in native_rows:
+                if (
+                    item["storage_id"] in consumed_native
+                    or item["account"] != account
+                    or item["side"] != side
+                    or abs(item["occurred"] - occurred_second) > 2.0
+                ):
+                    continue
+                candidates.setdefault(item["symbol"], []).append(item)
+
+            matches: list[tuple[str, list[dict[str, Any]]]] = []
+            for candidate_symbol, candidate_rows in candidates.items():
+                native_amount = sum(
+                    (item["amount"] for item in candidate_rows),
+                    Decimal(0),
+                )
+                native_cost = sum(
+                    (item["cost"] for item in candidate_rows),
+                    Decimal(0),
+                )
+                if (
+                    _decimal_close(csv_amount, native_amount, Decimal("0.00000001"))
+                    and _decimal_close(csv_cost, native_cost, Decimal("0.000002"))
+                ):
+                    matches.append((candidate_symbol, candidate_rows))
+            if len(matches) != 1:
+                continue
+
+            canonical_symbol, matched_rows = matches[0]
+            canonical_scope = hyperliquid_market_scope(canonical_symbol)
+            aliases[(account, csv_symbol)] = (
+                canonical_scope,
+                canonical_symbol,
+            )
+            affected.add((account, canonical_scope, canonical_symbol))
+            affected.update(
+                (account, item["market_scope"], item["symbol"])
+                for item in csv_rows
+            )
+            for item in matched_rows:
+                consumed_native.add(item["storage_id"])
+                deleted_native.append(item["storage_id"])
+
+        if deleted_native:
+            connection.executemany(
+                "DELETE FROM fills WHERE rowid = ?",
+                [(storage_id,) for storage_id in deleted_native],
+            )
+
+        for (account, source_symbol), (market_scope, symbol) in aliases.items():
+            matching = connection.execute(
+                """
+                SELECT rowid AS storage_id, market_scope, symbol, payload_json
+                FROM fills
+                WHERE account = ? AND exchange = 'hyperliquid'
+                  AND source LIKE 'csv:%' AND symbol = ?
+                """,
+                (account, source_symbol),
+            ).fetchall()
+            for row in matching:
+                payload = _payload_object(row["payload_json"])
+                payload["symbol"] = symbol
+                connection.execute(
+                    """
+                    UPDATE fills
+                    SET market_scope = ?, symbol = ?, payload_json = ?
+                    WHERE rowid = ?
+                    """,
+                    (market_scope, symbol, _json(payload), int(row["storage_id"])),
+                )
+                affected.add((account, str(row["market_scope"]), source_symbol))
+                affected.add((account, market_scope, symbol))
+
+        for account, _, symbol in affected:
+            connection.execute(
+                """
+                DELETE FROM position_history
+                WHERE account = ? AND exchange = 'hyperliquid'
+                  AND symbol = ? AND source = 'trades'
+                """,
+                (account, symbol),
+            )
+        return affected
+
+    @staticmethod
     def _repair_okx_history_scopes(connection: sqlite3.Connection) -> None:
         for table, identity_column in (
             ("orders", "order_id"),
@@ -696,13 +868,14 @@ class AccountCache:
             ):
                 continue
             net = gross + trading_fee + funding + liquidation_fee
-            fees = gross - net
+            fees = gross + funding - net
             net_text = format(net, "f")
             fees_text = format(fees, "f")
             if (
                 payload.get("realized_pnl") == net_text
                 and breakdown.get("fees") == fees_text
                 and breakdown.get("net_pnl") == net_text
+                and breakdown.get("funding_source") == "position"
                 and breakdown.get("complete") is True
             ):
                 continue
@@ -711,12 +884,189 @@ class AccountCache:
                 "gross_pnl": format(gross, "f"),
                 "fees": fees_text,
                 "net_pnl": net_text,
+                "funding_source": "position",
                 "complete": True,
             })
             connection.execute(
                 "UPDATE position_history SET payload_json = ? WHERE id = ?",
                 (_json(payload), row["id"]),
             )
+
+    @staticmethod
+    def _repair_bitget_csv_position_pnl(connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            """
+            SELECT id, payload_json
+            FROM position_history
+            WHERE exchange = 'bitget' AND source = 'csv:bitget'
+            """
+        ).fetchall()
+        for row in rows:
+            payload = _payload_object(row["payload_json"])
+            breakdown = payload.get("realized_pnl_breakdown")
+            if not isinstance(breakdown, dict):
+                continue
+            gross = _decimal(breakdown.get("gross_pnl"))
+            net = _decimal(breakdown.get("net_pnl"))
+            funding = _decimal(breakdown.get("funding_or_other"))
+            if gross is None or net is None or funding is None:
+                continue
+            fees = gross + funding - net
+            payload["realized_pnl"] = format(net, "f")
+            breakdown.update({
+                "fees": format(fees, "f"),
+                "funding": format(funding, "f"),
+                "funding_source": "position",
+                "complete": True,
+            })
+            connection.execute(
+                "UPDATE position_history SET payload_json = ? WHERE id = ?",
+                (_json(payload), row["id"]),
+            )
+
+    @staticmethod
+    def _allocate_position_funding(connection: sqlite3.Connection) -> None:
+        position_rows = connection.execute(
+            """
+            SELECT id, account, exchange, symbol, side, opened_at, closed_at,
+                   payload_json
+            FROM position_history
+            WHERE exchange IN ('binance', 'hyperliquid')
+            """
+        ).fetchall()
+        event_rows = connection.execute(
+            """
+            SELECT account, exchange, symbol, occurred_at, payload_json
+            FROM pnl_events
+            WHERE exchange IN ('binance', 'hyperliquid')
+            """
+        ).fetchall()
+        if not position_rows or not event_rows:
+            return
+
+        positions: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+        for row in position_rows:
+            opened = _iso_timestamp(row["opened_at"])
+            closed = _iso_timestamp(row["closed_at"])
+            if opened is None or closed is None:
+                continue
+            payload = _payload_object(row["payload_json"])
+            quantity = _decimal(payload.get("quantity"))
+            if quantity is None or quantity <= 0:
+                quantity = _decimal(payload.get("contracts")) or Decimal(1)
+            item = {
+                "id": int(row["id"]),
+                "account": str(row["account"]),
+                "exchange": str(row["exchange"]),
+                "symbol": str(row["symbol"]),
+                "side": str(row["side"]).lower(),
+                "opened": opened,
+                "closed": closed,
+                "quantity": abs(quantity),
+                "payload": payload,
+            }
+            key = (item["account"], item["exchange"], item["symbol"])
+            positions.setdefault(key, []).append(item)
+
+        allocations: dict[int, Decimal] = {}
+        estimated: set[int] = set()
+        covered_groups: set[tuple[str, str, str]] = set()
+        for row in event_rows:
+            payload = _payload_object(row["payload_json"])
+            if str(payload.get("component") or "").lower() != "funding":
+                continue
+            amount = _decimal(payload.get("amount"))
+            occurred = _iso_timestamp(row["occurred_at"])
+            if amount is None or occurred is None:
+                continue
+            key = (
+                str(row["account"]),
+                str(row["exchange"]),
+                str(row["symbol"]),
+            )
+            candidates = positions.get(key, [])
+            if not candidates:
+                continue
+            covered_groups.add(key)
+            event_side = str(payload.get("side") or "").lower()
+            if event_side in {"long", "short"}:
+                candidates = [item for item in candidates if item["side"] == event_side]
+
+            event_time = datetime.fromtimestamp(occurred, UTC)
+            is_daily_hyperliquid = (
+                key[1] == "hyperliquid"
+                and event_time.hour == 0
+                and event_time.minute == 0
+                and event_time.second == 0
+            )
+            weighted: list[tuple[dict[str, Any], Decimal]] = []
+            if is_daily_hyperliquid:
+                window_end = occurred + 86400.0
+                for item in candidates:
+                    overlap = min(item["closed"], window_end) - max(
+                        item["opened"], occurred
+                    )
+                    if overlap > 0:
+                        weighted.append(
+                            (item, item["quantity"] * Decimal(str(overlap)))
+                        )
+            else:
+                weighted = [
+                    (item, item["quantity"])
+                    for item in candidates
+                    if item["opened"] <= occurred <= item["closed"]
+                ]
+            total_weight = sum((weight for _, weight in weighted), Decimal(0))
+            if total_weight <= 0:
+                continue
+            for item, weight in weighted:
+                position_id = int(item["id"])
+                allocations[position_id] = (
+                    allocations.get(position_id, Decimal(0))
+                    + amount * weight / total_weight
+                )
+                if is_daily_hyperliquid:
+                    estimated.add(position_id)
+
+        for key in covered_groups:
+            for item in positions.get(key, []):
+                payload = item["payload"]
+                breakdown = payload.get("realized_pnl_breakdown")
+                if not isinstance(breakdown, dict):
+                    continue
+                funding = allocations.get(int(item["id"]), Decimal(0))
+                gross = _decimal(breakdown.get("gross_pnl"))
+                fees = _decimal(breakdown.get("fees"))
+                trading_net = _decimal(breakdown.get("trading_net_pnl"))
+                if trading_net is None and gross is not None and fees is not None:
+                    trading_net = gross - fees
+                if trading_net is None:
+                    current_net = _decimal(payload.get("realized_pnl"))
+                    previous_funding = (
+                        _decimal(breakdown.get("funding"))
+                        if breakdown.get("funding_source") == "ledger"
+                        else Decimal(0)
+                    )
+                    if current_net is None or previous_funding is None:
+                        continue
+                    trading_net = current_net - previous_funding
+                net = trading_net + funding
+                funding_text = format(funding, "f")
+                net_text = format(net, "f")
+                payload["realized_pnl"] = net_text
+                breakdown.update({
+                    "funding": funding_text,
+                    "funding_source": "ledger",
+                    "funding_allocation": (
+                        "estimated" if int(item["id"]) in estimated else "exact"
+                    ),
+                    "trading_net_pnl": format(trading_net, "f"),
+                    "net_pnl": net_text,
+                })
+                connection.execute(
+                    "UPDATE position_history SET payload_json = ? WHERE id = ?",
+                    (_json(payload), int(item["id"])),
+                )
 
     @staticmethod
     def _rebuild_fill_position_history(
@@ -1060,6 +1410,7 @@ class AccountCache:
         connection.execute("BEGIN IMMEDIATE")
         touched_binance_fills: set[tuple[str, str, str]] = set()
         touched_hyperliquid_fills: set[tuple[str, str, str]] = set()
+        hyperliquid_fills_changed = False
         try:
             accepted_imports: set[str] = set()
             import_results: list[dict[str, Any]] = []
@@ -1091,19 +1442,19 @@ class AccountCache:
                     """,
                     (account, exchange, file_type, file_hash),
                 ).fetchone()
+                previous_import_id = ""
                 if existing is not None:
-                    import_results.append({
-                        "import_id": import_id,
-                        "status": "already_imported",
-                        "existing_import_id": str(existing["import_id"]),
-                        "name": str(manifest.get("original_name") or ""),
-                    })
-                    continue
+                    previous_import_id = str(existing["import_id"])
+                    connection.execute(
+                        "DELETE FROM csv_imports WHERE import_id = ?",
+                        (previous_import_id,),
+                    )
                 accepted_imports.add(import_id)
                 pending_import_keys[import_key] = import_id
                 import_results.append({
                     "import_id": import_id,
                     "status": "imported",
+                    "reprocessed": bool(previous_import_id),
                     "name": str(manifest.get("original_name") or ""),
                 })
 
@@ -1166,14 +1517,22 @@ class AccountCache:
                         END,
                         created_at = COALESCE(orders.created_at, excluded.created_at),
                         updated_at = excluded.updated_at,
-                        source = CASE
-                            WHEN excluded.source = 'live' THEN 'live'
-                            ELSE orders.source
-                        END,
+                        source = excluded.source,
                         payload_json = excluded.payload_json
-                    WHERE orders.updated_at IS NULL
-                        OR excluded.updated_at IS NULL
-                        OR excluded.updated_at >= orders.updated_at
+                    WHERE (
+                            orders.updated_at IS NULL
+                            AND excluded.updated_at IS NOT NULL
+                        )
+                        OR excluded.updated_at > orders.updated_at
+                        OR (
+                            excluded.updated_at = orders.updated_at
+                            AND excluded.source LIKE 'csv:%'
+                        )
+                        OR (
+                            orders.updated_at IS NULL
+                            AND excluded.updated_at IS NULL
+                            AND excluded.source LIKE 'csv:%'
+                        )
                     """,
                     (
                         account,
@@ -1234,11 +1593,10 @@ class AccountCache:
                         order_id = excluded.order_id,
                         side = excluded.side,
                         occurred_at = excluded.occurred_at,
-                        source = CASE
-                            WHEN excluded.source = 'live' THEN 'live'
-                            ELSE fills.source
-                        END,
+                        source = excluded.source,
                         payload_json = excluded.payload_json
+                    WHERE fills.source NOT LIKE 'csv:%'
+                       OR excluded.source LIKE 'csv:%'
                     """,
                     (
                         account,
@@ -1255,10 +1613,17 @@ class AccountCache:
                 )
                 if exchange == "binance":
                     touched_binance_fills.add((account, market_scope, symbol))
-                elif exchange == "hyperliquid" and market_scope != "spot":
-                    touched_hyperliquid_fills.add(
-                        (account, market_scope, symbol),
-                    )
+                elif exchange == "hyperliquid":
+                    hyperliquid_fills_changed = True
+                    if market_scope != "spot":
+                        touched_hyperliquid_fills.add(
+                            (account, market_scope, symbol),
+                        )
+
+            if hyperliquid_fills_changed:
+                touched_hyperliquid_fills.update(
+                    self._repair_hyperliquid_csv_fill_overlaps(connection),
+                )
 
             for record in positions:
                 if not record_allowed(record):
@@ -1290,6 +1655,8 @@ class AccountCache:
                         side = excluded.side,
                         source = excluded.source,
                         payload_json = excluded.payload_json
+                    WHERE position_history.source NOT LIKE 'csv:%'
+                       OR excluded.source LIKE 'csv:%'
                     """,
                     (
                         account,
@@ -1349,6 +1716,75 @@ class AccountCache:
                 event_type = str(record.get("event_type") or "").strip()
                 if not all((account, exchange, event_id, event_type)):
                     continue
+                symbol = str(record.get("symbol") or "")
+                occurred_at = str(record.get("occurred_at") or "") or None
+                amount = _decimal(payload.get("amount"))
+                duplicate_ids: list[str] = []
+                if amount is not None:
+                    if occurred_at is None:
+                        existing_events = connection.execute(
+                            """
+                            SELECT event_id, payload_json
+                            FROM pnl_events
+                            WHERE account = ? AND exchange = ? AND event_type = ?
+                              AND symbol = ? AND occurred_at IS NULL
+                            """,
+                            (account, exchange, event_type, symbol),
+                        ).fetchall()
+                    else:
+                        existing_events = connection.execute(
+                            """
+                            SELECT event_id, payload_json
+                            FROM pnl_events
+                            WHERE account = ? AND exchange = ? AND event_type = ?
+                              AND symbol = ?
+                              AND ABS(
+                                  (julianday(occurred_at) - julianday(?))
+                                  * 86400000.0
+                              ) <= 1.0
+                            """,
+                            (account, exchange, event_type, symbol, occurred_at),
+                        ).fetchall()
+                    duplicate_ids = [
+                        str(existing["event_id"])
+                        for existing in existing_events
+                        if str(existing["event_id"]) != event_id
+                        and _decimal(
+                            _payload_object(existing["payload_json"]).get("amount")
+                        ) == amount
+                    ]
+                canonical_source = str(payload.get("canonical_source") or "")
+                existing_event = connection.execute(
+                    """
+                    SELECT payload_json
+                    FROM pnl_events
+                    WHERE account = ? AND exchange = ?
+                      AND event_id = ? AND event_type = ?
+                    """,
+                    (account, exchange, event_id, event_type),
+                ).fetchone()
+                if existing_event is not None:
+                    existing_source = str(
+                        _payload_object(existing_event["payload_json"]).get(
+                            "canonical_source"
+                        ) or ""
+                    )
+                    if (
+                        existing_source.startswith("csv:")
+                        and not canonical_source.startswith("csv:")
+                    ):
+                        continue
+                if duplicate_ids and not canonical_source.startswith("csv:"):
+                    continue
+                for duplicate_id in duplicate_ids:
+                    connection.execute(
+                        """
+                        DELETE FROM pnl_events
+                        WHERE account = ? AND exchange = ?
+                          AND event_id = ? AND event_type = ?
+                        """,
+                        (account, exchange, duplicate_id, event_type),
+                    )
                 connection.execute(
                     """
                     INSERT INTO pnl_events (
@@ -1366,8 +1802,8 @@ class AccountCache:
                         exchange,
                         event_id,
                         event_type,
-                        str(record.get("symbol") or ""),
-                        str(record.get("occurred_at") or "") or None,
+                        symbol,
+                        occurred_at,
                         _json(payload),
                     ),
                 )
@@ -1383,6 +1819,10 @@ class AccountCache:
                 )
             if positions or touched_binance_fills or touched_hyperliquid_fills:
                 self._repair_csv_position_history(connection)
+            if imports or pnl_events:
+                self._repair_okx_csv_position_pnl(connection)
+                self._repair_bitget_csv_position_pnl(connection)
+                self._allocate_position_funding(connection)
 
             imported_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
             for manifest in imports:
@@ -1583,14 +2023,20 @@ class AccountCache:
             payload = _payload_object(row["payload_json"])
             bucket = bucket_for(row, payload)
             bucket["closed_positions"] += 1
+            breakdown = payload.get("realized_pnl_breakdown")
+            breakdown = breakdown if isinstance(breakdown, dict) else {}
             realized = _decimal(payload.get("realized_pnl"))
             if realized is None:
                 bucket["realized_complete"] = False
             else:
+                allocated_funding = _decimal(breakdown.get("funding"))
+                if (
+                    breakdown.get("funding_source") == "ledger"
+                    and allocated_funding is not None
+                ):
+                    realized -= allocated_funding
                 bucket["realized_pnl"] += realized
 
-            breakdown = payload.get("realized_pnl_breakdown")
-            breakdown = breakdown if isinstance(breakdown, dict) else {}
             gross = _decimal(breakdown.get("gross_pnl"))
             fees = _decimal(breakdown.get("fees"))
             if breakdown.get("complete") is True and gross is not None and fees is not None:
@@ -1598,6 +2044,13 @@ class AccountCache:
                 bucket["fees"] += fees
             else:
                 bucket["fee_breakdown_complete"] = False
+            position_funding = _decimal(breakdown.get("funding"))
+            if (
+                breakdown.get("funding_source") == "position"
+                and position_funding is not None
+            ):
+                bucket["funding"] += position_funding
+                bucket["funding_available"] = True
 
         for row in event_rows:
             payload = _payload_object(row["payload_json"])
@@ -1729,6 +2182,33 @@ class AccountCache:
             warnings = []
         result["warnings"] = warnings if isinstance(warnings, list) else []
         return result
+
+    def delete_csv_import(self, import_id: str) -> dict[str, Any]:
+        normalized_id = import_id.strip()
+        if not normalized_id:
+            raise ValueError("CSV import was not found")
+        connection = self._connect()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = connection.execute(
+                "SELECT original_name FROM csv_imports WHERE import_id = ?",
+                (normalized_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("CSV import was not found")
+            connection.execute(
+                "DELETE FROM csv_imports WHERE import_id = ?",
+                (normalized_id,),
+            )
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        return {
+            "status": "deleted",
+            "import_id": normalized_id,
+            "original_name": str(row["original_name"] or ""),
+        }
 
     def update_csv_import_status(
         self,

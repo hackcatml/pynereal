@@ -681,6 +681,7 @@ class AccountDataService:
         job = {
             "job_id": job_id,
             "batch_id": str(manifest.get("batch_id") or ""),
+            "import_id": import_id,
             "kind": "enrichment",
             "status": "queued",
             "created_at": now,
@@ -781,6 +782,45 @@ class AccountDataService:
             if job.get("status") in {"queued", "running"}
         ]
         return payload
+
+    async def delete_history_import(self, import_id: str) -> dict[str, Any]:
+        normalized_id = import_id.strip()
+        if not normalized_id:
+            raise AccountDataError("CSV import was not found")
+        self._cleanup_history_import_state()
+        if any(
+            job.get("status") in {"queued", "running"}
+            and job.get("import_id") == normalized_id
+            for job in self._history_import_jobs.values()
+        ):
+            raise AccountDataError("CSV import enrichment is still running")
+        request_id = uuid4().hex
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._history_import_waiters[request_id] = waiter
+        try:
+            await self._ensure_live_stream()
+            process = self._live_process
+            input_queue = self._live_input
+            if process is None or not process.is_alive() or input_queue is None:
+                raise AccountDataError("account worker is not available")
+            await asyncio.to_thread(input_queue.put, {
+                "type": "history.import.delete",
+                "request_id": request_id,
+                "import_id": normalized_id,
+            }, True, 10.0)
+            result = await asyncio.wait_for(asyncio.shield(waiter), timeout=30.0)
+            if result.get("status") == "error":
+                error = result.get("error")
+                error = error if isinstance(error, dict) else {}
+                raise AccountDataError(
+                    str(error.get("message") or "CSV import deletion failed")[:500]
+                )
+            return result
+        finally:
+            self._history_import_waiters.pop(request_id, None)
+            if not waiter.done():
+                waiter.cancel()
 
     async def refresh_history(
         self,
@@ -999,6 +1039,7 @@ class AccountDataService:
             elif message_type in {
                 "history.import.result",
                 "history.enrichment.result",
+                "history.import.delete.result",
             }:
                 waiter_map = self._history_import_waiters
             else:

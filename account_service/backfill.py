@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -41,6 +42,8 @@ CURSOR_OVERLAP_SECONDS = 24 * 60 * 60
 BACKFILL_INTERVAL_SECONDS = 30 * 60
 MAX_PAGINATION_CALLS = 5
 MAX_HISTORY_RECORDS = 1000
+MAX_FUNDING_RECORDS = 1000
+MAX_FUNDING_PAGINATION_CALLS = 10
 BITGET_SPOT_ORDER_PAGE_LIMIT = 100
 BINANCE_HISTORY_WINDOW_SAFETY_MS = 5 * 60 * 1000
 BINANCE_ORDER_CURSOR_STREAM = "orders_90d"
@@ -281,11 +284,41 @@ def _position_pnl_breakdown(
         native_net = _first_number(info, ("netProfit",))
         if native_net is not None:
             net = native_net
+        funding = _first_number(info, ("totalFunding", "totalFundingFee"))
+        if gross is not None and funding is not None and net is not None:
+            fees = gross + funding - net
+            return net, {
+                "gross_pnl": gross,
+                "fees": fees,
+                "funding": funding,
+                "funding_source": "position",
+                "net_pnl": net,
+                "currency": str(info.get("marginCoin") or "").upper() or None,
+                "complete": True,
+            }
     elif exchange_id == "okx":
-        gross = _first_number(info, ("pnl",))
+        position_pnl = _first_number(info, ("pnl",))
+        settled_pnl = _first_number(info, ("settledPnl",)) or 0.0
+        gross = (
+            position_pnl + settled_pnl
+            if position_pnl is not None
+            else None
+        )
         native_net = _first_number(info, ("realizedPnl",))
         if native_net is not None:
             net = native_net
+        funding = _first_number(info, ("fundingFee",))
+        if gross is not None and funding is not None and net is not None:
+            fees = gross + funding - net
+            return net, {
+                "gross_pnl": gross,
+                "fees": fees,
+                "funding": funding,
+                "funding_source": "position",
+                "net_pnl": net,
+                "currency": str(info.get("ccy") or "").upper() or None,
+                "complete": True,
+            }
     elif exchange_id == "bybit":
         native_net = _first_number(info, ("closedPnl",))
         if native_net is not None:
@@ -586,6 +619,161 @@ def _rest_record(
         "source": "rest",
         "payload": payload,
     }
+
+
+def _decimal_text(value: Any) -> str | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return format(parsed, "f") if parsed.is_finite() else None
+
+
+def _funding_amount_text(exchange_id: str, funding: dict[str, Any]) -> str | None:
+    info = funding.get("info")
+    info = info if isinstance(info, dict) else {}
+    if exchange_id == "binance":
+        raw = info.get("income")
+    elif exchange_id == "hyperliquid":
+        delta = info.get("delta")
+        delta = delta if isinstance(delta, dict) else {}
+        raw = delta.get("usdc")
+    else:
+        raw = None
+    return _decimal_text(raw if raw is not None else funding.get("amount"))
+
+
+def _normalize_funding_event(
+    account: Any,
+    market_scope: str,
+    funding: dict[str, Any],
+) -> dict[str, Any] | None:
+    timestamp = _integer(funding.get("timestamp"))
+    amount = _funding_amount_text(account.exchange_id, funding)
+    if timestamp is None or amount is None:
+        return None
+    occurred_at = _iso_timestamp(timestamp)
+    if occurred_at is None:
+        return None
+    symbol = str(funding.get("symbol") or "").strip()
+    currency = str(funding.get("code") or "").strip().upper()
+    if not currency:
+        currency = "USDC" if account.exchange_id == "hyperliquid" else "USDT"
+
+    info = funding.get("info")
+    info = info if isinstance(info, dict) else {}
+    event_id = str(funding.get("id") or "").strip()
+    if account.exchange_id == "hyperliquid":
+        delta = info.get("delta")
+        delta = delta if isinstance(delta, dict) else {}
+        identity = [
+            account.name,
+            occurred_at,
+            symbol,
+            amount,
+            delta.get("fundingRate") or funding.get("rate"),
+            delta.get("szi"),
+        ]
+        event_id = "hyperliquid-funding:" + hashlib.sha256(
+            json.dumps(identity, ensure_ascii=True, default=str).encode("utf-8")
+        ).hexdigest()[:24]
+    elif not event_id:
+        identity = [account.name, market_scope, occurred_at, symbol, amount]
+        event_id = "rest-funding:" + hashlib.sha256(
+            json.dumps(identity, ensure_ascii=True, default=str).encode("utf-8")
+        ).hexdigest()[:24]
+
+    payload: dict[str, Any] = {
+        "amount": amount,
+        "currency": currency,
+        "component": "funding",
+        "count_in_pnl": True,
+        "canonical_source": f"rest:{account.exchange_id}",
+    }
+    if account.exchange_id == "hyperliquid":
+        delta = info.get("delta")
+        delta = delta if isinstance(delta, dict) else {}
+        size = _decimal_text(delta.get("szi"))
+        payload.update({
+            "side": "long" if size is not None and not size.startswith("-") else "short",
+            "size": size,
+            "rate": _decimal_text(delta.get("fundingRate") or funding.get("rate")),
+        })
+    return {
+        "account": account.name,
+        "exchange": account.exchange_id,
+        "event_id": event_id,
+        "event_type": "funding",
+        "market_scope": market_scope,
+        "symbol": symbol,
+        "occurred_at": occurred_at,
+        "source": "rest",
+        "payload": payload,
+    }
+
+
+async def _fetch_funding_events(
+    exchange: Any,
+    account: Any,
+    scope: HistoryScope,
+    since: int,
+    now_ms: int,
+    stop: asyncio.Event,
+    symbol: str | None = None,
+) -> list[dict[str, Any]]:
+    if account.exchange_id not in {"binance", "hyperliquid"}:
+        return []
+    if not exchange.has.get("fetchFundingHistory"):
+        raise ccxt.NotSupported(
+            f"{account.exchange_id} does not expose funding history"
+        )
+
+    params = dict(scope.params)
+    records: dict[str, dict[str, Any]] = {}
+    page_limit = 500 if account.exchange_id == "hyperliquid" else MAX_FUNDING_RECORDS
+    for window_start, window_end in _stream_windows(
+        account.exchange_id,
+        since,
+        now_ms,
+    ):
+        cursor = window_start
+        effective_end = window_end if window_end is not None else now_ms
+        for _ in range(MAX_FUNDING_PAGINATION_CALLS):
+            request_params = {**params, "until": effective_end}
+            page = await _fetch_with_retry(
+                exchange,
+                account,
+                f"{scope.name} funding history",
+                lambda cursor=cursor, request_params=request_params: (
+                    exchange.fetch_funding_history(
+                        symbol,
+                        cursor,
+                        page_limit,
+                        dict(request_params),
+                    )
+                ),
+                stop,
+            )
+            page_timestamps: list[int] = []
+            for item in page:
+                timestamp = _integer(item.get("timestamp"))
+                if timestamp is None or timestamp < since or timestamp > now_ms:
+                    continue
+                page_timestamps.append(timestamp)
+                normalized = _normalize_funding_event(account, scope.name, item)
+                if normalized is not None:
+                    records[normalized["event_id"]] = normalized
+            if not page_timestamps:
+                break
+            next_cursor = max(page_timestamps) + 1
+            if next_cursor <= cursor or next_cursor > effective_end:
+                break
+            cursor = next_cursor
+            if len(page) < page_limit:
+                break
+    return list(records.values())
 
 
 def _binance_unified_symbol(
@@ -1132,6 +1320,7 @@ async def backfill_account_once(
     include_orders: bool = True,
     include_fills: bool = True,
     include_positions: bool = True,
+    include_pnl_events: bool = True,
     target_symbol: str | None = None,
     discover_symbols: bool = True,
 ) -> dict[str, list[dict[str, Any]]]:
@@ -1139,6 +1328,7 @@ async def backfill_account_once(
     orders: list[dict[str, Any]] = []
     fills: list[dict[str, Any]] = []
     positions: list[dict[str, Any]] = []
+    pnl_events: list[dict[str, Any]] = []
     cursor_records: list[dict[str, Any]] = []
     scopes = _history_scopes(account.exchange_id, account.config)
     discovered_symbols: dict[str, set[str]] = {}
@@ -1211,6 +1401,55 @@ async def backfill_account_once(
             symbol_targets = symbols
         else:
             symbol_targets = symbols[:1]
+
+        collects_funding = (
+            account.exchange_id == "hyperliquid"
+            or (
+                account.exchange_id == "binance"
+                and scope.name in {"usd_m", "coin_m"}
+            )
+        )
+        if include_pnl_events and collects_funding:
+            funding_key = _cursor_key(
+                account.name,
+                account.exchange_id,
+                "funding",
+                scope.name,
+            )
+            funding_since = _history_since(
+                account.exchange_id,
+                cursors,
+                funding_key,
+                now_ms,
+            )
+            try:
+                pnl_events.extend(await _fetch_funding_events(
+                    exchange,
+                    account,
+                    scope,
+                    funding_since,
+                    now_ms,
+                    stop,
+                    target_symbol,
+                ))
+                cursors[funding_key] = str(now_ms)
+                cursor_records.append(_cursor_record(
+                    account.name,
+                    account.exchange_id,
+                    "funding",
+                    scope.name,
+                    now_ms,
+                ))
+            except (ccxt.ArgumentsRequired, ccxt.BadRequest, ccxt.NotSupported):
+                pass
+            except Exception as exc:
+                print(
+                    f"[account] {account.name} {scope.name} funding backfill "
+                    f"failed: {type(exc).__name__}: "
+                    f"{redact_error(exc, secrets)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
         order_stream = (
             OKX_ORDER_CURSOR_STREAM
@@ -1371,6 +1610,7 @@ async def backfill_account_once(
         "orders": orders,
         "fills": fills,
         "positions": positions,
+        "pnl_events": pnl_events,
         "cursors": cursor_records,
     }
 
@@ -1427,7 +1667,9 @@ async def account_history_backfill_loop(
                 f"[account] history backfill completed | "
                 f"account={account.name} exchange={account.exchange_id} "
                 f"orders={len(batch['orders'])} fills={len(batch['fills'])} "
-                f"positions={len(batch['positions'])} elapsed={elapsed:.1f}s",
+                f"positions={len(batch['positions'])} "
+                f"pnl_events={len(batch['pnl_events'])} "
+                f"elapsed={elapsed:.1f}s",
                 flush=True,
             )
         except asyncio.CancelledError:

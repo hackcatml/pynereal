@@ -90,11 +90,15 @@ def _pnl_breakdown(
     fee_cost: Decimal,
     net_pnl: Decimal,
     *,
+    funding: Decimal,
+    funding_source: str,
     currency: str | None,
 ) -> dict[str, Any]:
     return {
         "gross_pnl": float(gross_pnl),
         "fees": float(fee_cost),
+        "funding": float(funding),
+        "funding_source": funding_source,
         "net_pnl": float(net_pnl),
         "currency": currency,
         "complete": True,
@@ -109,6 +113,8 @@ def normalize_realized_pnl(position: dict[str, Any]) -> tuple[float | None, dict
     ccxt_net = number_or_none(position.get("realizedPnl"))
     gross_pnl: float | None = None
     fee_cost: float | None = None
+    funding: float | None = None
+    funding_source: str | None = None
     net_pnl = ccxt_net
     complete = False
 
@@ -116,18 +122,20 @@ def normalize_realized_pnl(position: dict[str, Any]) -> tuple[float | None, dict
     if "instId" in info and "realizedPnl" in info:
         net_pnl = number_or_none(info.get("realizedPnl"))
         gross_pnl = _sum_present_numbers(info, ("pnl", "settledPnl"))
+        funding = number_or_none(info.get("fundingFee"))
         if net_pnl is not None and gross_pnl is not None:
-            fee_cost = gross_pnl - net_pnl
+            fee_cost = gross_pnl + (funding or 0.0) - net_pnl
+            funding_source = "position" if funding is not None else None
             complete = True
 
     # Bitget classic: achievedProfits excludes transaction and funding fees.
     elif "achievedProfits" in info:
         gross_pnl = _sum_present_numbers(info, ("achievedProfits", "cashDividend"))
-        funding_adjustment = number_or_none(info.get("totalFee")) or 0.0
-        deducted_fee = number_or_none(info.get("deductedFee")) or 0.0
+        funding = number_or_none(info.get("totalFee")) or 0.0
+        fee_cost = number_or_none(info.get("deductedFee")) or 0.0
         if gross_pnl is not None:
-            fee_cost = deducted_fee - funding_adjustment
-            net_pnl = gross_pnl - fee_cost
+            net_pnl = gross_pnl + funding - fee_cost
+            funding_source = "position"
             complete = True
 
     # Bitget UTA exposes signed fee/funding components alongside current net PnL.
@@ -135,13 +143,15 @@ def normalize_realized_pnl(position: dict[str, Any]) -> tuple[float | None, dict
         key in info for key in ("openFeeTotal", "closeFeeTotal", "totalFunding")
     ):
         net_pnl = number_or_none(info.get("curRealisedPnl"))
-        signed_adjustment = _sum_present_numbers(
+        signed_trading_fees = _sum_present_numbers(
             info,
-            ("openFeeTotal", "closeFeeTotal", "totalFunding"),
+            ("openFeeTotal", "closeFeeTotal"),
         )
-        if net_pnl is not None and signed_adjustment is not None:
-            fee_cost = -signed_adjustment
-            gross_pnl = net_pnl + fee_cost
+        funding = number_or_none(info.get("totalFunding")) or 0.0
+        if net_pnl is not None and signed_trading_fees is not None:
+            fee_cost = -signed_trading_fees
+            gross_pnl = net_pnl + fee_cost - funding
+            funding_source = "position"
             complete = True
 
     # Bybit's curRealisedPnl is already net of trading and funding fees for
@@ -155,6 +165,8 @@ def normalize_realized_pnl(position: dict[str, Any]) -> tuple[float | None, dict
     return net_pnl, {
         "gross_pnl": gross_pnl,
         "fees": fee_cost,
+        "funding": funding,
+        "funding_source": funding_source,
         "net_pnl": net_pnl,
         "complete": complete,
     }
@@ -348,8 +360,10 @@ def enrich_binance_realized_pnl(
     normalized["realized_pnl"] = float(net_pnl)
     normalized["realized_pnl_breakdown"] = _pnl_breakdown(
         gross_pnl,
-        fee_cost,
+        trading_fees,
         net_pnl,
+        funding=funding,
+        funding_source="income",
         currency=next(iter(assets), None),
     )
 
@@ -462,11 +476,12 @@ def enrich_bybit_realized_pnl(
     tolerance = max(abs(net_value) * Decimal("1e-8"), Decimal("1e-8"))
     if len(currencies) > 1 or abs(calculated_net - net_value) > tolerance:
         return
-    fee_cost = trading_fees - funding
     normalized["realized_pnl_breakdown"] = _pnl_breakdown(
         gross_pnl,
-        fee_cost,
+        trading_fees,
         net_value,
+        funding=funding,
+        funding_source="transaction_log",
         currency=next(iter(currencies), None),
     )
 
@@ -513,6 +528,11 @@ def normalize_hyperliquid_position(position: dict[str, Any]) -> dict[str, Any]:
     info = info if isinstance(info, dict) else {}
     entry = info.get("position")
     entry = entry if isinstance(entry, dict) else {}
+    if normalized.get("mark_price") is None:
+        notional = number_or_none(normalized.get("notional"))
+        quantity = number_or_none(normalized.get("quantity"))
+        if notional is not None and quantity not in {None, 0}:
+            normalized["mark_price"] = abs(notional / quantity)
     return_on_equity = number_or_none(entry.get("returnOnEquity"))
     if return_on_equity is not None:
         normalized["percentage"] = round(return_on_equity * 100, 12)

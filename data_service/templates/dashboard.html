@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=112" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=114" />
 </head>
 <body>
   <header class="topbar">
@@ -447,7 +447,20 @@
           <div class="history-import-heading">
             <div>
               <strong>Import exchange history</strong>
-              <span>Merge exported CSV history into Position History, Order History, and PnL.</span>
+              <span class="history-import-description">Merge exported CSV history into Position History, Order History, and PnL.
+                <span id="history-import-help" class="history-import-help">
+                  <button id="history-import-help-button" type="button" aria-label="Show recommended CSV files"
+                          aria-expanded="false" aria-controls="history-import-help-popover">?</button>
+                  <span id="history-import-help-popover" class="history-import-help-popover" role="tooltip">
+                    <strong>* Recommended for complete data</strong>
+                    <span>Binance: Position History, Order History, Trade History, and Transaction History</span>
+                    <span>Bitget: Futures Position History and Futures Order History</span>
+                    <span>Bybit: Closed P&amp;L, Order History, Trade History, and Transaction Log (import support pending)</span>
+                    <span>OKX: Position History, Order History, and Trade Details</span>
+                    <span>Hyperliquid: Trade History and Funding History; Order History is added automatically via API</span>
+                  </span>
+                </span>
+              </span>
             </div>
           </div>
           <input id="history-import-files" class="hidden" type="file" accept=".csv,text/csv" multiple />
@@ -495,6 +508,8 @@
             <button type="button" data-pnl-days="7" aria-pressed="false">7D</button>
             <button type="button" data-pnl-days="30" aria-pressed="false">30D</button>
             <button class="active" type="button" data-pnl-days="90" aria-pressed="true">90D</button>
+            <button type="button" data-pnl-days="180" aria-pressed="false">6M</button>
+            <button type="button" data-pnl-days="365" aria-pressed="false">1Y</button>
             <button type="button" data-pnl-days="all" aria-pressed="false">All</button>
           </div>
           <div id="pnl-loading" class="assets-state">
@@ -519,6 +534,10 @@
         <div class="position-pnl-row">
           <span>Fees</span>
           <span id="position-pnl-fees" class="mono"></span>
+        </div>
+        <div class="position-pnl-row">
+          <span>Funding</span>
+          <span id="position-pnl-funding" class="mono"></span>
         </div>
         <div class="position-pnl-row position-pnl-net-row">
           <span>Net PnL</span>
@@ -780,6 +799,6 @@
     </form>
   </div>
 
-  <script src="/static/dashboard.js?v=120"></script>
+  <script src="/static/dashboard.js?v=124"></script>
 </body>
 </html>

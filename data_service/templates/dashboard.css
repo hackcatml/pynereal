@@ -1716,6 +1716,59 @@ tr:last-child td { border-bottom: none; }
   font-size: 11px;
   line-height: 1.45;
 }
+.history-import-description {
+  display: inline;
+}
+.history-import-help {
+  position: relative;
+  display: inline-flex;
+  vertical-align: middle;
+}
+.history-import-help > button {
+  width: 17px;
+  height: 17px;
+  margin: 0 0 1px 3px;
+  padding: 0;
+  border: 1px solid #465261;
+  border-radius: 50%;
+  background: #161b22;
+  color: #aeb8c4;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  cursor: help;
+}
+.history-import-help-popover {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 7px);
+  right: 0;
+  width: min(390px, calc(100vw - 48px));
+  display: none;
+  gap: 4px;
+  padding: 10px 11px;
+  border: 1px solid #3a4655;
+  border-radius: 6px;
+  background: #111820;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .38);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.history-import-help-popover strong {
+  color: #e4e9ef;
+  font-size: 10px;
+  font-weight: 650;
+}
+.history-import-help.show .history-import-help-popover {
+  display: grid;
+}
+@media (hover: hover) and (pointer: fine) {
+  .history-import-help:hover .history-import-help-popover {
+    display: grid;
+  }
+}
 .history-import-dropzone {
   appearance: none;
   width: 100%;
@@ -1973,6 +2026,10 @@ tr:last-child td { border-bottom: none; }
   border-bottom: 1px solid #222a34;
 }
 .history-import-log-row:last-child { border-bottom: 0; }
+.history-import-log-row.is-deleting {
+  opacity: .5;
+  pointer-events: none;
+}
 .history-import-log-logo {
   width: 22px;
   height: 22px;
@@ -2634,6 +2691,7 @@ tr:last-child td { border-bottom: none; }
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   font-weight: 550;
+  line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

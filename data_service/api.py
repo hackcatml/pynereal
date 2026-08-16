@@ -862,6 +862,14 @@ def build_control_router(
             return JSONResponse({"error": str(exc)}, status_code=503)
         return JSONResponse(result)
 
+    @r.delete("/api/account/history/imports/{import_id}")
+    async def delete_account_history_import(import_id: str) -> JSONResponse:
+        try:
+            result = await account_data_service.delete_history_import(import_id)
+        except AccountDataError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse(result)
+
     @r.post("/api/account/history/imports/{import_id}/retry-enrichment")
     async def retry_account_history_import_enrichment(
         import_id: str,
@@ -960,7 +968,7 @@ def build_control_router(
                 normalized_days = int(days)
             except ValueError:
                 return JSONResponse(
-                    {"error": "days must be 7, 30, 90, or all"},
+                    {"error": "days must be 7, 30, 90, 180, 365, or all"},
                     status_code=400,
                 )
         try:

@@ -46,7 +46,9 @@ from account_service.backfill import (  # noqa: E402
 )
 from account_service.cache import AccountCache  # noqa: E402
 from account_service.csv_import import (  # noqa: E402
+    canonicalize_hyperliquid_import_batch,
     fetch_hyperliquid_historical_orders,
+    fetch_hyperliquid_symbol_aliases,
 )
 from account_service.history import (  # noqa: E402
     normalize_fill,
@@ -158,6 +160,9 @@ class LivePositionState:
             key = _position_key(normalized)
             previous = current.get(key)
             if isinstance(previous, dict):
+                previous_mark = _number(previous.get("mark_price"))
+                if _number(normalized.get("mark_price")) is None and previous_mark is not None:
+                    normalized["mark_price"] = previous_mark
                 previous_breakdown = previous.get("realized_pnl_breakdown")
                 new_breakdown = normalized.get("realized_pnl_breakdown")
                 previous_net = _number(previous.get("realized_pnl"))
@@ -258,6 +263,7 @@ class AccountHistoryBuffer:
         self._orders: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
         self._fills: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
         self._positions: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        self._pnl_events: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         self._cursors: dict[tuple[str, str, str, str], dict[str, Any]] = {}
 
     def add_orders(
@@ -352,6 +358,7 @@ class AccountHistoryBuffer:
         orders: list[dict[str, Any]],
         fills: list[dict[str, Any]],
         positions: list[dict[str, Any]],
+        pnl_events: list[dict[str, Any]],
         cursors: list[dict[str, Any]],
     ) -> None:
         self.add_orders_from_records(orders)
@@ -364,6 +371,14 @@ class AccountHistoryBuffer:
                 str(record.get("closed_at") or ""),
             )
             self._positions[key] = record
+        for record in pnl_events:
+            key = (
+                str(record.get("account") or ""),
+                str(record.get("exchange") or ""),
+                str(record.get("event_type") or ""),
+                str(record.get("event_id") or ""),
+            )
+            self._pnl_events[key] = record
         for record in cursors:
             key = (
                 str(record.get("account") or ""),
@@ -372,7 +387,7 @@ class AccountHistoryBuffer:
                 str(record.get("market_scope") or ""),
             )
             self._cursors[key] = record
-        if positions or cursors:
+        if positions or pnl_events or cursors:
             self.dirty.set()
 
     def add_orders_from_records(self, records: list[dict[str, Any]]) -> None:
@@ -434,22 +449,26 @@ class AccountHistoryBuffer:
         list[dict[str, Any]],
         list[dict[str, Any]],
         list[dict[str, Any]],
+        list[dict[str, Any]],
     ]:
         orders = list(self._orders.values())
         fills = list(self._fills.values())
         positions = list(self._positions.values())
+        pnl_events = list(self._pnl_events.values())
         cursors = list(self._cursors.values())
         self._orders.clear()
         self._fills.clear()
         self._positions.clear()
+        self._pnl_events.clear()
         self._cursors.clear()
-        return orders, fills, positions, cursors
+        return orders, fills, positions, pnl_events, cursors
 
     def restore(
         self,
         orders: list[dict[str, Any]],
         fills: list[dict[str, Any]],
         positions: list[dict[str, Any]],
+        pnl_events: list[dict[str, Any]],
         cursors: list[dict[str, Any]],
     ) -> None:
         for record in orders:
@@ -484,6 +503,14 @@ class AccountHistoryBuffer:
                 str(record.get("closed_at") or ""),
             )
             self._positions.setdefault(key, record)
+        for record in pnl_events:
+            key = (
+                str(record.get("account") or ""),
+                str(record.get("exchange") or ""),
+                str(record.get("event_type") or ""),
+                str(record.get("event_id") or ""),
+            )
+            self._pnl_events.setdefault(key, record)
         for record in cursors:
             key = (
                 str(record.get("account") or ""),
@@ -492,7 +519,7 @@ class AccountHistoryBuffer:
                 str(record.get("market_scope") or ""),
             )
             self._cursors.setdefault(key, record)
-        if orders or fills or positions or cursors:
+        if orders or fills or positions or pnl_events or cursors:
             self.dirty.set()
 
 
@@ -1057,7 +1084,7 @@ async def _persist_history_updates(
         except TimeoutError:
             pass
         history.dirty.clear()
-        orders, fills, positions, cursors = history.drain()
+        orders, fills, positions, pnl_events, cursors = history.drain()
         try:
             await loop.run_in_executor(
                 executor,
@@ -1066,9 +1093,10 @@ async def _persist_history_updates(
                 fills,
                 positions,
                 cursors,
+                pnl_events,
             )
         except Exception as exc:
-            history.restore(orders, fills, positions, cursors)
+            history.restore(orders, fills, positions, pnl_events, cursors)
             print(
                 f"[account] history cache write failed: {type(exc).__name__}: {exc}",
                 file=sys.stderr,
@@ -1184,6 +1212,7 @@ async def _refresh_history_from_parent(
                             include_orders=kind == "order",
                             include_fills=kind == "position",
                             include_positions=kind == "position",
+                            include_pnl_events=kind == "position",
                             target_symbol=requested_symbol or None,
                             discover_symbols=False,
                         )
@@ -1207,6 +1236,7 @@ async def _refresh_history_from_parent(
                         batch["fills"],
                         batch["positions"],
                         batch["cursors"],
+                        batch["pnl_events"],
                     )
             result = {
                 "account": account.name,
@@ -1215,6 +1245,7 @@ async def _refresh_history_from_parent(
                 "orders": len(batch["orders"]),
                 "fills": len(batch["fills"]),
                 "positions": len(batch["positions"]),
+                "pnl_events": len(batch["pnl_events"]),
                 "elapsed_seconds": round(time.monotonic() - started_at, 3),
             }
             print(
@@ -1224,6 +1255,7 @@ async def _refresh_history_from_parent(
                 f"symbol={requested_symbol or '*'} "
                 f"orders={result['orders']} fills={result['fills']} "
                 f"positions={result['positions']} "
+                f"pnl_events={result['pnl_events']} "
                 f"elapsed={result['elapsed_seconds']:.1f}s",
                 flush=True,
             )
@@ -1326,6 +1358,22 @@ async def _import_history_from_parent(
         wallet_address = str(account.config.get("walletAddress") or "").strip()
         anchor = account_imports[0]
         try:
+            aliases = await asyncio.to_thread(fetch_hyperliquid_symbol_aliases)
+            canonicalize_hyperliquid_import_batch(batch, account_name, aliases)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            message = redact_error(exc, secret_values(account.config))
+            warning = (
+                "Hyperliquid symbol metadata could not be loaded: "
+                f"{message}"
+            )
+            for manifest in account_imports:
+                manifest["status"] = "partial"
+                manifest_warnings = manifest.setdefault("warnings", [])
+                if isinstance(manifest_warnings, list) and warning not in manifest_warnings:
+                    manifest_warnings.append(warning)
+        try:
             orders, warnings = await asyncio.to_thread(
                 fetch_hyperliquid_historical_orders,
                 wallet_address,
@@ -1407,7 +1455,18 @@ async def _retry_history_enrichment_from_parent(
         for warning in previous_warnings
         if not str(warning).startswith("Hyperliquid Order History could not be enriched:")
         and not str(warning).startswith("Hyperliquid returned 2,000 historical orders;")
+        and not str(warning).startswith("Hyperliquid symbol metadata could not be loaded:")
     ]
+    metadata_warnings: list[str] = []
+    try:
+        await asyncio.to_thread(fetch_hyperliquid_symbol_aliases)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        message = redact_error(exc, secret_values(account.config))
+        metadata_warnings.append(
+            f"Hyperliquid symbol metadata could not be loaded: {message}"
+        )
     try:
         orders, warnings = await asyncio.to_thread(
             fetch_hyperliquid_historical_orders,
@@ -1428,13 +1487,14 @@ async def _retry_history_enrichment_from_parent(
             orders,
             [],
         )
-        combined_warnings = [*retained_warnings, *warnings]
+        combined_warnings = [*retained_warnings, *metadata_warnings, *warnings]
+        status = "partial" if combined_warnings else "imported"
         await loop.run_in_executor(
             cache_executor,
             partial(
                 cache.update_csv_import_status,
                 import_id,
-                status="partial" if warnings else "imported",
+                status=status,
                 warnings=combined_warnings,
             ),
         )
@@ -1443,7 +1503,7 @@ async def _retry_history_enrichment_from_parent(
             "summary": {"orders": len(orders)},
             "imports": [{
                 "import_id": import_id,
-                "status": "partial" if warnings else "imported",
+                "status": status,
                 "warnings": combined_warnings,
             }],
         }
@@ -1452,7 +1512,7 @@ async def _retry_history_enrichment_from_parent(
     except Exception as exc:
         message = redact_error(exc, secret_values(account.config))
         warning = f"Hyperliquid Order History could not be enriched: {message}"
-        combined_warnings = [*retained_warnings, warning]
+        combined_warnings = [*retained_warnings, *metadata_warnings, warning]
         await loop.run_in_executor(
             cache_executor,
             partial(
@@ -1571,6 +1631,30 @@ async def _apply_parent_messages(
                 "payload": result,
             })
             continue
+        if message.get("type") == "history.import.delete":
+            request_id = str(message.get("request_id") or "")
+            try:
+                result = await asyncio.get_running_loop().run_in_executor(
+                    cache_executor,
+                    cache.delete_csv_import,
+                    str(message.get("import_id") or ""),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                result = {
+                    "status": "error",
+                    "error": {
+                        "type": type(exc).__name__,
+                        "message": str(exc).replace("\n", " ")[:500],
+                    },
+                }
+            await _put_control_message(control_output_queue, {
+                "type": "history.import.delete.result",
+                "request_id": request_id,
+                "payload": result,
+            })
+            continue
         snapshot = message.get("snapshot")
         if not isinstance(snapshot, dict):
             continue
@@ -1678,8 +1762,8 @@ async def _run_positions_stream(
                 file=sys.stderr,
                 flush=True,
             )
-        orders, fills, positions, cursor_records = history.drain()
-        if orders or fills or positions or cursor_records:
+        orders, fills, positions, pnl_events, cursor_records = history.drain()
+        if orders or fills or positions or pnl_events or cursor_records:
             try:
                 await loop.run_in_executor(
                     cache_executor,
@@ -1688,6 +1772,7 @@ async def _run_positions_stream(
                     fills,
                     positions,
                     cursor_records,
+                    pnl_events,
                 )
             except Exception as exc:
                 print(

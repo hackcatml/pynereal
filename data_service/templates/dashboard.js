@@ -78,6 +78,7 @@
   let historyImportBusy = false;
   let historyImportJobTimer = null;
   let historyImportLogLoaded = false;
+  let historyImportLogPayload = { results: [], total: 0 };
   let historyImportStatusText = "";
   let positionHistoryRequestSeq = 0;
   let positionHistoryHaveData = false;
@@ -1939,7 +1940,13 @@
     button.dataset.positionPnl = JSON.stringify(
       breakdown && typeof breakdown === "object"
         ? breakdown
-        : { gross_pnl: null, fees: null, net_pnl: value, complete: false },
+        : {
+          gross_pnl: null,
+          fees: null,
+          funding: null,
+          net_pnl: value,
+          complete: false,
+        },
     );
     cell.removeAttribute("title");
   }
@@ -1974,6 +1981,10 @@
 
     const gross = Number(breakdown.gross_pnl);
     const fees = Number(breakdown.fees);
+    const fundingValue = breakdown.funding;
+    const funding = fundingValue === null || fundingValue === undefined
+      ? Number.NaN
+      : Number(fundingValue);
     const net = Number(breakdown.net_pnl);
     const complete = breakdown.complete === true
       && Number.isFinite(gross)
@@ -1989,13 +2000,33 @@
       el("position-pnl-fees"),
       `mono ${positionPnlClass(feeAdjustment)}`.trim(),
     );
+    setText(
+      el("position-pnl-funding"),
+      Number.isFinite(funding) ? formatSignedPositionNumber(funding) : "Unavailable",
+    );
+    setClass(
+      el("position-pnl-funding"),
+      `mono ${positionPnlClass(funding)}`.trim(),
+    );
     setText(el("position-pnl-net"), formatSignedPositionNumber(net));
     setClass(el("position-pnl-net"), `mono ${positionPnlClass(net)}`.trim());
-    el("position-pnl-note").classList.toggle("hidden", complete);
+    const fundingAvailable = Number.isFinite(funding);
+    const estimatedFunding = breakdown.funding_allocation === "estimated";
+    el("position-pnl-note").classList.toggle(
+      "hidden",
+      complete && fundingAvailable && !estimatedFunding,
+    );
     if (!complete) {
       setText(
         el("position-pnl-note"),
         "The exchange reports net realized PnL without a fee breakdown.",
+      );
+    } else if (!fundingAvailable) {
+      setText(el("position-pnl-note"), "Funding data is unavailable for this position.");
+    } else if (estimatedFunding) {
+      setText(
+        el("position-pnl-note"),
+        "Daily funding is allocated by position size and holding time.",
       );
     }
 
@@ -2750,6 +2781,14 @@
     renderHistoryImportActions();
   }
 
+  function setHistoryImportHelpOpen(open) {
+    const help = el("history-import-help");
+    const button = el("history-import-help-button");
+    if (!help || !button) return;
+    help.classList.toggle("show", open);
+    button.setAttribute("aria-expanded", String(open));
+  }
+
   function historyImportTypeLabel(value) {
     return String(value || "")
       .split("_")
@@ -2871,8 +2910,13 @@
 
   function renderHistoryImportLog(payload) {
     const results = payload && Array.isArray(payload.results) ? payload.results : [];
-    el("history-import-log-count").textContent = results.length
-      ? `${Number(payload.total || results.length).toLocaleString()} files`
+    historyImportLogPayload = {
+      ...(payload || {}),
+      results,
+      total: Number(payload && payload.total || results.length),
+    };
+    el("history-import-log-count").textContent = historyImportLogPayload.total
+      ? `${historyImportLogPayload.total.toLocaleString()} files`
       : "";
     el("history-import-log-empty").classList.toggle("hidden", results.length > 0);
     el("history-import-log-list").innerHTML = results.map((item) => {
@@ -2892,6 +2936,8 @@
           ? `<button type="button" class="btn btn-icon" data-history-import-retry="${esc(item.import_id)}" title="Retry Hyperliquid Order History" aria-label="Retry Hyperliquid Order History">`
             + `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.7-6L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15.7 6L3 16"></path><path d="M3 21v-5h5"></path></svg></button>`
           : "")
+        + `<button type="button" class="btn btn-danger btn-icon" data-history-import-delete="${esc(item.import_id)}" title="Delete import record" aria-label="Delete import record">`
+        + `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v5M14 11v5"></path></svg></button>`
         + `</span></div>`;
     }).join("");
   }
@@ -3069,6 +3115,38 @@
     }
   }
 
+  async function deleteHistoryImport(importId, button) {
+    if (!importId || historyImportBusy) return;
+    const row = button && button.closest(".history-import-log-row");
+    el("history-import-error").classList.add("hidden");
+    if (button) button.disabled = true;
+    if (row) row.classList.add("is-deleting");
+    try {
+      await api(`/api/account/history/imports/${encodeURIComponent(importId)}`, {
+        method: "DELETE",
+      });
+      const results = (historyImportLogPayload.results || []).filter(
+        (item) => String(item && item.import_id || "") !== importId,
+      );
+      historyImportLogPayload = {
+        ...historyImportLogPayload,
+        results,
+        total: Math.max(0, Number(historyImportLogPayload.total || 0) - 1),
+      };
+      if (row) row.remove();
+      el("history-import-log-count").textContent = historyImportLogPayload.total
+        ? `${historyImportLogPayload.total.toLocaleString()} files`
+        : "";
+      el("history-import-log-empty").classList.toggle("hidden", results.length > 0);
+      historyImportLogLoaded = true;
+    } catch (error) {
+      if (button) button.disabled = false;
+      if (row) row.classList.remove("is-deleting");
+      el("history-import-error").textContent = error.message;
+      el("history-import-error").classList.remove("hidden");
+    }
+  }
+
   function formatAccountHistoryDate(value, includeSeconds = false, includeYear = false) {
     const timestamp = Date.parse(String(value || ""));
     if (!Number.isFinite(timestamp)) return "—";
@@ -3196,8 +3274,8 @@
     const metrics = document.createElement("div");
     metrics.className = "account-history-record-metrics";
     metrics.append(
-      createHistoryMetric("Opened", formatAccountHistoryDate(record.opened_at, true)),
-      createHistoryMetric("Closed", formatAccountHistoryDate(record.closed_at, true)),
+      createHistoryMetric("Opened", formatAccountHistoryDate(record.opened_at, true, true)),
+      createHistoryMetric("Closed", formatAccountHistoryDate(record.closed_at, true, true)),
       createHistoryMetric("Entry Price", formatPositionNumber(position.entry_price)),
       createHistoryMetric("Avg Close Price", formatPositionNumber(position.exit_price)),
       createHistoryMetric("Size", formatPositionNumber(position.quantity ?? position.contracts)),
@@ -3240,7 +3318,7 @@
         "Avg Price",
         formatPositionNumber(order.average_price ?? order.price),
       ),
-      createHistoryMetric("Created", formatAccountHistoryDate(record.created_at, true)),
+      createHistoryMetric("Created", formatAccountHistoryDate(record.created_at, true, true)),
     );
     row.appendChild(metrics);
     return row;
@@ -4852,6 +4930,10 @@
     el("history-import-dropzone").addEventListener("click", () => {
       if (!historyImportBusy) el("history-import-files").click();
     });
+    el("history-import-help-button").addEventListener("click", (event) => {
+      event.stopPropagation();
+      setHistoryImportHelpOpen(!el("history-import-help").classList.contains("show"));
+    });
     el("history-import-dropzone").addEventListener("dragover", (event) => {
       event.preventDefault();
       if (!historyImportBusy) el("history-import-dropzone").classList.add("dragover");
@@ -4916,6 +4998,16 @@
     });
     el("history-import-submit").addEventListener("click", submitHistoryImport);
     el("history-import-log-list").addEventListener("click", (event) => {
+      const deleteButton = event.target && event.target.closest
+        ? event.target.closest("[data-history-import-delete]")
+        : null;
+      if (deleteButton) {
+        deleteHistoryImport(
+          String(deleteButton.dataset.historyImportDelete || ""),
+          deleteButton,
+        );
+        return;
+      }
       const button = event.target && event.target.closest
         ? event.target.closest("[data-history-import-retry]")
         : null;
@@ -4925,6 +5017,9 @@
     document.addEventListener("click", (event) => {
       if (!event.target || !event.target.closest(".history-import-select")) {
         closeHistoryImportSelects();
+      }
+      if (!event.target || !event.target.closest("#history-import-help")) {
+        setHistoryImportHelpOpen(false);
       }
     });
     el("assets-close").addEventListener("click", closeAssets);

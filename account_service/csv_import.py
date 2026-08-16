@@ -5,11 +5,17 @@ import hashlib
 import io
 import json
 import re
+import ssl
 import urllib.request
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+
+try:
+    import certifi
+except ModuleNotFoundError:  # pragma: no cover - provider extras install certifi
+    certifi = None
 
 from account_service.history import reconstruct_position_history_from_fills
 
@@ -186,6 +192,11 @@ def _hyperliquid_symbol(value: Any) -> tuple[str, str]:
     raw = _clean(value)
     if not raw:
         return "", "default"
+    display_match = re.fullmatch(r"(.+?)\s*\(([^()]+)\)", raw)
+    if display_match is not None:
+        coin = display_match.group(1).strip().upper()
+        dex_name = display_match.group(2).strip().lower() or "default"
+        return f"{dex_name.upper()}-{coin}/USDC:USDC", dex_name
     if "/" in raw:
         return raw.upper(), "spot"
     if ":" in raw:
@@ -193,6 +204,70 @@ def _hyperliquid_symbol(value: Any) -> tuple[str, str]:
         dex_name = dex.strip().lower() or "default"
         return f"{dex_name.upper()}-{coin.strip().upper()}/USDC:USDC", dex_name
     return f"{raw.upper()}/USDC:USDC", "default"
+
+
+def canonicalize_hyperliquid_symbol(
+    symbol: str,
+    aliases: dict[tuple[str, str], tuple[str, str]],
+) -> tuple[str, str]:
+    normalized = _clean(symbol).upper()
+    if not normalized:
+        return "", "default"
+    if "/" in normalized and ":" not in normalized:
+        return normalized, "spot"
+    base = normalized.split("/", 1)[0]
+    if "-" not in base:
+        return normalized, "default"
+    dex_name, coin = base.split("-", 1)
+    return aliases.get(
+        (dex_name.lower(), coin),
+        (normalized, dex_name.lower()),
+    )
+
+
+def canonicalize_hyperliquid_import_batch(
+    batch: dict[str, Any],
+    account: str,
+    aliases: dict[tuple[str, str], tuple[str, str]],
+) -> None:
+    for category in ("orders", "fills", "positions"):
+        records = batch.get(category)
+        if not isinstance(records, list):
+            continue
+        for record in records:
+            if (
+                not isinstance(record, dict)
+                or record.get("account") != account
+                or record.get("exchange") != "hyperliquid"
+            ):
+                continue
+            payload = record.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            symbol, scope = canonicalize_hyperliquid_symbol(
+                str(payload.get("symbol") or ""),
+                aliases,
+            )
+            payload["symbol"] = symbol
+            record["market_scope"] = scope
+            if category == "positions":
+                record["dex"] = scope
+
+    events = batch.get("pnl_events")
+    if not isinstance(events, list):
+        return
+    for record in events:
+        if (
+            not isinstance(record, dict)
+            or record.get("account") != account
+            or record.get("exchange") != "hyperliquid"
+        ):
+            continue
+        symbol, _ = canonicalize_hyperliquid_symbol(
+            str(record.get("symbol") or ""),
+            aliases,
+        )
+        record["symbol"] = symbol
 
 
 def _rows_from_bytes(content: bytes) -> tuple[list[list[str]], str]:
@@ -496,7 +571,12 @@ def _parse_bitget(
             symbol, side, margin_mode = _bitget_future_parts(row.get("Futures"))
             gross = _decimal(row.get("Realized PnL"))
             net = _decimal(row.get("Position Pnl"))
-            fees = gross - net if gross is not None and net is not None else None
+            funding = _decimal(row.get("Fees"))
+            fees = (
+                gross + funding - net
+                if gross is not None and funding is not None and net is not None
+                else None
+            )
             currency_match = re.search(r"([A-Za-z]+)$", _clean(row.get("Position Pnl")))
             currency = currency_match.group(1).upper() if currency_match else "USDT"
             result["positions"].append(_position_record(
@@ -517,7 +597,14 @@ def _parse_bitget(
                         "fees": format(fees, "f") if fees is not None else None,
                         "net_pnl": format(net, "f") if net is not None else None,
                         "currency": currency,
-                        "complete": gross is not None and net is not None,
+                        "complete": all(
+                            value is not None
+                            for value in (gross, net, funding, fees)
+                        ),
+                        "funding": (
+                            format(funding, "f") if funding is not None else None
+                        ),
+                        "funding_source": "position",
                         "funding_or_other": _number_text(row.get("Fees")),
                         "opening_fee": _number_text(row.get("Opening fee")),
                         "closing_fee": _number_text(row.get("Closing fee")),
@@ -593,7 +680,11 @@ def _parse_okx(
             funding = _decimal(row.get("Funding Fee"))
             liquidation = _decimal(row.get("Liquidation Clearance Fee"))
             net = _sum_decimal(gross, fee, funding, liquidation)
-            fee_cost = gross - net if gross is not None and net is not None else None
+            fee_cost = (
+                gross + funding - net
+                if gross is not None and funding is not None and net is not None
+                else None
+            )
             currency = _clean(row.get("Margin Currency")).upper() or "USDT"
             result["positions"].append(_position_record(
                 exchange="okx",
@@ -614,6 +705,7 @@ def _parse_okx(
                         "net_pnl": format(net, "f") if net is not None else None,
                         "currency": currency,
                         "complete": net is not None,
+                        "funding_source": "position",
                         "trading_fee": format(fee, "f") if fee is not None else None,
                         "funding": format(funding, "f") if funding is not None else None,
                         "liquidation_fee": (
@@ -711,7 +803,7 @@ def _parse_hyperliquid(
                 row.get("payment"),
                 row.get("rate"),
             )
-            result["pnl_events"].append(_event_record(
+            event = _event_record(
                 "hyperliquid",
                 event_id,
                 "funding",
@@ -720,7 +812,13 @@ def _parse_hyperliquid(
                 _number_text(row.get("payment"), "0") or "0",
                 "USDC",
                 "funding",
-            ))
+            )
+            event["payload"].update({
+                "side": _clean(row.get("side")).lower(),
+                "size": _number_text(row.get("sz")),
+                "rate": _number_text(row.get("rate")),
+            })
+            result["pnl_events"].append(event)
             continue
 
         direction = _clean(row.get("dir"))
@@ -1031,6 +1129,62 @@ def build_history_import_batch(specs: list[dict[str, Any]]) -> dict[str, Any]:
     return batch
 
 
+def _hyperliquid_info_request(
+    body: dict[str, Any],
+    *,
+    timeout: float,
+) -> Any:
+    request = urllib.request.Request(
+        "https://api.hyperliquid.xyz/info",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": "PyneReal/1"},
+        method="POST",
+    )
+    context = ssl.create_default_context(
+        cafile=certifi.where() if certifi is not None else None,
+    )
+    with urllib.request.urlopen(  # noqa: S310
+        request,
+        timeout=timeout,
+        context=context,
+    ) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_hyperliquid_symbol_aliases(
+    *,
+    timeout: float = 30.0,
+) -> dict[tuple[str, str], tuple[str, str]]:
+    payload = _hyperliquid_info_request(
+        {"type": "perpConciseAnnotations"},
+        timeout=timeout,
+    )
+    if not isinstance(payload, list):
+        raise HistoryCsvError(
+            "Hyperliquid perpConciseAnnotations returned an invalid response"
+        )
+    aliases: dict[tuple[str, str], tuple[str, str]] = {}
+    for item in payload:
+        if not isinstance(item, list) or len(item) != 2:
+            continue
+        raw_coin, annotation = item
+        if not isinstance(annotation, dict):
+            continue
+        coin_name = _clean(raw_coin)
+        if ":" not in coin_name:
+            continue
+        dex_name, coin = coin_name.split(":", 1)
+        dex_name = dex_name.strip().lower()
+        coin = coin.strip().upper()
+        display_name = _clean(annotation.get("displayName")).upper()
+        if not dex_name or not coin or not display_name:
+            continue
+        canonical = (f"{dex_name.upper()}-{coin}/USDC:USDC", dex_name)
+        aliases[(dex_name, display_name)] = canonical
+        aliases[(dex_name, coin)] = canonical
+    return aliases
+
+
 def fetch_hyperliquid_historical_orders(
     wallet_address: str,
     account: str,
@@ -1041,15 +1195,10 @@ def fetch_hyperliquid_historical_orders(
     address = _clean(wallet_address)
     if not re.fullmatch(r"0x[0-9a-fA-F]{40}", address):
         raise HistoryCsvError("Hyperliquid account requires a valid walletAddress")
-    body = json.dumps({"type": "historicalOrders", "user": address}).encode("utf-8")
-    request = urllib.request.Request(
-        "https://api.hyperliquid.xyz/info",
-        data=body,
-        headers={"Content-Type": "application/json", "User-Agent": "PyneReal/1"},
-        method="POST",
+    payload = _hyperliquid_info_request(
+        {"type": "historicalOrders", "user": address},
+        timeout=timeout,
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
-        payload = json.loads(response.read().decode("utf-8"))
     if not isinstance(payload, list):
         raise HistoryCsvError("Hyperliquid historicalOrders returned an invalid response")
     orders: list[dict[str, Any]] = []
