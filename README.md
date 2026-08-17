@@ -333,13 +333,14 @@ Webhook failure prevents the AI instruction from running; an unavailable or
 failed AI service does not roll back a successful webhook.
 
 Manual alerts are independent from the Webhook checkbox. The checkbox controls
-strategy-generated alerts only; a manual alert can still be sent while the
-checkbox is off. A valid webhook URL is still required. PyneReal sends the final
-JSON message directly to that URL.
+strategy-generated alerts only; a manual alert still attempts to send the final
+JSON message directly to its configured webhook URL while the checkbox is off.
 
 If Telegram credentials are configured for the session, or through the root
-`.env` fallback, PyneReal also sends a Telegram manual-alert message after the
-webhook send succeeds. This does not depend on the Telegram checkbox.
+`.env` fallback, PyneReal sends a Telegram manual-alert message after the webhook
+attempt finishes. The message reports whether the webhook was sent or failed,
+and a webhook failure does not prevent this Telegram notification. This does not
+depend on the Telegram checkbox.
 
 The JSON `MESSAGE` and optional `AI INSTRUCTION` support these placeholders:
 

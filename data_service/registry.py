@@ -187,6 +187,7 @@ class SessionRegistry:
         feed.tasks = {
             "watch_trades_loop": asyncio.create_task(self._guard_feed(feed, "watch_trades_loop", watch_trades_loop(
                 spec.exchange, spec.symbol, spec.timeframe, feed.state, feed.broadcast_bar,
+                on_trades=feed.broadcast_trades,
                 market_type=spec.market_type))),
             "fix_missing_bars_loop": asyncio.create_task(self._guard_feed(feed, "fix_missing_bars_loop", fix_missing_bars_loop(
                 spec.exchange, spec.timeframe, feed.state))),
