@@ -687,7 +687,23 @@ App.ui = {
       status.classList.add("error");
       return;
     }
+    const webhook = result.data && result.data.webhook;
     const telegram = result.data && result.data.telegram;
+    if (!webhook || !webhook.sent) {
+      const webhookDetail = String((webhook && webhook.error) || "unknown error").slice(0, 180);
+      if (telegram && telegram.sent) {
+        status.textContent = webhookDetail
+          ? `Webhook failed: ${webhookDetail}; Telegram sent`
+          : "Webhook failed; Telegram sent";
+      } else {
+        const telegramDetail = String((telegram && telegram.error) || "").slice(0, 180);
+        status.textContent = telegramDetail
+          ? `Webhook failed: ${webhookDetail}; Telegram failed: ${telegramDetail}`
+          : `Webhook failed: ${webhookDetail}`;
+      }
+      status.classList.add("error");
+      return;
+    }
     if (telegram && telegram.error) {
       const detail = String(telegram.error || "").slice(0, 180);
       status.textContent = detail ? `Webhook sent; Telegram failed: ${detail}` : "Webhook sent; Telegram failed";
