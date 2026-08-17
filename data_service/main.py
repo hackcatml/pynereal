@@ -216,7 +216,15 @@ async def main() -> None:
         ai_enabled=lambda: codex_service.enabled,
         request_shutdown=update_shutdown.set,
     )
-    await asyncio.to_thread(update_service.sync_dependencies_after_legacy_update)
+    legacy_dependencies_synced = await asyncio.to_thread(
+        update_service.sync_dependencies_after_legacy_update
+    )
+    if legacy_dependencies_synced:
+        print(
+            "[update] restarting data service with freshly installed dependencies",
+            flush=True,
+        )
+        update_service.restart_after_legacy_dependency_sync()
     registry.set_ai_instruction_handler(codex_service.handle_strategy_instruction)
     try:
         await codex_service.start()

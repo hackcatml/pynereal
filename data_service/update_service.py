@@ -309,6 +309,13 @@ class UpdateService:
             message="Restarting data service",
             error=update_error,
         )
+        self._exec_data_service(request, update_error)
+
+    def _exec_data_service(
+        self,
+        request: dict[str, Any],
+        update_error: str = "",
+    ) -> None:
         env = os.environ.copy()
         env["PYNEREAL_UPDATE_AI_ENABLED"] = "1" if request.get("ai_enabled") else "0"
         python = str(request.get("python") or sys.executable)
@@ -327,15 +334,15 @@ class UpdateService:
             )
             raise
 
-    def sync_dependencies_after_legacy_update(self) -> None:
+    def sync_dependencies_after_legacy_update(self) -> bool:
         """Handle the first update performed by an older updater implementation."""
         if not self.pending_restart():
-            return
+            return False
         request = read_update_state(self.request_path)
         if request.get("dependencies_synced") or not self._dependency_sync_required(
             request.get("changed_files", [])
         ):
-            return
+            return False
         try:
             write_update_state(
                 self.state_path,
@@ -358,6 +365,11 @@ class UpdateService:
                 error=str(exc),
             )
             raise
+        return True
+
+    def restart_after_legacy_dependency_sync(self) -> None:
+        request = read_update_state(self.request_path)
+        self._exec_data_service(request)
 
     async def finish_restart(self, timeout: float = 900) -> None:
         request = read_update_state(self.request_path)
