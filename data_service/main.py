@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import traceback
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -10,7 +11,9 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.exception_handlers import http_exception_handler
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ai.provider.codex_service import CodexService
 from account_data import AccountDataService
@@ -43,6 +46,37 @@ def build_app(
     update_service: UpdateService,
 ) -> FastAPI:
     app = FastAPI()
+
+    @app.exception_handler(StarletteHTTPException)
+    async def log_history_import_body_error(
+        request: Request,
+        exc: StarletteHTTPException,
+    ):
+        if (
+            request.url.path == "/api/account/history/import/preview"
+            and exc.status_code == 400
+            and exc.detail == "There was an error parsing the body"
+        ):
+            cause = exc.__cause__
+            if cause is None:
+                print(
+                    "[history_import] multipart parsing failed without an exception cause",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"[history_import] multipart parsing failed: "
+                    f"{type(cause).__name__}: {cause}",
+                    file=sys.stderr,
+                )
+                traceback.print_exception(
+                    type(cause),
+                    cause,
+                    cause.__traceback__,
+                    file=sys.stderr,
+                )
+        return await http_exception_handler(request, exc)
+
     app.include_router(build_ui_router())
     app.include_router(
         build_control_router(
