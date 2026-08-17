@@ -804,6 +804,18 @@ class Session:
                 script_title=self._manual_alert_script_title(),
                 payload=payload,
             )
+            webhook = result.get("webhook") if isinstance(result, dict) else None
+            if isinstance(webhook, dict) and webhook.get("error"):
+                log_with_time(
+                    f"[manual_alert_trigger] webhook failed for {self.spec.id}: "
+                    f"{webhook['error']}"
+                )
+            telegram = result.get("telegram") if isinstance(result, dict) else None
+            if isinstance(telegram, dict) and telegram.get("error"):
+                log_with_time(
+                    f"[manual_alert_trigger] Telegram failed for {self.spec.id}: "
+                    f"{telegram['error']}"
+                )
         except Exception as e:
             log_with_time(
                 f"[manual_alert_trigger] send failed for {self.spec.id} "
@@ -895,6 +907,9 @@ class Session:
     ) -> bool:
         instruction = str(payload.get("ai_instruction") or "").strip()
         if not instruction:
+            return False
+        webhook = delivery_result.get("webhook")
+        if not isinstance(webhook, dict) or not webhook.get("sent"):
             return False
         if len(instruction) > _MAX_AI_INSTRUCTION_CHARS:
             log_with_time(

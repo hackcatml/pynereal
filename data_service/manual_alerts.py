@@ -70,6 +70,15 @@ def post_telegram_message(token: str, chat_id: str, text: str) -> dict:
         raise RuntimeError(type(e).__name__) from e
 
 
+def webhook_delivery_status(error: BaseException | str) -> str:
+    reason = str(error).strip()
+    if not reason and isinstance(error, BaseException):
+        reason = type(error).__name__
+    if len(reason) > 117:
+        reason = reason[:117] + "..."
+    return f"Failed({reason or 'unknown error'})"
+
+
 def manual_alert_signal_text(message: Any) -> str:
     if isinstance(message, str):
         return message
@@ -100,12 +109,25 @@ def send_manual_alert_payload(*, spec: SessionSpec, script_title: str | None,
 
     wh = spec.webhook
     url = (wh.get("url") or "").strip() or default_webhook_url()
+    webhook_result: dict[str, Any] = {"sent": False}
     if not url:
-        raise ValueError("webhook url is empty")
-    if not url.startswith(("http://", "https://")):
-        raise ValueError("webhook url must start with http:// or https://")
+        webhook_result["error"] = "webhook url is empty"
+    elif not url.startswith(("http://", "https://")):
+        webhook_result["error"] = "webhook url must start with http:// or https://"
+    else:
+        try:
+            webhook_result = {
+                "sent": True,
+                **post_json_webhook(url, payload["message"], spec.exchange),
+            }
+        except Exception as e:
+            webhook_result = {"sent": False, "error": str(e) or type(e).__name__}
 
-    webhook_result = post_json_webhook(url, payload["message"], spec.exchange)
+    webhook_status = (
+        "Sent"
+        if webhook_result.get("sent")
+        else webhook_delivery_status(str(webhook_result.get("error") or "unknown error"))
+    )
 
     token = (wh.get("telegram_token") or "").strip() or default_telegram_token()
     chat_id = (wh.get("telegram_chat_id") or "").strip() or default_telegram_chat_id()
@@ -116,7 +138,7 @@ def send_manual_alert_payload(*, spec: SessionSpec, script_title: str | None,
             timeframe=spec.timeframe,
             ticker=spec.symbol,
             message=payload["message"],
-            webhook_status="Sent",
+            webhook_status=webhook_status,
         )
         try:
             telegram_result = {
