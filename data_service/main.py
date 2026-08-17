@@ -13,6 +13,7 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from ai.provider.codex_service import CodexService
+from account_data import AccountDataService
 from asset_portfolio import AssetPortfolioService
 from asset_transfer import AssetTransferService
 from calendar_store import CalendarEventStore
@@ -36,6 +37,7 @@ def build_app(
     registry: SessionRegistry,
     codex_service: CodexService,
     calendar_store: CalendarEventStore,
+    account_data_service: AccountDataService,
     asset_portfolio_service: AssetPortfolioService,
     asset_transfer_service: AssetTransferService,
     update_service: UpdateService,
@@ -47,6 +49,7 @@ def build_app(
             registry,
             codex_service,
             calendar_store,
+            account_data_service,
             asset_portfolio_service,
             asset_transfer_service,
             update_service,
@@ -72,6 +75,17 @@ def build_app(
             await registry.hub_ws.disconnect(ws)
         except Exception:
             await registry.hub_ws.disconnect(ws)
+
+    @app.websocket("/ws/account")
+    async def account_ws(ws: WebSocket):
+        await account_data_service.connect_live(ws)
+        try:
+            while True:
+                await ws.receive_text()
+        except WebSocketDisconnect:
+            await account_data_service.disconnect_live(ws)
+        except Exception:
+            await account_data_service.disconnect_live(ws)
 
     @app.websocket("/ws/{session_id}")
     async def session_ws(ws: WebSocket, session_id: str):
@@ -147,6 +161,10 @@ async def main() -> None:
     asset_portfolio_service = AssetPortfolioService(
         _PROJECT_ROOT / "workdir" / "config" / "providers.toml"
     )
+    account_data_service = AccountDataService(
+        _PROJECT_ROOT / "workdir" / "config" / "providers.toml",
+        cache_path=_PROJECT_ROOT / "workdir" / "data" / "cache" / "account_cache.sqlite",
+    )
     asset_transfer_service = AssetTransferService(
         _PROJECT_ROOT / "workdir" / "config" / "providers.toml"
     )
@@ -164,6 +182,7 @@ async def main() -> None:
         ai_enabled=lambda: codex_service.enabled,
         request_shutdown=update_shutdown.set,
     )
+    await asyncio.to_thread(update_service.sync_dependencies_after_legacy_update)
     registry.set_ai_instruction_handler(codex_service.handle_strategy_instruction)
     try:
         await codex_service.start()
@@ -174,6 +193,7 @@ async def main() -> None:
         registry,
         codex_service,
         calendar_store,
+        account_data_service,
         asset_portfolio_service,
         asset_transfer_service,
         update_service,
@@ -181,6 +201,10 @@ async def main() -> None:
 
     await registry.start_all(specs)
     await asset_portfolio_service.start()
+    try:
+        await account_data_service.start()
+    except Exception as exc:
+        print(f"[account] service startup failed: {type(exc).__name__}: {exc}")
     heartbeat = asyncio.create_task(_hub_status_heartbeat(registry))
 
     server = uvicorn.Server(
@@ -212,15 +236,22 @@ async def main() -> None:
         if update_finish_task is not None:
             update_finish_task.cancel()
             shutdown_tasks.append(update_finish_task)
-        await asyncio.gather(*shutdown_tasks, return_exceptions=True)
+        try:
+            await asyncio.gather(*shutdown_tasks, return_exceptions=True)
+        except asyncio.CancelledError:
+            # Ctrl-C can cancel this wait while child services still need to close.
+            pass
         heartbeat.cancel()
         try:
             await registry.shutdown()
         finally:
             try:
-                await asset_portfolio_service.close()
+                await account_data_service.close()
             finally:
-                await codex_service.close()
+                try:
+                    await asset_portfolio_service.close()
+                finally:
+                    await codex_service.close()
     if update_shutdown.is_set():
         update_service.apply_and_restart()
 

@@ -5,6 +5,8 @@ import time
 
 POST_BAR_TASK_OFFSET_SECONDS = 10.0
 POST_BAR_TASK_WINDOW_SECONDS = 10.0
+MANUAL_REFRESH_POST_BOUNDARY_GUARD_SECONDS = 5.0
+MANUAL_REFRESH_PRE_BOUNDARY_GUARD_SECONDS = 10.0
 
 
 def seconds_until_post_bar_task_slot(
@@ -33,3 +35,34 @@ def seconds_until_post_bar_task_window(
     if second < window_start:
         return window_start - second
     return 60.0 - second + window_start
+
+
+def seconds_until_bar_boundary_guard_end(
+    now_seconds: float | None = None,
+) -> float:
+    """Delay work during the 10 seconds before and after a minute boundary."""
+
+    current = time.time() if now_seconds is None else now_seconds
+    second = current % 60.0
+    if second < POST_BAR_TASK_OFFSET_SECONDS:
+        return POST_BAR_TASK_OFFSET_SECONDS - second
+    guard_start = 60.0 - POST_BAR_TASK_OFFSET_SECONDS
+    if second >= guard_start:
+        return 60.0 - second + POST_BAR_TASK_OFFSET_SECONDS
+    return 0.0
+
+
+def seconds_until_manual_refresh_guard_end(
+    now_seconds: float | None = None,
+) -> float:
+    """Delay manual refreshes from 10 seconds before to 5 seconds after a minute."""
+
+    current = time.time() if now_seconds is None else now_seconds
+    second = current % 60.0
+    post_guard = MANUAL_REFRESH_POST_BOUNDARY_GUARD_SECONDS
+    if second < post_guard:
+        return post_guard - second
+    guard_start = 60.0 - MANUAL_REFRESH_PRE_BOUNDARY_GUARD_SECONDS
+    if second >= guard_start:
+        return 60.0 - second + post_guard
+    return 0.0

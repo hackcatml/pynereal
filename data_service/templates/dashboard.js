@@ -52,11 +52,61 @@
     hyperliquid: new Set(["spot", "swap"]),
   };
   let assetsRequestSeq = 0;
+  const assetsRefreshIntervalMs = 10000;
+  let assetsRefreshTimer = null;
   let assetsOpenTimer = null;
   let assetsCloseTimer = null;
   let assetsHaveData = false;
   let assetsPayload = null;
   let selectedAssetExchange = null;
+  let accountView = "assets";
+  let positionsRequestSeq = 0;
+  let positionsHaveData = false;
+  let positionsPayload = null;
+  let positionsObservedAt = 0;
+  let pnlRequestSeq = 0;
+  let pnlHaveData = false;
+  let pnlPayload = null;
+  let selectedPnlExchange = null;
+  let pnlPeriodDays = 90;
+  const pnlRefreshIntervalMs = 10000;
+  let pnlRefreshTimer = null;
+  let pnlListSizeFrame = null;
+  const historyCustomSelects = {};
+  let historyImportPreview = null;
+  let historyImportSelections = {};
+  let historyImportBusy = false;
+  let historyImportJobTimer = null;
+  let historyImportLogLoaded = false;
+  let historyImportLogPayload = { results: [], total: 0 };
+  let historyImportStatusText = "";
+  let positionHistoryRequestSeq = 0;
+  let positionHistoryHaveData = false;
+  let positionHistoryRows = [];
+  let positionHistoryCursor = null;
+  let positionHistoryTotal = 0;
+  let positionHistoryGroupsHaveData = false;
+  const positionHistoryNavigation = {
+    level: "exchanges",
+    exchange: "",
+    symbol: "",
+  };
+  let orderHistoryRequestSeq = 0;
+  let orderHistoryHaveData = false;
+  let orderHistoryRows = [];
+  let orderHistoryCursor = null;
+  let orderHistoryTotal = 0;
+  let orderHistoryGroupsHaveData = false;
+  const orderHistoryNavigation = {
+    level: "exchanges",
+    exchange: "",
+    symbol: "",
+  };
+  const accountHistoryPageSize = 50;
+  let accountPositionsWs = null;
+  let accountPositionsReconnectTimer = null;
+  let accountPositionsKeepaliveTimer = null;
+  let accountPositionsGeneration = 0;
   let assetTransferRequestSeq = 0;
   let assetTransferContext = null;
   let assetTransferReview = null;
@@ -450,6 +500,46 @@
     return !el("assets-modal").classList.contains("hidden");
   }
 
+  function clearAssetsRefreshTimer() {
+    if (assetsRefreshTimer === null) return;
+    clearTimeout(assetsRefreshTimer);
+    assetsRefreshTimer = null;
+  }
+
+  function scheduleAssetsRefresh() {
+    clearAssetsRefreshTimer();
+    if (
+      !isAssetsOpen()
+      || accountView !== "assets"
+      || document.visibilityState !== "visible"
+    ) return;
+    assetsRefreshTimer = window.setTimeout(() => {
+      assetsRefreshTimer = null;
+      if (!isAssetsOpen() || accountView !== "assets") return;
+      loadAssets(true, true);
+    }, assetsRefreshIntervalMs);
+  }
+
+  function clearPnlRefreshTimer() {
+    if (pnlRefreshTimer === null) return;
+    clearTimeout(pnlRefreshTimer);
+    pnlRefreshTimer = null;
+  }
+
+  function schedulePnlRefresh() {
+    clearPnlRefreshTimer();
+    if (
+      !isAssetsOpen()
+      || accountView !== "pnl"
+      || document.visibilityState !== "visible"
+    ) return;
+    pnlRefreshTimer = window.setTimeout(() => {
+      pnlRefreshTimer = null;
+      if (!isAssetsOpen() || accountView !== "pnl") return;
+      loadPnl();
+    }, pnlRefreshIntervalMs);
+  }
+
   function finishAssetsOpening() {
     if (assetsOpenTimer !== null) {
       clearTimeout(assetsOpenTimer);
@@ -472,17 +562,26 @@
     box.style.transform = "";
     box.style.transition = "";
     modal.setAttribute("aria-hidden", "true");
+    clearAssetsRefreshTimer();
+    clearPnlRefreshTimer();
+    closeAccountPositionsSocket();
     assetsCloseTimer = null;
     assetsOpenTimer = null;
     unlockBodyScroll();
   }
 
-  async function openAssets() {
+  async function openAccount(view = "assets") {
+    const wasOpen = isAssetsOpen();
     closeHubMenu();
     closeAiChat();
-    selectedAssetExchange = null;
-    el("assets-title").textContent = "Assets";
-    el("assets-back").classList.add("hidden");
+    if (view === "assets") selectedAssetExchange = null;
+    if (view === "pnl") selectedPnlExchange = null;
+    if (!wasOpen && accountView === view && view === "position-history") {
+      resetHistoryNavigation("position");
+    }
+    if (!wasOpen && accountView === view && view === "orders") {
+      resetHistoryNavigation("order");
+    }
     if (assetsCloseTimer !== null) {
       clearTimeout(assetsCloseTimer);
       assetsCloseTimer = null;
@@ -507,17 +606,26 @@
     box.style.transition = "";
     modal.setAttribute("aria-hidden", "false");
     lockBodyScroll();
-    await loadAssets(false);
+    await switchAccountView(view, { load: true });
   }
 
   function closeAssets(options = {}) {
     if (!isAssetsOpen()) return;
     closeAssetTransfer();
+    closePositionPnlPopover();
     const modal = el("assets-modal");
     if (modal.classList.contains("assets-closing")) return;
     const fromDrag = options && options.fromDrag === true;
     finishAssetsOpening();
+    clearAssetsRefreshTimer();
+    clearPnlRefreshTimer();
     assetsRequestSeq += 1;
+    setAssetsLoading(false);
+    positionsRequestSeq += 1;
+    positionHistoryRequestSeq += 1;
+    orderHistoryRequestSeq += 1;
+    pnlRequestSeq += 1;
+    setPnlLoading(false);
     if (!mobileHubQuery.matches) {
       finishAssetsClose();
       return;
@@ -536,6 +644,162 @@
     }
     modal.classList.add("assets-closing");
     assetsCloseTimer = window.setTimeout(finishAssetsClose, 220);
+  }
+
+  const accountViewTitles = {
+    assets: "Assets",
+    positions: "Positions",
+    "position-history": "Position History",
+    orders: "Order History",
+    "import-history": "Import History",
+    pnl: "PnL",
+  };
+
+  function accountViewIsDrilledIn(view) {
+    if (view === "assets") {
+      return Boolean(selectedAssetExchange);
+    }
+    if (view === "position-history") {
+      return positionHistoryNavigation.level !== "exchanges";
+    }
+    if (view === "orders") {
+      return orderHistoryNavigation.level !== "exchanges";
+    }
+    if (view === "pnl") {
+      return Boolean(selectedPnlExchange);
+    }
+    return false;
+  }
+
+  async function switchAccountView(view, options = {}) {
+    if (!Object.prototype.hasOwnProperty.call(accountViewTitles, view)) return;
+    const previousView = accountView;
+    // Desktop: capture the modal-box height before the view swap so we can
+    // animate it to the new view's height (avoids the snap between tabs).
+    const accountBox = document.querySelector(".assets-modal-box");
+    const animateAccountHeight = Boolean(options.animate)
+      && accountBox
+      && !el("assets-modal").classList.contains("hidden")
+      && !mobileHubQuery.matches
+      && !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const accountStartHeight = animateAccountHeight ? accountBox.offsetHeight : 0;
+    // History views reset their content and refetch on switch, so the height
+    // right after the view swap is the (empty) reset state — animating to it
+    // then jumping to the loaded height is the snap the user sees. For those we
+    // hold the old height through the reload and tween once to the final height.
+    const isAccountHistoryView = (
+      view === "position-history"
+      || view === "orders"
+      || view === "import-history"
+      || view === "pnl"
+    );
+    const deferAccountHeight = animateAccountHeight && isAccountHistoryView && Boolean(options.load);
+    const runAccountHeightTween = () => {
+      accountBox.style.height = "";
+      const endHeight = accountBox.offsetHeight;
+      if (Math.abs(endHeight - accountStartHeight) <= 1) return;
+      accountBox.style.height = `${accountStartHeight}px`;
+      void accountBox.offsetHeight; // reflow to lock the start height
+      accountBox.classList.add("flip-animating");
+      accountBox.style.height = `${endHeight}px`;
+      const onHeightEnd = (event) => {
+        if (event.target !== accountBox || event.propertyName !== "height") return;
+        accountBox.removeEventListener("transitionend", onHeightEnd);
+        accountBox.classList.remove("flip-animating");
+        accountBox.style.height = "";
+      };
+      accountBox.addEventListener("transitionend", onHeightEnd);
+    };
+    if (accountView === "assets" && view !== "assets") {
+      clearAssetsRefreshTimer();
+      assetsRequestSeq += 1;
+      setAssetsLoading(false);
+    }
+    if (accountView === "positions" && view !== "positions") {
+      positionsRequestSeq += 1;
+      closeAccountPositionsSocket();
+      closePositionPnlPopover();
+    }
+    if (accountView === "position-history" && view !== "position-history") {
+      positionHistoryRequestSeq += 1;
+    }
+    if (accountView === "orders" && view !== "orders") {
+      orderHistoryRequestSeq += 1;
+    }
+    if (accountView === "pnl" && view !== "pnl") {
+      clearPnlRefreshTimer();
+      pnlRequestSeq += 1;
+      setPnlLoading(false);
+    }
+    if (previousView !== view && view === "position-history") {
+      resetHistoryNavigation("position");
+    }
+    if (previousView !== view && view === "orders") {
+      resetHistoryNavigation("order");
+    }
+    if (previousView === view && accountViewIsDrilledIn(view)) {
+      if (view === "assets") selectedAssetExchange = null;
+      else if (view === "pnl") selectedPnlExchange = null;
+      else resetHistoryNavigation(view === "position-history" ? "position" : "order");
+    }
+    accountView = view;
+    document.querySelectorAll("[data-account-view]").forEach((button) => {
+      if (!button.classList.contains("account-tab")) return;
+      const active = button.dataset.accountView === view;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+    });
+    Object.keys(accountViewTitles).forEach((name) => {
+      el(`account-${name}-view`).classList.toggle("hidden", name !== view);
+    });
+    if (animateAccountHeight) {
+      if (deferAccountHeight) {
+        // hold the old height while the history content resets and reloads
+        accountBox.style.height = `${accountStartHeight}px`;
+      } else {
+        runAccountHeightTween();
+      }
+    }
+
+    const accountDetailSelected = (
+      (view === "assets" && selectedAssetExchange)
+      || (view === "pnl" && selectedPnlExchange)
+    );
+    el("assets-back").classList.toggle("hidden", !accountDetailSelected);
+    el("assets-refresh").classList.toggle(
+      "hidden",
+      !new Set(["assets", "positions", "position-history", "orders", "pnl"]).has(view),
+    );
+    const refreshTitles = {
+      assets: "Refresh assets",
+      positions: "Refresh positions",
+      "position-history": "Refresh position history",
+      orders: "Refresh order history",
+      pnl: "Refresh PnL",
+    };
+    el("assets-refresh").title = refreshTitles[view] || "Refresh";
+    el("assets-refresh").setAttribute("aria-label", el("assets-refresh").title);
+    el("assets-title").textContent = accountViewTitles[view];
+    if (view === "assets" && assetsPayload) renderAssetsView();
+    if (view === "pnl" && pnlPayload) renderPnlView();
+    if (!options.load) {
+      if (view === "assets") scheduleAssetsRefresh();
+      if (view === "pnl") schedulePnlRefresh();
+      return;
+    }
+    if (view === "assets") await loadAssets(false);
+    else if (view === "positions") {
+      await loadPositions(false);
+      connectAccountPositions();
+    }
+    else if (view === "position-history") await loadPositionHistory(false);
+    else if (view === "orders") await loadOrderHistory(false);
+    else if (view === "import-history") await loadHistoryImports(true);
+    else if (view === "pnl") await loadPnl();
+    if (deferAccountHeight) {
+      if (isAssetsOpen() && accountView === view) runAccountHeightTween();
+      else accountBox.style.height = ""; // switched away or closed mid-load
+    }
   }
 
   function formatAssetValue(value, currency, compact = false) {
@@ -1559,15 +1823,17 @@
           day: "numeric",
           hour: "2-digit",
           minute: "2-digit",
-        })}${payload.cached ? " · cached" : ""}`
+        })}`
       : "";
     renderAssetsView();
     assetsHaveData = true;
   }
 
   function setAssetsLoading(loading, preserveContent = false) {
-    el("assets-refresh").disabled = loading;
-    el("assets-refresh").classList.toggle("assets-refreshing", loading);
+    if (accountView === "assets") {
+      el("assets-refresh").disabled = loading;
+      el("assets-refresh").classList.toggle("assets-refreshing", loading);
+    }
     el("assets-loading").classList.toggle("hidden", !loading || preserveContent);
     if (loading) el("assets-error").classList.add("hidden");
     if (loading && !preserveContent) {
@@ -1578,16 +1844,20 @@
     }
   }
 
-  async function loadAssets(force) {
+  async function loadAssets(force, autoRefresh = false) {
+    clearAssetsRefreshTimer();
     const seq = ++assetsRequestSeq;
-    const preserveContent = Boolean(force && assetsHaveData);
+    const preserveContent = assetsHaveData;
     setAssetsLoading(true, preserveContent);
     try {
-      const payload = await api(`/api/assets${force ? "?refresh=true" : ""}`);
-      if (seq !== assetsRequestSeq || !isAssetsOpen()) return;
+      const query = force
+        ? `?refresh=true${autoRefresh ? "&auto_refresh=true" : ""}`
+        : "";
+      const payload = await api(`/api/account/assets${query}`);
+      if (seq !== assetsRequestSeq || !isAssetsOpen() || accountView !== "assets") return;
       renderAssets(payload);
     } catch (error) {
-      if (seq !== assetsRequestSeq || !isAssetsOpen()) return;
+      if (seq !== assetsRequestSeq || !isAssetsOpen() || accountView !== "assets") return;
       const errorElement = el("assets-error");
       errorElement.textContent = `${error.message}\nUse refresh to try again.`;
       errorElement.classList.remove("hidden");
@@ -1596,8 +1866,2200 @@
         el("assets-portfolios").replaceChildren();
       }
     } finally {
-      if (seq === assetsRequestSeq) setAssetsLoading(false);
+      if (seq === assetsRequestSeq) {
+        setAssetsLoading(false);
+        scheduleAssetsRefresh();
+      }
     }
+  }
+
+  function formatPositionNumber(value, maximumFractionDigits = 6) {
+    if (value === null || value === undefined || value === "" || typeof value === "boolean") {
+      return "—";
+    }
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "—";
+    return number.toLocaleString(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits,
+    });
+  }
+
+  function positionTableCell(text, className = "", label = "") {
+    const cell = document.createElement("td");
+    cell.textContent = text;
+    if (className) cell.className = className;
+    if (label) cell.dataset.label = label;
+    cell.title = text;
+    return cell;
+  }
+
+  function formatSignedPositionNumber(value, maximumFractionDigits = 4) {
+    if (value === null || value === undefined || value === "" || typeof value === "boolean") {
+      return "—";
+    }
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "—";
+    return `${number > 0 ? "+" : ""}${formatPositionNumber(number, maximumFractionDigits)}`;
+  }
+
+  function positionPnlClass(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "";
+    return number > 0
+      ? "account-pnl-positive"
+      : number < 0 ? "account-pnl-negative" : "";
+  }
+
+  function updatePositionRealizedPnlCell(cell, position) {
+    const value = position.realized_pnl === null || position.realized_pnl === undefined
+      ? Number.NaN
+      : Number(position.realized_pnl);
+    if (!Number.isFinite(value)) {
+      if (activePositionPnlButton && cell.contains(activePositionPnlButton)) {
+        closePositionPnlPopover();
+      }
+      setClass(cell, "");
+      setText(cell, "—");
+      cell.title = "—";
+      return;
+    }
+    setClass(cell, positionPnlClass(value));
+    let button = cell.querySelector(".position-pnl-value");
+    if (!button) {
+      button = document.createElement("button");
+      button.className = "position-pnl-value";
+      button.type = "button";
+      button.setAttribute("aria-label", "Show realized PnL calculation");
+      button.setAttribute("aria-haspopup", "dialog");
+      button.setAttribute("aria-expanded", "false");
+      cell.replaceChildren(button);
+    }
+    setText(button, formatSignedPositionNumber(value));
+    const breakdown = position.realized_pnl_breakdown;
+    button.dataset.positionPnl = JSON.stringify(
+      breakdown && typeof breakdown === "object"
+        ? breakdown
+        : {
+          gross_pnl: null,
+          fees: null,
+          funding: null,
+          net_pnl: value,
+          complete: false,
+        },
+    );
+    cell.removeAttribute("title");
+  }
+
+  let activePositionPnlButton = null;
+  let positionPnlPress = null;
+  let suppressPositionPnlClickUntil = 0;
+
+  function closePositionPnlPopover() {
+    if (activePositionPnlButton) {
+      activePositionPnlButton.setAttribute("aria-expanded", "false");
+      activePositionPnlButton = null;
+    }
+    const popover = el("position-pnl-popover");
+    if (popover) popover.classList.add("hidden");
+  }
+
+  function showPositionPnlPopover(button) {
+    if (activePositionPnlButton === button) {
+      closePositionPnlPopover();
+      return;
+    }
+    let breakdown;
+    try {
+      breakdown = JSON.parse(button.dataset.positionPnl || "{}");
+    } catch {
+      breakdown = {};
+    }
+    closePositionPnlPopover();
+    activePositionPnlButton = button;
+    button.setAttribute("aria-expanded", "true");
+
+    const gross = Number(breakdown.gross_pnl);
+    const fees = Number(breakdown.fees);
+    const fundingValue = breakdown.funding;
+    const funding = fundingValue === null || fundingValue === undefined
+      ? Number.NaN
+      : Number(fundingValue);
+    const net = Number(breakdown.net_pnl);
+    const complete = breakdown.complete === true
+      && Number.isFinite(gross)
+      && Number.isFinite(fees)
+      && Number.isFinite(net);
+    const feeAdjustment = complete ? -fees : Number.NaN;
+    setText(el("position-pnl-gross"), complete ? formatSignedPositionNumber(gross) : "Unavailable");
+    setText(
+      el("position-pnl-fees"),
+      complete ? formatSignedPositionNumber(feeAdjustment) : "Unavailable",
+    );
+    setClass(
+      el("position-pnl-fees"),
+      `mono ${positionPnlClass(feeAdjustment)}`.trim(),
+    );
+    setText(
+      el("position-pnl-funding"),
+      Number.isFinite(funding) ? formatSignedPositionNumber(funding) : "Unavailable",
+    );
+    setClass(
+      el("position-pnl-funding"),
+      `mono ${positionPnlClass(funding)}`.trim(),
+    );
+    setText(el("position-pnl-net"), formatSignedPositionNumber(net));
+    setClass(el("position-pnl-net"), `mono ${positionPnlClass(net)}`.trim());
+    const fundingAvailable = Number.isFinite(funding);
+    const estimatedFunding = breakdown.funding_allocation === "estimated";
+    el("position-pnl-note").classList.toggle(
+      "hidden",
+      complete && fundingAvailable && !estimatedFunding,
+    );
+    if (!complete) {
+      setText(
+        el("position-pnl-note"),
+        "The exchange reports net realized PnL without a fee breakdown.",
+      );
+    } else if (!fundingAvailable) {
+      setText(el("position-pnl-note"), "Funding data is unavailable for this position.");
+    } else if (estimatedFunding) {
+      setText(
+        el("position-pnl-note"),
+        "Daily funding is allocated by position size and holding time.",
+      );
+    }
+
+    const popover = el("position-pnl-popover");
+    popover.classList.remove("hidden");
+    const buttonRect = button.getBoundingClientRect();
+    const popoverRect = popover.getBoundingClientRect();
+    const left = Math.min(
+      Math.max(12, buttonRect.right - popoverRect.width),
+      window.innerWidth - popoverRect.width - 12,
+    );
+    let top = buttonRect.bottom + 8;
+    if (top + popoverRect.height > window.innerHeight - 12) {
+      top = Math.max(12, buttonRect.top - popoverRect.height - 8);
+    }
+    popover.style.left = `${left}px`;
+    popover.style.top = `${top}px`;
+  }
+
+  function positionRowKey(position) {
+    return JSON.stringify([
+      position.account || "",
+      position.exchange || "",
+      position.market_scope || "",
+      position.dex || "",
+      position.symbol || "",
+      position.side || "",
+    ]);
+  }
+
+  function createPositionRow() {
+    const row = document.createElement("tr");
+    const fields = [
+      ["account", "Account", "account-table-account"],
+      ["symbol", "Symbol", "account-table-symbol"],
+      ["side", "Side", ""],
+      ["size", "Size", ""],
+      ["entry", "Entry", ""],
+      ["mark", "Mark", ""],
+      ["unrealized", "Unrealized PnL", ""],
+      ["realized", "Realized PnL", ""],
+      ["return", "Return", ""],
+      ["leverage", "Leverage", ""],
+      ["liquidation", "Liquidation", ""],
+    ];
+    const cells = {};
+    fields.forEach(([field, label, className]) => {
+      const cell = positionTableCell("", className, label);
+      cell.dataset.positionField = field;
+      cells[field] = cell;
+      row.appendChild(cell);
+    });
+    row.positionCells = cells;
+    return row;
+  }
+
+  function updatePositionCell(cell, text, className = "") {
+    setClass(cell, className);
+    setText(cell, text);
+    cell.title = text;
+  }
+
+  function updatePositionRow(row, position) {
+    const cells = row.positionCells;
+    const accountName = String(position.account || "—");
+    const exchangeName = String(position.exchange || "").toUpperCase();
+    const accountIdentity = JSON.stringify([
+      accountName,
+      exchangeName,
+      position.exchange_logo_url || "",
+    ]);
+    if (cells.account.dataset.identity !== accountIdentity) {
+      const exchangeLogo = logoImg(
+        position.exchange_logo_url,
+        exchangeName,
+        "exchange-logo",
+      );
+      setHTML(
+        cells.account,
+        `${exchangeLogo}<span class="account-table-account-name">${esc(accountName)}</span>`,
+      );
+      cells.account.dataset.identity = accountIdentity;
+    }
+    cells.account.title = accountName;
+
+    const symbolText = String(position.symbol || "—");
+    const scopeText = String(position.market_scope || position.dex || "");
+    const symbolIdentity = JSON.stringify([symbolText, scopeText]);
+    if (cells.symbol.dataset.identity !== symbolIdentity) {
+      cells.symbol.replaceChildren(document.createTextNode(symbolText));
+      if (scopeText) {
+        const scope = document.createElement("small");
+        scope.textContent = scopeText;
+        cells.symbol.appendChild(scope);
+      }
+      cells.symbol.dataset.identity = symbolIdentity;
+    }
+    cells.symbol.title = symbolText;
+
+    const sideText = String(position.side || "—");
+    const sideClass = sideText.toLowerCase() === "long"
+      ? "account-position-long"
+      : sideText.toLowerCase() === "short" ? "account-position-short" : "";
+    const pnl = position.unrealized_pnl === null || position.unrealized_pnl === undefined
+      ? Number.NaN
+      : Number(position.unrealized_pnl);
+    const pnlClass = positionPnlClass(pnl);
+    const percentage = position.percentage === null || position.percentage === undefined
+      ? Number.NaN
+      : Number(position.percentage);
+    const percentageText = Number.isFinite(percentage)
+      ? `${percentage > 0 ? "+" : ""}${formatPositionNumber(percentage, 2)}%`
+      : "—";
+
+    updatePositionCell(cells.side, sideText, sideClass);
+    updatePositionCell(cells.size, formatPositionNumber(position.quantity ?? position.contracts));
+    updatePositionCell(cells.entry, formatPositionNumber(position.entry_price));
+    updatePositionCell(cells.mark, formatPositionNumber(position.mark_price));
+    updatePositionCell(
+      cells.unrealized,
+      Number.isFinite(pnl)
+        ? `${pnl > 0 ? "+" : ""}${formatPositionNumber(pnl, 4)}`
+        : "—",
+      pnlClass,
+    );
+    updatePositionRealizedPnlCell(cells.realized, position);
+    updatePositionCell(cells.return, percentageText, pnlClass);
+    updatePositionCell(
+      cells.leverage,
+      position.leverage !== null
+        && position.leverage !== undefined
+        && Number.isFinite(Number(position.leverage))
+        ? `${formatPositionNumber(position.leverage, 2)}x`
+        : "—",
+    );
+    updatePositionCell(cells.liquidation, formatPositionNumber(position.liquidation_price));
+  }
+
+  function renderPositions(payload) {
+    const observedAt = Date.parse(payload.collected_at || "");
+    if (Number.isFinite(observedAt) && observedAt < positionsObservedAt) return;
+    if (Number.isFinite(observedAt)) positionsObservedAt = observedAt;
+    positionsPayload = payload;
+    positionsHaveData = true;
+    const results = Array.isArray(payload.results) ? payload.results : [];
+    const positions = [];
+    const errors = [];
+    results.forEach((result) => {
+      if (result && result.status === "ok") {
+        (Array.isArray(result.positions) ? result.positions : []).forEach((position) => {
+          positions.push({
+            ...position,
+            account: result.account || "",
+            exchange: result.exchange || "",
+            exchange_logo_url: result.exchange_logo_url || "",
+          });
+        });
+        return;
+      }
+      const error = result && result.error && result.error.message;
+      errors.push(
+        `${result && result.account || "Unknown account"}: ${error || "Position data unavailable"}`,
+      );
+    });
+
+    const summary = payload.summary || {};
+    el("positions-open-count").textContent = String(positions.length);
+    el("positions-account-count").textContent =
+      `${Number(summary.succeeded || 0)} of ${Number(summary.accounts || 0)} accounts`;
+    el("positions-updated").textContent = Number.isFinite(observedAt)
+      ? `Updated ${new Date(observedAt).toLocaleString("en-US", {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        })}${payload.live ? " · live" : payload.cached ? " · cached" : ""}`
+      : "";
+    el("positions-summary").classList.remove("hidden");
+    el("positions-empty").textContent = Number(summary.accounts || 0) === 0
+      ? "No exchange accounts are configured in providers.toml."
+      : "No open positions.";
+    el("positions-empty").classList.toggle("hidden", positions.length !== 0);
+    el("positions-list").classList.toggle("hidden", positions.length === 0);
+
+    const list = el("positions-list");
+    const existingRows = new Map(
+      Array.from(list.children).map((row) => [row.dataset.positionKey || "", row]),
+    );
+    positions.forEach((position, index) => {
+      const key = positionRowKey(position);
+      let row = existingRows.get(key);
+      if (!row) row = createPositionListRow();
+      row.dataset.positionKey = key;
+      updatePositionListRow(row, position);
+      const currentRow = list.children[index];
+      if (currentRow !== row) list.insertBefore(row, currentRow || null);
+      existingRows.delete(key);
+    });
+    existingRows.forEach((row) => row.remove());
+
+    const errorContainer = el("positions-account-errors");
+    errorContainer.replaceChildren();
+    errors.forEach((message) => {
+      const item = document.createElement("div");
+      item.textContent = message;
+      errorContainer.appendChild(item);
+    });
+    errorContainer.classList.toggle("hidden", errors.length === 0);
+  }
+
+  function createPositionListRow() {
+    const row = document.createElement("article");
+    row.className = "account-history-record account-position-live-record";
+    const header = document.createElement("div");
+    header.className = "account-history-record-header";
+    const identity = document.createElement("div");
+    identity.className = "account-history-record-identity";
+    const logo = document.createElement("span");
+    logo.className = "account-position-live-logo";
+    const copy = document.createElement("div");
+    copy.className = "account-history-record-copy";
+    const symbolLine = document.createElement("div");
+    symbolLine.className = "account-history-record-symbol";
+    const symbol = document.createElement("strong");
+    const side = document.createElement("span");
+    symbolLine.append(symbol, side);
+    const account = document.createElement("small");
+    copy.append(symbolLine, account);
+    identity.append(logo, copy);
+    const trailing = document.createElement("div");
+    trailing.className = "account-history-record-trailing";
+    const trailingLabel = document.createElement("span");
+    trailingLabel.textContent = "Unrealized PnL";
+    const trailingValue = document.createElement("strong");
+    trailing.append(trailingLabel, trailingValue);
+    header.append(identity, trailing);
+    const metrics = document.createElement("div");
+    metrics.className = "account-history-record-metrics";
+    const makeMetric = (label) => {
+      const metric = document.createElement("div");
+      metric.className = "account-history-record-metric";
+      const labelNode = document.createElement("span");
+      labelNode.textContent = label;
+      const valueNode = document.createElement("strong");
+      metric.append(labelNode, valueNode);
+      metrics.appendChild(metric);
+      return valueNode;
+    };
+    row.positionListNodes = {
+      logo,
+      symbol,
+      side,
+      account,
+      trailingValue,
+      size: makeMetric("Size"),
+      entry: makeMetric("Entry Price"),
+      mark: makeMetric("Mark Price"),
+      ret: makeMetric("Return"),
+      leverage: makeMetric("Leverage"),
+      realized: makeMetric("Realized PnL"),
+      liquidation: makeMetric("Liquidation"),
+    };
+    row.append(header, metrics);
+    return row;
+  }
+
+  function updatePositionListRow(row, position) {
+    const nodes = row.positionListNodes;
+    const exchangeName = String(position.exchange || "").toUpperCase();
+    const logoIdentity = `${position.exchange_logo_url || ""}|${exchangeName}`;
+    if (nodes.logo.dataset.identity !== logoIdentity) {
+      setHTML(nodes.logo, logoImg(position.exchange_logo_url, exchangeName, "exchange-logo"));
+      nodes.logo.querySelectorAll("[title]").forEach((n) => n.removeAttribute("title"));
+      nodes.logo.dataset.identity = logoIdentity;
+    }
+    nodes.symbol.textContent = String(position.symbol || "—");
+    const sideText = String(position.side || "—");
+    nodes.side.textContent = sideText;
+    nodes.side.className = sideText.toLowerCase() === "long"
+      ? "account-position-long"
+      : sideText.toLowerCase() === "short" ? "account-position-short" : "";
+    const scope = String(position.market_scope || position.dex || "");
+    nodes.account.textContent = [position.account || "—", scope].filter(Boolean).join(" · ");
+
+    const pnl = position.unrealized_pnl === null || position.unrealized_pnl === undefined
+      ? Number.NaN : Number(position.unrealized_pnl);
+    const pnlClass = positionPnlClass(pnl);
+    nodes.trailingValue.textContent = Number.isFinite(pnl)
+      ? `${pnl > 0 ? "+" : ""}${formatPositionNumber(pnl, 4)}` : "—";
+    nodes.trailingValue.className = pnlClass;
+
+    nodes.size.textContent = formatPositionNumber(position.quantity ?? position.contracts);
+    nodes.entry.textContent = formatPositionNumber(position.entry_price);
+    nodes.mark.textContent = formatPositionNumber(position.mark_price);
+    const percentage = position.percentage === null || position.percentage === undefined
+      ? Number.NaN : Number(position.percentage);
+    nodes.ret.textContent = Number.isFinite(percentage)
+      ? `${percentage > 0 ? "+" : ""}${formatPositionNumber(percentage, 2)}%` : "—";
+    nodes.ret.className = pnlClass;
+    nodes.leverage.textContent = position.leverage !== null
+      && position.leverage !== undefined
+      && Number.isFinite(Number(position.leverage))
+      ? `${formatPositionNumber(position.leverage, 2)}x` : "—";
+    updatePositionRealizedPnlCell(nodes.realized, position);
+    nodes.liquidation.textContent = formatPositionNumber(position.liquidation_price);
+  }
+
+  function setPositionsLoading(loading, preserveContent = false) {
+    if (accountView === "positions") {
+      el("assets-refresh").disabled = loading;
+      el("assets-refresh").classList.toggle("assets-refreshing", loading);
+    }
+    el("positions-loading").classList.toggle("hidden", !loading || preserveContent);
+    if (loading) el("positions-error").classList.add("hidden");
+    if (loading && !preserveContent) {
+      positionsPayload = null;
+      el("positions-summary").classList.add("hidden");
+      el("positions-empty").classList.add("hidden");
+      el("positions-list").classList.add("hidden");
+      el("positions-account-errors").classList.add("hidden");
+      el("positions-list").replaceChildren();
+    }
+  }
+
+  async function loadPositions(force) {
+    const seq = ++positionsRequestSeq;
+    const preserveContent = positionsHaveData;
+    setPositionsLoading(true, preserveContent);
+    try {
+      const payload = await api(`/api/account/positions${force ? "?refresh=true" : ""}`);
+      if (seq !== positionsRequestSeq || !isAssetsOpen() || accountView !== "positions") return;
+      renderPositions(payload);
+    } catch (error) {
+      if (seq !== positionsRequestSeq || !isAssetsOpen() || accountView !== "positions") return;
+      el("positions-error").textContent = `${error.message}\nUse refresh to try again.`;
+      el("positions-error").classList.remove("hidden");
+      if (!preserveContent) {
+        el("positions-summary").classList.add("hidden");
+        el("positions-list").classList.add("hidden");
+      }
+    } finally {
+      if (seq === positionsRequestSeq) setPositionsLoading(false);
+    }
+  }
+
+  function formatPnlValue(value, currency) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "—";
+    return `${number > 0 ? "+" : ""}${number.toLocaleString(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: Math.abs(number) > 0 && Math.abs(number) < 1 ? 6 : 2,
+    })} ${currency || ""}`.trim();
+  }
+
+  function pnlRowKey(record) {
+    return [record.exchange, record.account, record.currency].join("|");
+  }
+
+  function syncPnlTotals(container, totals, className = "pnl-summary-value") {
+    const existing = new Map(
+      Array.from(container.children).map((node) => [node.dataset.currency || "", node]),
+    );
+    totals.forEach((total, index) => {
+      const currency = String(total.currency || "UNKNOWN");
+      let value = existing.get(currency);
+      if (!value) {
+        value = document.createElement("strong");
+        value.dataset.currency = currency;
+      }
+      value.className = `${className} ${positionPnlClass(total.net_pnl)}`.trim();
+      value.textContent = `${formatPnlValue(total.net_pnl, currency)}${
+        total.complete === true ? "" : "*"
+      }`;
+      const current = container.children[index];
+      if (current !== value) container.insertBefore(value, current || null);
+      existing.delete(currency);
+    });
+    existing.forEach((node) => node.remove());
+  }
+
+  function groupPnlByExchange(results) {
+    const groups = new Map();
+    results.forEach((record) => {
+      const exchange = String(record.exchange || "unknown");
+      let group = groups.get(exchange);
+      if (!group) {
+        group = {
+          exchange,
+          exchange_logo_url: record.exchange_logo_url || "",
+          accounts: new Set(),
+          rows: [],
+          totals: new Map(),
+        };
+        groups.set(exchange, group);
+      }
+      group.accounts.add(String(record.account || ""));
+      group.rows.push(record);
+      const currency = String(record.currency || "UNKNOWN");
+      let total = group.totals.get(currency);
+      if (!total) {
+        total = { currency, net_pnl: 0, complete: true };
+        group.totals.set(currency, total);
+      }
+      const net = Number(record.net_pnl);
+      if (Number.isFinite(net)) total.net_pnl += net;
+      else total.complete = false;
+      total.complete = total.complete && record.complete === true;
+    });
+    return Array.from(groups.values())
+      .map((group) => ({
+        ...group,
+        account_count: Array.from(group.accounts).filter(Boolean).length,
+        totals: Array.from(group.totals.values()).sort((left, right) => (
+          left.currency.localeCompare(right.currency)
+        )),
+      }))
+      .sort((left, right) => left.exchange.localeCompare(right.exchange));
+  }
+
+  function createPnlExchangeRow() {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "pnl-exchange-row";
+    const identity = document.createElement("span");
+    identity.className = "pnl-exchange-identity";
+    const logo = document.createElement("span");
+    logo.className = "pnl-exchange-logo";
+    const copy = document.createElement("span");
+    copy.className = "assets-exchange-identity";
+    const title = document.createElement("span");
+    title.className = "assets-exchange-title";
+    const accounts = document.createElement("span");
+    accounts.className = "assets-exchange-accounts";
+    copy.append(title, accounts);
+    identity.append(logo, copy);
+    const totals = document.createElement("span");
+    totals.className = "pnl-exchange-totals";
+    const chevron = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    chevron.classList.add("assets-exchange-chevron");
+    chevron.setAttribute("viewBox", "0 0 24 24");
+    chevron.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", "m9 18 6-6-6-6");
+    chevron.appendChild(path);
+    row.append(identity, totals, chevron);
+    row.pnlNodes = { logo, title, accounts, totals };
+    row.addEventListener("click", () => {
+      selectedPnlExchange = row.dataset.pnlExchange || null;
+      renderPnlView();
+      scrollPnlToTop();
+    });
+    return row;
+  }
+
+  function updatePnlExchangeRow(row, group) {
+    row.dataset.pnlKey = `exchange:${group.exchange}`;
+    row.dataset.pnlExchange = group.exchange;
+    row.setAttribute("aria-label", `Show ${assetExchangeLabel(group.exchange)} PnL details`);
+    const nodes = row.pnlNodes;
+    const exchangeName = String(group.exchange || "").toUpperCase();
+    const logoIdentity = `${group.exchange_logo_url || ""}|${exchangeName}`;
+    if (nodes.logo.dataset.identity !== logoIdentity) {
+      setHTML(nodes.logo, logoImg(group.exchange_logo_url, exchangeName, "exchange-logo"));
+      nodes.logo.querySelectorAll("[title]").forEach((node) => node.removeAttribute("title"));
+      nodes.logo.dataset.identity = logoIdentity;
+    }
+    nodes.title.textContent = assetExchangeLabel(group.exchange);
+    nodes.accounts.textContent =
+      `${group.account_count} account${group.account_count === 1 ? "" : "s"}`;
+    syncPnlTotals(nodes.totals, group.totals, "pnl-exchange-total");
+  }
+
+  function createPnlRecord() {
+    const row = document.createElement("article");
+    row.className = "account-history-record account-pnl-record";
+
+    const header = document.createElement("div");
+    header.className = "account-history-record-header";
+    const identity = document.createElement("div");
+    identity.className = "account-history-record-identity";
+    const logo = document.createElement("span");
+    logo.className = "account-position-live-logo";
+    identity.appendChild(logo);
+    const copy = document.createElement("div");
+    copy.className = "account-history-record-copy";
+    const account = document.createElement("div");
+    account.className = "account-history-record-symbol";
+    const accountName = document.createElement("strong");
+    const currency = document.createElement("span");
+    account.append(accountName, currency);
+    const partial = document.createElement("span");
+    partial.className = "account-pnl-partial hidden";
+    partial.textContent = "Partial data";
+    account.appendChild(partial);
+    const exchange = document.createElement("small");
+    copy.append(account, exchange);
+    identity.appendChild(copy);
+
+    const trailing = document.createElement("div");
+    trailing.className = "account-history-record-trailing";
+    const trailingLabel = document.createElement("span");
+    trailingLabel.textContent = "Net PnL";
+    const trailingValue = document.createElement("strong");
+    trailing.append(trailingLabel, trailingValue);
+    header.append(identity, trailing);
+
+    const metrics = document.createElement("div");
+    metrics.className = "account-history-record-metrics";
+    const makeMetric = (label) => {
+      const metric = createHistoryMetric(label, "");
+      metrics.appendChild(metric);
+      return metric.querySelector("strong");
+    };
+    row.pnlNodes = {
+      logo,
+      accountName,
+      currency,
+      partial,
+      exchange,
+      trailingValue,
+      realized: makeMetric("Realized"),
+      unrealized: makeMetric("Unrealized"),
+      fees: makeMetric("Fees"),
+      closed: makeMetric("Closed"),
+      open: makeMetric("Open"),
+    };
+    row.append(header, metrics);
+    return row;
+  }
+
+  function updatePnlRecord(row, record) {
+    row.dataset.pnlKey = `account:${pnlRowKey(record)}`;
+    const nodes = row.pnlNodes;
+    const exchangeName = String(record.exchange || "").toUpperCase();
+    const logoIdentity = `${record.exchange_logo_url || ""}|${exchangeName}`;
+    if (nodes.logo.dataset.identity !== logoIdentity) {
+      setHTML(nodes.logo, logoImg(record.exchange_logo_url, exchangeName, "exchange-logo"));
+      nodes.logo.querySelectorAll("[title]").forEach((node) => node.removeAttribute("title"));
+      nodes.logo.dataset.identity = logoIdentity;
+    }
+    nodes.accountName.textContent = String(record.account || "—");
+    nodes.currency.textContent = String(record.currency || "");
+    nodes.partial.classList.toggle("hidden", record.complete === true);
+    nodes.exchange.textContent = exchangeName || "—";
+    nodes.trailingValue.textContent = formatPnlValue(record.net_pnl, record.currency);
+    nodes.trailingValue.className = positionPnlClass(record.net_pnl);
+    const feeAdjustment = record.fees === null || record.fees === undefined
+      ? null
+      : -Number(record.fees);
+    const values = [
+      [nodes.realized, record.realized_pnl, formatPnlValue(record.realized_pnl, record.currency)],
+      [nodes.unrealized, record.unrealized_pnl, formatPnlValue(record.unrealized_pnl, record.currency)],
+      [
+        nodes.fees,
+        feeAdjustment,
+        feeAdjustment === null ? "—" : formatPnlValue(feeAdjustment, record.currency),
+      ],
+    ];
+    values.forEach(([node, value, text]) => {
+      node.textContent = text;
+      node.className = value === null ? "" : positionPnlClass(value);
+    });
+    nodes.closed.textContent = formatPositionNumber(record.closed_positions, 0);
+    nodes.open.textContent = formatPositionNumber(record.open_positions, 0);
+  }
+
+  function syncPnlList(items, keyFor, createRow, updateRow) {
+    const list = el("pnl-list");
+    const existing = new Map(
+      Array.from(list.children).map((row) => [row.dataset.pnlKey || "", row]),
+    );
+    items.forEach((item, index) => {
+      const key = keyFor(item);
+      let row = existing.get(key);
+      if (!row) row = createRow();
+      updateRow(row, item);
+      const current = list.children[index];
+      if (current !== row) list.insertBefore(row, current || null);
+      existing.delete(key);
+    });
+    existing.forEach((row) => row.remove());
+  }
+
+  function scrollPnlToTop() {
+    el("pnl-list").scrollTop = 0;
+    const body = el("account-pnl-view").querySelector(".account-view-body");
+    if (body) body.scrollTop = 0;
+  }
+
+  function updatePnlListSizing() {
+    const list = el("pnl-list");
+    if (!list) return;
+    if (
+      mobileHubQuery.matches
+      || !isAssetsOpen()
+      || accountView !== "pnl"
+      || list.classList.contains("hidden")
+    ) {
+      list.classList.remove("pnl-list-sized", "pnl-list-scrollable");
+      list.style.removeProperty("--pnl-list-height");
+      return;
+    }
+    const rows = Array.from(list.children);
+    if (!rows.length) {
+      list.classList.remove("pnl-list-sized", "pnl-list-scrollable");
+      list.style.removeProperty("--pnl-list-height");
+      return;
+    }
+    const visibleRows = rows.slice(0, 5);
+    const style = getComputedStyle(list);
+    const borders = Number.parseFloat(style.borderTopWidth || "0")
+      + Number.parseFloat(style.borderBottomWidth || "0");
+    const height = visibleRows.reduce((sum, row) => sum + row.offsetHeight, borders);
+    list.classList.add("pnl-list-sized");
+    list.classList.toggle("pnl-list-scrollable", rows.length > 5);
+    list.style.setProperty("--pnl-list-height", `${Math.ceil(height)}px`);
+  }
+
+  function schedulePnlListSizing() {
+    if (pnlListSizeFrame !== null) cancelAnimationFrame(pnlListSizeFrame);
+    pnlListSizeFrame = requestAnimationFrame(() => {
+      pnlListSizeFrame = null;
+      updatePnlListSizing();
+    });
+  }
+
+  function renderPnlView() {
+    if (!pnlPayload) return;
+    const results = Array.isArray(pnlPayload.results) ? pnlPayload.results : [];
+    const groups = groupPnlByExchange(results);
+    let selected = selectedPnlExchange
+      ? groups.find((group) => group.exchange === selectedPnlExchange)
+      : null;
+    if (selectedPnlExchange && !selected) {
+      selectedPnlExchange = null;
+      selected = null;
+    }
+    const visibleResults = selected ? selected.rows : results;
+    const totals = selected
+      ? selected.totals
+      : (Array.isArray(pnlPayload.totals) ? pnlPayload.totals : []);
+    const totalsElement = el("pnl-summary-totals");
+    syncPnlTotals(totalsElement, totals);
+    const accountCount = selected
+      ? selected.account_count
+      : Number((pnlPayload.summary || {}).accounts || 0);
+    el("pnl-summary-counts").textContent =
+      `${selected ? "" : `${groups.length} exchanges · `}${accountCount} accounts`;
+    const collectedAt = Date.parse(pnlPayload.collected_at || "");
+    el("pnl-updated").textContent = Number.isFinite(collectedAt)
+      ? `Updated ${new Date(collectedAt).toLocaleString("en-US", {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        })}`
+      : "";
+    el("assets-back").classList.toggle("hidden", !selected);
+    el("assets-title").textContent = selected
+      ? `${assetExchangeLabel(selected.exchange)} PnL`
+      : "PnL";
+    el("pnl-summary").classList.toggle("hidden", results.length === 0);
+    el("pnl-empty").classList.toggle("hidden", results.length !== 0);
+    el("pnl-list").classList.toggle("hidden", results.length === 0);
+    el("pnl-list").classList.toggle("pnl-exchange-overview", !selected);
+    if (selected) {
+      syncPnlList(
+        visibleResults,
+        (record) => `account:${pnlRowKey(record)}`,
+        createPnlRecord,
+        updatePnlRecord,
+      );
+    } else {
+      syncPnlList(
+        groups,
+        (group) => `exchange:${group.exchange}`,
+        createPnlExchangeRow,
+        updatePnlExchangeRow,
+      );
+    }
+    const partial = visibleResults.some((result) => result && result.complete !== true);
+    const coverage = pnlPayload.summary || {};
+    const unavailable = [];
+    if (coverage.funding_available !== true) unavailable.push("funding");
+    if (coverage.borrow_interest_available !== true) unavailable.push("borrow interest");
+    const notes = [];
+    if (partial) notes.push("Unavailable PnL values are excluded");
+    if (unavailable.length) notes.push(`${unavailable.join(" and ")} are not included`);
+    el("pnl-coverage-note").textContent = notes.length ? `* ${notes.join(". ")}.` : "";
+    el("pnl-coverage-note").classList.toggle(
+      "hidden",
+      results.length === 0 || notes.length === 0,
+    );
+    el("pnl-loading").classList.add("hidden");
+    updatePnlListSizing();
+    historyFlipCommit();
+  }
+
+  function renderPnl(payload) {
+    pnlPayload = payload;
+    pnlHaveData = true;
+    renderPnlView();
+  }
+
+  function setPnlLoading(loading, preserveContent = false) {
+    if (accountView === "pnl") {
+      el("assets-refresh").disabled = loading;
+      el("assets-refresh").classList.toggle("assets-refreshing", loading);
+    }
+    el("pnl-loading").classList.toggle("hidden", !loading || preserveContent);
+    if (loading) el("pnl-error").classList.add("hidden");
+    if (loading && !preserveContent) {
+      pnlPayload = null;
+      el("pnl-summary").classList.add("hidden");
+      el("pnl-empty").classList.add("hidden");
+      el("pnl-list").classList.add("hidden");
+      el("pnl-coverage-note").classList.add("hidden");
+      el("pnl-list").replaceChildren();
+    }
+  }
+
+  async function loadPnl() {
+    clearPnlRefreshTimer();
+    const seq = ++pnlRequestSeq;
+    const preserveContent = pnlHaveData;
+    setPnlLoading(true, preserveContent);
+    try {
+      const payload = await api(`/api/account/pnl?days=${pnlPeriodDays}`);
+      if (seq !== pnlRequestSeq || !isAssetsOpen() || accountView !== "pnl") return;
+      renderPnl(payload);
+    } catch (error) {
+      if (seq !== pnlRequestSeq || !isAssetsOpen() || accountView !== "pnl") return;
+      el("pnl-error").textContent = `${error.message}\nUse refresh to try again.`;
+      el("pnl-error").classList.remove("hidden");
+      if (!preserveContent) {
+        el("pnl-summary").classList.add("hidden");
+        el("pnl-list").classList.add("hidden");
+      }
+    } finally {
+      if (seq === pnlRequestSeq) {
+        setPnlLoading(false);
+        schedulePnlRefresh();
+      }
+    }
+  }
+
+  function setHistoryImportLoading(loading, text = "") {
+    historyImportBusy = loading;
+    el("history-import-loading").classList.toggle("hidden", !loading);
+    if (text) el("history-import-loading-text").textContent = text;
+    el("history-import-dropzone").disabled = loading;
+    renderHistoryImportActions();
+  }
+
+  function setHistoryImportHelpOpen(open) {
+    const help = el("history-import-help");
+    const button = el("history-import-help-button");
+    if (!help || !button) return;
+    help.classList.toggle("show", open);
+    button.setAttribute("aria-expanded", String(open));
+  }
+
+  function historyImportTypeLabel(value) {
+    return String(value || "")
+      .split("_")
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" ");
+  }
+
+  function historyImportSelectMarkup(fileId, field, options, selected, emptyLabel) {
+    const selectedLabel = options.includes(selected) ? selected : emptyLabel;
+    const optionMarkup = options.length
+      ? options.map((value) => (
+        `<button type="button" class="history-import-select-option${value === selected ? " selected" : ""}" `
+        + `data-history-import-option="${esc(fileId)}" data-field="${esc(field)}" `
+        + `data-value="${esc(value)}" role="option" aria-selected="${value === selected}">`
+        + `${esc(value)}</button>`
+      )).join("")
+      : `<div class="script-select-empty">${esc(emptyLabel)}</div>`;
+    return `<div class="history-import-select" data-history-import-select-wrap="${esc(fileId)}:${esc(field)}">`
+      + `<button type="button" class="history-import-select-button" `
+      + `data-history-import-select="${esc(fileId)}" data-field="${esc(field)}" `
+      + `aria-haspopup="listbox" aria-expanded="false">`
+      + `<span>${esc(selectedLabel)}</span><span aria-hidden="true">&#9662;</span></button>`
+      + `<div class="history-import-select-options hidden" role="listbox">${optionMarkup}</div>`
+      + `</div>`;
+  }
+
+  function closeHistoryImportSelects(except = null) {
+    document.querySelectorAll(".history-import-select").forEach((control) => {
+      if (control === except) return;
+      control.classList.remove("open");
+      const button = control.querySelector(".history-import-select-button");
+      const options = control.querySelector(".history-import-select-options");
+      if (button) button.setAttribute("aria-expanded", "false");
+      if (options) options.classList.add("hidden");
+    });
+  }
+
+  function historyImportReady() {
+    if (!historyImportPreview || historyImportBusy) return false;
+    const files = Array.isArray(historyImportPreview.files) ? historyImportPreview.files : [];
+    return files.length > 0 && files.every((file) => {
+      const selection = historyImportSelections[file.file_id] || {};
+      return Boolean(
+        selection.account
+        && selection.source_timezone
+        && selection.timezone_confirmed,
+      );
+    });
+  }
+
+  function renderHistoryImportActions() {
+    const hasPreview = Boolean(
+      historyImportPreview
+      && Array.isArray(historyImportPreview.files)
+      && historyImportPreview.files.length,
+    );
+    el("history-import-actions").classList.toggle("hidden", !hasPreview);
+    el("history-import-submit").disabled = !historyImportReady();
+    el("history-import-status").textContent = historyImportStatusText;
+  }
+
+  function renderHistoryImportPreview() {
+    const container = el("history-import-preview");
+    const files = historyImportPreview && Array.isArray(historyImportPreview.files)
+      ? historyImportPreview.files
+      : [];
+    container.classList.toggle("hidden", !files.length);
+    if (!files.length) {
+      container.replaceChildren();
+      renderHistoryImportActions();
+      return;
+    }
+    const timezoneOptions = Array.isArray(historyImportPreview.timezone_options)
+      ? historyImportPreview.timezone_options
+      : [];
+    container.innerHTML = files.map((file) => {
+      const selection = historyImportSelections[file.file_id] || {};
+      const accounts = Array.isArray(file.account_candidates) ? file.account_candidates : [];
+      const warnings = Array.isArray(file.warnings) ? file.warnings : [];
+      const range = file.first_occurred_at && file.last_occurred_at
+        ? `${formatAccountHistoryDate(file.first_occurred_at, false, true)} – ${formatAccountHistoryDate(file.last_occurred_at, false, true)}`
+        : "No dated rows";
+      return `<article class="history-import-file" data-history-import-file="${esc(file.file_id)}">`
+        + `<header><div><strong title="${esc(file.name)}">${esc(file.name)}</strong>`
+        + `<span>${esc(file.exchange)} · ${esc(historyImportTypeLabel(file.file_type))}</span></div>`
+        + `<aside><b>${Number(file.row_count || 0).toLocaleString()} rows</b>`
+        + `<button type="button" class="btn btn-icon history-import-remove" `
+        + `data-history-import-remove="${esc(file.file_id)}" title="Remove file" aria-label="Remove file">&times;</button>`
+        + `</aside></header>`
+        + `<div class="history-import-range"><span>Coverage</span><strong>${esc(range)}</strong></div>`
+        + `<div class="history-import-fields">`
+        + `<label><span>Account</span>${historyImportSelectMarkup(
+          file.file_id,
+          "account",
+          accounts,
+          selection.account || "",
+          accounts.length ? "Select account" : "No configured account",
+        )}</label>`
+        + `<label><span>Source timezone</span>${historyImportSelectMarkup(
+          file.file_id,
+          "source_timezone",
+          timezoneOptions,
+          selection.source_timezone || "",
+          "Select timezone",
+        )}</label>`
+        + `</div>`
+        + `<label class="history-import-confirm"><input type="checkbox" `
+        + `data-history-import-timezone-confirm="${esc(file.file_id)}" `
+        + `${selection.timezone_confirmed ? "checked" : ""} />`
+        + `<span>Timezone confirmed as ${esc(selection.source_timezone || "not selected")}</span></label>`
+        + (warnings.length
+          ? `<div class="history-import-warnings">${warnings.map((warning) => `<span>${esc(warning)}</span>`).join("")}</div>`
+          : "")
+        + `</article>`;
+    }).join("");
+    renderHistoryImportActions();
+  }
+
+  function renderHistoryImportLog(payload) {
+    const results = payload && Array.isArray(payload.results) ? payload.results : [];
+    historyImportLogPayload = {
+      ...(payload || {}),
+      results,
+      total: Number(payload && payload.total || results.length),
+    };
+    el("history-import-log-count").textContent = historyImportLogPayload.total
+      ? `${historyImportLogPayload.total.toLocaleString()} files`
+      : "";
+    el("history-import-log-empty").classList.toggle("hidden", results.length > 0);
+    el("history-import-log-list").innerHTML = results.map((item) => {
+      const warningCount = Array.isArray(item.warnings) ? item.warnings.length : 0;
+      const coverage = item.first_occurred_at && item.last_occurred_at
+        ? `${formatAccountHistoryDate(item.first_occurred_at, false, true)} – ${formatAccountHistoryDate(item.last_occurred_at, false, true)}`
+        : "No dated rows";
+      return `<div class="history-import-log-row">`
+        + `<span class="history-import-log-logo">${logoImg(item.exchange_logo_url, item.exchange, "exchange-logo")}</span>`
+        + `<span><strong title="${esc(item.original_name)}">${esc(item.original_name)}</strong>`
+        + `<small>${esc(item.account)} · ${esc(historyImportTypeLabel(item.file_type))} · ${Number(item.row_count || 0).toLocaleString()} rows</small>`
+        + `<small>${esc(coverage)}</small></span>`
+        + `<span class="history-import-log-actions"><span class="history-import-log-status ${item.status === "partial" ? "partial" : ""}">`
+        + `${esc(item.status || "imported")}${warningCount ? ` · ${warningCount} warning${warningCount === 1 ? "" : "s"}` : ""}`
+        + `</span>`
+        + (item.enrichment_retry_available
+          ? `<button type="button" class="btn btn-icon" data-history-import-retry="${esc(item.import_id)}" title="Retry Hyperliquid Order History" aria-label="Retry Hyperliquid Order History">`
+            + `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.7-6L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15.7 6L3 16"></path><path d="M3 21v-5h5"></path></svg></button>`
+          : "")
+        + `<button type="button" class="btn btn-danger btn-icon" data-history-import-delete="${esc(item.import_id)}" title="Delete import record" aria-label="Delete import record">`
+        + `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v5M14 11v5"></path></svg></button>`
+        + `</span></div>`;
+    }).join("");
+  }
+
+  async function loadHistoryImports(force = false) {
+    if (historyImportLogLoaded && !force) return;
+    try {
+      const payload = await api("/api/account/history/imports?limit=100");
+      historyImportLogLoaded = true;
+      renderHistoryImportLog(payload);
+      const activeJobs = Array.isArray(payload.active_jobs) ? payload.active_jobs : [];
+      if (activeJobs.length && historyImportJobTimer === null && !historyImportBusy) {
+        const job = activeJobs[activeJobs.length - 1];
+        const mode = job.kind === "enrichment" ? "enrichment" : "import";
+        historyImportStatusText = mode === "enrichment"
+          ? "Refreshing Hyperliquid Order History..."
+          : "Merging history into the account cache...";
+        setHistoryImportLoading(true, historyImportStatusText);
+        pollHistoryImportJob(job.job_id, mode);
+      }
+    } catch (error) {
+      el("history-import-error").textContent = error.message;
+      el("history-import-error").classList.remove("hidden");
+    }
+  }
+
+  async function previewHistoryImport(fileList) {
+    const files = Array.from(fileList || []);
+    if (!files.length || historyImportBusy) return;
+    historyImportPreview = null;
+    historyImportSelections = {};
+    historyImportStatusText = "";
+    el("history-import-error").classList.add("hidden");
+    renderHistoryImportPreview();
+    setHistoryImportLoading(true, "Inspecting CSV files...");
+    const body = new FormData();
+    files.forEach((file) => body.append("files", file, file.name));
+    try {
+      const payload = await api("/api/account/history/import/preview", {
+        method: "POST",
+        body,
+      });
+      historyImportPreview = payload;
+      (payload.files || []).forEach((file) => {
+        historyImportSelections[file.file_id] = {
+          account: file.suggested_account || "",
+          source_timezone: file.source_timezone || "",
+          timezone_confirmed: false,
+        };
+      });
+      renderHistoryImportPreview();
+    } catch (error) {
+      el("history-import-error").textContent = error.message;
+      el("history-import-error").classList.remove("hidden");
+    } finally {
+      el("history-import-files").value = "";
+      setHistoryImportLoading(false);
+    }
+  }
+
+  async function removeHistoryImportPreviewFile(fileId) {
+    if (!historyImportPreview || historyImportBusy || !fileId) return;
+    el("history-import-error").classList.add("hidden");
+    setHistoryImportLoading(true, "Removing CSV file...");
+    try {
+      await api(
+        `/api/account/history/import/previews/${encodeURIComponent(historyImportPreview.preview_id)}`
+          + `/files/${encodeURIComponent(fileId)}`,
+        { method: "DELETE" },
+      );
+      historyImportPreview.files = (historyImportPreview.files || []).filter(
+        (file) => file.file_id !== fileId,
+      );
+      delete historyImportSelections[fileId];
+      if (!historyImportPreview.files.length) historyImportPreview = null;
+      historyImportStatusText = "";
+      renderHistoryImportPreview();
+    } catch (error) {
+      el("history-import-error").textContent = error.message;
+      el("history-import-error").classList.remove("hidden");
+    } finally {
+      setHistoryImportLoading(false);
+    }
+  }
+
+  function pollHistoryImportJob(jobId, mode = "import") {
+    if (historyImportJobTimer !== null) clearTimeout(historyImportJobTimer);
+    historyImportJobTimer = window.setTimeout(async () => {
+      historyImportJobTimer = null;
+      try {
+        const job = await api(`/api/account/history/import/jobs/${encodeURIComponent(jobId)}`);
+        if (job.status === "completed") {
+          const summary = job.summary || {};
+          historyImportStatusText = mode === "enrichment"
+            ? `${Number(summary.orders || 0).toLocaleString()} Hyperliquid orders refreshed`
+            : `${Number(summary.imported || 0)} imported · ${Number(summary.already_imported || 0)} already imported`;
+          setHistoryImportLoading(false);
+          if (mode === "import") {
+            historyImportPreview = null;
+            historyImportSelections = {};
+            historyImportStatusText = "";
+            renderHistoryImportPreview();
+          }
+          historyImportLogLoaded = false;
+          positionHistoryGroupsHaveData = false;
+          orderHistoryGroupsHaveData = false;
+          pnlHaveData = false;
+          await loadHistoryImports(true);
+          return;
+        }
+        if (job.status === "failed") {
+          throw new Error(job.error || "History import failed");
+        }
+        historyImportStatusText = job.status === "queued"
+          ? "Waiting for Account Worker..."
+          : mode === "enrichment"
+            ? "Refreshing Hyperliquid Order History..."
+            : "Merging history into the account cache...";
+        renderHistoryImportActions();
+        pollHistoryImportJob(jobId, mode);
+      } catch (error) {
+        historyImportStatusText = "";
+        setHistoryImportLoading(false);
+        el("history-import-error").textContent = error.message;
+        el("history-import-error").classList.remove("hidden");
+      }
+    }, 900);
+  }
+
+  async function submitHistoryImport() {
+    if (!historyImportReady()) return;
+    historyImportStatusText = "Preparing normalized history...";
+    el("history-import-error").classList.add("hidden");
+    setHistoryImportLoading(true, "Preparing import...");
+    try {
+      const payload = await api("/api/account/history/import/commit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          preview_id: historyImportPreview.preview_id,
+          files: historyImportPreview.files.map((file) => ({
+            file_id: file.file_id,
+            ...historyImportSelections[file.file_id],
+          })),
+        }),
+      });
+      historyImportStatusText = "Waiting for Account Worker...";
+      el("history-import-loading-text").textContent = "Importing history...";
+      renderHistoryImportActions();
+      pollHistoryImportJob(payload.job_id);
+    } catch (error) {
+      setHistoryImportLoading(false);
+      historyImportStatusText = "";
+      el("history-import-error").textContent = error.message;
+      el("history-import-error").classList.remove("hidden");
+    }
+  }
+
+  async function retryHistoryImportEnrichment(importId) {
+    if (!importId || historyImportBusy) return;
+    historyImportStatusText = "Preparing Hyperliquid Order History refresh...";
+    el("history-import-error").classList.add("hidden");
+    setHistoryImportLoading(true, "Refreshing Hyperliquid Order History...");
+    try {
+      const payload = await api(
+        `/api/account/history/imports/${encodeURIComponent(importId)}/retry-enrichment`,
+        { method: "POST" },
+      );
+      pollHistoryImportJob(payload.job_id, "enrichment");
+    } catch (error) {
+      setHistoryImportLoading(false);
+      historyImportStatusText = "";
+      el("history-import-error").textContent = error.message;
+      el("history-import-error").classList.remove("hidden");
+    }
+  }
+
+  async function deleteHistoryImport(importId, button) {
+    if (!importId || historyImportBusy) return;
+    const row = button && button.closest(".history-import-log-row");
+    el("history-import-error").classList.add("hidden");
+    if (button) button.disabled = true;
+    if (row) row.classList.add("is-deleting");
+    try {
+      await api(`/api/account/history/imports/${encodeURIComponent(importId)}`, {
+        method: "DELETE",
+      });
+      const results = (historyImportLogPayload.results || []).filter(
+        (item) => String(item && item.import_id || "") !== importId,
+      );
+      historyImportLogPayload = {
+        ...historyImportLogPayload,
+        results,
+        total: Math.max(0, Number(historyImportLogPayload.total || 0) - 1),
+      };
+      if (row) row.remove();
+      el("history-import-log-count").textContent = historyImportLogPayload.total
+        ? `${historyImportLogPayload.total.toLocaleString()} files`
+        : "";
+      el("history-import-log-empty").classList.toggle("hidden", results.length > 0);
+      historyImportLogLoaded = true;
+    } catch (error) {
+      if (button) button.disabled = false;
+      if (row) row.classList.remove("is-deleting");
+      el("history-import-error").textContent = error.message;
+      el("history-import-error").classList.remove("hidden");
+    }
+  }
+
+  function formatAccountHistoryDate(value, includeSeconds = false, includeYear = false) {
+    const timestamp = Date.parse(String(value || ""));
+    if (!Number.isFinite(timestamp)) return "—";
+    const options = {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    };
+    if (includeYear) options.year = "numeric";
+    if (includeSeconds) options.second = "2-digit";
+    return new Date(timestamp).toLocaleString("en-US", options);
+  }
+
+  function formatAccountHistoryDuration(openedAt, closedAt) {
+    const opened = Date.parse(String(openedAt || ""));
+    const closed = Date.parse(String(closedAt || ""));
+    if (!Number.isFinite(opened) || !Number.isFinite(closed) || closed < opened) return "—";
+    let seconds = Math.floor((closed - opened) / 1000);
+    const days = Math.floor(seconds / 86400);
+    seconds %= 86400;
+    const hours = Math.floor(seconds / 3600);
+    seconds %= 3600;
+    const minutes = Math.floor(seconds / 60);
+    if (days) return `${days}d ${hours}h`;
+    if (hours) return `${hours}h ${minutes}m`;
+    if (minutes) return `${minutes}m`;
+    return `${seconds}s`;
+  }
+
+  function createHistoryMetric(label, value, className = "") {
+    const metric = document.createElement("div");
+    metric.className = "account-history-record-metric";
+    const labelNode = document.createElement("span");
+    labelNode.textContent = label;
+    const valueNode = document.createElement("strong");
+    valueNode.textContent = value;
+    if (className) valueNode.className = className;
+    metric.append(labelNode, valueNode);
+    return metric;
+  }
+
+  function createHistoryRecordHeader(
+    record,
+    detailParts,
+    trailingLabel,
+    trailingValue,
+    trailingClass = "",
+  ) {
+    const header = document.createElement("div");
+    header.className = "account-history-record-header";
+
+    const identity = document.createElement("div");
+    identity.className = "account-history-record-identity";
+    const exchangeName = String(record.exchange || "").toUpperCase();
+    setHTML(identity, logoImg(record.exchange_logo_url, exchangeName, "exchange-logo"));
+    identity.querySelectorAll("[title]").forEach((node) => node.removeAttribute("title"));
+
+    const copy = document.createElement("div");
+    copy.className = "account-history-record-copy";
+    const symbolLine = document.createElement("div");
+    symbolLine.className = "account-history-record-symbol";
+    const symbol = document.createElement("strong");
+    symbol.textContent = String(record.symbol || "—");
+    symbolLine.appendChild(symbol);
+    detailParts.filter(Boolean).forEach(({ text, className = "" }) => {
+      const detail = document.createElement("span");
+      detail.textContent = text;
+      if (className) detail.className = className;
+      symbolLine.appendChild(detail);
+    });
+    const account = document.createElement("small");
+    const scope = String(record.market_scope || record.dex || "");
+    account.textContent = [record.account || "—", scope].filter(Boolean).join(" · ");
+    copy.append(symbolLine, account);
+    identity.appendChild(copy);
+
+    header.appendChild(identity);
+    if (trailingValue !== null && trailingValue !== undefined) {
+      const trailing = document.createElement("div");
+      trailing.className = "account-history-record-trailing";
+      if (trailingLabel) {
+        const trailingLabelNode = document.createElement("span");
+        trailingLabelNode.textContent = trailingLabel;
+        trailing.appendChild(trailingLabelNode);
+      }
+      const trailingNode = document.createElement("strong");
+      trailingNode.textContent = trailingValue;
+      if (trailingClass) trailingNode.className = trailingClass;
+      trailing.appendChild(trailingNode);
+      header.appendChild(trailing);
+    }
+    return header;
+  }
+
+  function createPositionHistoryRow(record) {
+    const position = record.position && typeof record.position === "object"
+      ? record.position
+      : {};
+    const row = document.createElement("article");
+    row.className = "account-history-record account-position-history-record";
+    const side = String(record.side || position.side || "—");
+    const sideClass = side.toLowerCase() === "long"
+      ? "account-position-long"
+      : side.toLowerCase() === "short" ? "account-position-short" : "";
+    const partiallyClosed = record.close_status === "partially_closed";
+    const closeStatus = partiallyClosed ? "Partially closed" : "Fully closed";
+    const closeStatusClass = partiallyClosed
+      ? "account-position-close-status account-position-partially-closed"
+      : "account-position-close-status account-position-fully-closed";
+    const header = createHistoryRecordHeader(
+      record,
+      [
+        { text: side, className: sideClass },
+        { text: closeStatus, className: closeStatusClass },
+      ],
+      "Realized PnL",
+      formatSignedPositionNumber(position.realized_pnl),
+      positionPnlClass(position.realized_pnl),
+    );
+    const realizedNode = header.querySelector(".account-history-record-trailing > strong");
+    if (realizedNode) updatePositionRealizedPnlCell(realizedNode, position);
+    row.appendChild(header);
+    const metrics = document.createElement("div");
+    metrics.className = "account-history-record-metrics";
+    metrics.append(
+      createHistoryMetric("Opened", formatAccountHistoryDate(record.opened_at, true, true)),
+      createHistoryMetric("Closed", formatAccountHistoryDate(record.closed_at, true, true)),
+      createHistoryMetric("Entry Price", formatPositionNumber(position.entry_price)),
+      createHistoryMetric("Avg Close Price", formatPositionNumber(position.exit_price)),
+      createHistoryMetric("Size", formatPositionNumber(position.quantity ?? position.contracts)),
+      createHistoryMetric(
+        "Duration",
+        formatAccountHistoryDuration(record.opened_at, record.closed_at),
+      ),
+    );
+    row.appendChild(metrics);
+    return row;
+  }
+
+  function createOrderHistoryRow(record) {
+    const order = record.order && typeof record.order === "object" ? record.order : {};
+    const row = document.createElement("article");
+    row.className = "account-history-record account-order-history-record";
+    const side = String(record.side || order.side || "—");
+    const sideClass = side.toLowerCase() === "buy"
+      ? "account-position-long"
+      : side.toLowerCase() === "sell" ? "account-position-short" : "";
+    const status = String(record.status || order.status || "—");
+    const statusClass = `account-order-status account-order-status-${status
+      .toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+    row.appendChild(createHistoryRecordHeader(
+      record,
+      [
+        { text: String(record.order_type || order.type || "—") },
+        { text: side, className: sideClass },
+      ],
+      "",
+      null,
+    ));
+    const metrics = document.createElement("div");
+    metrics.className = "account-history-record-metrics";
+    metrics.append(
+      createHistoryMetric("Status", status, statusClass),
+      createHistoryMetric("Amount", formatPositionNumber(order.amount)),
+      createHistoryMetric("Filled", formatPositionNumber(order.filled)),
+      createHistoryMetric(
+        "Avg Price",
+        formatPositionNumber(order.average_price ?? order.price),
+      ),
+      createHistoryMetric("Created", formatAccountHistoryDate(record.created_at, true, true)),
+    );
+    row.appendChild(metrics);
+    return row;
+  }
+
+  function historyNavigation(kind) {
+    return kind === "position" ? positionHistoryNavigation : orderHistoryNavigation;
+  }
+
+  function historyPrefix(kind) {
+    return kind === "position" ? "position-history" : "order-history";
+  }
+
+  function updateHistoryNavigation(kind) {
+    const prefix = historyPrefix(kind);
+    const navigation = historyNavigation(kind);
+    const isDetails = navigation.level === "details";
+    el(`${prefix}-groups`).classList.toggle("hidden", isDetails);
+    el(`${prefix}-details`).classList.toggle("hidden", !isDetails);
+    el(`${prefix}-back`).classList.toggle(
+      "hidden",
+      navigation.level === "exchanges",
+    );
+
+    let title = "Exchanges";
+    let subtitle = "Choose an exchange";
+    if (navigation.level === "symbols") {
+      title = navigation.exchange.toUpperCase();
+      subtitle = "Choose a symbol";
+    } else if (isDetails) {
+      title = navigation.symbol || "History";
+      subtitle = navigation.exchange.toUpperCase();
+    }
+    el(`${prefix}-navigation-title`).textContent = title;
+    el(`${prefix}-navigation-subtitle`).textContent = subtitle;
+  }
+
+  function historyQuery(prefix, navigation, cursor, includeStatus = false) {
+    const params = new URLSearchParams({ limit: String(accountHistoryPageSize) });
+    if (cursor) params.set("cursor", cursor);
+    const account = String(el(`${prefix}-account`).value || "").trim();
+    if (account) params.set("account", account);
+    if (navigation.exchange) params.set("exchange", navigation.exchange);
+    if (navigation.symbol) params.set("symbol", navigation.symbol);
+    params.set("exact_market", "true");
+    if (includeStatus) {
+      const status = String(el(`${prefix}-status`).value || "").trim();
+      if (status) params.set("status", status);
+    }
+    return params;
+  }
+
+  async function refreshAccountHistory(kind) {
+    const navigation = historyNavigation(kind);
+    const prefix = historyPrefix(kind);
+    const account = navigation.level === "details"
+      ? String(el(`${prefix}-account`).value || "").trim()
+      : "";
+    await api("/api/account/history/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind,
+        account,
+        exchange: navigation.exchange,
+        symbol: navigation.symbol,
+      }),
+    });
+  }
+
+  function historyGroupRow(kind, group, level) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "account-history-group-row";
+    const exchange = String(group.exchange || "");
+    const symbol = String(group.symbol || "");
+    const label = level === "exchanges" ? exchange.toUpperCase() : symbol;
+    row.setAttribute("aria-label", `Show ${label} history`);
+
+    const identity = document.createElement("span");
+    identity.className = "account-history-group-identity";
+    if (level === "exchanges") {
+      const logo = document.createElement("span");
+      setHTML(logo, logoImg(group.exchange_logo_url, label, "exchange-logo"));
+      logo.querySelectorAll("[title]").forEach((node) => node.removeAttribute("title"));
+      identity.appendChild(logo);
+    }
+    const copy = document.createElement("span");
+    copy.className = "account-history-group-copy";
+    const name = document.createElement("strong");
+    name.textContent = label || "Unknown";
+    const accounts = document.createElement("small");
+    const accountCount = Number(group.account_count || 0);
+    accounts.textContent = `${accountCount} account${accountCount === 1 ? "" : "s"}`;
+    copy.append(name, accounts);
+    identity.appendChild(copy);
+
+    const summary = document.createElement("span");
+    summary.className = "account-history-group-summary";
+    const count = document.createElement("span");
+    const recordCount = Number(group.record_count || 0);
+    count.textContent = `${recordCount.toLocaleString()} record${recordCount === 1 ? "" : "s"}`;
+    const latest = document.createElement("small");
+    latest.textContent = `Latest ${formatAccountHistoryDate(group.latest_at)}`;
+    summary.append(count, latest);
+
+    const chevron = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    chevron.classList.add("account-history-group-chevron");
+    chevron.setAttribute("viewBox", "0 0 24 24");
+    chevron.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", "m9 18 6-6-6-6");
+    chevron.appendChild(path);
+    row.append(identity, summary, chevron);
+    row.addEventListener("click", () => openHistoryGroup(kind, group));
+    return row;
+  }
+
+  // Smoothly animate the modal-box height across an account content change
+  // (history exchange/symbol/detail navigation, a history filter reload, or a
+  // PnL period change). begin() pins the current height before the swap;
+  // commit() (from the render) releases to the natural height and transitions.
+  let historyFlipHeight = null;
+  let historyFlipTimer = null;
+
+  function historyFlipBegin() {
+    const box = document.querySelector(".assets-modal-box");
+    if (!box
+      || mobileHubQuery.matches
+      || window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      || el("assets-modal").classList.contains("hidden")) {
+      return;
+    }
+    historyFlipHeight = box.offsetHeight;
+    box.style.height = `${historyFlipHeight}px`;
+    if (historyFlipTimer !== null) clearTimeout(historyFlipTimer);
+    historyFlipTimer = window.setTimeout(() => {
+      historyFlipTimer = null;
+      historyFlipHeight = null;
+      box.style.height = "";
+    }, 2000);
+  }
+
+  function historyFlipCommit() {
+    if (historyFlipHeight === null) return;
+    if (historyFlipTimer !== null) {
+      clearTimeout(historyFlipTimer);
+      historyFlipTimer = null;
+    }
+    const box = document.querySelector(".assets-modal-box");
+    const start = historyFlipHeight;
+    historyFlipHeight = null;
+    if (!box) return;
+    box.style.height = "";
+    const end = box.offsetHeight;
+    if (Math.abs(end - start) <= 1) return;
+    box.style.height = `${start}px`;
+    void box.offsetHeight; // reflow to lock the start height
+    box.classList.add("flip-animating");
+    box.style.height = `${end}px`;
+    const onEnd = (event) => {
+      if (event.target !== box || event.propertyName !== "height") return;
+      box.removeEventListener("transitionend", onEnd);
+      box.classList.remove("flip-animating");
+      box.style.height = "";
+    };
+    box.addEventListener("transitionend", onEnd);
+  }
+
+  function renderHistoryGroups(kind, payload) {
+    const prefix = historyPrefix(kind);
+    const navigation = historyNavigation(kind);
+    updateHistoryNavigation(kind);
+    const groups = Array.isArray(payload.results) ? payload.results : [];
+    const container = el(`${prefix}-groups`);
+    const list = document.createElement("div");
+    list.className = "account-history-group-list";
+    groups.forEach((group) => {
+      list.appendChild(historyGroupRow(kind, group, navigation.level));
+    });
+    container.replaceChildren(list);
+    if (kind === "position") positionHistoryGroupsHaveData = true;
+    else orderHistoryGroupsHaveData = true;
+
+    const summary = payload.summary || {};
+    const groupLabel = navigation.level === "exchanges" ? "exchanges" : "symbols";
+    el(`${prefix}-navigation-subtitle`).textContent = groups.length
+      ? `${groups.length} ${groupLabel} · ${Number(summary.total || 0).toLocaleString()} records`
+      : navigation.level === "exchanges" ? "Choose an exchange" : "Choose a symbol";
+    el(`${prefix}-empty`).textContent = navigation.level === "exchanges"
+      ? `No ${kind === "position" ? "position" : "order"} history.`
+      : `No history found for ${navigation.exchange.toUpperCase()}.`;
+    el(`${prefix}-empty`).classList.toggle("hidden", groups.length !== 0);
+    el(`${prefix}-meta`).classList.add("hidden");
+    el(`${prefix}-loading`).classList.add("hidden");
+    historyFlipCommit();
+  }
+
+  function openHistoryGroup(kind, group) {
+    historyFlipBegin();
+    const navigation = historyNavigation(kind);
+    if (navigation.level === "exchanges") {
+      navigation.level = "symbols";
+      navigation.exchange = String(group.exchange || "");
+      navigation.symbol = "";
+      if (kind === "position") positionHistoryGroupsHaveData = false;
+      else orderHistoryGroupsHaveData = false;
+    } else if (navigation.level === "symbols") {
+      navigation.level = "details";
+      navigation.symbol = String(group.symbol || "");
+      if (kind === "position") {
+        el("position-history-account").value = "";
+        resetPositionHistory();
+      } else {
+        el("order-history-account").value = "";
+        el("order-history-status").value = "";
+        resetOrderHistory();
+      }
+    }
+    updateHistoryNavigation(kind);
+    if (kind === "position") loadPositionHistory(false);
+    else loadOrderHistory(false);
+  }
+
+  function navigateHistoryBack(kind) {
+    historyFlipBegin();
+    const navigation = historyNavigation(kind);
+    if (navigation.level === "details") {
+      navigation.level = "symbols";
+      navigation.symbol = "";
+    } else if (navigation.level === "symbols") {
+      navigation.level = "exchanges";
+      navigation.exchange = "";
+    } else {
+      return;
+    }
+    if (kind === "position") {
+      resetPositionHistory();
+      positionHistoryGroupsHaveData = false;
+    } else {
+      resetOrderHistory();
+      orderHistoryGroupsHaveData = false;
+    }
+    updateHistoryNavigation(kind);
+    if (kind === "position") loadPositionHistory(false);
+    else loadOrderHistory(false);
+  }
+
+  function resetHistoryNavigation(kind) {
+    const navigation = historyNavigation(kind);
+    navigation.level = "exchanges";
+    navigation.exchange = "";
+    navigation.symbol = "";
+    if (kind === "position") {
+      positionHistoryGroupsHaveData = false;
+      el("position-history-account").value = "";
+      resetPositionHistory();
+    } else {
+      orderHistoryGroupsHaveData = false;
+      el("order-history-account").value = "";
+      el("order-history-status").value = "";
+      resetOrderHistory();
+    }
+    updateHistoryNavigation(kind);
+  }
+
+  function fillHistorySelect(selectEl, values, allLabel) {
+    const current = selectEl.value;
+    const seen = [];
+    values.forEach((value) => {
+      const text = String(value || "").trim();
+      if (text && !seen.includes(text)) seen.push(text);
+    });
+    seen.sort((a, b) => a.localeCompare(b));
+    selectEl.replaceChildren();
+    const allOption = document.createElement("option");
+    allOption.value = "";
+    allOption.textContent = allLabel;
+    selectEl.appendChild(allOption);
+    seen.forEach((text) => {
+      const option = document.createElement("option");
+      option.value = text;
+      option.textContent = text;
+      selectEl.appendChild(option);
+    });
+    selectEl.value = seen.includes(current) ? current : "";
+    const custom = historyCustomSelects[selectEl.id];
+    if (custom) custom.sync();
+  }
+
+  // Custom dropdown skin over a native <select>, matching the Add-session
+  // script selector. Reads its options from the native select and dispatches a
+  // native "change" event on choose (so existing filter handlers still fire).
+  function setupHistoryCustomSelect(selectId) {
+    const select = el(selectId);
+    const control = el(`${selectId}-control`);
+    const button = el(`${selectId}-button`);
+    const label = el(`${selectId}-label`);
+    const optionsBox = el(`${selectId}-options`);
+    if (!select || !control || !button || !label || !optionsBox) return;
+    let activeIndex = -1;
+
+    const sync = () => {
+      const selected = select.options[select.selectedIndex];
+      const text = selected ? selected.textContent : "";
+      label.textContent = text;
+      button.title = text;
+      optionsBox.querySelectorAll(".script-select-option").forEach((opt, index) => {
+        const on = opt.dataset.value === select.value;
+        opt.classList.toggle("selected", on);
+        opt.classList.toggle("active", index === activeIndex);
+        opt.setAttribute("aria-selected", on ? "true" : "false");
+      });
+    };
+    const render = () => {
+      const opts = Array.from(select.options);
+      if (!opts.length) {
+        optionsBox.innerHTML = `<div class="script-select-empty">No options</div>`;
+        return;
+      }
+      optionsBox.innerHTML = opts.map((option, index) => {
+        const on = option.value === select.value;
+        const active = index === activeIndex;
+        return `<button type="button" role="option" `
+          + `class="script-select-option${on ? " selected" : ""}${active ? " active" : ""}" `
+          + `data-value="${esc(option.value)}" aria-selected="${on ? "true" : "false"}" `
+          + `title="${esc(option.textContent)}">${esc(option.textContent)}</button>`;
+      }).join("");
+    };
+    const open = () => {
+      activeIndex = Math.max(0, select.selectedIndex);
+      render();
+      control.classList.add("open");
+      button.setAttribute("aria-expanded", "true");
+      optionsBox.classList.remove("hidden");
+    };
+    const close = () => {
+      control.classList.remove("open");
+      button.setAttribute("aria-expanded", "false");
+      optionsBox.classList.add("hidden");
+    };
+    const choose = (value) => {
+      close();
+      if (select.value === value) return;
+      select.value = value;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    const move = (delta) => {
+      const count = select.options.length;
+      if (!count) return;
+      activeIndex = Math.max(0, Math.min((activeIndex < 0 ? 0 : activeIndex) + delta, count - 1));
+      render();
+      const active = optionsBox.querySelector(".script-select-option.active");
+      if (active) active.scrollIntoView({ block: "nearest" });
+    };
+    const commit = () => {
+      if (activeIndex < 0 || activeIndex >= select.options.length) return;
+      choose(select.options[activeIndex].value);
+      button.focus();
+    };
+
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      if (optionsBox.classList.contains("hidden")) open();
+      else close();
+    });
+    button.addEventListener("keydown", (event) => {
+      const isOpen = !optionsBox.classList.contains("hidden");
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        if (!isOpen) open();
+        else move(event.key === "ArrowDown" ? 1 : -1);
+      } else if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        if (isOpen) commit();
+        else open();
+      } else if (event.key === "Escape") {
+        close();
+      }
+    });
+    optionsBox.addEventListener("click", (event) => {
+      const opt = event.target && event.target.closest
+        ? event.target.closest(".script-select-option")
+        : null;
+      if (!opt) return;
+      choose(opt.dataset.value || "");
+      button.focus();
+    });
+    optionsBox.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        move(event.key === "ArrowDown" ? 1 : -1);
+      } else if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        commit();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+        button.focus();
+      }
+    });
+    document.addEventListener("click", (event) => {
+      if (event.target && !control.contains(event.target)) close();
+    });
+    select.addEventListener("change", sync);
+
+    historyCustomSelects[selectId] = { sync, close };
+    sync();
+  }
+
+  function renderPositionHistory(payload, append) {
+    const incoming = Array.isArray(payload.results) ? payload.results : [];
+    positionHistoryRows = append ? positionHistoryRows.concat(incoming) : incoming;
+    positionHistoryCursor = payload.next_cursor || null;
+    positionHistoryTotal = Number(payload.summary && payload.summary.total || 0);
+    positionHistoryHaveData = true;
+    if (!append && !el("position-history-account").value) {
+      fillHistorySelect(
+        el("position-history-account"),
+        positionHistoryRows.map((row) => row.account),
+        "All accounts",
+      );
+    }
+    updateHistoryNavigation("position");
+    const body = el("position-history-table-body");
+    closePositionPnlPopover();
+    body.replaceChildren(...positionHistoryRows.map(createPositionHistoryRow));
+    el("position-history-table-wrap").classList.toggle("hidden", positionHistoryRows.length === 0);
+    el("position-history-empty").classList.toggle("hidden", positionHistoryRows.length !== 0);
+    el("position-history-meta").textContent = positionHistoryRows.length
+      ? `${positionHistoryRows.length} of ${positionHistoryTotal} records`
+      : "";
+    el("position-history-meta").classList.toggle("hidden", positionHistoryRows.length === 0);
+    el("position-history-more").classList.toggle("hidden", !positionHistoryCursor);
+    el("position-history-loading").classList.add("hidden");
+    historyFlipCommit();
+  }
+
+  function renderOrderHistory(payload, append) {
+    const incoming = Array.isArray(payload.results) ? payload.results : [];
+    orderHistoryRows = append ? orderHistoryRows.concat(incoming) : incoming;
+    orderHistoryCursor = payload.next_cursor || null;
+    orderHistoryTotal = Number(payload.summary && payload.summary.total || 0);
+    orderHistoryHaveData = true;
+    if (!append) {
+      if (!el("order-history-account").value) {
+        fillHistorySelect(
+          el("order-history-account"),
+          orderHistoryRows.map((row) => row.account),
+          "All accounts",
+        );
+      }
+      if (!el("order-history-status").value) {
+        fillHistorySelect(
+          el("order-history-status"),
+          orderHistoryRows.map((row) => row.status),
+          "All statuses",
+        );
+      }
+    }
+    updateHistoryNavigation("order");
+    const body = el("order-history-table-body");
+    body.replaceChildren(...orderHistoryRows.map(createOrderHistoryRow));
+    el("order-history-table-wrap").classList.toggle("hidden", orderHistoryRows.length === 0);
+    el("order-history-empty").classList.toggle("hidden", orderHistoryRows.length !== 0);
+    el("order-history-meta").textContent = orderHistoryRows.length
+      ? `${orderHistoryRows.length} of ${orderHistoryTotal} records`
+      : "";
+    el("order-history-meta").classList.toggle("hidden", orderHistoryRows.length === 0);
+    el("order-history-more").classList.toggle("hidden", !orderHistoryCursor);
+    el("order-history-loading").classList.add("hidden");
+    historyFlipCommit();
+  }
+
+  function setPositionHistoryLoading(loading, preserveContent, append) {
+    if (accountView === "position-history") {
+      el("assets-refresh").disabled = loading;
+      el("assets-refresh").classList.toggle("assets-refreshing", loading);
+    }
+    el("position-history-loading").classList.toggle("hidden", !loading || preserveContent);
+    el("position-history-more").disabled = loading;
+    el("position-history-more").textContent = loading && append ? "Loading..." : "Load more";
+    if (loading) el("position-history-error").classList.add("hidden");
+    if (loading && !preserveContent) {
+      el("position-history-meta").classList.add("hidden");
+      el("position-history-empty").classList.add("hidden");
+      el("position-history-table-wrap").classList.add("hidden");
+      el("position-history-more").classList.add("hidden");
+      el("position-history-table-body").replaceChildren();
+      if (positionHistoryNavigation.level !== "details") {
+        el("position-history-groups").replaceChildren();
+      }
+    }
+  }
+
+  function setOrderHistoryLoading(loading, preserveContent, append) {
+    if (accountView === "orders") {
+      el("assets-refresh").disabled = loading;
+      el("assets-refresh").classList.toggle("assets-refreshing", loading);
+    }
+    el("order-history-loading").classList.toggle("hidden", !loading || preserveContent);
+    el("order-history-more").disabled = loading;
+    el("order-history-more").textContent = loading && append ? "Loading..." : "Load more";
+    if (loading) el("order-history-error").classList.add("hidden");
+    if (loading && !preserveContent) {
+      el("order-history-meta").classList.add("hidden");
+      el("order-history-empty").classList.add("hidden");
+      el("order-history-table-wrap").classList.add("hidden");
+      el("order-history-more").classList.add("hidden");
+      el("order-history-table-body").replaceChildren();
+      if (orderHistoryNavigation.level !== "details") {
+        el("order-history-groups").replaceChildren();
+      }
+    }
+  }
+
+  async function loadPositionHistoryGroups(force = false) {
+    const seq = ++positionHistoryRequestSeq;
+    const level = positionHistoryNavigation.level;
+    const exchange = positionHistoryNavigation.exchange;
+    const preserveContent = positionHistoryGroupsHaveData;
+    setPositionHistoryLoading(true, preserveContent, false);
+    updateHistoryNavigation("position");
+    const params = new URLSearchParams();
+    if (level === "symbols" && exchange) params.set("exchange", exchange);
+    try {
+      if (force) await refreshAccountHistory("position");
+      const query = params.toString();
+      const suffix = query ? `?${query}` : "";
+      const payload = await api(`/api/account/position-history/groups${suffix}`);
+      if (
+        seq !== positionHistoryRequestSeq
+        || !isAssetsOpen()
+        || accountView !== "position-history"
+        || positionHistoryNavigation.level !== level
+        || positionHistoryNavigation.exchange !== exchange
+      ) return;
+      renderHistoryGroups("position", payload);
+    } catch (error) {
+      if (seq !== positionHistoryRequestSeq || accountView !== "position-history") return;
+      el("position-history-error").textContent = `${error.message}\nUse refresh to try again.`;
+      el("position-history-error").classList.remove("hidden");
+    } finally {
+      if (seq === positionHistoryRequestSeq) {
+        setPositionHistoryLoading(false, positionHistoryGroupsHaveData, false);
+      }
+    }
+  }
+
+  async function loadOrderHistoryGroups(force = false) {
+    const seq = ++orderHistoryRequestSeq;
+    const level = orderHistoryNavigation.level;
+    const exchange = orderHistoryNavigation.exchange;
+    const preserveContent = orderHistoryGroupsHaveData;
+    setOrderHistoryLoading(true, preserveContent, false);
+    updateHistoryNavigation("order");
+    const params = new URLSearchParams();
+    if (level === "symbols" && exchange) params.set("exchange", exchange);
+    try {
+      if (force) await refreshAccountHistory("order");
+      const query = params.toString();
+      const suffix = query ? `?${query}` : "";
+      const payload = await api(`/api/account/orders/groups${suffix}`);
+      if (
+        seq !== orderHistoryRequestSeq
+        || !isAssetsOpen()
+        || accountView !== "orders"
+        || orderHistoryNavigation.level !== level
+        || orderHistoryNavigation.exchange !== exchange
+      ) return;
+      renderHistoryGroups("order", payload);
+    } catch (error) {
+      if (seq !== orderHistoryRequestSeq || accountView !== "orders") return;
+      el("order-history-error").textContent = `${error.message}\nUse refresh to try again.`;
+      el("order-history-error").classList.remove("hidden");
+    } finally {
+      if (seq === orderHistoryRequestSeq) {
+        setOrderHistoryLoading(false, orderHistoryGroupsHaveData, false);
+      }
+    }
+  }
+
+  async function loadPositionHistory(append = false, force = false) {
+    if (positionHistoryNavigation.level !== "details") {
+      await loadPositionHistoryGroups(force);
+      return;
+    }
+    if (append && !positionHistoryCursor) return;
+    const seq = ++positionHistoryRequestSeq;
+    const preserveContent = positionHistoryHaveData || append;
+    setPositionHistoryLoading(true, preserveContent, append);
+    try {
+      if (force) await refreshAccountHistory("position");
+      const query = historyQuery(
+        "position-history",
+        positionHistoryNavigation,
+        append ? positionHistoryCursor : null,
+      );
+      const payload = await api(`/api/account/position-history?${query}`);
+      if (
+        seq !== positionHistoryRequestSeq
+        || !isAssetsOpen()
+        || accountView !== "position-history"
+      ) return;
+      renderPositionHistory(payload, append);
+    } catch (error) {
+      if (
+        seq !== positionHistoryRequestSeq
+        || !isAssetsOpen()
+        || accountView !== "position-history"
+      ) return;
+      el("position-history-error").textContent = `${error.message}\nUse refresh to try again.`;
+      el("position-history-error").classList.remove("hidden");
+    } finally {
+      if (seq === positionHistoryRequestSeq) {
+        setPositionHistoryLoading(false, positionHistoryHaveData, append);
+      }
+    }
+  }
+
+  async function loadOrderHistory(append = false, force = false) {
+    if (orderHistoryNavigation.level !== "details") {
+      await loadOrderHistoryGroups(force);
+      return;
+    }
+    if (append && !orderHistoryCursor) return;
+    const seq = ++orderHistoryRequestSeq;
+    const preserveContent = orderHistoryHaveData || append;
+    setOrderHistoryLoading(true, preserveContent, append);
+    try {
+      if (force) await refreshAccountHistory("order");
+      const query = historyQuery(
+        "order-history",
+        orderHistoryNavigation,
+        append ? orderHistoryCursor : null,
+        true,
+      );
+      const payload = await api(`/api/account/orders?${query}`);
+      if (seq !== orderHistoryRequestSeq || !isAssetsOpen() || accountView !== "orders") return;
+      renderOrderHistory(payload, append);
+    } catch (error) {
+      if (seq !== orderHistoryRequestSeq || !isAssetsOpen() || accountView !== "orders") return;
+      el("order-history-error").textContent = `${error.message}\nUse refresh to try again.`;
+      el("order-history-error").classList.remove("hidden");
+    } finally {
+      if (seq === orderHistoryRequestSeq) {
+        setOrderHistoryLoading(false, orderHistoryHaveData, append);
+      }
+    }
+  }
+
+  function resetPositionHistory() {
+    positionHistoryRequestSeq += 1;
+    positionHistoryHaveData = false;
+    positionHistoryRows = [];
+    positionHistoryCursor = null;
+    positionHistoryTotal = 0;
+  }
+
+  function resetOrderHistory() {
+    orderHistoryRequestSeq += 1;
+    orderHistoryHaveData = false;
+    orderHistoryRows = [];
+    orderHistoryCursor = null;
+    orderHistoryTotal = 0;
+  }
+
+  function clearAccountPositionsTimers() {
+    if (accountPositionsReconnectTimer !== null) {
+      clearTimeout(accountPositionsReconnectTimer);
+      accountPositionsReconnectTimer = null;
+    }
+    if (accountPositionsKeepaliveTimer !== null) {
+      clearInterval(accountPositionsKeepaliveTimer);
+      accountPositionsKeepaliveTimer = null;
+    }
+  }
+
+  function closeAccountPositionsSocket() {
+    accountPositionsGeneration += 1;
+    clearAccountPositionsTimers();
+    const ws = accountPositionsWs;
+    accountPositionsWs = null;
+    if (ws) {
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+        try { ws.close(); } catch {}
+      }
+    }
+  }
+
+  function connectAccountPositions(generation = accountPositionsGeneration) {
+    if (
+      generation !== accountPositionsGeneration
+      || !isAssetsOpen()
+      || accountView !== "positions"
+      || document.visibilityState === "hidden"
+    ) return;
+    if (
+      accountPositionsWs
+      && [WebSocket.OPEN, WebSocket.CONNECTING].includes(accountPositionsWs.readyState)
+    ) return;
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(`${proto}//${location.host}/ws/account`);
+    accountPositionsWs = ws;
+    ws.onopen = () => {
+      if (ws !== accountPositionsWs || generation !== accountPositionsGeneration) return;
+      accountPositionsKeepaliveTimer = setInterval(() => {
+        if (ws === accountPositionsWs && ws.readyState === WebSocket.OPEN) ws.send("ping");
+      }, 15000);
+    };
+    ws.onmessage = (event) => {
+      if (
+        ws !== accountPositionsWs
+        || generation !== accountPositionsGeneration
+        || !isAssetsOpen()
+        || accountView !== "positions"
+      ) return;
+      try {
+        const message = JSON.parse(event.data);
+        if (message.type === "account.positions" && message.payload) {
+          renderPositions(message.payload);
+        }
+      } catch {}
+    };
+    ws.onclose = () => {
+      if (ws !== accountPositionsWs || generation !== accountPositionsGeneration) return;
+      accountPositionsWs = null;
+      clearAccountPositionsTimers();
+      if (!isAssetsOpen() || accountView !== "positions") return;
+      accountPositionsReconnectTimer = setTimeout(
+        () => connectAccountPositions(generation),
+        1500,
+      );
+    };
+    ws.onerror = () => {
+      try { ws.close(); } catch {}
+    };
   }
 
   async function loadCalendarEvents() {
@@ -2232,7 +4694,47 @@
     el("hub-menu-close").addEventListener("click", closeHubMenu);
     el("hub-menu-backdrop").addEventListener("click", closeHubMenu);
     el("hub-calendar-open").addEventListener("click", openCalendar);
-    el("hub-assets-open").addEventListener("click", openAssets);
+    // Expand/collapse an accordion section to its exact content height so the
+    // easing settles on-screen instead of being cut off mid-curve (which reads
+    // as an abrupt "snap"). scrollHeight ignores the max-height clamp, so it
+    // always reports the true content height in either state.
+    const setSectionOpen = (menu, open) => {
+      if (open) {
+        menu.classList.add("open");
+        menu.style.maxHeight = `${menu.scrollHeight}px`;
+      } else {
+        menu.style.maxHeight = `${menu.scrollHeight}px`;
+        void menu.offsetHeight; // lock the current height before collapsing to 0
+        menu.classList.remove("open");
+        menu.style.maxHeight = "0px";
+      }
+    };
+    el("hub-account-toggle").addEventListener("click", () => {
+      const menu = el("hub-account-menu");
+      const toggle = el("hub-account-toggle");
+      const willOpen = toggle.getAttribute("aria-expanded") !== "true";
+      toggle.setAttribute("aria-expanded", String(willOpen));
+      menu.setAttribute("aria-hidden", String(!willOpen));
+      setSectionOpen(menu, willOpen);
+    });
+    el("hub-account-menu").addEventListener("click", (event) => {
+      const button = event.target && event.target.closest
+        ? event.target.closest("[data-account-view]")
+        : null;
+      if (!button) return;
+      openAccount(String(button.dataset.accountView || "assets"));
+    });
+    el("hub-history-toggle").addEventListener("click", () => {
+      const menu = el("hub-history-menu");
+      const toggle = el("hub-history-toggle");
+      const willOpen = toggle.getAttribute("aria-expanded") !== "true";
+      toggle.setAttribute("aria-expanded", String(willOpen));
+      menu.setAttribute("aria-hidden", String(!willOpen));
+      // release the account submenu's fixed clamp so it grows/shrinks to fit the
+      // nested History section as it animates
+      el("hub-account-menu").style.maxHeight = "none";
+      setSectionOpen(menu, willOpen);
+    });
     el("hub-update-button").addEventListener("click", checkForUpdate);
     el("update-close").addEventListener("click", closeUpdateModal);
     el("update-cancel").addEventListener("click", closeUpdateModal);
@@ -2366,17 +4868,301 @@
     }
     initMobileHubMenuSwipe();
     initMobileCalendarGestures();
+    const accountTabs = document.querySelector(".account-tabs");
+    let accountTabGesture = null;
+    let suppressAccountTabClickUntil = 0;
+    function accountTabFromEvent(event) {
+      return event.target && event.target.closest
+        ? event.target.closest("[data-account-view]")
+        : null;
+    }
+    accountTabs.addEventListener("pointerdown", (event) => {
+      if (!event.isPrimary || (event.pointerType === "mouse" && event.button !== 0)) return;
+      const button = accountTabFromEvent(event);
+      if (!button) return;
+      if (event.pointerType === "mouse") return;
+      accountTabGesture = {
+        id: event.pointerId,
+        button,
+        startX: event.clientX,
+        startY: event.clientY,
+        moved: false,
+      };
+    });
+    accountTabs.addEventListener("pointermove", (event) => {
+      if (!accountTabGesture || event.pointerId !== accountTabGesture.id) return;
+      if (
+        Math.abs(event.clientX - accountTabGesture.startX) > 8
+        || Math.abs(event.clientY - accountTabGesture.startY) > 8
+      ) {
+        accountTabGesture.moved = true;
+      }
+    }, { passive: true });
+    accountTabs.addEventListener("pointerup", (event) => {
+      if (!accountTabGesture || event.pointerId !== accountTabGesture.id) return;
+      const gesture = accountTabGesture;
+      accountTabGesture = null;
+      if (gesture.moved) return;
+      event.preventDefault();
+      event.stopPropagation();
+      suppressAccountTabClickUntil = Date.now() + 400;
+      const view = String(gesture.button.dataset.accountView || "assets");
+      if (view !== accountView || accountViewIsDrilledIn(view)) {
+        switchAccountView(view, { load: true, animate: true });
+      }
+    });
+    accountTabs.addEventListener("pointercancel", () => {
+      accountTabGesture = null;
+    });
+    accountTabs.addEventListener("click", (event) => {
+      if (Date.now() < suppressAccountTabClickUntil) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      const button = accountTabFromEvent(event);
+      if (!button) return;
+      const view = String(button.dataset.accountView || "assets");
+      if (view !== accountView || accountViewIsDrilledIn(view)) {
+        switchAccountView(view, { load: true, animate: true });
+      }
+    });
+    el("history-import-dropzone").addEventListener("click", () => {
+      if (!historyImportBusy) el("history-import-files").click();
+    });
+    el("history-import-help-button").addEventListener("click", (event) => {
+      event.stopPropagation();
+      setHistoryImportHelpOpen(!el("history-import-help").classList.contains("show"));
+    });
+    el("history-import-dropzone").addEventListener("dragover", (event) => {
+      event.preventDefault();
+      if (!historyImportBusy) el("history-import-dropzone").classList.add("dragover");
+    });
+    el("history-import-dropzone").addEventListener("dragleave", () => {
+      el("history-import-dropzone").classList.remove("dragover");
+    });
+    el("history-import-dropzone").addEventListener("drop", (event) => {
+      event.preventDefault();
+      el("history-import-dropzone").classList.remove("dragover");
+      if (!historyImportBusy) previewHistoryImport(event.dataTransfer && event.dataTransfer.files);
+    });
+    el("history-import-files").addEventListener("change", (event) => {
+      previewHistoryImport(event.target.files);
+    });
+    el("history-import-preview").addEventListener("click", (event) => {
+      const removeButton = event.target && event.target.closest
+        ? event.target.closest("[data-history-import-remove]")
+        : null;
+      if (removeButton) {
+        removeHistoryImportPreviewFile(String(removeButton.dataset.historyImportRemove || ""));
+        return;
+      }
+      const option = event.target && event.target.closest
+        ? event.target.closest("[data-history-import-option]")
+        : null;
+      if (option) {
+        const fileId = String(option.dataset.historyImportOption || "");
+        const field = String(option.dataset.field || "");
+        if (historyImportSelections[fileId] && ["account", "source_timezone"].includes(field)) {
+          historyImportSelections[fileId][field] = String(option.dataset.value || "");
+          if (field === "source_timezone") {
+            historyImportSelections[fileId].timezone_confirmed = false;
+          }
+          closeHistoryImportSelects();
+          renderHistoryImportPreview();
+        }
+        return;
+      }
+      const button = event.target && event.target.closest
+        ? event.target.closest("[data-history-import-select]")
+        : null;
+      if (!button) return;
+      const control = button.closest(".history-import-select");
+      const options = control && control.querySelector(".history-import-select-options");
+      if (!control || !options) return;
+      const willOpen = options.classList.contains("hidden");
+      closeHistoryImportSelects(control);
+      control.classList.toggle("open", willOpen);
+      options.classList.toggle("hidden", !willOpen);
+      button.setAttribute("aria-expanded", String(willOpen));
+    });
+    el("history-import-preview").addEventListener("change", (event) => {
+      const checkbox = event.target && event.target.closest
+        ? event.target.closest("[data-history-import-timezone-confirm]")
+        : null;
+      if (!checkbox) return;
+      const fileId = String(checkbox.dataset.historyImportTimezoneConfirm || "");
+      if (!historyImportSelections[fileId]) return;
+      historyImportSelections[fileId].timezone_confirmed = checkbox.checked;
+      renderHistoryImportActions();
+    });
+    el("history-import-submit").addEventListener("click", submitHistoryImport);
+    el("history-import-log-list").addEventListener("click", (event) => {
+      const deleteButton = event.target && event.target.closest
+        ? event.target.closest("[data-history-import-delete]")
+        : null;
+      if (deleteButton) {
+        deleteHistoryImport(
+          String(deleteButton.dataset.historyImportDelete || ""),
+          deleteButton,
+        );
+        return;
+      }
+      const button = event.target && event.target.closest
+        ? event.target.closest("[data-history-import-retry]")
+        : null;
+      if (!button) return;
+      retryHistoryImportEnrichment(String(button.dataset.historyImportRetry || ""));
+    });
+    document.addEventListener("click", (event) => {
+      if (!event.target || !event.target.closest(".history-import-select")) {
+        closeHistoryImportSelects();
+      }
+      if (!event.target || !event.target.closest("#history-import-help")) {
+        setHistoryImportHelpOpen(false);
+      }
+    });
     el("assets-close").addEventListener("click", closeAssets);
     el("assets-back").addEventListener("click", () => {
+      if (accountView === "pnl") {
+        selectedPnlExchange = null;
+        renderPnlView();
+        scrollPnlToTop();
+        return;
+      }
       selectedAssetExchange = null;
       renderAssetsView();
       el("assets-body").scrollTop = 0;
     });
-    el("assets-refresh").addEventListener("click", () => loadAssets(true));
+    el("assets-refresh").addEventListener("click", () => {
+      if (accountView === "positions") loadPositions(true);
+      else if (accountView === "position-history") loadPositionHistory(false, true);
+      else if (accountView === "orders") loadOrderHistory(false, true);
+      else if (accountView === "pnl") loadPnl();
+      else if (accountView === "assets") loadAssets(true);
+    });
+    document.querySelectorAll("[data-pnl-days]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const rawDays = String(button.dataset.pnlDays || "");
+        const days = rawDays === "all" ? "all" : Number(rawDays);
+        if ((days !== "all" && !Number.isInteger(days)) || days === pnlPeriodDays) return;
+        pnlPeriodDays = days;
+        // keep the current rows (preserveContent) so the list updates in place
+        // via syncPnlList's keyed diff instead of clearing → no empty flash
+        document.querySelectorAll("[data-pnl-days]").forEach((candidate) => {
+          const candidateRaw = String(candidate.dataset.pnlDays || "");
+          const candidateDays = candidateRaw === "all" ? "all" : Number(candidateRaw);
+          const active = candidateDays === pnlPeriodDays;
+          candidate.classList.toggle("active", active);
+          candidate.setAttribute("aria-pressed", String(active));
+        });
+        historyFlipBegin();
+        loadPnl();
+      });
+    });
+    el("position-history-filters").addEventListener("submit", (event) => {
+      event.preventDefault();
+      resetPositionHistory();
+      loadPositionHistory(false);
+    });
+    el("position-history-account").addEventListener("change", () => {
+      historyFlipBegin();
+      resetPositionHistory();
+      loadPositionHistory(false);
+    });
+    el("position-history-back").addEventListener("click", () => {
+      navigateHistoryBack("position");
+    });
+    el("position-history-more").addEventListener("click", () => {
+      loadPositionHistory(true);
+    });
+    el("order-history-filters").addEventListener("submit", (event) => {
+      event.preventDefault();
+      resetOrderHistory();
+      loadOrderHistory(false);
+    });
+    ["account", "status"].forEach((field) => {
+      el(`order-history-${field}`).addEventListener("change", () => {
+        historyFlipBegin();
+        resetOrderHistory();
+        loadOrderHistory(false);
+      });
+    });
+    setupHistoryCustomSelect("position-history-account");
+    setupHistoryCustomSelect("order-history-account");
+    setupHistoryCustomSelect("order-history-status");
+    el("order-history-back").addEventListener("click", () => {
+      navigateHistoryBack("order");
+    });
+    el("order-history-more").addEventListener("click", () => {
+      loadOrderHistory(true);
+    });
     const assetsModal = el("assets-modal");
+    assetsModal.addEventListener("pointerdown", (event) => {
+      const target = event.target && event.target.closest ? event.target : null;
+      const button = target && target.closest(".position-pnl-value");
+      if (!button) return;
+      positionPnlPress = {
+        button,
+        pointerId: event.pointerId,
+        startedAt: performance.now(),
+        x: event.clientX,
+        y: event.clientY,
+        moved: false,
+      };
+    }, { passive: true });
+    assetsModal.addEventListener("pointermove", (event) => {
+      if (!positionPnlPress || positionPnlPress.pointerId !== event.pointerId) return;
+      if (Math.hypot(
+        event.clientX - positionPnlPress.x,
+        event.clientY - positionPnlPress.y,
+      ) > 8) {
+        positionPnlPress.moved = true;
+      }
+    }, { passive: true });
+    assetsModal.addEventListener("pointerup", (event) => {
+      if (!positionPnlPress || positionPnlPress.pointerId !== event.pointerId) return;
+      if (positionPnlPress.moved || performance.now() - positionPnlPress.startedAt > 450) {
+        suppressPositionPnlClickUntil = Date.now() + 500;
+      }
+      positionPnlPress = null;
+    }, { passive: true });
+    assetsModal.addEventListener("pointercancel", () => {
+      positionPnlPress = null;
+      suppressPositionPnlClickUntil = Date.now() + 500;
+    }, { passive: true });
     assetsModal.addEventListener("click", (event) => {
+      if (Date.now() < suppressAccountTabClickUntil) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      const target = event.target && event.target.closest ? event.target : null;
+      const pnlButton = target && target.closest(".position-pnl-value");
+      if (pnlButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (Date.now() >= suppressPositionPnlClickUntil) {
+          showPositionPnlPopover(pnlButton);
+        }
+        return;
+      }
       if (event.target === assetsModal) closeAssets();
     });
+    document.addEventListener("pointerdown", (event) => {
+      if (!activePositionPnlButton) return;
+      const target = event.target && event.target.closest ? event.target : null;
+      if (
+        target
+        && (
+          target.closest("#position-pnl-popover")
+          || target.closest(".position-pnl-value")
+        )
+      ) return;
+      closePositionPnlPopover();
+    }, { passive: true });
+    window.addEventListener("resize", closePositionPnlPopover, { passive: true });
+    window.addEventListener("resize", schedulePnlListSizing, { passive: true });
     el("asset-transfer-close").addEventListener("click", closeAssetTransfer);
     el("asset-transfer-back").addEventListener("click", () => {
       if (assetTransferMode === "review") {
@@ -5642,10 +8428,22 @@
   }
 
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") rebuildHub();
-    else closeForBackground();
+    if (document.visibilityState === "visible") {
+      rebuildHub();
+      connectAccountPositions();
+      scheduleAssetsRefresh();
+      schedulePnlRefresh();
+    } else {
+      clearAssetsRefreshTimer();
+      clearPnlRefreshTimer();
+      closeForBackground();
+      closeAccountPositionsSocket();
+    }
   });
-  window.addEventListener("online", rebuildHub);
+  window.addEventListener("online", () => {
+    rebuildHub();
+    connectAccountPositions();
+  });
 
   initHubMenuCalendar();
   initSessionReordering();

@@ -8,6 +8,7 @@ import json
 import ssl
 import sys
 import time
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,7 @@ from asset import (
 )
 
 
-SCHEMA_VERSION = "1.4"
+SCHEMA_VERSION = "1.5"
 DEFAULT_ACCOUNT_TYPE = "swap"
 
 BINANCE_ALL_POSITION_SCOPES = (
@@ -46,6 +47,8 @@ BITGET_ALL_POSITION_SCOPES = (
     "USDC-FUTURES",
     "COIN-FUTURES",
 )
+BYBIT_TRANSACTION_MAX_RANGE_MS = 7 * 24 * 60 * 60 * 1000
+BYBIT_BREAKDOWN_MAX_AGE_MS = 31 * 24 * 60 * 60 * 1000
 
 
 def normalized_side(position: dict[str, Any], contracts: int | float | None) -> str | None:
@@ -57,12 +60,439 @@ def normalized_side(position: dict[str, Any], contracts: int | float | None) -> 
     return None
 
 
+def _sum_present_numbers(source: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+    values = [number_or_none(source.get(key)) for key in keys]
+    present = [value for value in values if value is not None]
+    return sum(present) if present else None
+
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return result if result.is_finite() else None
+
+
+def _integer_or_none(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _pnl_breakdown(
+    gross_pnl: Decimal,
+    fee_cost: Decimal,
+    net_pnl: Decimal,
+    *,
+    funding: Decimal,
+    funding_source: str,
+    currency: str | None,
+) -> dict[str, Any]:
+    return {
+        "gross_pnl": float(gross_pnl),
+        "fees": float(fee_cost),
+        "funding": float(funding),
+        "funding_source": funding_source,
+        "net_pnl": float(net_pnl),
+        "currency": currency,
+        "complete": True,
+    }
+
+
+def normalize_realized_pnl(position: dict[str, Any]) -> tuple[float | None, dict[str, Any] | None]:
+    """Normalize the current position's realized PnL without estimating missing data."""
+
+    info = position.get("info")
+    info = info if isinstance(info, dict) else {}
+    ccxt_net = number_or_none(position.get("realizedPnl"))
+    gross_pnl: float | None = None
+    fee_cost: float | None = None
+    funding: float | None = None
+    funding_source: str | None = None
+    net_pnl = ccxt_net
+    complete = False
+
+    # OKX: realizedPnl = pnl + settledPnl + fee + fundingFee + liqPenalty.
+    if "instId" in info and "realizedPnl" in info:
+        net_pnl = number_or_none(info.get("realizedPnl"))
+        gross_pnl = _sum_present_numbers(info, ("pnl", "settledPnl"))
+        funding = number_or_none(info.get("fundingFee"))
+        if net_pnl is not None and gross_pnl is not None:
+            fee_cost = gross_pnl + (funding or 0.0) - net_pnl
+            funding_source = "position" if funding is not None else None
+            complete = True
+
+    # Bitget classic: achievedProfits excludes transaction and funding fees.
+    elif "achievedProfits" in info:
+        gross_pnl = _sum_present_numbers(info, ("achievedProfits", "cashDividend"))
+        funding = number_or_none(info.get("totalFee")) or 0.0
+        fee_cost = number_or_none(info.get("deductedFee")) or 0.0
+        if gross_pnl is not None:
+            net_pnl = gross_pnl + funding - fee_cost
+            funding_source = "position"
+            complete = True
+
+    # Bitget UTA exposes signed fee/funding components alongside current net PnL.
+    elif "curRealisedPnl" in info and any(
+        key in info for key in ("openFeeTotal", "closeFeeTotal", "totalFunding")
+    ):
+        net_pnl = number_or_none(info.get("curRealisedPnl"))
+        signed_trading_fees = _sum_present_numbers(
+            info,
+            ("openFeeTotal", "closeFeeTotal"),
+        )
+        funding = number_or_none(info.get("totalFunding")) or 0.0
+        if net_pnl is not None and signed_trading_fees is not None:
+            fee_cost = -signed_trading_fees
+            gross_pnl = net_pnl + fee_cost - funding
+            funding_source = "position"
+            complete = True
+
+    # Bybit's curRealisedPnl is already net of trading and funding fees for
+    # the current holding position. A separate transaction-log lookup adds
+    # the fee breakdown when available.
+    elif "curRealisedPnl" in info:
+        net_pnl = number_or_none(info.get("curRealisedPnl"))
+
+    if net_pnl is None:
+        return None, None
+    return net_pnl, {
+        "gross_pnl": gross_pnl,
+        "fees": fee_cost,
+        "funding": funding,
+        "funding_source": funding_source,
+        "net_pnl": net_pnl,
+        "complete": complete,
+    }
+
+
+def _private_call_with_retry(
+    exchange: ccxt.Exchange,
+    call: Any,
+    params: dict[str, Any],
+    attempts: int,
+    secrets: list[str],
+    label: str,
+) -> Any:
+    for attempt in range(1, attempts + 1):
+        try:
+            return call(params)
+        except (
+            ccxt.ArgumentsRequired,
+            ccxt.AuthenticationError,
+            ccxt.BadRequest,
+            ccxt.NotSupported,
+            ccxt.PermissionDenied,
+        ):
+            raise
+        except ccxt.BaseError as exc:
+            if attempt >= attempts:
+                raise
+            delay = min(2 ** (attempt - 1), 4)
+            eprint(
+                f"[position] {exchange.id} {label} failed ({attempt}/{attempts}): "
+                f"{type(exc).__name__}: {redact_error(exc, secrets)}; "
+                f"retrying in {delay}s"
+            )
+            time.sleep(delay)
+    raise RuntimeError(f"{label} retry loop ended unexpectedly")
+
+
+def _binance_position_cycle(
+    trades: list[dict[str, Any]],
+    position: dict[str, Any],
+    normalized: dict[str, Any],
+) -> tuple[int, list[dict[str, Any]]] | None:
+    info = position.get("info")
+    info = info if isinstance(info, dict) else {}
+    position_side = str(info.get("positionSide") or "BOTH").upper()
+    side = str(normalized.get("side") or "").lower()
+    contracts = _decimal_or_none(normalized.get("contracts"))
+    if side not in {"long", "short"} or contracts in {None, Decimal(0)}:
+        return None
+
+    current = abs(contracts) if side == "long" else -abs(contracts)
+    relevant: list[tuple[int, int, str, Decimal, dict[str, Any]]] = []
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        trade_position_side = str(trade.get("positionSide") or "BOTH").upper()
+        if trade_position_side != position_side:
+            continue
+        timestamp = _integer_or_none(trade.get("time"))
+        quantity = _decimal_or_none(trade.get("qty"))
+        trade_side = str(trade.get("side") or "").upper()
+        if timestamp is None or quantity in {None, Decimal(0)}:
+            continue
+        if trade_side not in {"BUY", "SELL"}:
+            continue
+        trade_id = _integer_or_none(trade.get("id")) or 0
+        relevant.append((timestamp, trade_id, trade_side, quantity, trade))
+
+    tolerance = max(abs(current) * Decimal("1e-12"), Decimal("1e-12"))
+    cycle: list[dict[str, Any]] = []
+    for timestamp, _, trade_side, quantity, trade in sorted(relevant, reverse=True):
+        cycle.append(trade)
+        delta = quantity if trade_side == "BUY" else -quantity
+        before = current - delta
+        if abs(before) <= tolerance:
+            cycle.reverse()
+            return timestamp, cycle
+        # A single fill that flips direction contains PnL from two position
+        # lifecycles and cannot be split reliably from Income History.
+        if before * current < 0:
+            return None
+        current = before
+    return None
+
+
+def _binance_position_start_time(
+    trades: list[dict[str, Any]],
+    position: dict[str, Any],
+    normalized: dict[str, Any],
+) -> int | None:
+    cycle = _binance_position_cycle(trades, position, normalized)
+    return cycle[0] if cycle is not None else None
+
+
+def enrich_binance_realized_pnl(
+    exchange: ccxt.Exchange,
+    position: dict[str, Any],
+    normalized: dict[str, Any],
+    market_scope: str,
+    attempts: int,
+    secrets: list[str],
+) -> None:
+    if not is_open_position(normalized):
+        return
+    info = position.get("info")
+    info = info if isinstance(info, dict) else {}
+    raw_symbol = str(info.get("symbol") or "").upper()
+    if not raw_symbol:
+        return
+    if market_scope == "coin_m":
+        trades_call = exchange.dapiPrivateGetUserTrades
+        income_call = exchange.dapiPrivateGetIncome
+    else:
+        trades_call = exchange.fapiPrivateGetUserTrades
+        income_call = exchange.fapiPrivateGetIncome
+
+    trades = _private_call_with_retry(
+        exchange,
+        trades_call,
+        {"symbol": raw_symbol, "limit": 1000},
+        attempts,
+        secrets,
+        f"{market_scope} user trades",
+    )
+    if not isinstance(trades, list):
+        return
+    cycle = _binance_position_cycle(trades, position, normalized)
+    if cycle is None:
+        return
+    start_time, cycle_trades = cycle
+
+    # Trade rows provide exact cycle-specific realized PnL and commissions.
+    # Income History is needed only for funding, which is not a trade event.
+    gross_pnl = Decimal(0)
+    trading_fees = Decimal(0)
+    assets: set[str] = set()
+    for trade in cycle_trades:
+        gross_pnl += _decimal_or_none(trade.get("realizedPnl")) or Decimal(0)
+        trading_fees += _decimal_or_none(trade.get("commission")) or Decimal(0)
+        commission_asset = str(trade.get("commissionAsset") or "").upper()
+        if commission_asset:
+            assets.add(commission_asset)
+
+    unified_symbol = str(normalized.get("symbol") or "")
+    if ":" in unified_symbol:
+        settlement = unified_symbol.rsplit(":", 1)[1].split("-", 1)[0].upper()
+        if settlement:
+            assets.add(settlement)
+
+    # Binance Income timestamps are rounded to the second while trade times
+    # include milliseconds, so include the whole opening second.
+    income_start = start_time // 1000 * 1000
+    incomes = _private_call_with_retry(
+        exchange,
+        income_call,
+        {
+            "symbol": raw_symbol,
+            "incomeType": "FUNDING_FEE",
+            "startTime": income_start,
+            "limit": 1000,
+        },
+        attempts,
+        secrets,
+        f"{market_scope} income history",
+    )
+    if not isinstance(incomes, list) or len(incomes) >= 1000:
+        return
+
+    funding = Decimal(0)
+    for income in incomes:
+        if not isinstance(income, dict):
+            continue
+        value = _decimal_or_none(income.get("income"))
+        timestamp = _integer_or_none(income.get("time"))
+        if (
+            str(income.get("incomeType") or "").upper() != "FUNDING_FEE"
+            or value is None
+            or timestamp is None
+            or timestamp < income_start
+        ):
+            continue
+        funding += value
+        asset = str(income.get("asset") or "").upper()
+        if asset:
+            assets.add(asset)
+    if len(assets) > 1:
+        return
+
+    fee_cost = trading_fees - funding
+    net_pnl = gross_pnl - fee_cost
+    normalized["realized_pnl"] = float(net_pnl)
+    normalized["realized_pnl_breakdown"] = _pnl_breakdown(
+        gross_pnl,
+        trading_fees,
+        net_pnl,
+        funding=funding,
+        funding_source="income",
+        currency=next(iter(assets), None),
+    )
+
+
+def _bybit_transaction_pages(
+    exchange: ccxt.Exchange,
+    category: str,
+    start_time: int,
+    end_time: int,
+    attempts: int,
+    secrets: list[str],
+) -> list[dict[str, Any]] | None:
+    rows: list[dict[str, Any]] = []
+    window_start = start_time
+    while window_start <= end_time:
+        window_end = min(window_start + BYBIT_TRANSACTION_MAX_RANGE_MS - 1, end_time)
+        cursor = ""
+        while True:
+            params: dict[str, Any] = {
+                "accountType": "UNIFIED",
+                "category": category,
+                "startTime": window_start,
+                "endTime": window_end,
+                "limit": 50,
+            }
+            if cursor:
+                params["cursor"] = cursor
+            response = _private_call_with_retry(
+                exchange,
+                exchange.privateGetV5AccountTransactionLog,
+                params,
+                attempts,
+                secrets,
+                "transaction log",
+            )
+            result = response.get("result") if isinstance(response, dict) else None
+            if not isinstance(result, dict):
+                return None
+            page = result.get("list")
+            if not isinstance(page, list):
+                return None
+            rows.extend(item for item in page if isinstance(item, dict))
+            next_cursor = str(result.get("nextPageCursor") or "")
+            if not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+        window_start = window_end + 1
+    return rows
+
+
+def enrich_bybit_realized_pnl(
+    exchange: ccxt.Exchange,
+    position: dict[str, Any],
+    normalized: dict[str, Any],
+    attempts: int,
+    secrets: list[str],
+) -> None:
+    net_value = _decimal_or_none(normalized.get("realized_pnl"))
+    if net_value is None or not is_open_position(normalized):
+        return
+    info = position.get("info")
+    info = info if isinstance(info, dict) else {}
+    raw_symbol = str(info.get("symbol") or "").upper()
+    category = str(info.get("category") or "linear").lower()
+    start_time = _integer_or_none(info.get("openTime"))
+    if start_time is None or start_time <= 0:
+        start_time = _integer_or_none(position.get("timestamp"))
+    end_time = exchange.milliseconds()
+    if (
+        not raw_symbol
+        or category not in {"linear", "inverse", "option"}
+        or start_time is None
+        or start_time <= 0
+        or end_time - start_time > BYBIT_BREAKDOWN_MAX_AGE_MS
+    ):
+        return
+
+    try:
+        transactions = _bybit_transaction_pages(
+            exchange,
+            category,
+            start_time,
+            end_time,
+            attempts,
+            secrets,
+        )
+    except (ccxt.NotSupported, ccxt.PermissionDenied, ccxt.BadRequest):
+        return
+    if transactions is None:
+        return
+
+    gross_pnl = Decimal(0)
+    trading_fees = Decimal(0)
+    funding = Decimal(0)
+    currencies: set[str] = set()
+    for transaction in transactions:
+        if str(transaction.get("symbol") or "").upper() != raw_symbol:
+            continue
+        cash_flow = _decimal_or_none(transaction.get("cashFlow")) or Decimal(0)
+        fee = _decimal_or_none(transaction.get("fee")) or Decimal(0)
+        funding_value = _decimal_or_none(transaction.get("funding")) or Decimal(0)
+        gross_pnl += cash_flow
+        trading_fees += fee
+        funding += funding_value
+        currency = str(transaction.get("currency") or "").upper()
+        if currency:
+            currencies.add(currency)
+
+    calculated_net = gross_pnl + funding - trading_fees
+    tolerance = max(abs(net_value) * Decimal("1e-8"), Decimal("1e-8"))
+    if len(currencies) > 1 or abs(calculated_net - net_value) > tolerance:
+        return
+    normalized["realized_pnl_breakdown"] = _pnl_breakdown(
+        gross_pnl,
+        trading_fees,
+        net_value,
+        funding=funding,
+        funding_source="transaction_log",
+        currency=next(iter(currencies), None),
+    )
+
+
 def normalize_position(position: dict[str, Any]) -> dict[str, Any]:
     contracts = number_or_none(position.get("contracts"))
     contract_size = number_or_none(position.get("contractSize"))
     quantity = contracts
     if contracts is not None and contract_size is not None:
         quantity = contracts * contract_size
+    realized_pnl, realized_pnl_breakdown = normalize_realized_pnl(position)
     return {
         "symbol": str(position.get("symbol") or ""),
         "side": normalized_side(position, contracts),
@@ -81,7 +511,8 @@ def normalize_position(position: dict[str, Any]) -> dict[str, Any]:
         "margin_mode": position.get("marginMode"),
         "hedged": position.get("hedged") if isinstance(position.get("hedged"), bool) else None,
         "unrealized_pnl": number_or_none(position.get("unrealizedPnl")),
-        "realized_pnl": number_or_none(position.get("realizedPnl")),
+        "realized_pnl": realized_pnl,
+        "realized_pnl_breakdown": realized_pnl_breakdown,
         "percentage": number_or_none(position.get("percentage")),
         "stop_loss_price": number_or_none(position.get("stopLossPrice")),
         "take_profit_price": number_or_none(position.get("takeProfitPrice")),
@@ -97,6 +528,11 @@ def normalize_hyperliquid_position(position: dict[str, Any]) -> dict[str, Any]:
     info = info if isinstance(info, dict) else {}
     entry = info.get("position")
     entry = entry if isinstance(entry, dict) else {}
+    if normalized.get("mark_price") is None:
+        notional = number_or_none(normalized.get("notional"))
+        quantity = number_or_none(normalized.get("quantity"))
+        if notional is not None and quantity not in {None, 0}:
+            normalized["mark_price"] = abs(notional / quantity)
     return_on_equity = number_or_none(entry.get("returnOnEquity"))
     if return_on_equity is not None:
         normalized["percentage"] = round(return_on_equity * 100, 12)
@@ -169,6 +605,28 @@ def binance_position_scopes(
     ]
 
 
+def binance_position_matches_scope(
+    position: dict[str, Any],
+    market_scope: str,
+) -> bool:
+    """Validate a Binance derivative scope from its CCXT unified symbol."""
+
+    symbol = str(position.get("symbol") or "")
+    if ":" not in symbol or "/" not in symbol:
+        return True
+    market_pair, settlement = symbol.rsplit(":", 1)
+    base, quote = market_pair.split("/", 1)
+    settlement = settlement.split("-", 1)[0]
+    base = base.upper()
+    quote = quote.upper()
+    settlement = settlement.upper()
+    if market_scope == "usd_m":
+        return settlement == quote
+    if market_scope == "coin_m":
+        return settlement == base
+    return True
+
+
 def bitget_position_scopes(
     account_type: str,
     all_derivative_scopes: bool,
@@ -197,6 +655,7 @@ def bitget_position_scopes(
 
 def fetch_bitget_positions_with_retry(
     exchange: ccxt.Exchange,
+    account_name: str,
     product_type: str,
     symbols: list[str] | None,
     attempts: int,
@@ -237,7 +696,7 @@ def fetch_bitget_positions_with_retry(
                 raise
             delay = min(2 ** (attempt - 1), 4)
             eprint(
-                f"[position] bitget {product_type} fetch failed "
+                f"[position] {account_name}/bitget {product_type} fetch failed "
                 f"({attempt}/{attempts}): {type(exc).__name__}: "
                 f"{redact_error(exc, secrets)}; retrying in {delay}s"
             )
@@ -438,13 +897,16 @@ def collect_one(
     account_type: str,
     config: dict[str, Any],
     args: argparse.Namespace,
+    *,
+    log_progress: bool = True,
 ) -> dict[str, Any]:
     secrets = secret_values(config)
     exchange: ccxt.Exchange | None = None
-    eprint(
-        f"[position] collecting account={account_name} exchange={exchange_id} "
-        f"account_type={account_type}"
-    )
+    if log_progress:
+        eprint(
+            f"[position] collecting account={account_name} exchange={exchange_id} "
+            f"account_type={account_type}"
+        )
     try:
         exchange = build_exchange(exchange_id, config, args.timeout_ms, account_type)
         if not exchange.has.get("fetchPositions"):
@@ -476,7 +938,22 @@ def collect_one(
                 for position in positions:
                     item = normalize_position(position)
                     item["market_scope"] = scope
-                    normalized.append(item)
+                    if binance_position_matches_scope(item, scope):
+                        try:
+                            enrich_binance_realized_pnl(
+                                exchange,
+                                position,
+                                item,
+                                scope,
+                                args.attempts,
+                                secrets,
+                            )
+                        except Exception as exc:
+                            eprint(
+                                f"[position] binance {scope} realized PnL unavailable: "
+                                f"{type(exc).__name__}: {redact_error(exc, secrets)}"
+                            )
+                        normalized.append(item)
             source = "ccxt.fetch_positions"
         elif exchange_id == "bitget":
             normalized = []
@@ -489,6 +966,7 @@ def collect_one(
             for product_type in product_types:
                 positions = fetch_bitget_positions_with_retry(
                     exchange,
+                    account_name,
                     product_type,
                     args.symbols or None,
                     args.attempts,
@@ -509,7 +987,24 @@ def collect_one(
                 args.attempts,
                 secrets,
             )
-            normalized = [normalize_position(position) for position in positions]
+            normalized = []
+            for position in positions:
+                item = normalize_position(position)
+                if exchange_id == "bybit":
+                    try:
+                        enrich_bybit_realized_pnl(
+                            exchange,
+                            position,
+                            item,
+                            args.attempts,
+                            secrets,
+                        )
+                    except Exception as exc:
+                        eprint(
+                            f"[position] bybit realized PnL breakdown unavailable: "
+                            f"{type(exc).__name__}: {redact_error(exc, secrets)}"
+                        )
+                normalized.append(item)
             queried_dexes = []
             queried_scopes = [account_type]
             source = "ccxt.fetch_positions"

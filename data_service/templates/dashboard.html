@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=69" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=114" />
 </head>
 <body>
   <header class="topbar">
@@ -31,12 +31,79 @@
       <button id="hub-menu-close" class="hub-menu-close" type="button" aria-label="Close menu">&times;</button>
     </div>
     <nav class="hub-menu-nav" aria-label="Hub menu">
-      <button id="hub-assets-open" class="hub-menu-item" type="button">
-        <span class="hub-menu-emoji" aria-hidden="true">&#x1f4b0;</span>
-        <span>Assets</span>
+      <button id="hub-account-toggle" class="hub-menu-item hub-menu-parent" type="button"
+              aria-expanded="false" aria-controls="hub-account-menu">
+        <span class="hub-menu-emoji" aria-hidden="true">
+          <svg class="hub-menu-glyph" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+            <circle cx="12" cy="7" r="4" />
+          </svg>
+        </span>
+        <span>Account</span>
+        <svg class="hub-menu-parent-chevron" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="m9 18 6-6-6-6" />
+        </svg>
       </button>
+      <div id="hub-account-menu" class="hub-submenu" aria-hidden="true">
+        <button class="hub-submenu-item" type="button" data-account-view="assets">
+          <span class="hub-submenu-emoji" aria-hidden="true">
+            <svg class="hub-submenu-glyph" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 3h6l-1.3 3.3h-3.4z" />
+              <path d="M10 6.3C6 8.5 4 11.5 4 15A6 6 0 0 0 10 21H14A6 6 0 0 0 20 15C20 11.5 18 8.5 14 6.3" />
+              <path d="M13.4 11.4a2 2 0 0 0-3.4.5c0 1.7 3.4 1 3.4 2.7a2 2 0 0 1-3.4.5" />
+              <line x1="12" y1="9.7" x2="12" y2="16.3" />
+            </svg>
+          </span>
+          <span>Assets</span>
+        </button>
+        <button class="hub-submenu-item" type="button" data-account-view="positions">
+          <span class="hub-submenu-emoji" aria-hidden="true">
+            <svg class="hub-submenu-glyph" viewBox="0 0 24 24" aria-hidden="true">
+              <line x1="6" y1="20" x2="6" y2="14" />
+              <line x1="12" y1="20" x2="12" y2="4" />
+              <line x1="18" y1="20" x2="18" y2="10" />
+            </svg>
+          </span>
+          <span>Positions</span>
+        </button>
+        <button class="hub-submenu-item" type="button" data-account-view="pnl">
+          <span class="hub-submenu-emoji" aria-hidden="true">
+            <svg class="hub-submenu-glyph" viewBox="0 0 24 24" aria-hidden="true">
+              <polyline points="3 17 9 11 13 15 21 7" />
+              <polyline points="15 7 21 7 21 13" />
+            </svg>
+          </span>
+          <span>PnL</span>
+        </button>
+        <button id="hub-history-toggle" class="hub-submenu-item hub-submenu-parent" type="button"
+                aria-expanded="false" aria-controls="hub-history-menu">
+          <span class="hub-submenu-emoji" aria-hidden="true">
+            <svg class="hub-submenu-glyph" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+              <path d="M3 3v5h5" />
+              <path d="M12 7v5l4 2" />
+            </svg>
+          </span>
+          <span>History</span>
+          <svg class="hub-submenu-parent-chevron" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m9 18 6-6-6-6" />
+          </svg>
+        </button>
+        <div id="hub-history-menu" class="hub-subsubmenu" aria-hidden="true">
+          <button class="hub-subsubmenu-item" type="button" data-account-view="position-history">Position History</button>
+          <button class="hub-subsubmenu-item" type="button" data-account-view="orders">Order History</button>
+          <button class="hub-subsubmenu-item" type="button" data-account-view="import-history">Import History</button>
+        </div>
+      </div>
       <button id="hub-calendar-open" class="hub-menu-item" type="button">
-        <span class="hub-menu-emoji" aria-hidden="true">&#x1f4c5;</span>
+        <span class="hub-menu-emoji" aria-hidden="true">
+          <svg class="hub-menu-glyph" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="18" rx="2" />
+            <line x1="3" y1="10" x2="21" y2="10" />
+            <line x1="8" y1="2" x2="8" y2="6" />
+            <line x1="16" y1="2" x2="16" y2="6" />
+          </svg>
+        </span>
         <span>Calendar</span>
       </button>
     </nav>
@@ -189,7 +256,7 @@
               <path d="m12 19-7-7 7-7" />
             </svg>
           </button>
-          <span id="assets-title">Assets</span>
+          <span id="assets-title">Account</span>
         </div>
         <div class="modal-actions">
           <button id="assets-refresh" class="btn btn-icon" type="button"
@@ -201,10 +268,28 @@
               <path d="M3 21v-5h5" />
             </svg>
           </button>
-          <button id="assets-close" class="btn" type="button" title="Close" aria-label="Close">&times;</button>
+          <button id="assets-close" class="btn btn-icon" type="button" title="Close" aria-label="Close">&times;</button>
         </div>
       </div>
-      <div class="assets-body">
+      <nav class="account-tabs" aria-label="Account views">
+        <button class="account-tab active" type="button" data-account-view="assets">Assets</button>
+        <button class="account-tab" type="button" data-account-view="positions">Positions</button>
+        <button class="account-tab account-tab-history" type="button" data-account-view="position-history"
+                aria-label="Position History">
+          <span>Position</span><span>History</span>
+        </button>
+        <button class="account-tab account-tab-history" type="button" data-account-view="orders"
+                aria-label="Order History">
+          <span>Order</span><span>History</span>
+        </button>
+        <button class="account-tab account-tab-history" type="button" data-account-view="import-history"
+                aria-label="Import History">
+          <span>Import</span><span>History</span>
+        </button>
+        <button class="account-tab" type="button" data-account-view="pnl">PnL</button>
+      </nav>
+      <section id="account-assets-view" class="account-view">
+        <div id="assets-body" class="assets-body">
         <section id="assets-summary" class="assets-summary hidden" aria-label="Asset summary">
           <div>
             <span class="assets-summary-label">Total assets</span>
@@ -215,7 +300,7 @@
             <span id="assets-updated"></span>
           </div>
         </section>
-        <div id="assets-loading" class="assets-state">
+        <div id="assets-loading" class="assets-state hidden">
           <span class="assets-spinner" aria-hidden="true"></span>
           <span>Loading account assets...</span>
         </div>
@@ -224,6 +309,241 @@
           No exchange accounts are configured in providers.toml.
         </div>
         <div id="assets-portfolios" class="assets-portfolios"></div>
+        </div>
+      </section>
+      <section id="account-positions-view" class="account-view hidden">
+        <div class="account-view-body">
+          <section id="positions-summary" class="account-summary hidden" aria-label="Position summary">
+            <div>
+              <span class="account-summary-label">Open positions</span>
+              <strong id="positions-open-count">0</strong>
+            </div>
+            <div class="account-summary-meta">
+              <span id="positions-account-count"></span>
+              <span id="positions-updated"></span>
+            </div>
+          </section>
+          <div id="positions-loading" class="assets-state">
+            <span class="assets-spinner" aria-hidden="true"></span>
+            <span>Loading positions...</span>
+          </div>
+          <div id="positions-error" class="assets-state assets-state-error hidden" role="alert"></div>
+          <div id="positions-empty" class="assets-state hidden">No open positions.</div>
+          <div id="positions-list" class="account-history-record-list account-positions-list hidden"></div>
+          <div id="positions-account-errors" class="account-errors hidden"></div>
+        </div>
+      </section>
+      <section id="account-position-history-view" class="account-view account-history-view hidden">
+        <div class="account-view-body">
+          <div class="account-history-navigation">
+            <button id="position-history-back" class="btn btn-icon account-history-back hidden"
+                    type="button" title="Back" aria-label="Back">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M19 12H5"></path><path d="m12 19-7-7 7-7"></path>
+              </svg>
+            </button>
+            <div>
+              <strong id="position-history-navigation-title">Exchanges</strong>
+              <span id="position-history-navigation-subtitle">Choose an exchange</span>
+            </div>
+          </div>
+          <div id="position-history-groups" class="account-history-groups"></div>
+          <div id="position-history-loading" class="assets-state hidden">
+            <span class="assets-spinner" aria-hidden="true"></span>
+            <span>Loading position history...</span>
+          </div>
+          <div id="position-history-error" class="assets-state assets-state-error hidden" role="alert"></div>
+          <div id="position-history-empty" class="assets-state hidden">No position history.</div>
+          <div id="position-history-details" class="account-history-details hidden">
+          <form id="position-history-filters"
+                class="account-history-filters account-history-detail-filters">
+            <div class="script-select account-history-select" id="position-history-account-control">
+              <select id="position-history-account" class="script-native-select"
+                      tabindex="-1" aria-hidden="true">
+                <option value="">All accounts</option>
+              </select>
+              <button type="button" class="script-select-button" id="position-history-account-button"
+                      aria-haspopup="listbox" aria-expanded="false" aria-label="Filter by account">
+                <span class="script-select-label" id="position-history-account-label">All accounts</span>
+                <span class="script-select-chevron" aria-hidden="true">&#9662;</span>
+              </button>
+              <div class="script-select-options hidden" id="position-history-account-options"
+                   role="listbox"></div>
+            </div>
+          </form>
+          <div id="position-history-meta" class="account-history-meta hidden"></div>
+          <div id="position-history-table-wrap" class="account-history-list-wrap hidden">
+            <div id="position-history-table-body" class="account-history-record-list"></div>
+          </div>
+          <div class="account-history-more">
+            <button id="position-history-more" class="btn hidden" type="button">Load more</button>
+          </div>
+          </div>
+        </div>
+      </section>
+      <section id="account-orders-view" class="account-view account-history-view hidden">
+        <div class="account-view-body">
+          <div class="account-history-navigation">
+            <button id="order-history-back" class="btn btn-icon account-history-back hidden"
+                    type="button" title="Back" aria-label="Back">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M19 12H5"></path><path d="m12 19-7-7 7-7"></path>
+              </svg>
+            </button>
+            <div>
+              <strong id="order-history-navigation-title">Exchanges</strong>
+              <span id="order-history-navigation-subtitle">Choose an exchange</span>
+            </div>
+          </div>
+          <div id="order-history-groups" class="account-history-groups"></div>
+          <div id="order-history-loading" class="assets-state hidden">
+            <span class="assets-spinner" aria-hidden="true"></span>
+            <span>Loading order history...</span>
+          </div>
+          <div id="order-history-error" class="assets-state assets-state-error hidden" role="alert"></div>
+          <div id="order-history-empty" class="assets-state hidden">No order history.</div>
+          <div id="order-history-details" class="account-history-details hidden">
+          <form id="order-history-filters"
+                class="account-history-filters account-history-detail-filters account-order-detail-filters">
+            <div class="script-select account-history-select" id="order-history-account-control">
+              <select id="order-history-account" class="script-native-select"
+                      tabindex="-1" aria-hidden="true">
+                <option value="">All accounts</option>
+              </select>
+              <button type="button" class="script-select-button" id="order-history-account-button"
+                      aria-haspopup="listbox" aria-expanded="false" aria-label="Filter by account">
+                <span class="script-select-label" id="order-history-account-label">All accounts</span>
+                <span class="script-select-chevron" aria-hidden="true">&#9662;</span>
+              </button>
+              <div class="script-select-options hidden" id="order-history-account-options"
+                   role="listbox"></div>
+            </div>
+            <div class="script-select account-history-select" id="order-history-status-control">
+              <select id="order-history-status" class="script-native-select"
+                      tabindex="-1" aria-hidden="true">
+                <option value="">All statuses</option>
+              </select>
+              <button type="button" class="script-select-button" id="order-history-status-button"
+                      aria-haspopup="listbox" aria-expanded="false" aria-label="Filter by order status">
+                <span class="script-select-label" id="order-history-status-label">All statuses</span>
+                <span class="script-select-chevron" aria-hidden="true">&#9662;</span>
+              </button>
+              <div class="script-select-options hidden" id="order-history-status-options"
+                   role="listbox"></div>
+            </div>
+          </form>
+          <div id="order-history-meta" class="account-history-meta hidden"></div>
+          <div id="order-history-table-wrap" class="account-history-list-wrap hidden">
+            <div id="order-history-table-body" class="account-history-record-list"></div>
+          </div>
+          <div class="account-history-more">
+            <button id="order-history-more" class="btn hidden" type="button">Load more</button>
+          </div>
+          </div>
+        </div>
+      </section>
+      <section id="account-import-history-view" class="account-view account-history-import-view hidden">
+        <div class="account-view-body history-import-body">
+          <div class="history-import-heading">
+            <div>
+              <strong>Import exchange history</strong>
+              <span class="history-import-description">Merge exported CSV history into Position History, Order History, and PnL.
+                <span id="history-import-help" class="history-import-help">
+                  <button id="history-import-help-button" type="button" aria-label="Show recommended CSV files"
+                          aria-expanded="false" aria-controls="history-import-help-popover">?</button>
+                  <span id="history-import-help-popover" class="history-import-help-popover" role="tooltip">
+                    <strong>* Recommended for complete data</strong>
+                    <span>Binance: Position History, Order History, Trade History, and Transaction History</span>
+                    <span>Bitget: Futures Position History and Futures Order History</span>
+                    <span>Bybit: Closed P&amp;L, Order History, Trade History, and Transaction Log (import support pending)</span>
+                    <span>OKX: Position History, Order History, and Trade Details</span>
+                    <span>Hyperliquid: Trade History and Funding History; Order History is added automatically via API</span>
+                  </span>
+                </span>
+              </span>
+            </div>
+          </div>
+          <input id="history-import-files" class="hidden" type="file" accept=".csv,text/csv" multiple />
+          <button id="history-import-dropzone" class="history-import-dropzone" type="button">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 16V4"></path><path d="m7 9 5-5 5 5"></path>
+              <path d="M5 20h14"></path>
+            </svg>
+            <span>Choose or drop CSV files</span>
+            <small>Binance, Bitget, OKX, and Hyperliquid exports</small>
+          </button>
+          <div id="history-import-loading" class="assets-state hidden">
+            <span class="assets-spinner" aria-hidden="true"></span>
+            <span id="history-import-loading-text">Inspecting CSV files...</span>
+          </div>
+          <div id="history-import-error" class="assets-state assets-state-error hidden" role="alert"></div>
+          <div id="history-import-preview" class="history-import-preview hidden"></div>
+          <div id="history-import-actions" class="history-import-actions hidden">
+            <span id="history-import-status" aria-live="polite"></span>
+            <button id="history-import-submit" class="btn btn-primary" type="button">Import</button>
+          </div>
+          <section class="history-import-log">
+            <div class="history-import-log-heading">
+              <strong>Previous imports</strong>
+              <span id="history-import-log-count"></span>
+            </div>
+            <div id="history-import-log-empty" class="assets-state hidden">No CSV history has been imported.</div>
+            <div id="history-import-log-list" class="history-import-log-list"></div>
+          </section>
+        </div>
+      </section>
+      <section id="account-pnl-view" class="account-view hidden">
+        <div class="account-view-body pnl-view-body">
+          <section id="pnl-summary" class="account-summary pnl-summary hidden" aria-label="PnL summary">
+            <div>
+              <span class="account-summary-label">Net PnL</span>
+              <div id="pnl-summary-totals" class="pnl-summary-totals"></div>
+            </div>
+            <div class="account-summary-meta">
+              <span id="pnl-summary-counts"></span>
+              <span id="pnl-updated"></span>
+            </div>
+          </section>
+          <div class="pnl-period-control" role="group" aria-label="PnL period">
+            <button type="button" data-pnl-days="7" aria-pressed="false">7D</button>
+            <button type="button" data-pnl-days="30" aria-pressed="false">30D</button>
+            <button class="active" type="button" data-pnl-days="90" aria-pressed="true">90D</button>
+            <button type="button" data-pnl-days="180" aria-pressed="false">6M</button>
+            <button type="button" data-pnl-days="365" aria-pressed="false">1Y</button>
+            <button type="button" data-pnl-days="all" aria-pressed="false">All</button>
+          </div>
+          <div id="pnl-loading" class="assets-state">
+            <span class="assets-spinner" aria-hidden="true"></span>
+            <span>Loading PnL...</span>
+          </div>
+          <div id="pnl-error" class="assets-state assets-state-error hidden" role="alert"></div>
+          <div id="pnl-empty" class="assets-state hidden">No PnL data.</div>
+          <div id="pnl-list" class="account-history-record-list pnl-list hidden"></div>
+          <div id="pnl-coverage-note" class="pnl-coverage-note hidden">
+            Funding and borrow interest are not included.
+          </div>
+        </div>
+      </section>
+      <div id="position-pnl-popover" class="position-pnl-popover hidden" role="dialog"
+           aria-label="Realized PnL calculation">
+        <strong>Realized PnL</strong>
+        <div class="position-pnl-row">
+          <span>Total PnL</span>
+          <span id="position-pnl-gross" class="mono"></span>
+        </div>
+        <div class="position-pnl-row">
+          <span>Fees</span>
+          <span id="position-pnl-fees" class="mono"></span>
+        </div>
+        <div class="position-pnl-row">
+          <span>Funding</span>
+          <span id="position-pnl-funding" class="mono"></span>
+        </div>
+        <div class="position-pnl-row position-pnl-net-row">
+          <span>Net PnL</span>
+          <span id="position-pnl-net" class="mono"></span>
+        </div>
+        <div id="position-pnl-note" class="position-pnl-note hidden"></div>
       </div>
     </div>
   </div>
@@ -479,6 +799,6 @@
     </form>
   </div>
 
-  <script src="/static/dashboard.js?v=76"></script>
+  <script src="/static/dashboard.js?v=124"></script>
 </body>
 </html>
