@@ -20,7 +20,8 @@ Run your crypto trading strategy in real time without TradingView.
   signal to exchange in under a second after candle confirmation
 - 📊 Bitget, Hyperliquid, OKX, Binance, and Bybit supported
 - 🔔 Webhook, Telegram, and draggable manual price alerts on the chart
-- 💼 Exchange and account-level asset portfolios with reviewed internal transfers
+- 💼 **Account Center** — assets, live positions, trade history, net PnL,
+  CSV history import, and reviewed internal transfers
 - 📱 Full mobile dashboard
 
 ## 🤖 AI Copilot
@@ -142,7 +143,7 @@ pynereal/
 |   |   |-- sessions.json            Runtime session state saved by dashboard
 |   |   `-- providers.toml           Provider credentials, e.g. ccxt API keys
 |   |-- data/                        OHLCV files and per-symbol metadata
-|   |   `-- cache/                   SQLite OHLCV cache
+|   |   `-- cache/                   SQLite OHLCV and account-history caches
 |   `-- output/realtime/             Per-session logs, plots, script hashes
 |-- demo_webhook_server.py           Optional local webhook receiver
 `-- setup.sh                         Local environment setup helper
@@ -364,26 +365,60 @@ values:
 {"signal":"CLOSE TP3","ticker":"{{ticker}}","timeframe":"{{timeframe}}"}
 ```
 
-## Assets and Internal Transfers
+## Account Center
 
-Open the Hub menu beside the PyneReal Hub title and select **Assets** to view the
-combined value of every configured exchange account. The list shows totals by
-exchange and account; select an account to open a donut chart with its asset and
-account-type breakdown, including supported spot, futures, margin, funding, and
-earn balances.
+Open the Hub menu beside the PyneReal Hub title and expand **Account**. Account
+Center combines every exchange account configured in
+`workdir/config/providers.toml`:
 
-Select a non-zero account type to open **Internal transfer**. Available routes
-depend on the exchange and account configuration. PyneReal supports transfers
-between the exchange's internal wallets, flexible Earn redemption where
+- **Assets** shows totals by exchange and account. Select an account to open a
+  donut chart with its asset and account-type breakdown, including supported
+  spot, futures, margin, funding, and earn balances.
+- **Positions** shows current derivative positions with mark price, unrealized
+  and realized PnL, return, leverage, margin mode, and liquidation price. Live
+  exchange streams update supported values, with periodic REST reconciliation.
+- **PnL** groups account results by exchange for `7D`, `30D`, `90D`, `6M`, `1Y`,
+  or all locally available history. Net realized PnL includes available trading
+  fees and funding; the UI marks incomplete breakdowns when an exchange source
+  does not expose every component.
+- **History** provides exchange- and symbol-grouped Position History and Order
+  History with manual refresh and local pagination.
+
+Recent account history is collected in the background and stored locally in
+`workdir/data/cache/account_cache.sqlite`. The initial API backfill targets the
+latest 90 days where the exchange permits it. Subsequent collections resume
+from overlapping cursors so restarts do not require rebuilding the full cache.
+
+### Import History
+
+Use **Account > History > Import History** to merge older exchange exports into
+Position History, Order History, and PnL. Re-importing the same file is allowed,
+and imported CSV records take precedence when they provide a more complete
+canonical record. Recommended exports are:
+
+- **Binance:** Position History, Order History, Trade History, and Transaction
+  History
+- **Bitget:** Futures Position History and Futures Order History
+- **OKX:** Position History, Order History, and Trade Details
+- **Hyperliquid:** Trade History and Funding History; historical orders are
+  completed through the Hyperliquid API during import
+
+Bybit accounts remain available in Account Center through supported exchange
+APIs, but **Bybit CSV import is not supported yet**.
+
+### Internal Transfers
+
+From **Assets**, select a non-zero account type to open **Internal transfer**.
+Available routes depend on the exchange and account configuration. PyneReal
+supports transfers between internal wallets, flexible Earn redemption where
 available, and main/sub-account transfers where the exchange API permits them.
 Every transfer is shown on a review screen and requires explicit confirmation.
 This feature does not perform blockchain withdrawals.
 
-Asset access uses credentials from `workdir/config/providers.toml`. Keep API
-keys read-only when only portfolio viewing is needed. If internal transfers are
-required, grant only the minimum account and transfer permissions for the
-intended routes; withdrawal permission is not required and should remain
-disabled.
+Keep API keys read-only when only portfolio viewing is needed. If internal
+transfers are required, grant only the minimum account and transfer permissions
+for the intended routes; withdrawal permission is not required and should
+remain disabled.
 
 ## Session Calendar
 
