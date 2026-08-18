@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from collections import deque
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from fastapi import WebSocket
 
 from config import FeedSpec, SessionSpec
+from pynecore.core.exchange_policy import tradingview_hides_zero_volume
 from log_utils import log_with_time
 from manual_alerts import build_manual_alert_payload, send_manual_alert_payload
 from ohlcv_paths import make_ohlcv_paths, runtime_output_dir
@@ -21,6 +24,7 @@ from ws_manager import WSManager
 
 _MAX_AI_INSTRUCTION_CHARS = 4_000
 _MAX_PROCESSED_AI_INSTRUCTION_EVENTS = 500
+_MAX_RECENT_RAW_TRADE_KEYS = 10_000
 
 
 def _plot_wire_value(value: Any, kind: str) -> float | int | None:
@@ -73,15 +77,20 @@ class Feed:
         self.state = DataState()
         self.tasks: Dict[str, Any] = {}
         self.history_ready_event = asyncio.Event()
+        self.data_integrity_lock = asyncio.Lock()
         self.collector_error: Optional[str] = None
         self._history_start_mtime: Optional[float] = None
         self._history_start_time: Optional[int] = None
-        self._last_broadcast_close: Optional[float] = None
+        self._raw_trade_sequence = 0
+        self._last_raw_trade_price: Optional[float] = None
+        self._last_raw_trade_time_ms: Optional[int] = None
+        self._raw_trade_stream_started = False
+        self._recent_raw_trade_keys: deque[tuple[Any, ...]] = deque()
+        self._recent_raw_trade_key_set: set[tuple[Any, ...]] = set()
         # session_id -> Session
         self.subscribers: Dict[str, "Session"] = {}
 
     async def broadcast_bar(self, bar: list) -> None:
-        prev_price = self._last_broadcast_close
         payload = {
             "type": "bar",
             "data": {
@@ -93,15 +102,103 @@ class Feed:
                 "volume": float(bar[5]),
             },
         }
-        self._last_broadcast_close = payload["data"]["close"]
         for session in list(self.subscribers.values()):
-            await session.maybe_fire_manual_alert_trigger(payload["data"], prev_price)
             await session.send_to_charts(payload)
+
+    @staticmethod
+    def _raw_trade_key(trade: dict[str, Any]) -> tuple[Any, ...]:
+        trade_id = trade.get("id")
+        if trade_id is not None and str(trade_id) != "":
+            return ("id", str(trade_id))
+        return (
+            "values",
+            trade.get("timestamp"),
+            trade.get("price"),
+            trade.get("amount"),
+            trade.get("side"),
+            trade.get("order"),
+        )
+
+    def _remember_raw_trade_key(self, key: tuple[Any, ...]) -> bool:
+        if key in self._recent_raw_trade_key_set:
+            return False
+        if len(self._recent_raw_trade_keys) >= _MAX_RECENT_RAW_TRADE_KEYS:
+            expired = self._recent_raw_trade_keys.popleft()
+            self._recent_raw_trade_key_set.discard(expired)
+        self._recent_raw_trade_keys.append(key)
+        self._recent_raw_trade_key_set.add(key)
+        return True
+
+    def raw_trade_cursor(self) -> tuple[int, float | None, int | None]:
+        return (
+            self._raw_trade_sequence,
+            self._last_raw_trade_price,
+            self._last_raw_trade_time_ms,
+        )
+
+    def broadcast_trades(self, trades: list) -> None:
+        initial_batch = not self._raw_trade_stream_started
+        new_trades: list[tuple[int, dict[str, Any]]] = []
+        for index, trade in enumerate(trades):
+            if not isinstance(trade, dict):
+                continue
+            if not self._remember_raw_trade_key(self._raw_trade_key(trade)):
+                continue
+            new_trades.append((index, trade))
+
+        def sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int]:
+            index, trade = item
+            try:
+                timestamp = int(trade.get("timestamp"))
+            except (TypeError, ValueError):
+                timestamp = 0
+            return timestamp, index
+
+        new_trades.sort(key=sort_key)
+        for _, trade in new_trades:
+            try:
+                price = float(trade.get("price"))
+            except (TypeError, ValueError):
+                continue
+            try:
+                trade_time_ms = int(trade.get("timestamp"))
+            except (TypeError, ValueError):
+                trade_time_ms = None
+
+            self._raw_trade_sequence += 1
+            self._last_raw_trade_price = price
+            if trade_time_ms is not None:
+                self._last_raw_trade_time_ms = trade_time_ms
+            for session in list(self.subscribers.values()):
+                if not session.spec.manual_alert_triggers:
+                    continue
+                session.maybe_fire_manual_alert_trade(
+                    price=price,
+                    trade_time_ms=trade_time_ms,
+                    sequence=self._raw_trade_sequence,
+                    initial_batch=initial_batch,
+                )
+        self._raw_trade_stream_started = True
 
     async def emit_event(self, payload: dict) -> None:
         # prerun_ready / run_ready fan out to every runner subscribed to this feed.
         for session in list(self.subscribers.values()):
-            await session.send_to_runners(payload)
+            if session.runner_count <= 0:
+                continue
+            session_payload = dict(payload)
+            if (
+                session.strategy_evaluation_enabled
+                and payload.get("type") in {
+                    "prerun_ready",
+                    "prerun_ready_after_history_download",
+                    "run_ready",
+                }
+            ):
+                generation_id = await session.begin_calculation(session_payload)
+                if generation_id is not None:
+                    session_payload["calculation_generation_id"] = generation_id
+                    session_payload["strategy_evaluation_enabled"] = True
+            await session.send_to_runners(session_payload)
 
     def history_ready(self) -> bool:
         return self.history_ready_event.is_set()
@@ -154,9 +251,16 @@ class Feed:
 # strategies on the same BTC market).
 # ======================================================================
 class Session:
-    def __init__(self, spec: SessionSpec, feed: Feed) -> None:
+    def __init__(
+        self,
+        spec: SessionSpec,
+        feed: Feed,
+        *,
+        strategy_evaluation_enabled: bool = False,
+    ) -> None:
         self.spec = spec
         self.feed = feed
+        self.strategy_evaluation_enabled = strategy_evaluation_enabled
         self.paths = SessionPaths.build(spec.id)
 
         self.ws_manager = WSManager(on_disconnect=self._cleanup_client)
@@ -170,6 +274,14 @@ class Session:
         # ready = "running" (green).
         self.runner_ready = False
         self.history_resync_pending = False
+        self.calculation_generation_id = uuid.uuid4().hex
+        self.calculation_status = "stopped"
+        self.calculation_latest_confirmed_bar: int | None = None
+        self.calculated_through: int | None = None
+        self.calculation_updated_at = datetime.now(UTC).isoformat()
+        self.strategy_snapshot: dict[str, Any] | None = None
+        self.strategy_snapshot_generation_id: str | None = None
+        self._calculation_condition = asyncio.Condition()
         self.chart_info: Dict[str, Any] = {
             "exchange": spec.exchange,
             "symbol": spec.symbol,
@@ -188,7 +300,8 @@ class Session:
         self._processed_ai_instruction_ids: set[str] = set()
         self._processed_ai_instruction_order: deque[str] = deque()
         self._manual_alert_trigger_sending_ids: set[str] = set()
-        self._manual_alert_trigger_last_bar_time: dict[str, int] = {}
+        self._manual_alert_trigger_gates: dict[str, dict[str, Any]] = {}
+        self.reset_manual_alert_trigger_gate()
 
     @property
     def ohlcv_path(self) -> Path:
@@ -207,6 +320,121 @@ class Session:
                 await self.on_spec_change()
             except Exception:
                 pass
+
+    @staticmethod
+    def _event_confirmed_bar_time(event: dict[str, Any]) -> int | None:
+        bars = event.get("confirmed_bar_and_new_bar")
+        if not isinstance(bars, list) or not bars:
+            return None
+        confirmed = bars[0]
+        if not isinstance(confirmed, (list, tuple)) or not confirmed:
+            return None
+        try:
+            return int(confirmed[0] // 1000)
+        except (TypeError, ValueError):
+            return None
+
+    def _event_confirmed_bar_is_hidden(self, event: dict[str, Any]) -> bool:
+        bars = event.get("confirmed_bar_and_new_bar")
+        if not isinstance(bars, list) or not bars:
+            return False
+        confirmed = bars[0]
+        if not isinstance(confirmed, (list, tuple)) or len(confirmed) < 6:
+            return False
+        if not tradingview_hides_zero_volume(self.spec.exchange):
+            return False
+        try:
+            return float(confirmed[5]) == 0.0
+        except (TypeError, ValueError):
+            return False
+
+    async def begin_calculation(self, event: dict[str, Any] | None = None) -> str | None:
+        event = event or {}
+        if self._event_confirmed_bar_is_hidden(event):
+            return None
+        target = self._event_confirmed_bar_time(event)
+        async with self._calculation_condition:
+            self.calculation_generation_id = uuid.uuid4().hex
+            self.calculation_status = (
+                "starting" if event.get("type") == "runner_start" else "prerun"
+            )
+            self.calculation_latest_confirmed_bar = target
+            self.calculated_through = None
+            self.calculation_updated_at = datetime.now(UTC).isoformat()
+            self.strategy_snapshot = None
+            self.strategy_snapshot_generation_id = None
+            self._calculation_condition.notify_all()
+            return self.calculation_generation_id
+
+    async def set_calculation_stopped(self) -> None:
+        async with self._calculation_condition:
+            self.calculation_status = "stopped"
+            self.calculation_updated_at = datetime.now(UTC).isoformat()
+            self._calculation_condition.notify_all()
+
+    async def apply_strategy_snapshot(self, event: dict[str, Any]) -> bool:
+        event_generation_id = str(event.get("calculation_generation_id") or "")
+        try:
+            calculated_through = int(event["calculated_through"])
+        except (KeyError, TypeError, ValueError):
+            calculated_through = None
+        snapshot = dict(event)
+        snapshot.pop("type", None)
+        async with self._calculation_condition:
+            if event_generation_id != self.calculation_generation_id:
+                return False
+            if self.calculation_latest_confirmed_bar is None:
+                self.calculation_latest_confirmed_bar = calculated_through
+            self.calculated_through = calculated_through
+            self.strategy_snapshot = snapshot
+            self.strategy_snapshot_generation_id = self.calculation_generation_id
+            target = self.calculation_latest_confirmed_bar
+            if calculated_through is not None and (target is None or calculated_through >= target):
+                self.calculation_status = "ready"
+            else:
+                self.calculation_status = "prerun"
+            self.calculation_updated_at = datetime.now(UTC).isoformat()
+            self._calculation_condition.notify_all()
+            return True
+
+    def calculation_state_payload(self) -> dict[str, Any]:
+        return {
+            "status": self.calculation_status,
+            "generation_id": self.calculation_generation_id,
+            "calculated_through": self.calculated_through,
+            "latest_confirmed_bar": self.calculation_latest_confirmed_bar,
+            "snapshot_generation_id": self.strategy_snapshot_generation_id,
+            "updated_at": self.calculation_updated_at,
+        }
+
+    def calculation_ready(self) -> bool:
+        target = self.calculation_latest_confirmed_bar
+        return bool(
+            self.calculation_status == "ready"
+            and self.strategy_snapshot is not None
+            and self.strategy_snapshot_generation_id == self.calculation_generation_id
+            and self.calculated_through is not None
+            and (target is None or self.calculated_through >= target)
+        )
+
+    async def wait_for_calculation_ready(self, timeout: float) -> bool:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, timeout)
+        async with self._calculation_condition:
+            while not self.calculation_ready():
+                if self.runner_count <= 0 or self.calculation_status == "stopped":
+                    return False
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return False
+                try:
+                    await asyncio.wait_for(
+                        self._calculation_condition.wait(),
+                        timeout=remaining,
+                    )
+                except asyncio.TimeoutError:
+                    return False
+            return True
 
     # ------------------------------------------------------------------
     # WebSocket lifecycle
@@ -227,6 +455,7 @@ class Session:
             if self.runner_count <= 0:
                 self.runner_count = 0
                 self.runner_ready = False
+                await self.set_calculation_stopped()
                 await self.send_to_charts({"type": "runner_disconnected"})
             await self._notify_status()
 
@@ -248,6 +477,8 @@ class Session:
         if msg_type == "client_hello":
             role = event.get("role")
             if role == "runner":
+                if self.strategy_evaluation_enabled:
+                    await self.begin_calculation({"type": "runner_start"})
                 # Replay the feed's pending after-history prerun only after the
                 # client identifies as a runner. Until then it receives no live
                 # bars, so long pre_run cannot build up a chart-message backlog.
@@ -257,6 +488,11 @@ class Session:
                     pending_prerun_event = dict(pending_prerun_event)
                     if self.history_resync_pending:
                         pending_prerun_event["history_resync"] = True
+                    if self.strategy_evaluation_enabled:
+                        generation_id = await self.begin_calculation(pending_prerun_event)
+                        if generation_id is not None:
+                            pending_prerun_event["calculation_generation_id"] = generation_id
+                            pending_prerun_event["strategy_evaluation_enabled"] = True
                     await ws_manager.send(ws, pending_prerun_event)
 
                 self.client_roles[ws] = role
@@ -283,6 +519,11 @@ class Session:
             self.runner_ready = True
             self.history_resync_pending = False
             await self._notify_status()
+
+        elif msg_type == "strategy_snapshot":
+            if self.client_roles.get(ws) != "runner":
+                return
+            await self.apply_strategy_snapshot(event)
 
         elif msg_type == "last_bar_open_fix":
             last_bar_index = event.get("last_bar_index", -1)
@@ -354,10 +595,23 @@ class Session:
             self.plot_options.update(event.get("data", {}))
             confirmed_bar_index = event.get("confirmed_bar_index", -1)
             confirmed_bar_time = event.get("confirmed_bar_time")
+            plot_values = event.get("values")
 
             if self.plot_options and (confirmed_bar_time is not None or confirmed_bar_index >= 0):
                 try:
-                    if plot_path.exists():
+                    if isinstance(plot_values, dict) and confirmed_bar_time is not None:
+                        for title, options in self.plot_options.items():
+                            kind = str(options.get("kind") or "line")
+                            await self.send_to_charts({
+                                "type": "plot_data",
+                                "title": title,
+                                "kind": kind,
+                                "time": int(confirmed_bar_time),
+                                "value": _plot_wire_value(plot_values.get(title), kind),
+                            })
+                    elif plot_path.exists():
+                        # Backward-compatible fallback for runners that do not include
+                        # current values in the plot_options event.
                         from pynecore.core.csv_file import CSVReader
                         with CSVReader(plot_path) as reader:
                             candle = None
@@ -451,9 +705,44 @@ class Session:
     def manual_alert_triggers_payload(self) -> list[dict]:
         return [dict(t) for t in self.spec.manual_alert_triggers]
 
+    @staticmethod
+    def _manual_alert_trigger_signature(trigger: dict) -> str:
+        return json.dumps(
+            {
+                "price": trigger.get("price"),
+                "template": trigger.get("template"),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+
     def reset_manual_alert_trigger_gate(self) -> None:
-        self._manual_alert_trigger_last_bar_time.clear()
-        self._manual_alert_trigger_sending_ids.clear()
+        sequence, last_price, last_trade_time_ms = self.feed.raw_trade_cursor()
+        armed_at_ms = int(time.time() * 1000)
+        active_ids: set[str] = set()
+        gates: dict[str, dict[str, Any]] = {}
+        for trigger in self.spec.manual_alert_triggers:
+            if not trigger.get("enabled"):
+                continue
+            trigger_id = str(trigger.get("id") or "")
+            if not trigger_id:
+                continue
+            active_ids.add(trigger_id)
+            signature = self._manual_alert_trigger_signature(trigger)
+            previous = self._manual_alert_trigger_gates.get(trigger_id)
+            if previous is not None and previous.get("signature") == signature:
+                gates[trigger_id] = previous
+                continue
+            gates[trigger_id] = {
+                "signature": signature,
+                "armed_sequence": sequence,
+                "armed_at_ms": armed_at_ms,
+                "last_price": last_price,
+                "last_trade_time_ms": last_trade_time_ms,
+            }
+        self._manual_alert_trigger_gates = gates
+        self._manual_alert_trigger_sending_ids.intersection_update(active_ids)
 
     async def push_manual_alert_trigger(self) -> None:
         await self.send_to_charts({
@@ -473,13 +762,13 @@ class Session:
             return Path(self.spec.script_name).stem
         return None
 
-    def _manual_alert_trigger_touched(self, bar: dict, prev_price: float | None,
+    @staticmethod
+    def _manual_alert_trigger_touched(prev_price: float | None, market_price: float,
                                       trigger_price: float) -> bool:
-        close = float(bar.get("close"))
         if prev_price is None:
-            prev_price = float(bar.get("open", close))
-        low = min(float(prev_price), close)
-        high = max(float(prev_price), close)
+            return market_price == trigger_price
+        low = min(float(prev_price), market_price)
+        high = max(float(prev_price), market_price)
         return low <= trigger_price <= high
 
     def _remove_manual_alert_trigger(self, trigger_id: str) -> bool:
@@ -488,6 +777,7 @@ class Session:
         if len(remaining) == len(triggers):
             return False
         self.spec = self.spec.with_manual_alert_triggers(remaining)
+        self._manual_alert_trigger_gates.pop(trigger_id, None)
         return True
 
     async def _discard_manual_alert_trigger(self, trigger_id: str) -> None:
@@ -514,6 +804,18 @@ class Session:
                 script_title=self._manual_alert_script_title(),
                 payload=payload,
             )
+            webhook = result.get("webhook") if isinstance(result, dict) else None
+            if isinstance(webhook, dict) and webhook.get("error"):
+                log_with_time(
+                    f"[manual_alert_trigger] webhook failed for {self.spec.id}: "
+                    f"{webhook['error']}"
+                )
+            telegram = result.get("telegram") if isinstance(result, dict) else None
+            if isinstance(telegram, dict) and telegram.get("error"):
+                log_with_time(
+                    f"[manual_alert_trigger] Telegram failed for {self.spec.id}: "
+                    f"{telegram['error']}"
+                )
         except Exception as e:
             log_with_time(
                 f"[manual_alert_trigger] send failed for {self.spec.id} "
@@ -535,31 +837,65 @@ class Session:
             if trigger_id:
                 self._manual_alert_trigger_sending_ids.discard(trigger_id)
 
-    async def maybe_fire_manual_alert_trigger(self, bar: dict, prev_price: float | None) -> None:
-        try:
-            bar_time = int(bar.get("time"))
-            market_price = float(bar.get("close"))
-        except (TypeError, ValueError):
-            return
-
+    def maybe_fire_manual_alert_trade(
+        self,
+        *,
+        price: float,
+        trade_time_ms: int | None,
+        sequence: int,
+        initial_batch: bool,
+    ) -> None:
         for trigger in self.spec.manual_alert_triggers:
             if not trigger.get("enabled"):
                 continue
             trigger_id = str(trigger.get("id") or "")
             if not trigger_id or trigger_id in self._manual_alert_trigger_sending_ids:
                 continue
+            gate = self._manual_alert_trigger_gates.get(trigger_id)
+            if gate is None or sequence <= int(gate.get("armed_sequence", 0)):
+                continue
             try:
                 trigger_price = float(trigger.get("price"))
             except (TypeError, ValueError):
                 continue
-            if self._manual_alert_trigger_last_bar_time.get(trigger_id) == bar_time:
+
+            last_trade_time_ms = gate.get("last_trade_time_ms")
+            if (
+                trade_time_ms is not None
+                and last_trade_time_ms is not None
+                and trade_time_ms < int(last_trade_time_ms)
+            ):
                 continue
-            if not self._manual_alert_trigger_touched(bar, prev_price, trigger_price):
+            armed_at_ms = int(gate.get("armed_at_ms", 0))
+            if trade_time_ms is not None and trade_time_ms < armed_at_ms:
+                gate["last_price"] = price
+                gate["last_trade_time_ms"] = trade_time_ms
+                continue
+            if initial_batch and trade_time_ms is None:
+                gate["last_price"] = price
                 continue
 
-            self._manual_alert_trigger_last_bar_time[trigger_id] = bar_time
+            previous_price = gate.get("last_price")
+            gate["last_price"] = price
+            if trade_time_ms is not None:
+                gate["last_trade_time_ms"] = trade_time_ms
+            if not self._manual_alert_trigger_touched(previous_price, price, trigger_price):
+                continue
+
+            event_time = (
+                trade_time_ms // 1000
+                if trade_time_ms is not None
+                else int(time.time())
+            )
             self._manual_alert_trigger_sending_ids.add(trigger_id)
-            asyncio.create_task(self._send_manual_alert_trigger(dict(trigger), trigger_price, market_price, bar_time))
+            asyncio.create_task(
+                self._send_manual_alert_trigger(
+                    dict(trigger),
+                    trigger_price,
+                    price,
+                    event_time,
+                )
+            )
 
     async def dispatch_manual_alert_ai_instruction(
         self,
@@ -571,6 +907,9 @@ class Session:
     ) -> bool:
         instruction = str(payload.get("ai_instruction") or "").strip()
         if not instruction:
+            return False
+        webhook = delivery_result.get("webhook")
+        if not isinstance(webhook, dict) or not webhook.get("sent"):
             return False
         if len(instruction) > _MAX_AI_INSTRUCTION_CHARS:
             log_with_time(
@@ -638,6 +977,8 @@ class Session:
             "history_ready": feed.history_ready(),
             "data_since_time": feed.history_start_time(),
             "runner_connected": self.runner_count > 0,
+            "runner_ready": self.runner_ready,
+            "calculation": self.calculation_state_payload(),
             "last_bar_time": feed.last_bar_time(),
             "last_price": feed.last_price(),
         }

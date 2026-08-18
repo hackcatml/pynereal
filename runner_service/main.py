@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 import tomllib
 import ast
 from script_hash import compute_script_hashes, load_script_hashes, write_script_hashes
@@ -13,12 +14,13 @@ from collections import deque
 from functools import partial
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 
 import numpy as np
 import websockets
 
 from appendable_iter import AppendableIterable
+from strategy_snapshot import build_strategy_snapshot
 from pynecore.cli.app import app_state
 from pynecore.core.ohlcv_file import OHLCVReader
 from pynecore.core.exchange_policy import normalize_exchange_name, tradingview_hides_zero_volume
@@ -269,6 +271,7 @@ def on_close_event(trade, runner=None):
         "price": float(trade.exit_price),
         "size": float(trade.size),
         "id": trade.entry_id,
+        "exit_id": trade.exit_id if trade.exit_id else "",
         "comment": trade.exit_comment if trade.exit_comment else "",
         "profit": float(trade.profit)
     }
@@ -530,6 +533,28 @@ def get_runner_candle(runner: ScriptRunner, index: int) -> OHLCV | None:
     return candles[index]
 
 
+async def send_strategy_snapshot(
+    ws,
+    runner: ScriptRunner,
+    *,
+    phase: str,
+    calculated_through: int | None,
+    calculation_generation_id: str,
+) -> None:
+    try:
+        source_hashes = compute_script_hashes(SCRIPT_PATH)
+        event = build_strategy_snapshot(
+            runner,
+            phase=phase,
+            calculated_through=calculated_through,
+            calculation_generation_id=calculation_generation_id,
+            source_hashes=source_hashes,
+        )
+        await ws.send(json.dumps(event))
+    except Exception as e:
+        print(f"[runner] Failed to send strategy snapshot: {e}")
+
+
 def bar_list_to_ohlcv(bar: list) -> OHLCV:
     # bar: [ts_ms, o, h, l, c, v]
     return OHLCV(
@@ -544,14 +569,52 @@ def bar_list_to_ohlcv(bar: list) -> OHLCV:
     )
 
 
-def run_prerun_steps(runner: ScriptRunner, prerun_range: int) -> None:
+def _plot_wire_value(value: Any, kind: str) -> float | int | None:
+    if value is None or str(value) == "":
+        return None
+    try:
+        if kind == "bgcolor":
+            return int(value)
+        text = format(value, ".8g") if isinstance(value, float) else str(value)
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _plot_values_from_step(
+    step_res: tuple | None,
+    expected_timestamp: int | None,
+) -> dict[str, float | int | None] | None:
+    if not isinstance(step_res, tuple) or len(step_res) < 2:
+        return None
+    candle, values = step_res[0], step_res[1]
+    if not isinstance(candle, OHLCV) or not isinstance(values, dict):
+        return None
+    if expected_timestamp is not None and int(candle.timestamp) != expected_timestamp:
+        return None
+    return {
+        title: _plot_wire_value(values.get(title), str(options.get("kind") or "line"))
+        for title, options in plot_options.items()
+    }
+
+
+def run_prerun_steps(
+    runner: ScriptRunner,
+    prerun_range: int,
+    plot_timestamp: int | None = None,
+) -> dict[str, float | int | None] | None:
+    plot_values = None
     for _ in range(prerun_range):
         step_res = runner.step()
         if step_res is None:
             break
+        current_values = _plot_values_from_step(step_res, plot_timestamp)
+        if current_values is not None:
+            plot_values = current_values
     # Flush plot writer to ensure all data is written
     if runner.plot_writer:
         runner.plot_writer.flush()
+    return plot_values
 
 
 @dataclass
@@ -843,6 +906,11 @@ async def main():
                 and int(last_visible_bar.timestamp) == int(reader.end_timestamp)
             )
             prerun_range = size - 1 if has_unconfirmed_visible_bar else size
+            confirmed_bar_index = runner.last_bar_index - 1
+            confirmed_bar = get_runner_candle(runner, confirmed_bar_index)
+            confirmed_bar_time = (
+                int(confirmed_bar.timestamp) if confirmed_bar is not None else None
+            )
             runner.script.pre_run = True
             if mtype == "prerun_ready_after_history_download":
                 prerun_range = size
@@ -861,7 +929,12 @@ async def main():
                 and msg.get("history_resync")
             )
             try:
-                await asyncio.to_thread(run_prerun_steps, runner, prerun_range)
+                prerun_plot_values = await asyncio.to_thread(
+                    run_prerun_steps,
+                    runner,
+                    prerun_range,
+                    confirmed_bar_time,
+                )
             finally:
                 SUPPRESS_EXTERNAL_NOTIFICATIONS = False
             pending_full_reemit = False
@@ -925,21 +998,32 @@ async def main():
             # Send plot options to data_service
             if plot_options:
                 try:
-                    # Plot CSV rows are keyed by candle timestamp. Timestamp lookup avoids
-                    # using a raw file index that may include hidden OKX bars.
-                    confirmed_bar_index = runner.last_bar_index - 1
-                    confirmed_bar = get_runner_candle(runner, confirmed_bar_index)
-                    confirmed_bar_time = int(confirmed_bar.timestamp) if confirmed_bar is not None else None
                     plot_options_event = {
                         "type": "plot_options",
                         "data": plot_options,
                         "confirmed_bar_index": confirmed_bar_index,
                         "confirmed_bar_time": confirmed_bar_time,
                     }
+                    if prerun_plot_values is not None:
+                        plot_options_event["values"] = prerun_plot_values
                     await ws.send(json.dumps(plot_options_event))
                     # print(f"[runner] Sent plot_options: {plot_options}")
                 except Exception as e:
                     print(f"[runner] Failed to send plot options: {e}")
+
+            if msg.get("strategy_evaluation_enabled"):
+                processed_bar = get_runner_candle(runner, runner.bar_index)
+                await send_strategy_snapshot(
+                    ws,
+                    runner,
+                    phase="prerun",
+                    calculated_through=(
+                        int(processed_bar.timestamp) if processed_bar is not None else None
+                    ),
+                    calculation_generation_id=str(
+                        msg.get("calculation_generation_id") or ""
+                    ),
+                )
 
             if mtype == "prerun_ready":
                 # confirmed_bar_and_new_bar가 있다면 new bar ts를 추적에 사용
@@ -1047,10 +1131,17 @@ async def main():
 
                 # Calculate the last confirmed bar
                 ctx.runner.script.pre_run = False
+                confirmed_plot_values = None
                 while True:
                     step_res = ctx.runner.step()
                     if step_res is None:
                         break
+                    current_values = _plot_values_from_step(
+                        step_res,
+                        int(confirmed_ohlcv.timestamp),
+                    )
+                    if current_values is not None:
+                        confirmed_plot_values = current_values
 
                 # Hidden-bar fix:
                 # 새로 열린 봉이 volume 0 hidden bar 면 new_ohlcv 가 stream 에 append 되지
@@ -1099,10 +1190,23 @@ async def main():
                             "confirmed_bar_index": confirmed_bar_index,
                             "confirmed_bar_time": int(confirmed_ohlcv.timestamp),
                         }
+                        if confirmed_plot_values is not None:
+                            plot_options_event["values"] = confirmed_plot_values
                         await ws.send(json.dumps(plot_options_event))
                         # print(f"[runner] Sent plot_options: {plot_options}")
                     except Exception as e:
                         print(f"[runner] Failed to send plot options: {e}")
+
+                if msg.get("strategy_evaluation_enabled"):
+                    await send_strategy_snapshot(
+                        ws,
+                        ctx.runner,
+                        phase="run_ready",
+                        calculated_through=int(confirmed_ohlcv.timestamp),
+                        calculation_generation_id=str(
+                            msg.get("calculation_generation_id") or ""
+                        ),
+                    )
 
             # Remove the script_module using destroy() (required). If you don't remove it,
             # the ScriptRunner will reuse the previous candle data even when reloading the script.

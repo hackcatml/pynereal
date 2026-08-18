@@ -9,7 +9,7 @@ from typing import Awaitable, Callable, Dict, List, Optional
 
 from config import MAX_SESSIONS, FeedSpec, SessionSpec, save_sessions
 from collector_loop import fix_missing_bars_loop, watch_trades_loop
-from file_update_loop import file_update_loop
+from file_update_loop import _to_thread_cancel_safe, file_update_loop
 from runner_supervisor import RunnerSupervisor
 from runtime import Feed, Session
 from tv_logos import TradingViewLogoResolver
@@ -53,6 +53,7 @@ class SessionRegistry:
         self.ai_instruction_handler: Optional[
             Callable[[Session, dict], Awaitable[None]]
         ] = None
+        self.strategy_evaluation_enabled = False
 
     # ------------------------------------------------------------------
     # Queries
@@ -96,6 +97,11 @@ class SessionRegistry:
         self.ai_instruction_handler = handler
         for session in self.sessions.values():
             session.on_ai_instruction = handler
+
+    def set_strategy_evaluation_enabled(self, enabled: bool) -> None:
+        self.strategy_evaluation_enabled = bool(enabled)
+        for session in self.sessions.values():
+            session.strategy_evaluation_enabled = self.strategy_evaluation_enabled
 
     def _schedule_logo_resolution(self, session: Session) -> None:
         task = self.logo_tasks.pop(session.spec.id, None)
@@ -181,6 +187,7 @@ class SessionRegistry:
         feed.tasks = {
             "watch_trades_loop": asyncio.create_task(self._guard_feed(feed, "watch_trades_loop", watch_trades_loop(
                 spec.exchange, spec.symbol, spec.timeframe, feed.state, feed.broadcast_bar,
+                on_trades=feed.broadcast_trades,
                 market_type=spec.market_type))),
             "fix_missing_bars_loop": asyncio.create_task(self._guard_feed(feed, "fix_missing_bars_loop", fix_missing_bars_loop(
                 spec.exchange, spec.timeframe, feed.state))),
@@ -259,7 +266,11 @@ class SessionRegistry:
         if len(self.sessions) >= MAX_SESSIONS:
             raise SessionLimitError(f"max {MAX_SESSIONS} sessions reached")
         feed = self._get_or_create_feed(spec)
-        session = Session(spec, feed)
+        session = Session(
+            spec,
+            feed,
+            strategy_evaluation_enabled=self.strategy_evaluation_enabled,
+        )
         session.on_status_change = self.notify_hub
         session.on_spec_change = self._persist_and_notify
         session.on_ai_instruction = self.ai_instruction_handler
@@ -365,6 +376,54 @@ class SessionRegistry:
             s.history_resync_pending = True
             await self.supervisor.start(s.spec, s.paths)
         await self.notify_hub()
+
+    async def repair_data_integrity(
+        self,
+        session_id: str,
+        repair: Callable[[], dict],
+    ) -> dict:
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise SessionNotFoundError(session_id)
+        feed = session.feed
+        targets = list(feed.subscribers.values())
+        running = [
+            target
+            for target in targets
+            if self.supervisor.status(target.spec.id) in ("running", "starting")
+        ]
+        for target in running:
+            await self.supervisor.stop(target.spec.id)
+
+        file_task = feed.tasks.pop("file_update_loop", None)
+        if file_task is not None:
+            file_task.cancel()
+            await asyncio.gather(file_task, return_exceptions=True)
+
+        result: dict | None = None
+        repair_error: BaseException | None = None
+        try:
+            result = await _to_thread_cancel_safe(repair)
+        except BaseException as exc:
+            repair_error = exc
+
+        restart_error: BaseException | None = None
+        try:
+            await self._restart_file_update(feed)
+        except BaseException as exc:
+            restart_error = exc
+
+        if restart_error is None:
+            for target in running:
+                target.history_resync_pending = True
+                await self.supervisor.start(target.spec, target.paths)
+        await self.notify_hub()
+
+        if repair_error is not None:
+            raise repair_error
+        if restart_error is not None:
+            raise restart_error
+        return result or {}
 
     async def update_manual_alert_templates(self, session_id: str, templates: list[dict]) -> list[dict]:
         session = self.sessions.get(session_id)

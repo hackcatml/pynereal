@@ -67,7 +67,38 @@ DEFAULT_DEVELOPER_INSTRUCTIONS = (
     "In the final response, do not list the procedure; present the lookup result immediately. "
     "Only when the user explicitly asks to send the result to Telegram, complete the lookup and "
     "then call send_telegram_message with a concise plain-text result. Report successful Telegram "
-    "delivery only when the tool returns success. For requests to check, refresh, add, update, or "
+    "delivery only when the tool returns success. For evaluation or analysis of a running PyneReal "
+    "strategy session, call get_session_evaluation_context before interpreting the strategy. If the "
+    "user names a symbol, company, asset, or strategy rather than an exact internal ID, first call the "
+    "tool without session_id, resolve exactly one human-readable match, and then call it again with "
+    "that ID and wait_for_ready=true. Within one user turn, call the session list at most once, the "
+    "exact session context at most once, and the chart capture at most once. Reuse those results "
+    "instead of refreshing them unless the tool explicitly rejects a changed generation. If the user "
+    "explicitly names a configured account, pass the "
+    "human-readable account name in the account argument; that selection must not be replaced by "
+    "another account. Otherwise omit account so the server matches configured accounts from current "
+    "positions and recent order history. Treat the returned confirmed bars, simulation state, plots, "
+    "trades, source, logs, calculation generation, and warnings as the authoritative session evidence. "
+    "For live-risk evaluation, prefer simulation.position.aggregate_avg_price and "
+    "simulation.pnl.aggregate_openprofit. Use avg_price, openprofit, and open_trade_ledger for Pine "
+    "FIFO trade attribution and backtest statistics; a difference after partial closes is expected. "
+    "Do not mix aggregate_openprofit into Pine strategy equity or cumulative statistics. "
+    "Do not use script-specific variables such as avgEntry as the generic average-price basis. "
+    "Use simulation.position_lifecycle for continuous holding time and never derive total holding "
+    "duration from a surviving FIFO trade row. Use simulation.entry_open_ledger for the quantity "
+    "remaining under a specific entry ID. A missing or zero entry-bound quantity means that ID is "
+    "fully settled even if FIFO attribution leaves a row carrying that ID; do not call such a close "
+    "partial or mostly closed without structured evidence of a positive remainder. "
+    "Never infer the strategy's current entry stage from an open_trades entry_id or the Pine FIFO "
+    "ledger. Entry-specific closes can consume older FIFO rows and leave a later entry ID after that "
+    "strategy quantity has been closed. Use explicit source-supported state from logs or plots, and "
+    "report the stage as unknown when that state is unavailable. "
+    "Do not treat the forming bar as confirmed. Use account_match as request-time evidence, respect "
+    "ambiguous or no_match status, and clearly separate simulated state from real account state. Never "
+    "persist or invent a static account binding. Do not invent "
+    "strategy-specific state that is not exposed by source, plots, logs, orders, or trades. When visual "
+    "confirmation would materially improve the evaluation, call capture_session_chart only with the "
+    "exact ready generation returned by get_session_evaluation_context. For requests to check, refresh, add, update, or "
     "remove calendar schedules, first call get_calendar_context. If the user does not name a "
     "session, research every active session. "
     "Resolve company, asset, symbol, exchange, timeframe, or strategy descriptions to the exact "
@@ -209,6 +240,10 @@ class CodexService:
     @property
     def enabled(self) -> bool:
         return not self._disabled
+
+    @property
+    def running(self) -> bool:
+        return self._codex is not None and not self._disabled
 
     async def start(self) -> None:
         async with self._lifecycle_lock:

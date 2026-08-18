@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import traceback
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -10,9 +11,12 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.exception_handlers import http_exception_handler
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ai.provider.codex_service import CodexService
+from account_data import AccountDataService
 from asset_portfolio import AssetPortfolioService
 from asset_transfer import AssetTransferService
 from calendar_store import CalendarEventStore
@@ -36,17 +40,50 @@ def build_app(
     registry: SessionRegistry,
     codex_service: CodexService,
     calendar_store: CalendarEventStore,
+    account_data_service: AccountDataService,
     asset_portfolio_service: AssetPortfolioService,
     asset_transfer_service: AssetTransferService,
     update_service: UpdateService,
 ) -> FastAPI:
     app = FastAPI()
+
+    @app.exception_handler(StarletteHTTPException)
+    async def log_history_import_body_error(
+        request: Request,
+        exc: StarletteHTTPException,
+    ):
+        if (
+            request.url.path == "/api/account/history/import/preview"
+            and exc.status_code == 400
+            and exc.detail == "There was an error parsing the body"
+        ):
+            cause = exc.__cause__
+            if cause is None:
+                print(
+                    "[history_import] multipart parsing failed without an exception cause",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"[history_import] multipart parsing failed: "
+                    f"{type(cause).__name__}: {cause}",
+                    file=sys.stderr,
+                )
+                traceback.print_exception(
+                    type(cause),
+                    cause,
+                    cause.__traceback__,
+                    file=sys.stderr,
+                )
+        return await http_exception_handler(request, exc)
+
     app.include_router(build_ui_router())
     app.include_router(
         build_control_router(
             registry,
             codex_service,
             calendar_store,
+            account_data_service,
             asset_portfolio_service,
             asset_transfer_service,
             update_service,
@@ -72,6 +109,17 @@ def build_app(
             await registry.hub_ws.disconnect(ws)
         except Exception:
             await registry.hub_ws.disconnect(ws)
+
+    @app.websocket("/ws/account")
+    async def account_ws(ws: WebSocket):
+        await account_data_service.connect_live(ws)
+        try:
+            while True:
+                await ws.receive_text()
+        except WebSocketDisconnect:
+            await account_data_service.disconnect_live(ws)
+        except Exception:
+            await account_data_service.disconnect_live(ws)
 
     @app.websocket("/ws/{session_id}")
     async def session_ws(ws: WebSocket, session_id: str):
@@ -147,6 +195,10 @@ async def main() -> None:
     asset_portfolio_service = AssetPortfolioService(
         _PROJECT_ROOT / "workdir" / "config" / "providers.toml"
     )
+    account_data_service = AccountDataService(
+        _PROJECT_ROOT / "workdir" / "config" / "providers.toml",
+        cache_path=_PROJECT_ROOT / "workdir" / "data" / "cache" / "account_cache.sqlite",
+    )
     asset_transfer_service = AssetTransferService(
         _PROJECT_ROOT / "workdir" / "config" / "providers.toml"
     )
@@ -164,15 +216,26 @@ async def main() -> None:
         ai_enabled=lambda: codex_service.enabled,
         request_shutdown=update_shutdown.set,
     )
+    legacy_dependencies_synced = await asyncio.to_thread(
+        update_service.sync_dependencies_after_legacy_update
+    )
+    if legacy_dependencies_synced:
+        print(
+            "[update] restarting data service with freshly installed dependencies",
+            flush=True,
+        )
+        update_service.restart_after_legacy_dependency_sync()
     registry.set_ai_instruction_handler(codex_service.handle_strategy_instruction)
     try:
         await codex_service.start()
     except Exception as e:
         print(f"[ai] Codex app-server startup failed: {e}")
+    registry.set_strategy_evaluation_enabled(codex_service.running)
     app = build_app(
         registry,
         codex_service,
         calendar_store,
+        account_data_service,
         asset_portfolio_service,
         asset_transfer_service,
         update_service,
@@ -180,6 +243,10 @@ async def main() -> None:
 
     await registry.start_all(specs)
     await asset_portfolio_service.start()
+    try:
+        await account_data_service.start()
+    except Exception as exc:
+        print(f"[account] service startup failed: {type(exc).__name__}: {exc}")
     heartbeat = asyncio.create_task(_hub_status_heartbeat(registry))
 
     server = uvicorn.Server(
@@ -211,15 +278,22 @@ async def main() -> None:
         if update_finish_task is not None:
             update_finish_task.cancel()
             shutdown_tasks.append(update_finish_task)
-        await asyncio.gather(*shutdown_tasks, return_exceptions=True)
+        try:
+            await asyncio.gather(*shutdown_tasks, return_exceptions=True)
+        except asyncio.CancelledError:
+            # Ctrl-C can cancel this wait while child services still need to close.
+            pass
         heartbeat.cancel()
         try:
             await registry.shutdown()
         finally:
             try:
-                await asset_portfolio_service.close()
+                await account_data_service.close()
             finally:
-                await codex_service.close()
+                try:
+                    await asset_portfolio_service.close()
+                finally:
+                    await codex_service.close()
     if update_shutdown.is_set():
         update_service.apply_and_restart()
 

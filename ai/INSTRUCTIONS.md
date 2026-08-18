@@ -162,6 +162,65 @@ internals when an existing script already provides the required data.
 
 ## Evaluation Rules
 
+- For a running strategy or session evaluation, call
+  `get_session_evaluation_context` first. Call it without `session_id` when the
+  user's human-readable description still needs to be resolved, then call it
+  again with the exact matched ID and `wait_for_ready=true`.
+- Within one user turn, call the session list at most once, call the exact
+  session context at most once, and capture that session generation at most
+  once. Reuse the returned evidence instead of refreshing it during the same
+  evaluation. Recollect only when the tool explicitly rejects a stale or
+  changed generation.
+- Use only one ready calculation generation in an evaluation. If the generation
+  changes, recollect the context instead of combining old plots or trades with
+  new OHLCV.
+- Treat `market.confirmed_bars` as calculation evidence and
+  `market.forming_bar` as provisional context only.
+- For live-risk evaluation, prefer
+  `simulation.position.aggregate_avg_price` and
+  `simulation.pnl.aggregate_openprofit`. These use net-position average-cost
+  accounting, where same-direction additions update the weighted average and
+  partial reductions preserve it. Use `simulation.position.avg_price`,
+  `simulation.pnl.openprofit`, and `simulation.open_trade_ledger` for Pine FIFO
+  trade attribution and backtest statistics. A difference between the two
+  average prices after partial closes is expected, not an inconsistency. Do not
+  substitute aggregate unrealized PnL into the Pine strategy equity or
+  cumulative statistics. Do not use a script-specific variable such as
+  `avgEntry` as the generic average-price basis; it may be cited only as
+  supplemental strategy state when its semantics are clear.
+- Use `simulation.position_lifecycle` for continuous holding time. It starts
+  when the net position changes from flat to non-flat and survives additions
+  and partial reductions until the position becomes flat. Never derive the
+  overall holding time from the surviving Pine FIFO trade row.
+- Use `simulation.entry_open_ledger` for the remaining quantity bound to a
+  specific entry ID. A missing or zero quantity means that entry ID is fully
+  settled, even when Pine FIFO attribution leaves a trade row carrying that ID.
+  Do not describe an entry-specific close as partial or "mostly" closed unless
+  this ledger or another structured quantity shows a positive remainder.
+- The exact-session context call automatically reads current positions and
+  recent order history from configured `providers.toml` accounts. Use the
+  returned `account_match` evidence; do not rerun those collectors through shell.
+- When the user explicitly names an account, pass that human-readable name in
+  the context tool's `account` argument. The user-selected account takes
+  precedence even when it has no matching position or orders; never substitute
+  another account automatically.
+- When no account is named, omit `account` and use the tool's deterministic
+  position/order evidence ranking. Treat `ambiguous` and `no_match` as unresolved
+  rather than claiming a real exchange position.
+- Session metadata does not statically identify an account. Account association
+  is request-time evidence and must not be persisted as a session binding.
+- Use `capture_session_chart` only with the exact session and generation returned
+  by the context tool. The image is supporting evidence; structured values remain
+  authoritative for timestamps, durations, quantities, and state when a label or
+  pixel is ambiguous.
+- Do not infer the strategy's current entry stage from
+  `simulation.open_trades[*].entry_id` or `simulation.open_trade_ledger`. Under
+  Pine FIFO attribution, closing an entry-specific quantity can consume an older
+  trade row and leave a later entry ID in the FIFO ledger. Determine stage from
+  explicit strategy state in source-supported logs or plots; if it is not
+  exposed, report the stage as unknown.
+- Do not invent strategy-specific state that is absent from source, plots, logs,
+  orders, and trades.
 - Do not infer a current position, balance, order, or price from stale context.
 - Include the observation time when evaluating live account or market state.
 - State missing or stale evidence explicitly.

@@ -7,7 +7,9 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import tomllib
 from pathlib import Path
 from typing import Any, Callable
 
@@ -45,6 +47,7 @@ def write_update_state(path: Path, **values: Any) -> None:
 
 class UpdateService:
     _CONFIRM_TTL_SECONDS = 120
+    _DEPENDENCY_FILES = frozenset({"pyproject.toml", "requirements-runtime.txt"})
 
     def __init__(
         self,
@@ -272,6 +275,15 @@ class UpdateService:
             )
         else:
             try:
+                if self._dependency_sync_required(request.get("changed_files", [])):
+                    write_update_state(
+                        self.state_path,
+                        status="updating",
+                        message="Installing Python dependencies",
+                    )
+                    self._install_target_dependencies(str(request["target_sha"]))
+                    request["dependencies_synced"] = True
+                    _write_json_atomic(self.request_path, request)
                 write_update_state(
                     self.state_path,
                     status="updating",
@@ -297,6 +309,13 @@ class UpdateService:
             message="Restarting data service",
             error=update_error,
         )
+        self._exec_data_service(request, update_error)
+
+    def _exec_data_service(
+        self,
+        request: dict[str, Any],
+        update_error: str = "",
+    ) -> None:
         env = os.environ.copy()
         env["PYNEREAL_UPDATE_AI_ENABLED"] = "1" if request.get("ai_enabled") else "0"
         python = str(request.get("python") or sys.executable)
@@ -314,6 +333,43 @@ class UpdateService:
                 error=f"{update_error}; {exc}" if update_error else str(exc),
             )
             raise
+
+    def sync_dependencies_after_legacy_update(self) -> bool:
+        """Handle the first update performed by an older updater implementation."""
+        if not self.pending_restart():
+            return False
+        request = read_update_state(self.request_path)
+        if request.get("dependencies_synced") or not self._dependency_sync_required(
+            request.get("changed_files", [])
+        ):
+            return False
+        try:
+            write_update_state(
+                self.state_path,
+                status="restarting",
+                message="Installing Python dependencies",
+            )
+            self._install_current_dependencies()
+            request["dependencies_synced"] = True
+            _write_json_atomic(self.request_path, request)
+            write_update_state(
+                self.state_path,
+                status="restarting",
+                message="Restarting data service",
+            )
+        except Exception as exc:
+            write_update_state(
+                self.state_path,
+                status="failed",
+                message="Python dependency installation failed.",
+                error=str(exc),
+            )
+            raise
+        return True
+
+    def restart_after_legacy_dependency_sync(self) -> None:
+        request = read_update_state(self.request_path)
+        self._exec_data_service(request)
 
     async def finish_restart(self, timeout: float = 900) -> None:
         request = read_update_state(self.request_path)
@@ -385,6 +441,76 @@ class UpdateService:
                 dirs.remove(name)
                 removed += 1
         return removed
+
+    @classmethod
+    def _dependency_sync_required(cls, changed_files: Any) -> bool:
+        return any(str(path) in cls._DEPENDENCY_FILES for path in changed_files)
+
+    @staticmethod
+    def _runtime_requirements(text: str) -> list[str]:
+        return [
+            line
+            for raw_line in text.splitlines()
+            if (line := raw_line.strip()) and not line.startswith("#")
+        ]
+
+    @staticmethod
+    def _project_requirements(text: str) -> list[str]:
+        project = tomllib.loads(text).get("project", {})
+        optional = project.get("optional-dependencies", {})
+        return [str(item) for item in optional.get("all", [])]
+
+    @staticmethod
+    def _deduplicate_requirements(requirements: list[str]) -> list[str]:
+        return list(dict.fromkeys(requirements))
+
+    def _install_requirements(self, requirements: list[str]) -> None:
+        requirements = self._deduplicate_requirements(requirements)
+        if not requirements:
+            return
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt") as handle:
+            handle.write("\n".join(requirements) + "\n")
+            handle.flush()
+            completed = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-r", handle.name],
+                cwd=self.repo_root,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=900,
+            )
+        if completed.stdout.strip():
+            print(f"[update] {completed.stdout.strip()}")
+        if completed.returncode != 0:
+            detail = completed.stdout.strip()
+            if len(detail) > 4000:
+                detail = detail[-4000:]
+            raise subprocess.SubprocessError(
+                detail
+                or f"Python dependency installation failed with exit code {completed.returncode}"
+            )
+
+    def _install_target_dependencies(self, target_sha: str) -> None:
+        requirements = self._project_requirements(
+            self._git("show", f"{target_sha}:pyproject.toml")
+        )
+        requirements.extend(
+            self._runtime_requirements(
+                self._git("show", f"{target_sha}:requirements-runtime.txt")
+            )
+        )
+        self._install_requirements(requirements)
+
+    def _install_current_dependencies(self) -> None:
+        requirements = self._project_requirements(
+            (self.repo_root / "pyproject.toml").read_text(encoding="utf-8")
+        )
+        requirements.extend(
+            self._runtime_requirements(
+                (self.repo_root / "requirements-runtime.txt").read_text(encoding="utf-8")
+            )
+        )
+        self._install_requirements(requirements)
 
     def _git(self, *args: str, timeout: float = 60) -> str:
         completed = subprocess.run(

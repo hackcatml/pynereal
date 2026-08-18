@@ -372,7 +372,8 @@ class Position:
         'entry_orders', 'exit_orders', 'market_orders', 'orderbook',
         'open_trades', 'closed_trades', 'new_closed_trades',
         'closed_trades_count', 'wintrades', 'eventrades', 'losstrades',
-        'size', 'sign', 'avg_price', 'cum_profit',
+        'size', 'sign', 'avg_price', 'aggregate_avg_price', 'aggregate_openprofit',
+        'position_open_time', 'position_open_bar_index', 'cum_profit',
         'entry_equity', 'max_equity', 'min_equity',
         'drawdown_summ', 'runup_summ', 'max_drawdown', 'max_runup',
         'entry_summ', 'open_commission',
@@ -383,7 +384,8 @@ class Position:
         'risk_max_position_size',
         'risk_cons_loss_days', 'risk_last_day_index', 'risk_last_day_equity',
         'risk_intraday_filled_orders', 'risk_intraday_start_equity', 'risk_halt_trading',
-        'on_entry_callback', 'on_close_callback', 'on_alert_callback', 'on_ai_callback'
+        'on_entry_callback', 'on_close_callback', 'on_alert_callback', 'on_ai_callback',
+        '_entry_open_ledger'
     )
 
     def __init__(self):
@@ -409,6 +411,9 @@ class Position:
         self.open_trades: list[Trade] = []
         self.closed_trades: deque[Trade] = deque(maxlen=9000)  # 9000 is the limit of TV
         self.new_closed_trades: list[Trade] = []
+        # Exit orders remain bound to their entry IDs even though the default
+        # close_entries_rule attributes closed trade rows FIFO.
+        self._entry_open_ledger: dict[str, float] = {}
 
         # Trade statistics
         self.closed_trades_count: int = 0
@@ -418,6 +423,10 @@ class Position:
         self.size: float = 0.0
         self.sign: float = 0.0
         self.avg_price: float | NA[float] = na_float
+        self.aggregate_avg_price: float | NA[float] = na_float
+        self.aggregate_openprofit: float | NA[float] = 0.0
+        self.position_open_time: int | None = None
+        self.position_open_bar_index: int | None = None
         self.cum_profit: float | NA[float] = 0.0
         self.entry_equity: float = 0.0
         self.max_equity: float = -float("inf")
@@ -550,6 +559,22 @@ class Position:
                 else:
                     order.size = new_size * order.sign
 
+    def _reduce_entry_ledger(self, entry_id: str | None, qty: float) -> None:
+        """Settle a closing fill against the entry ID that sized the order."""
+        if entry_id is None:
+            return
+        left = self._entry_open_ledger.get(entry_id)
+        if left is None:
+            return
+        left -= qty
+        if _size_round(left) <= 0.0:
+            del self._entry_open_ledger[entry_id]
+            for exit_order in list(self.exit_orders.values()):
+                if exit_order.order_id == entry_id:
+                    self._remove_order(exit_order)
+        else:
+            self._entry_open_ledger[entry_id] = left
+
     def _fill_order(self, order: Order, price: float, h: float, l: float):
         """
         Fill an order (actually)
@@ -573,13 +598,13 @@ class Position:
         if self.size and order.sign != self.sign:
             delete = False
 
-            # Check list of open trades
+            # TradingView attributes closed trades FIFO by default. With ANY,
+            # an entry-bound close consumes only that entry's trade rows.
+            close_any = (order.order_type == _order_type_close and order.order_id is not None
+                         and getattr(script, 'close_entries_rule', 'FIFO') == 'ANY')
             new_open_trades = []
             for trade in self.open_trades:
-                # Only use if its order id is the same
-                if order.size != 0.0 and ((trade.entry_id == order.order_id and order.order_type == _order_type_close)
-                                          or order.order_type != _order_type_close
-                                          or order.order_id is None):
+                if order.size != 0.0 and (not close_any or trade.entry_id == order.order_id):
                     delete = True
 
                     size = order.size if abs(order.size) <= abs(trade.size) else -trade.size
@@ -661,23 +686,15 @@ class Position:
                     # Modify sizes
                     self.size += size
                     # Handle too small sizes because of floating point inaccuracy and rounding
-                    if _size_round(self.size) == 0.0:
+                    position_flat = _size_round(self.size) == 0.0
+                    if position_flat:
                         size -= self.size
                         self.size = 0.0
                     self.sign = 0.0 if self.size == 0.0 else 1.0 if self.size > 0.0 else -1.0
                     trade.size += size
+                    if position_flat:
+                        trade.size = 0.0
                     order.size -= size
-
-                    # Cancel exit orders for closed trades (TradingView behavior)
-                    # When a trade is fully closed, remove its associated exit orders
-                    if trade.size == 0.0:
-                        # Remove exit orders that have from_entry matching this trade's entry_id
-                        exit_orders_to_remove = []
-                        for exit_order_id, exit_order in self.exit_orders.items():
-                            if exit_order.order_id == trade.entry_id:
-                                exit_orders_to_remove.append(exit_order_id)
-                        for exit_order_id in exit_orders_to_remove:
-                            self._remove_order(self.exit_orders[exit_order_id])
 
                     # Gross P/L and counters
                     if closed_trade.profit == 0.0:
@@ -696,10 +713,15 @@ class Position:
 
                         # Unrealized P&L
                         self.openprofit = self.size * (self.c - self.avg_price)
+                        self.aggregate_openprofit = self.size * (
+                            self.c - self.aggregate_avg_price
+                        )
                     else:
                         # If position has just closed
                         self.avg_price = na_float
                         self.openprofit = 0.0
+                        self.aggregate_avg_price = na_float
+                        self.aggregate_openprofit = 0.0
 
                     # Exit equity
                     closed_trade.exit_equity = self.equity
@@ -717,6 +739,20 @@ class Position:
                 new_open_trades.append(trade)
 
             self.open_trades = new_open_trades
+
+            # Trade rows follow FIFO/ANY attribution, while this ledger follows
+            # the entry ID that the closing order was bound to.
+            closed_qty = filled_size - abs(order.size)
+            if closed_qty > 0.0:
+                if order.order_type == _order_type_close and order.order_id is not None:
+                    self._reduce_entry_ledger(order.order_id, closed_qty)
+                else:
+                    for entry_id in list(self._entry_open_ledger):
+                        if closed_qty <= 0.0:
+                            break
+                        taken = min(self._entry_open_ledger[entry_id], closed_qty)
+                        self._reduce_entry_ledger(entry_id, taken)
+                        closed_qty -= taken
 
             if delete:
                 self._remove_order(order)
@@ -777,6 +813,13 @@ class Position:
             )
 
             self.open_trades.append(trade)
+            self._entry_open_ledger[order.order_id] = (
+                self._entry_open_ledger.get(order.order_id, 0.0) + abs(order.size)
+            )
+            previous_size = abs(self.size)
+            if previous_size == 0.0:
+                self.position_open_time = int(lib._time)
+                self.position_open_bar_index = int(lib.bar_index)
             self.size += trade.size
             self.sign = 0.0 if self.size == 0.0 else 1.0 if self.size > 0.0 else -1.0
 
@@ -786,8 +829,17 @@ class Position:
                 self.avg_price = self.entry_summ / abs(self.size)
             except ZeroDivisionError:
                 self.avg_price = na_float
+            if previous_size == 0.0 or isinstance(self.aggregate_avg_price, NA):
+                self.aggregate_avg_price = price
+            else:
+                self.aggregate_avg_price = (
+                    self.aggregate_avg_price * previous_size + price * abs(order.size)
+                ) / abs(self.size)
             # Unrealized P&L
             self.openprofit = self.size * (self.c - self.avg_price)
+            self.aggregate_openprofit = self.size * (
+                self.c - self.aggregate_avg_price
+            )
             # Commission summ
             self.open_commission += commission
 
@@ -807,7 +859,12 @@ class Position:
             self.entry_summ = 0.0
             self.avg_price = na_float
             self.openprofit = 0.0
+            self.aggregate_avg_price = na_float
+            self.aggregate_openprofit = 0.0
+            self.position_open_time = None
+            self.position_open_bar_index = None
             self.open_commission = 0.0
+            self._entry_open_ledger.clear()
 
             # Cancel all exit orders when position is closed (TradingView behavior)
             # Exit orders without from_entry are canceled when position is flat
@@ -833,14 +890,14 @@ class Position:
 
     def _dispatch_order_notifications(self, order: Order) -> None:
         if not realtime_trade() and order.alert_message:
-            alert(order.alert_message)
+            alert(order.alert_message, _dispatch_callback=False)
         elif realtime_trade() and not pre_run():
             # print(f"order.bar_index: {order.bar_index}, last_bar_index: {last_bar_index()}")
             # Real time trade 에서는 최종 봉이 확정되고 새로운 봉이 생길때에만
             # alert 및 AI instruction을 전달함.
             if order.bar_index == last_bar_index() - 1:
                 if order.alert_message:
-                    alert(order.alert_message)
+                    alert(order.alert_message, _dispatch_callback=False)
                 if order.alert_message and self.on_alert_callback:
                     try:
                         self.on_alert_callback(order.alert_message)
@@ -1261,6 +1318,9 @@ class Position:
         if self.open_trades:
             # Unrealized P&L
             self.openprofit = self.size * (self.c - self.avg_price)
+            self.aggregate_openprofit = self.size * (
+                self.c - self.aggregate_avg_price
+            )
 
             # Calculate open drawdowns and runups
             for trade in self.open_trades:
@@ -1329,15 +1389,17 @@ class Position:
 # noinspection PyProtectedMember
 def _size_round(qty: float) -> float:
     """
-    Round size to the nearest possible value
+    Round a size down to the nearest tradable lot.
 
     :param qty: The quantity to round
     :return: The rounded quantity
     """
     rfactor = syminfo._size_round_factor  # noqa
-    qrf = int(abs(qty) * rfactor * 10.0) * 0.1  # We need to floor to one decimal place
+    scaled = abs(qty) * rfactor
+    nearest = round(scaled)
+    lots = nearest if abs(scaled - nearest) <= scaled * 1e-12 + 1e-9 else int(scaled)
     sign = 1 if qty > 0 else -1
-    return sign * int(qrf) / rfactor
+    return sign * lots / rfactor
 
 
 # noinspection PyShadowingNames
@@ -1424,13 +1486,13 @@ def close(id: str, comment: str | NA[str] = na_str, qty: float | NA[float] = na_
     if position.size == 0.0:
         return
 
+    bound_size = position.sign * position._entry_open_ledger.get(id, 0.0)
     if isinstance(qty, NA):
-        size = -position.size * (qty_percent * 0.01) if not isinstance(qty_percent, NA) \
-            else -position.size
+        size = _size_round(-bound_size * (qty_percent * 0.01)) \
+            if not isinstance(qty_percent, NA) else -bound_size
     else:
-        size = -position.sign * qty
+        size = _size_round(-position.sign * min(qty, abs(bound_size)))
 
-    size = _size_round(size)
     if size == 0.0:
         return
 
@@ -1458,7 +1520,10 @@ def close(id: str, comment: str | NA[str] = na_str, qty: float | NA[float] = na_
 
 
 # noinspection PyProtectedMember,PyShadowingNames
-def close_all(comment: str | NA[str] = na_str, alert_message: str | NA[str] = na_str, immediately: bool = False):
+def close_all(comment: str | NA[str] = na_str, alert_message: str | NA[str] = na_str,
+              immediately: bool = False,
+              record: bool = False, record_data: str | None = None,
+              ai: str | NA[str] = na_str):
     """
     Creates an order to close an open position completely, regardless of the identifiers of the entry
     orders that opened or added to it.
@@ -1466,6 +1531,9 @@ def close_all(comment: str | NA[str] = na_str, alert_message: str | NA[str] = na
     :param comment: Additional notes on the filled order
     :param alert_message: Custom text for the alert that fires when an order fills
     :param immediately: If true, the closing order executes on the same tick when the strategy places it
+    :param record: Whether to record the close data or not
+    :param record_data: Extra data to record
+    :param ai: Instruction sent to the configured AI service when the order fills
     """
     if lib._lib_semaphore:
         return
@@ -1475,13 +1543,26 @@ def close_all(comment: str | NA[str] = na_str, alert_message: str | NA[str] = na
         return
 
     exit_id = 'Close position order'
+    bar_time = lib._time
+    alert_message = f'{{"timestamp": {bar_time}, "message": {alert_message}}}' if alert_message else None
+    ai_instruction = None if isinstance(ai, NA) else str(ai).strip() or None
     order = Order(None, -position.size, exit_id=exit_id, order_type=_order_type_close,
-                  comment=comment, alert_message=alert_message)
+                  comment=None if isinstance(comment, NA) else comment,
+                  alert_message=None if isinstance(alert_message, NA) else alert_message,
+                  ai_instruction=ai_instruction)
 
     # Add order to position (this will handle orderbook and exit_orders)
     position._add_order(order)
     if immediately:
         position.fill_order(order, position.c, position.h, position.l)
+
+    if record:
+        record_message = (f'{{"time": {str(datetime.fromtimestamp(int(bar_time / 1000)))}, '
+                          f'"bar": {order.bar_index}, '
+                          f'"comment": "{comment}", '
+                          f'"alert": {alert_message}, '
+                          f'"data": {record_data}}}')
+        write_record(record_message)
 
 
 # noinspection PyProtectedMember,PyShadowingNames,PyShadowingBuiltins
@@ -1735,42 +1816,33 @@ def exit(id: str, from_entry: str = "",
         )
         position._add_order(order)
 
+    def _bound_size(entry_id: str) -> tuple[float, float]:
+        pending = position.entry_orders.get(entry_id)
+        pending_size = abs(pending.size) if pending is not None else 0.0
+        open_size = position._entry_open_ledger.get(entry_id, 0.0)
+        if open_size:
+            return position.sign, position.sign * (open_size + pending_size)
+        if pending is not None:
+            return pending.sign, pending.size
+        return 0.0, 0.0
+
     # Find direction and size
     if from_entry:
-        # Get from entry_orders dict
-        entry_order: Order | None = position.entry_orders.get(from_entry, None)
-
-        # Find open trade if no entry order found
-        if not entry_order:
-            for trade in position.open_trades:
-                if trade.entry_id == from_entry:
-                    direction = trade.sign
-                    size = trade.size
-                    _exit()
-
-            # The position should be opened, or an entry order should exist
-            if not entry_order:
-                return
-        else:
-            direction = entry_order.sign
-            size = entry_order.size
-            _exit()
+        direction, size = _bound_size(from_entry)
+        if not direction:
+            return
+        _exit()
 
     else:
-        # If still no entry order found, we should exit all open trades and open orders
-        if not direction:
-            for order in list(position.entry_orders.values()):
-                direction = order.sign
-                size = order.size
-                from_entry = order.order_id
+        entry_ids = list(position.entry_orders)
+        entry_ids.extend(
+            entry_id for entry_id in position._entry_open_ledger
+            if entry_id not in position.entry_orders
+        )
+        for from_entry in entry_ids:
+            direction, size = _bound_size(from_entry)
+            if direction:
                 _exit()
-
-            if not direction:
-                for trade in position.open_trades:
-                    direction = trade.sign
-                    size = trade.size
-                    from_entry = trade.entry_id
-                    _exit()
 
 
 # noinspection PyProtectedMember,PyShadowingNames,PyShadowingBuiltins,PyUnusedLocal
