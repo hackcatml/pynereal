@@ -60,6 +60,7 @@
   let assetsPayload = null;
   let selectedAssetExchange = null;
   let accountView = "assets";
+  let accountPagerScrollToView = null;
   let positionsRequestSeq = 0;
   let positionsHaveData = false;
   let positionsPayload = null;
@@ -752,6 +753,11 @@
     Object.keys(accountViewTitles).forEach((name) => {
       el(`account-${name}-view`).classList.toggle("hidden", name !== view);
     });
+    // mobile: keep the horizontal swipe pager aligned with the active view
+    // (skip when the switch itself came from a pager snap)
+    if (!options.fromPager && accountPagerScrollToView) {
+      accountPagerScrollToView(view, Boolean(options.animate));
+    }
     if (animateAccountHeight) {
       if (deferAccountHeight) {
         // hold the old height while the history content resets and reloads
@@ -4507,6 +4513,62 @@
     }, true);
   }
 
+  // Mobile: swipe in from the left screen edge to open the hub menu drawer.
+  function initMobileHubMenuEdgeSwipe() {
+    const edge = el("hub-edge-swipe");
+    const menu = el("hub-menu");
+    const backdrop = el("hub-menu-backdrop");
+    if (!edge) return;
+    let drag = null;
+
+    edge.addEventListener("pointerdown", (event) => {
+      if (!mobileHubQuery.matches || !event.isPrimary) return;
+      if (menu.classList.contains("open")) return;
+      // a modal/sheet is open (it locks body scroll) — leave the edge to it
+      if (document.body.style.position === "fixed") return;
+      drag = {
+        id: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        dx: 0,
+        active: false,
+        width: Math.max(1, menu.getBoundingClientRect().width),
+      };
+      try { edge.setPointerCapture(event.pointerId); } catch {}
+    });
+
+    edge.addEventListener("pointermove", (event) => {
+      if (!drag || event.pointerId !== drag.id) return;
+      const dx = event.clientX - drag.startX;
+      if (!drag.active) {
+        const dy = event.clientY - drag.startY;
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < 6) return;
+        drag.active = true;
+        menu.classList.add("dragging");
+        backdrop.classList.add("dragging");
+        menu.setAttribute("aria-hidden", "false");
+        backdrop.setAttribute("aria-hidden", "false");
+      }
+      // follow the finger's horizontal component only — vertical drift never
+      // cancels the drawer (the strip has touch-action:none so nothing scrolls)
+      drag.dx = Math.max(0, Math.min(dx, drag.width));
+      menu.style.transform = `translateX(${-drag.width + drag.dx}px)`;
+      backdrop.style.opacity = String(Math.max(0, Math.min(1, drag.dx / drag.width)));
+    });
+
+    function endEdgeDrag(event, cancelled = false) {
+      if (!drag || (event && event.pointerId !== drag.id)) return;
+      const current = drag;
+      drag = null;
+      try { edge.releasePointerCapture(current.id); } catch {}
+      if (!current.active) return;
+      if (!cancelled && current.dx > current.width * 0.3) openHubMenu();
+      else closeHubMenu();
+    }
+    edge.addEventListener("pointerup", (event) => endEdgeDrag(event));
+    edge.addEventListener("pointercancel", (event) => endEdgeDrag(event, true));
+  }
+
   function initMobileCalendarGestures() {
     const modal = el("calendar-modal");
     const box = modal.querySelector(".calendar-modal-box");
@@ -4608,6 +4670,83 @@
       event.preventDefault();
       event.stopImmediatePropagation();
     }, true);
+  }
+
+  // Mobile: the account views form a horizontal snap pager so the content
+  // slides in real time under the finger. The active tab is derived from the
+  // scrolled page, and tab taps / programmatic switches scroll the pager.
+  function initMobileAccountPager() {
+    const track = el("account-view-track");
+    if (!track) return;
+    let syncing = false;
+    let syncTimer = null;
+    let settleTimer = null;
+    let resizeFrame = null;
+
+    const tabOrder = () => Array.from(
+      document.querySelectorAll(".account-tabs .account-tab"),
+    ).map((tab) => tab.dataset.accountView);
+
+    // highlight the tab for `view` immediately (visual only, no load) so the
+    // active tab tracks the finger as the pager scrolls
+    const highlightTab = (view) => {
+      document.querySelectorAll(".account-tabs .account-tab").forEach((tab) => {
+        const active = tab.dataset.accountView === view;
+        tab.classList.toggle("active", active);
+        tab.setAttribute("aria-selected", String(active));
+      });
+    };
+
+    accountPagerScrollToView = (view, smooth) => {
+      if (!mobileHubQuery.matches) return;
+      const index = tabOrder().indexOf(view);
+      if (index < 0) return;
+      const width = track.clientWidth;
+      if (!width) {
+        requestAnimationFrame(() => accountPagerScrollToView(view, false));
+        return;
+      }
+      const left = index * width;
+      if (Math.abs(track.scrollLeft - left) < 2) return;
+      syncing = true;
+      track.scrollTo({ left, behavior: smooth ? "smooth" : "auto" });
+      if (syncTimer !== null) clearTimeout(syncTimer);
+      syncTimer = window.setTimeout(() => {
+        syncTimer = null;
+        syncing = false;
+      }, smooth ? 500 : 60);
+    };
+
+    const alignCurrentView = () => {
+      if (!mobileHubQuery.matches || !isAssetsOpen()) return;
+      if (resizeFrame !== null) cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(() => {
+        resizeFrame = null;
+        accountPagerScrollToView(accountView, false);
+      });
+    };
+    window.addEventListener("resize", alignCurrentView, { passive: true });
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", alignCurrentView, { passive: true });
+    }
+
+    track.addEventListener("scroll", () => {
+      if (!mobileHubQuery.matches || syncing) return;
+      const width = track.clientWidth || 1;
+      const views = tabOrder();
+      const index = Math.max(0, Math.min(Math.round(track.scrollLeft / width), views.length - 1));
+      const view = views[index];
+      // live: move the tab highlight in step with the sliding content
+      if (view) highlightTab(view);
+      // settled: activate + load the landed page
+      if (settleTimer !== null) clearTimeout(settleTimer);
+      settleTimer = window.setTimeout(() => {
+        settleTimer = null;
+        if (view && view !== accountView) {
+          switchAccountView(view, { load: true, fromPager: true });
+        }
+      }, 90);
+    }, { passive: true });
   }
 
   function initMobileAssetsGestures() {
@@ -4867,6 +5006,7 @@
       window.visualViewport.addEventListener("resize", fitCalendarForecastBubbles, { passive: true });
     }
     initMobileHubMenuSwipe();
+    initMobileHubMenuEdgeSwipe();
     initMobileCalendarGestures();
     const accountTabs = document.querySelector(".account-tabs");
     let accountTabGesture = null;
@@ -5248,6 +5388,7 @@
       );
     }
     initMobileAssetsGestures();
+    initMobileAccountPager();
   }
 
   function updateHubClock() {

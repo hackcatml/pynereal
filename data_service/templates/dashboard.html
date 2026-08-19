@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=114" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=121" />
 </head>
 <body>
   <header class="topbar">
@@ -24,6 +24,7 @@
     </div>
   </header>
 
+  <div id="hub-edge-swipe" class="hub-edge-swipe" aria-hidden="true"></div>
   <div id="hub-menu-backdrop" class="hub-menu-backdrop" aria-hidden="true"></div>
   <aside id="hub-menu" class="hub-menu" aria-hidden="true">
     <div class="hub-menu-header">
@@ -288,6 +289,7 @@
         </button>
         <button class="account-tab" type="button" data-account-view="pnl">PnL</button>
       </nav>
+      <div id="account-view-track" class="account-view-track">
       <section id="account-assets-view" class="account-view">
         <div id="assets-body" class="assets-body">
         <section id="assets-summary" class="assets-summary hidden" aria-label="Asset summary">
@@ -524,6 +526,7 @@
           </div>
         </div>
       </section>
+      </div>
       <div id="position-pnl-popover" class="position-pnl-popover hidden" role="dialog"
            aria-label="Realized PnL calculation">
         <strong>Realized PnL</strong>
@@ -799,6 +802,6 @@
     </form>
   </div>
 
-  <script src="/static/dashboard.js?v=124"></script>
+  <script src="/static/dashboard.js?v=130"></script>
 </body>
 </html>

@@ -19,6 +19,8 @@ from account_service.history import (
 
 _BUSY_TIMEOUT_SECONDS = 30.0
 _BUSY_TIMEOUT_MS = int(_BUSY_TIMEOUT_SECONDS * 1000)
+_POSITION_LIFECYCLE_OPEN_TOLERANCE_SECONDS = 2.0
+_POSITION_UPDATE_TOLERANCE_SECONDS = 1.0
 
 
 def _json(value: Any) -> str:
@@ -107,6 +109,35 @@ def _iso_timestamp(value: Any) -> float | None:
         return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return None
+
+
+def _epoch_timestamp(value: Any) -> float | None:
+    parsed = _iso_timestamp(value)
+    if parsed is not None:
+        return parsed
+    number = _decimal(value)
+    if number is None:
+        return None
+    seconds = float(number)
+    if abs(seconds) > 10_000_000_000:
+        seconds /= 1000.0
+    return seconds
+
+
+def _position_sides_match(left: Any, right: Any) -> bool:
+    left_side = str(left or "").strip().lower()
+    right_side = str(right or "").strip().lower()
+    return (
+        left_side == right_side
+        or left_side in {"", "net"}
+        or right_side in {"", "net"}
+    )
+
+
+def _position_scopes_match(left: Any, right: Any) -> bool:
+    left_scope = str(left or "").strip().lower()
+    right_scope = str(right or "").strip().lower()
+    return not left_scope or not right_scope or left_scope == right_scope
 
 
 def _fill_amount_and_cost(payload: dict[str, Any]) -> tuple[Decimal, Decimal] | None:
@@ -759,30 +790,98 @@ class AccountCache:
     def _repair_replaced_derived_position_history(
         connection: sqlite3.Connection,
     ) -> None:
-        connection.execute(
+        derived_rows = connection.execute(
             """
-            DELETE FROM position_history
+            SELECT id, account, exchange, market_scope, dex, symbol, side,
+                   opened_at, closed_at, payload_json
+            FROM position_history
             WHERE source = 'derived'
-              AND EXISTS (
-                  SELECT 1
-                  FROM position_history AS authoritative
-                  WHERE authoritative.id != position_history.id
-                    AND authoritative.source IN ('native', 'trades')
-                    AND authoritative.account = position_history.account
-                    AND authoritative.exchange = position_history.exchange
-                    AND authoritative.symbol = position_history.symbol
-                    AND (
-                        LOWER(authoritative.side) = LOWER(position_history.side)
-                        OR LOWER(authoritative.side) IN ('', 'net')
-                        OR LOWER(position_history.side) IN ('', 'net')
-                    )
-                    AND ABS(
-                        (julianday(authoritative.opened_at)
-                         - julianday(position_history.opened_at)) * 86400.0
-                    ) <= 1.0
-              )
+            ORDER BY id
             """
-        )
+        ).fetchall()
+        for derived in derived_rows:
+            candidates = connection.execute(
+                """
+                SELECT id, source, market_scope, dex, side, closed_at
+                FROM position_history
+                WHERE id != ? AND account = ? AND exchange = ? AND symbol = ?
+                  AND source IN ('native', 'trades')
+                  AND ABS(
+                      (julianday(opened_at) - julianday(?)) * 86400.0
+                  ) <= ?
+                ORDER BY closed_at, id
+                """,
+                (
+                    int(derived["id"]),
+                    str(derived["account"]),
+                    str(derived["exchange"]),
+                    str(derived["symbol"]),
+                    str(derived["opened_at"]),
+                    _POSITION_LIFECYCLE_OPEN_TOLERANCE_SECONDS,
+                ),
+            ).fetchall()
+            candidates = [
+                candidate
+                for candidate in candidates
+                if _position_sides_match(candidate["side"], derived["side"])
+                and _position_scopes_match(
+                    candidate["market_scope"],
+                    derived["market_scope"],
+                )
+                and _position_scopes_match(candidate["dex"], derived["dex"])
+            ]
+            if not candidates:
+                continue
+
+            # Fill-reconstructed histories represent a complete flat-to-flat
+            # lifecycle and remain authoritative over an observed disappearance.
+            if any(candidate["source"] == "trades" for candidate in candidates):
+                connection.execute(
+                    "DELETE FROM position_history WHERE id = ?",
+                    (int(derived["id"]),),
+                )
+                continue
+
+            payload = _payload_object(derived["payload_json"])
+            last_active_update = _epoch_timestamp(
+                payload.get("last_update_timestamp")
+            )
+            derived_closed_at = _iso_timestamp(derived["closed_at"])
+            intermediate_ids: list[int] = []
+            authoritative_native = False
+            for candidate in candidates:
+                native_closed_at = _iso_timestamp(candidate["closed_at"])
+                if native_closed_at is None:
+                    authoritative_native = True
+                    continue
+                if (
+                    last_active_update is not None
+                    and native_closed_at
+                    <= last_active_update + _POSITION_UPDATE_TOLERANCE_SECONDS
+                ):
+                    intermediate_ids.append(int(candidate["id"]))
+                    continue
+                if (
+                    derived_closed_at is not None
+                    and abs(native_closed_at - derived_closed_at)
+                    <= _POSITION_LIFECYCLE_OPEN_TOLERANCE_SECONDS
+                ):
+                    authoritative_native = True
+                    continue
+                # Without evidence that the native row was already reflected
+                # while the position remained open, preserve exchange history.
+                authoritative_native = True
+
+            if intermediate_ids:
+                connection.executemany(
+                    "DELETE FROM position_history WHERE id = ?",
+                    [(row_id,) for row_id in intermediate_ids],
+                )
+            if authoritative_native:
+                connection.execute(
+                    "DELETE FROM position_history WHERE id = ?",
+                    (int(derived["id"]),),
+                )
 
     @staticmethod
     def _repair_okx_intermediate_position_history(
@@ -1238,6 +1337,7 @@ class AccountCache:
             return
 
         connection.execute("BEGIN IMMEDIATE")
+        derived_history_changed = False
         try:
             for result in results:
                 if not isinstance(result, dict):
@@ -1382,10 +1482,13 @@ class AccountCache:
                                 row["payload_json"],
                             ),
                         )
+                        derived_history_changed = True
                     connection.execute(
                         "DELETE FROM current_positions WHERE account = ? AND position_key = ?",
                         (account, key),
                     )
+            if derived_history_changed:
+                self._repair_replaced_derived_position_history(connection)
             connection.commit()
         except BaseException:
             connection.rollback()
