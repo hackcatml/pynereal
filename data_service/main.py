@@ -16,6 +16,7 @@ from fastapi.exception_handlers import http_exception_handler
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ai.provider.codex_service import CodexService
+from ai.scripts.asset import eprint
 from account_data import AccountDataService
 from asset_portfolio import AssetPortfolioService
 from asset_transfer import AssetTransferService
@@ -246,7 +247,7 @@ async def main() -> None:
     try:
         await account_data_service.start()
     except Exception as exc:
-        print(f"[account] service startup failed: {type(exc).__name__}: {exc}")
+        eprint(f"[account] service startup failed: {type(exc).__name__}: {exc}")
     heartbeat = asyncio.create_task(_hub_status_heartbeat(registry))
 
     server = uvicorn.Server(

@@ -23,7 +23,7 @@ _AI_SCRIPTS = _PROJECT_ROOT / "ai" / "scripts"
 if str(_AI_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_AI_SCRIPTS))
 
-from asset import redact_error, secret_values, utc_now  # noqa: E402
+from asset import eprint, redact_error, secret_values, utc_now  # noqa: E402
 
 from account_service.history import (  # noqa: E402
     bitget_history_item_matches_scope,
@@ -1366,12 +1366,10 @@ async def backfill_account_once(
             except (ccxt.ArgumentsRequired, ccxt.BadRequest, ccxt.NotSupported):
                 pass
             except Exception as exc:
-                print(
+                eprint(
                     f"[account] {account.name} {market_scope} symbol discovery "
                     f"failed: {type(exc).__name__}: "
-                    f"{redact_error(exc, secret_values(account.config))}",
-                    file=sys.stderr,
-                    flush=True,
+                    f"{redact_error(exc, secret_values(account.config))}"
                 )
     secrets = secret_values(account.config)
     for scope in scopes:
@@ -1443,12 +1441,10 @@ async def backfill_account_once(
             except (ccxt.ArgumentsRequired, ccxt.BadRequest, ccxt.NotSupported):
                 pass
             except Exception as exc:
-                print(
+                eprint(
                     f"[account] {account.name} {scope.name} funding backfill "
                     f"failed: {type(exc).__name__}: "
-                    f"{redact_error(exc, secrets)}",
-                    file=sys.stderr,
-                    flush=True,
+                    f"{redact_error(exc, secrets)}"
                 )
 
         order_stream = (
@@ -1500,11 +1496,9 @@ async def backfill_account_once(
             except (ccxt.ArgumentsRequired, ccxt.BadRequest, ccxt.NotSupported):
                 pass
             except Exception as exc:
-                print(
+                eprint(
                     f"[account] {account.name} {scope.name} order backfill failed: "
-                    f"{type(exc).__name__}: {redact_error(exc, secrets)}",
-                    file=sys.stderr,
-                    flush=True,
+                    f"{type(exc).__name__}: {redact_error(exc, secrets)}"
                 )
 
         fill_key = _cursor_key(
@@ -1547,11 +1541,9 @@ async def backfill_account_once(
             except (ccxt.ArgumentsRequired, ccxt.BadRequest, ccxt.NotSupported):
                 pass
             except Exception as exc:
-                print(
+                eprint(
                     f"[account] {account.name} {scope.name} fill backfill failed: "
-                    f"{type(exc).__name__}: {redact_error(exc, secrets)}",
-                    file=sys.stderr,
-                    flush=True,
+                    f"{type(exc).__name__}: {redact_error(exc, secrets)}"
                 )
 
         if (
@@ -1599,11 +1591,9 @@ async def backfill_account_once(
         except (ccxt.ArgumentsRequired, ccxt.BadRequest, ccxt.NotSupported):
             pass
         except Exception as exc:
-            print(
+            eprint(
                 f"[account] {account.name} {scope.name} position backfill failed: "
-                f"{type(exc).__name__}: {redact_error(exc, secrets)}",
-                file=sys.stderr,
-                flush=True,
+                f"{type(exc).__name__}: {redact_error(exc, secrets)}"
             )
 
     return {
@@ -1638,22 +1628,6 @@ async def account_history_backfill_loop(
         try:
             async with semaphore:
                 async with account_lock:
-                    incremental = any(
-                        key[0] == account.name and key[1] == account.exchange_id
-                        for key in cursors
-                    )
-                    range_label = (
-                        "cursor-24h-overlap"
-                        if incremental
-                        else f"{INITIAL_HISTORY_DAYS}d"
-                    )
-                    started_at = time.monotonic()
-                    print(
-                        f"[account] history backfill started | "
-                        f"account={account.name} exchange={account.exchange_id} "
-                        f"range={range_label}",
-                        flush=True,
-                    )
                     batch = await backfill_account_once(
                         exchange,
                         account,
@@ -1662,25 +1636,13 @@ async def account_history_backfill_loop(
                         stop,
                     )
             history.add_backfill(**batch)
-            elapsed = time.monotonic() - started_at
-            print(
-                f"[account] history backfill completed | "
-                f"account={account.name} exchange={account.exchange_id} "
-                f"orders={len(batch['orders'])} fills={len(batch['fills'])} "
-                f"positions={len(batch['positions'])} "
-                f"pnl_events={len(batch['pnl_events'])} "
-                f"elapsed={elapsed:.1f}s",
-                flush=True,
-            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            print(
+            eprint(
                 f"[account] {account.name} history backfill failed: "
                 f"{type(exc).__name__}: "
-                f"{redact_error(exc, secret_values(account.config))}",
-                file=sys.stderr,
-                flush=True,
+                f"{redact_error(exc, secret_values(account.config))}"
             )
         try:
             await asyncio.wait_for(stop.wait(), timeout=BACKFILL_INTERVAL_SECONDS)

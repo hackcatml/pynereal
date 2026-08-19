@@ -55,7 +55,9 @@ def utc_now() -> str:
 
 
 def eprint(message: str) -> None:
-    print(message, file=sys.stderr, flush=True)
+    timestamp = datetime.now().astimezone().isoformat(sep=" ", timespec="seconds")
+    separator = "" if message.startswith("[") else " "
+    print(f"[{timestamp}]{separator}{message}", file=sys.stderr, flush=True)
 
 
 def read_provider_config(path: Path) -> dict[str, Any]:

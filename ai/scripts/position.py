@@ -902,11 +902,6 @@ def collect_one(
 ) -> dict[str, Any]:
     secrets = secret_values(config)
     exchange: ccxt.Exchange | None = None
-    if log_progress:
-        eprint(
-            f"[position] collecting account={account_name} exchange={exchange_id} "
-            f"account_type={account_type}"
-        )
     try:
         exchange = build_exchange(exchange_id, config, args.timeout_ms, account_type)
         if not exchange.has.get("fetchPositions"):
