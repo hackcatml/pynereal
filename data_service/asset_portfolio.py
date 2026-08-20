@@ -20,6 +20,7 @@ from ai.scripts.asset import (
     apply_cached_markets,
     collect_account,
     configured_accounts,
+    eprint,
     number_or_none,
     read_provider_config,
     remove_binance_earn_receipts,
@@ -627,7 +628,7 @@ class AssetPortfolioService:
         for exchange_id, result in zip(ordered_ids, results):
             if isinstance(result, Exception):
                 message = str(result).replace("\n", " ").strip()
-                print(
+                eprint(
                     f"[asset] market cache refresh failed exchange={exchange_id}: "
                     f"{message[:300] or type(result).__name__}"
                 )
@@ -650,7 +651,7 @@ class AssetPortfolioService:
                 await self._refresh_market_cache()
             except Exception as exc:
                 message = str(exc).replace("\n", " ").strip()
-                print(
+                eprint(
                     f"[asset] market cache refresh failed: "
                     f"{message[:300] or type(exc).__name__}"
                 )

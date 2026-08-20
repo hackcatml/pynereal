@@ -23,6 +23,7 @@ if str(_AI_SCRIPTS) not in sys.path:
 from asset import (  # noqa: E402
     ExchangeAccount,
     configured_accounts,
+    eprint,
     merge_dicts,
     read_provider_config,
     redact_error,
@@ -712,19 +713,15 @@ async def _watch_private_orders(
             ccxt.NotSupported,
             ccxt.PermissionDenied,
         ) as exc:
-            print(
+            eprint(
                 f"[account] {account.name} order stream unavailable: "
-                f"{type(exc).__name__}: {redact_error(exc, secrets)}",
-                file=sys.stderr,
-                flush=True,
+                f"{type(exc).__name__}: {redact_error(exc, secrets)}"
             )
             return
         except Exception as exc:
-            print(
+            eprint(
                 f"[account] {account.name} order stream error: "
-                f"{type(exc).__name__}: {redact_error(exc, secrets)}",
-                file=sys.stderr,
-                flush=True,
+                f"{type(exc).__name__}: {redact_error(exc, secrets)}"
             )
             try:
                 await asyncio.wait_for(stop.wait(), timeout=delay)
@@ -763,19 +760,15 @@ async def _watch_private_fills(
             ccxt.NotSupported,
             ccxt.PermissionDenied,
         ) as exc:
-            print(
+            eprint(
                 f"[account] {account.name} fill stream unavailable: "
-                f"{type(exc).__name__}: {redact_error(exc, secrets)}",
-                file=sys.stderr,
-                flush=True,
+                f"{type(exc).__name__}: {redact_error(exc, secrets)}"
             )
             return
         except Exception as exc:
-            print(
+            eprint(
                 f"[account] {account.name} fill stream error: "
-                f"{type(exc).__name__}: {redact_error(exc, secrets)}",
-                file=sys.stderr,
-                flush=True,
+                f"{type(exc).__name__}: {redact_error(exc, secrets)}"
             )
             try:
                 await asyncio.wait_for(stop.wait(), timeout=delay)
@@ -811,11 +804,9 @@ async def _watch_private_positions(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            print(
+            eprint(
                 f"[account] {account.name} position stream error: "
-                f"{type(exc).__name__}: {redact_error(exc, secrets)}",
-                file=sys.stderr,
-                flush=True,
+                f"{type(exc).__name__}: {redact_error(exc, secrets)}"
             )
             try:
                 await asyncio.wait_for(stop.wait(), timeout=delay)
@@ -865,11 +856,9 @@ async def _watch_mark(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            print(
+            eprint(
                 f"[account] {account.name} {symbol} mark stream error: "
-                f"{type(exc).__name__}: {redact_error(exc, secrets)}",
-                file=sys.stderr,
-                flush=True,
+                f"{type(exc).__name__}: {redact_error(exc, secrets)}"
             )
             try:
                 await asyncio.wait_for(stop.wait(), timeout=delay)
@@ -999,11 +988,9 @@ async def _watch_account(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        print(
+        eprint(
             f"[account] {account.name} live stream unavailable: "
-            f"{type(exc).__name__}: {redact_error(exc, secrets)}",
-            file=sys.stderr,
-            flush=True,
+            f"{type(exc).__name__}: {redact_error(exc, secrets)}"
         )
         await stop.wait()
     finally:
@@ -1062,10 +1049,8 @@ async def _persist_updates(
                 state.payload(),
             )
         except Exception as exc:
-            print(
-                f"[account] position cache write failed: {type(exc).__name__}: {exc}",
-                file=sys.stderr,
-                flush=True,
+            eprint(
+                f"[account] position cache write failed: {type(exc).__name__}: {exc}"
             )
 
 
@@ -1097,10 +1082,8 @@ async def _persist_history_updates(
             )
         except Exception as exc:
             history.restore(orders, fills, positions, pnl_events, cursors)
-            print(
-                f"[account] history cache write failed: {type(exc).__name__}: {exc}",
-                file=sys.stderr,
-                flush=True,
+            eprint(
+                f"[account] history cache write failed: {type(exc).__name__}: {exc}"
             )
 
 
@@ -1126,10 +1109,8 @@ async def _reconcile(
             snapshot = await asyncio.to_thread(collect_positions_snapshot, config_path)
             state.replace(snapshot)
         except Exception as exc:
-            print(
-                f"[account] position reconciliation failed: {type(exc).__name__}",
-                file=sys.stderr,
-                flush=True,
+            eprint(
+                f"[account] position reconciliation failed: {type(exc).__name__}"
             )
 
 
@@ -1248,27 +1229,14 @@ async def _refresh_history_from_parent(
                 "pnl_events": len(batch["pnl_events"]),
                 "elapsed_seconds": round(time.monotonic() - started_at, 3),
             }
-            print(
-                f"[account] manual history refresh completed | "
-                f"kind={kind} account={account.name} "
-                f"exchange={account.exchange_id} "
-                f"symbol={requested_symbol or '*'} "
-                f"orders={result['orders']} fills={result['fills']} "
-                f"positions={result['positions']} "
-                f"pnl_events={result['pnl_events']} "
-                f"elapsed={result['elapsed_seconds']:.1f}s",
-                flush=True,
-            )
             results.append(result)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             message = redact_error(exc, secret_values(account.config))
-            print(
+            eprint(
                 f"[account] {account.name} manual history refresh failed: "
-                f"{type(exc).__name__}: {message}",
-                file=sys.stderr,
-                flush=True,
+                f"{type(exc).__name__}: {message}"
             )
             results.append({
                 "account": account.name,
@@ -1757,10 +1725,8 @@ async def _run_positions_stream(
                 state.payload(),
             )
         except Exception as exc:
-            print(
-                f"[account] final position cache write failed: {type(exc).__name__}: {exc}",
-                file=sys.stderr,
-                flush=True,
+            eprint(
+                f"[account] final position cache write failed: {type(exc).__name__}: {exc}"
             )
         orders, fills, positions, pnl_events, cursor_records = history.drain()
         if orders or fills or positions or pnl_events or cursor_records:
@@ -1775,11 +1741,9 @@ async def _run_positions_stream(
                     pnl_events,
                 )
             except Exception as exc:
-                print(
+                eprint(
                     f"[account] final history cache write failed: "
-                    f"{type(exc).__name__}: {exc}",
-                    file=sys.stderr,
-                    flush=True,
+                    f"{type(exc).__name__}: {exc}"
                 )
         await loop.run_in_executor(cache_executor, cache.close)
         cache_executor.shutdown(wait=True, cancel_futures=True)
@@ -1809,10 +1773,8 @@ def run_positions_stream(
     except KeyboardInterrupt:
         pass
     except Exception as exc:
-        print(
-            f"[account] live account process stopped: {type(exc).__name__}",
-            file=sys.stderr,
-            flush=True,
+        eprint(
+            f"[account] live account process stopped: {type(exc).__name__}"
         )
     finally:
         try:

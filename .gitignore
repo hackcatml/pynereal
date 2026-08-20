@@ -15,12 +15,14 @@ workdir/config/providers.toml
 workdir/config/sessions.json
 workdir/config/ai_chat.json
 workdir/config/calendar_events.json
+workdir/config/watchlist_favorites.json
 workdir/config/update_request.json
 workdir/config/update_state.json
 workdir/output/realtime/
 
 # Ignore SQLite cache files but keep the directory
 workdir/data/cache/*.sqlite
+workdir/data/cache/watchlist_logos/
 
 # Ignore OHLCV and TOML files in workdir/data/
 workdir/data/ccxt*.ohlcv

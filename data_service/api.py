@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from fastapi import APIRouter, Body, File, Request, UploadFile
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from markdown_it import MarkdownIt
 
 from pynecore.cli.app import app_state
@@ -33,6 +33,7 @@ from calendar_store import CalendarEventStore, CalendarStoreError
 from data_integrity import DataIntegrityCancelled, inspect_data_integrity
 from registry import (
     HistoryNotReadyError,
+    RunnerActiveError,
     SessionExistsError,
     SessionLimitError,
     SessionNotFoundError,
@@ -52,6 +53,7 @@ from manual_alerts import send_manual_alert_payload
 from ohlcv_io import make_ccxt_pro_client
 from ohlcv_paths import make_cache_path
 from update_service import UpdateService, UpdateServiceError
+from watchlist import WatchlistService
 
 # Cache of exchange -> ccxt markets so symbol validation hits the network at most
 # once per exchange for the hub's lifetime.
@@ -350,6 +352,23 @@ def _resolve_script_path(spec: SessionSpec) -> Path:
     if script_path.suffix != ".py":
         raise ValueError("script must be a .py file")
     return script_path
+
+
+def _validate_script_name(raw: object) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        raise ValueError("script_name is required")
+    scripts_dir = app_state.scripts_dir.resolve()
+    script_path = (scripts_dir / value).resolve()
+    try:
+        relative = script_path.relative_to(scripts_dir)
+    except ValueError as exc:
+        raise ValueError("script path must be inside scripts directory") from exc
+    if script_path.suffix != ".py" or not script_path.is_file():
+        raise ValueError(f"script not found: {value}")
+    if not _declares_strategy(script_path):
+        raise ValueError("script must declare script.strategy(...)")
+    return relative.as_posix()
 
 
 def _script_source_display_name(spec: SessionSpec, script_path: Path | None = None) -> str:
@@ -703,6 +722,7 @@ def build_control_router(
     account_data_service: AccountDataService,
     asset_portfolio_service: AssetPortfolioService,
     asset_transfer_service: AssetTransferService,
+    watchlist_service: WatchlistService,
     update_service: UpdateService,
 ) -> APIRouter:
     r = APIRouter()
@@ -736,6 +756,55 @@ def build_control_router(
         except UpdateServiceError as exc:
             return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
         return JSONResponse(result, status_code=202)
+
+    @r.get("/api/watchlist/favorites")
+    async def get_watchlist_favorites() -> JSONResponse:
+        result = await asyncio.to_thread(watchlist_service.favorites_payload)
+        return JSONResponse(result)
+
+    @r.get("/api/watchlist/logos/{cmc_id}.png")
+    async def get_watchlist_logo(cmc_id: int) -> Response:
+        try:
+            path = await watchlist_service.logo_path(cmc_id)
+        except Exception:
+            return Response(status_code=404)
+        return FileResponse(
+            path,
+            media_type="image/png",
+            headers={
+                "Cache-Control": "public, max-age=2592000",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @r.put("/api/watchlist/favorites")
+    async def set_watchlist_favorite(
+        payload: dict = Body(default_factory=dict),
+    ) -> JSONResponse:
+        exchange = payload.get("exchange")
+        symbol = payload.get("symbol")
+        favorite = payload.get("favorite")
+        if not isinstance(exchange, str) or not isinstance(symbol, str):
+            return JSONResponse(
+                {"error": "exchange and symbol must be strings"},
+                status_code=400,
+            )
+        if not isinstance(favorite, bool):
+            return JSONResponse(
+                {"error": "favorite must be a boolean"},
+                status_code=400,
+            )
+        try:
+            result = await asyncio.to_thread(
+                watchlist_service.set_favorite,
+                exchange,
+                symbol,
+                favorite,
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        await watchlist_service.broadcast_favorites(result)
+        return JSONResponse(result)
 
     @r.get("/api/assets")
     @r.get("/api/account/assets")
@@ -1567,6 +1636,30 @@ def build_control_router(
         except Exception as e:
             return JSONResponse({"error": f"failed to update history_since: {e}"}, status_code=500)
         return JSONResponse({"ok": True, "history_since": value})
+
+    @r.patch("/api/sessions/{session_id}/script")
+    async def update_session_script(
+        session_id: str,
+        payload: dict = Body(default_factory=dict),
+    ) -> JSONResponse:
+        try:
+            script_name = _validate_script_name(payload.get("script_name"))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        try:
+            spec = await registry.update_script_name(session_id, script_name)
+        except SessionNotFoundError:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        except RunnerActiveError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        except SessionExistsError:
+            return JSONResponse(
+                {"error": "this script is already assigned to the same market session"},
+                status_code=409,
+            )
+        except Exception as exc:
+            return JSONResponse({"error": f"failed to update script: {exc}"}, status_code=500)
+        return JSONResponse({"ok": True, "id": spec.id, "script_name": spec.script_name})
 
     @r.get("/api/sessions/{session_id}/data-integrity")
     async def check_data_integrity(session_id: str) -> JSONResponse:

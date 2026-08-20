@@ -16,6 +16,7 @@ from fastapi.exception_handlers import http_exception_handler
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ai.provider.codex_service import CodexService
+from ai.scripts.asset import eprint
 from account_data import AccountDataService
 from asset_portfolio import AssetPortfolioService
 from asset_transfer import AssetTransferService
@@ -25,6 +26,7 @@ from registry import SessionRegistry
 from api import build_session_api_router, build_control_router, build_validation_router
 from ui import build_ui_router
 from update_service import UpdateService
+from watchlist import WatchlistService
 
 _BANNER = r"""
     ____                   ____             __
@@ -43,6 +45,7 @@ def build_app(
     account_data_service: AccountDataService,
     asset_portfolio_service: AssetPortfolioService,
     asset_transfer_service: AssetTransferService,
+    watchlist_service: WatchlistService,
     update_service: UpdateService,
 ) -> FastAPI:
     app = FastAPI()
@@ -86,6 +89,7 @@ def build_app(
             account_data_service,
             asset_portfolio_service,
             asset_transfer_service,
+            watchlist_service,
             update_service,
         )
     )
@@ -120,6 +124,17 @@ def build_app(
             await account_data_service.disconnect_live(ws)
         except Exception:
             await account_data_service.disconnect_live(ws)
+
+    @app.websocket("/ws/watchlist")
+    async def watchlist_ws(ws: WebSocket):
+        await watchlist_service.connect_live(ws)
+        try:
+            while True:
+                await ws.receive_text()
+        except WebSocketDisconnect:
+            await watchlist_service.disconnect_live(ws)
+        except Exception:
+            await watchlist_service.disconnect_live(ws)
 
     @app.websocket("/ws/{session_id}")
     async def session_ws(ws: WebSocket, session_id: str):
@@ -202,6 +217,10 @@ async def main() -> None:
     asset_transfer_service = AssetTransferService(
         _PROJECT_ROOT / "workdir" / "config" / "providers.toml"
     )
+    watchlist_service = WatchlistService(
+        _PROJECT_ROOT / "workdir" / "config" / "watchlist_favorites.json",
+        _PROJECT_ROOT / "workdir" / "data" / "cache" / "watchlist_logos",
+    )
     codex_service = CodexService(
         project_root=_PROJECT_ROOT,
         session_registry=registry,
@@ -238,6 +257,7 @@ async def main() -> None:
         account_data_service,
         asset_portfolio_service,
         asset_transfer_service,
+        watchlist_service,
         update_service,
     )
 
@@ -246,7 +266,7 @@ async def main() -> None:
     try:
         await account_data_service.start()
     except Exception as exc:
-        print(f"[account] service startup failed: {type(exc).__name__}: {exc}")
+        eprint(f"[account] service startup failed: {type(exc).__name__}: {exc}")
     heartbeat = asyncio.create_task(_hub_status_heartbeat(registry))
 
     server = uvicorn.Server(
@@ -293,7 +313,10 @@ async def main() -> None:
                 try:
                     await asset_portfolio_service.close()
                 finally:
-                    await codex_service.close()
+                    try:
+                        await watchlist_service.close()
+                    finally:
+                        await codex_service.close()
     if update_shutdown.is_set():
         update_service.apply_and_restart()
 
