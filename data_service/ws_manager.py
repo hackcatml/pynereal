@@ -37,6 +37,10 @@ def _coalesce_key(payload: Any) -> Optional[tuple]:
         return ("sessions",)
     if t == "account.positions":
         return ("account.positions",)
+    if t == "watchlist.snapshot":
+        return ("watchlist.snapshot",)
+    if t == "watchlist.favorites":
+        return ("watchlist.favorites",)
     return None
 
 

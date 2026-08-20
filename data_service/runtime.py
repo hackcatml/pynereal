@@ -303,6 +303,27 @@ class Session:
         self._manual_alert_trigger_gates: dict[str, dict[str, Any]] = {}
         self.reset_manual_alert_trigger_gate()
 
+    def reconfigure_script(self, spec: SessionSpec) -> None:
+        """Apply a stopped-session script change without replacing its identity."""
+        self.spec = spec
+        self.trades_history.clear()
+        self.plot_options.clear()
+        self.plotchar_history.clear()
+        self.runner_ready = False
+        self.history_resync_pending = False
+        self.calculation_generation_id = uuid.uuid4().hex
+        self.calculation_status = "stopped"
+        self.calculation_latest_confirmed_bar = None
+        self.calculated_through = None
+        self.calculation_updated_at = datetime.now(UTC).isoformat()
+        self.strategy_snapshot = None
+        self.strategy_snapshot_generation_id = None
+        self.chart_info["script_title"] = None
+        self.chart_info["script_source_name"] = None
+        self.chart_info["script_source"] = ""
+        self._processed_ai_instruction_ids.clear()
+        self._processed_ai_instruction_order.clear()
+
     @property
     def ohlcv_path(self) -> Path:
         return self.feed.paths.ohlcv_path

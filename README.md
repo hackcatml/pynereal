@@ -22,6 +22,8 @@ Run your crypto trading strategy in real time without TradingView.
 - 🔔 Webhook, Telegram, and draggable manual price alerts on the chart
 - 💼 **Account Center** — assets, live positions, trade history, net PnL,
   CSV history import, and reviewed internal transfers
+- 👁️ **Futures Watchlist** — live prices, 24-hour moves, turnover, favorites,
+  and direct session setup across supported exchanges
 - 📱 Full mobile dashboard
 
 ## 🤖 AI Copilot
@@ -364,6 +366,25 @@ values:
 ```json
 {"signal":"CLOSE TP3","ticker":"{{ticker}}","timeframe":"{{timeframe}}"}
 ```
+
+## Futures Watchlist
+
+Open the Hub menu and select **Watchlist** to browse futures markets from
+Binance, Bitget, Bybit, OKX, and Hyperliquid. The list updates while it is open
+and supports exchange, quote-currency, and Stocks / ETFs / Commodities filters,
+search, favorites, and price, 24-hour change, or turnover sorting.
+
+Select a market symbol to add it as a dashboard session. The exchange and symbol
+come from the selected Watchlist row; choose the timeframe and UTC history start
+date and time in the confirmation dialog. The default history range starts two
+months earlier at `00:00` UTC.
+
+Watchlist sessions are initially created without a strategy script. While their
+Runner is stopped, select the **Script** value in the dashboard row to assign or
+change a strategy. Script changes are blocked while the Runner is starting or
+running, and `Start` remains disabled until a script has been selected. Sessions
+on the same exchange, symbol, and timeframe share one market-data feed while
+still allowing separate strategies.
 
 ## Account Center
 

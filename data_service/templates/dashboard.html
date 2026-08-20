@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=121" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=136" />
 </head>
 <body>
   <header class="topbar">
@@ -107,6 +107,17 @@
         </span>
         <span>Calendar</span>
       </button>
+      <button id="hub-watchlist-open" class="hub-menu-item" type="button">
+        <span class="hub-menu-emoji" aria-hidden="true">
+          <svg class="hub-menu-glyph" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+            <polyline points="14 2 14 8 20 8" />
+            <line x1="8" y1="13" x2="16" y2="13" />
+            <line x1="8" y1="17" x2="16" y2="17" />
+          </svg>
+        </span>
+        <span>Watchlist</span>
+      </button>
     </nav>
     <div class="hub-menu-footer">
       <div id="hub-update-message" class="hub-update-message" aria-live="polite"></div>
@@ -137,14 +148,14 @@
       <div class="field"><input name="history_since" placeholder="history_since (YYYY-MM-DD, optional)" /></div>
       <div class="field">
         <div class="script-row">
-          <div class="script-select" id="script-select-control">
+          <div class="script-select script-select-animated" id="script-select-control">
             <select name="script_name" id="script-select" class="script-native-select" tabindex="-1" aria-hidden="true">
               <option value="">script_name…</option>
             </select>
             <button type="button" id="script-select-button" class="script-select-button"
                     aria-haspopup="listbox" aria-expanded="false" aria-controls="script-select-options">
               <span id="script-select-label" class="script-select-label">script_name…</span>
-              <span class="script-select-chevron" aria-hidden="true">&#9662;</span>
+              <span class="script-select-toggle-chevron" aria-hidden="true"></span>
             </button>
             <div id="script-select-options" class="script-select-options hidden" role="listbox"></div>
           </div>
@@ -187,6 +198,186 @@
     </table>
     <div id="empty" class="muted">No sessions yet. Add one above.</div>
   </section>
+
+  <div id="watchlist-modal" class="modal watchlist-modal hidden" aria-hidden="true">
+    <div class="modal-box watchlist-modal-box" role="dialog" aria-modal="true" aria-labelledby="watchlist-title">
+      <div class="modal-header watchlist-modal-header">
+        <div class="watchlist-title-group">
+          <span id="watchlist-title">Futures Watchlist</span>
+          <span id="watchlist-live-status" class="watchlist-live-status">Offline</span>
+        </div>
+        <button id="watchlist-close" class="btn btn-icon" type="button" title="Close" aria-label="Close">&times;</button>
+      </div>
+      <div class="watchlist-body">
+        <div class="watchlist-toolbar">
+          <label class="watchlist-search">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" />
+              <path d="m20 20-4-4" />
+            </svg>
+            <input id="watchlist-search" type="search" autocomplete="off"
+                   placeholder="Search futures" aria-label="Search futures" />
+          </label>
+          <div id="watchlist-exchange-filters" class="watchlist-filter-row" aria-label="Exchange filter">
+            <button class="watchlist-filter active" type="button" data-watchlist-exchange="all">All</button>
+            <button class="watchlist-filter" type="button" data-watchlist-exchange="binance">Binance</button>
+            <button class="watchlist-filter" type="button" data-watchlist-exchange="bitget">Bitget</button>
+            <button class="watchlist-filter" type="button" data-watchlist-exchange="bybit">Bybit</button>
+            <button class="watchlist-filter" type="button" data-watchlist-exchange="okx">OKX</button>
+            <button class="watchlist-filter" type="button" data-watchlist-exchange="hyperliquid">Hyperliquid</button>
+          </div>
+          <div id="watchlist-market-filters" class="watchlist-filter-row watchlist-market-filters" aria-label="Market filter">
+            <button class="watchlist-filter active" type="button" data-watchlist-market="all">All</button>
+            <button class="watchlist-filter" type="button" data-watchlist-market="favorites">Favorites</button>
+            <button class="watchlist-filter" type="button" data-watchlist-market="stocks">Stocks</button>
+            <button class="watchlist-filter" type="button" data-watchlist-market="etfs">ETFs</button>
+            <button class="watchlist-filter" type="button" data-watchlist-market="commodities">Commodities</button>
+            <button class="watchlist-filter" type="button" data-watchlist-market="USDT">USDT</button>
+            <button class="watchlist-filter" type="button" data-watchlist-market="USDC">USDC</button>
+          </div>
+        </div>
+        <div class="watchlist-meta">
+          <span id="watchlist-count">0 markets</span>
+          <span id="watchlist-updated">Waiting for market data</span>
+        </div>
+        <div class="watchlist-list-shell">
+          <div class="watchlist-list-header" role="row">
+            <span aria-hidden="true"></span>
+            <button type="button" class="active desc" data-watchlist-sort="turnover_24h">Market / Turnover</button>
+            <button type="button" data-watchlist-sort="last">Last</button>
+            <button type="button" data-watchlist-sort="change_24h">24h</button>
+          </div>
+          <div id="watchlist-loading" class="watchlist-state">
+            <span class="assets-spinner" aria-hidden="true"></span>
+            <span>Loading futures markets...</span>
+          </div>
+          <div id="watchlist-error" class="watchlist-state watchlist-state-error hidden" role="alert"></div>
+          <div id="watchlist-empty" class="watchlist-state hidden">No matching futures markets.</div>
+          <div id="watchlist-list" class="watchlist-list" role="table" aria-label="Futures markets"></div>
+        </div>
+        <div id="watchlist-exchange-errors" class="watchlist-exchange-errors hidden"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="watchlist-add-modal" class="modal watchlist-add-modal hidden" aria-hidden="true">
+    <div class="modal-box modal-box-sm watchlist-add-modal-box" role="dialog" aria-modal="true"
+         aria-labelledby="watchlist-add-title">
+      <div class="modal-header">
+        <span id="watchlist-add-title">Add session</span>
+        <button id="watchlist-add-close" class="btn btn-icon" type="button" title="Close"
+                aria-label="Close">&times;</button>
+      </div>
+      <form id="watchlist-add-form" class="watchlist-add-form">
+        <div class="watchlist-add-market">
+          <img id="watchlist-add-logo" class="watchlist-add-logo" alt="" />
+          <div>
+            <strong id="watchlist-add-symbol" class="mono"></strong>
+            <span id="watchlist-add-exchange"></span>
+          </div>
+        </div>
+        <div class="watchlist-add-field">
+          <span>Timeframe</span>
+          <div id="watchlist-add-timeframe-control"
+               class="script-select script-select-animated watchlist-add-select">
+            <button id="watchlist-add-timeframe-button" class="script-select-button" type="button"
+                    aria-haspopup="listbox" aria-expanded="false"
+                    aria-controls="watchlist-add-timeframe-options">
+              <span id="watchlist-add-timeframe-label" class="script-select-label">5m</span>
+              <span class="script-select-toggle-chevron" aria-hidden="true"></span>
+            </button>
+            <div id="watchlist-add-timeframe-options" class="script-select-options hidden" role="listbox">
+              <button class="script-select-option" type="button" data-watchlist-timeframe="1m" role="option">1m</button>
+              <button class="script-select-option" type="button" data-watchlist-timeframe="3m" role="option">3m</button>
+              <button class="script-select-option" type="button" data-watchlist-timeframe="5m" role="option">5m</button>
+              <button class="script-select-option" type="button" data-watchlist-timeframe="15m" role="option">15m</button>
+              <button class="script-select-option" type="button" data-watchlist-timeframe="30m" role="option">30m</button>
+              <button class="script-select-option" type="button" data-watchlist-timeframe="1h" role="option">1h</button>
+              <button class="script-select-option" type="button" data-watchlist-timeframe="2h" role="option">2h</button>
+              <button class="script-select-option" type="button" data-watchlist-timeframe="4h" role="option">4h</button>
+              <button class="script-select-option" type="button" data-watchlist-timeframe="6h" role="option">6h</button>
+              <button class="script-select-option" type="button" data-watchlist-timeframe="12h" role="option">12h</button>
+              <button class="script-select-option" type="button" data-watchlist-timeframe="1d" role="option">1d</button>
+            </div>
+          </div>
+        </div>
+        <div class="watchlist-add-history-row">
+          <div class="watchlist-add-field">
+            <span>History since <small>UTC</small></span>
+            <div id="watchlist-add-date-picker" class="watchlist-add-date-picker">
+              <button id="watchlist-add-date-button" class="watchlist-add-date-button" type="button"
+                      aria-haspopup="dialog" aria-expanded="false"
+                      aria-controls="watchlist-add-calendar">
+                <span id="watchlist-add-date-label"></span>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M8 2v4M16 2v4M3 9h18"></path>
+                  <rect x="3" y="4" width="18" height="17" rx="2"></rect>
+                </svg>
+              </button>
+              <div id="watchlist-add-calendar" class="watchlist-add-calendar hidden" role="dialog"
+                   aria-label="Choose history start date">
+                <div class="watchlist-add-calendar-toolbar">
+                  <button id="watchlist-add-calendar-prev" class="btn btn-icon" type="button"
+                          title="Previous month" aria-label="Previous month">&#8249;</button>
+                  <strong id="watchlist-add-calendar-title"></strong>
+                  <button id="watchlist-add-calendar-next" class="btn btn-icon" type="button"
+                          title="Next month" aria-label="Next month">&#8250;</button>
+                </div>
+                <div class="watchlist-add-calendar-weekdays" aria-hidden="true">
+                  <span>Su</span><span>Mo</span><span>Tu</span><span>We</span>
+                  <span>Th</span><span>Fr</span><span>Sa</span>
+                </div>
+                <div id="watchlist-add-calendar-days" class="watchlist-add-calendar-days"></div>
+              </div>
+            </div>
+          </div>
+          <label class="watchlist-add-field watchlist-add-time-field">
+            <span>Time <small>UTC</small></span>
+            <input id="watchlist-add-history-time" type="text" value="00:00"
+                   inputmode="numeric" maxlength="5" autocomplete="off"
+                   aria-label="History start time in UTC" />
+          </label>
+        </div>
+        <div id="watchlist-add-error" class="error" role="alert"></div>
+      </form>
+      <div class="confirm-footer">
+        <button id="watchlist-add-cancel" class="btn" type="button">Cancel</button>
+        <button id="watchlist-add-submit" class="btn btn-primary" type="submit"
+                form="watchlist-add-form">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="script-change-modal" class="modal script-change-modal hidden" aria-hidden="true">
+    <div class="modal-box modal-box-sm script-change-modal-box" role="dialog" aria-modal="true"
+         aria-labelledby="script-change-title">
+      <div class="modal-header">
+        <span id="script-change-title">Change script</span>
+        <button id="script-change-close" class="btn btn-icon" type="button" title="Close"
+                aria-label="Close">&times;</button>
+      </div>
+      <div class="script-change-body">
+        <div id="script-change-session" class="confirm-session mono"></div>
+        <div class="script-change-field">
+          <span>Strategy script</span>
+          <div id="script-change-select" class="script-select script-select-animated script-change-select">
+            <button id="script-change-select-button" class="script-select-button" type="button"
+                    aria-haspopup="listbox" aria-expanded="false"
+                    aria-controls="script-change-options">
+              <span id="script-change-select-label" class="script-select-label">Select script</span>
+              <span class="script-select-toggle-chevron" aria-hidden="true"></span>
+            </button>
+            <div id="script-change-options" class="script-select-options hidden" role="listbox"></div>
+          </div>
+        </div>
+        <div id="script-change-error" class="error" role="alert"></div>
+      </div>
+      <div class="confirm-footer">
+        <button id="script-change-cancel" class="btn" type="button">Cancel</button>
+        <button id="script-change-save" class="btn btn-primary" type="button">Save</button>
+      </div>
+    </div>
+  </div>
 
   <div id="calendar-modal" class="modal calendar-modal hidden" aria-hidden="true">
     <div class="modal-box calendar-modal-box" role="dialog" aria-modal="true" aria-labelledby="calendar-title">
@@ -802,6 +993,6 @@
     </form>
   </div>
 
-  <script src="/static/dashboard.js?v=130"></script>
+  <script src="/static/dashboard.js?v=144"></script>
 </body>
 </html>
