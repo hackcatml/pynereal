@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=121" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=124" />
 </head>
 <body>
   <header class="topbar">
@@ -107,6 +107,17 @@
         </span>
         <span>Calendar</span>
       </button>
+      <button id="hub-watchlist-open" class="hub-menu-item" type="button">
+        <span class="hub-menu-emoji" aria-hidden="true">
+          <svg class="hub-menu-glyph" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+            <polyline points="14 2 14 8 20 8" />
+            <line x1="8" y1="13" x2="16" y2="13" />
+            <line x1="8" y1="17" x2="16" y2="17" />
+          </svg>
+        </span>
+        <span>Watchlist</span>
+      </button>
     </nav>
     <div class="hub-menu-footer">
       <div id="hub-update-message" class="hub-update-message" aria-live="polite"></div>
@@ -187,6 +198,67 @@
     </table>
     <div id="empty" class="muted">No sessions yet. Add one above.</div>
   </section>
+
+  <div id="watchlist-modal" class="modal watchlist-modal hidden" aria-hidden="true">
+    <div class="modal-box watchlist-modal-box" role="dialog" aria-modal="true" aria-labelledby="watchlist-title">
+      <div class="modal-header watchlist-modal-header">
+        <div class="watchlist-title-group">
+          <span id="watchlist-title">Futures Watchlist</span>
+          <span id="watchlist-live-status" class="watchlist-live-status">Offline</span>
+        </div>
+        <button id="watchlist-close" class="btn btn-icon" type="button" title="Close" aria-label="Close">&times;</button>
+      </div>
+      <div class="watchlist-body">
+        <div class="watchlist-toolbar">
+          <label class="watchlist-search">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" />
+              <path d="m20 20-4-4" />
+            </svg>
+            <input id="watchlist-search" type="search" autocomplete="off"
+                   placeholder="Search futures" aria-label="Search futures" />
+          </label>
+          <div id="watchlist-exchange-filters" class="watchlist-filter-row" aria-label="Exchange filter">
+            <button class="watchlist-filter active" type="button" data-watchlist-exchange="all">All</button>
+            <button class="watchlist-filter" type="button" data-watchlist-exchange="binance">Binance</button>
+            <button class="watchlist-filter" type="button" data-watchlist-exchange="bitget">Bitget</button>
+            <button class="watchlist-filter" type="button" data-watchlist-exchange="bybit">Bybit</button>
+            <button class="watchlist-filter" type="button" data-watchlist-exchange="okx">OKX</button>
+            <button class="watchlist-filter" type="button" data-watchlist-exchange="hyperliquid">Hyperliquid</button>
+          </div>
+          <div id="watchlist-market-filters" class="watchlist-filter-row watchlist-market-filters" aria-label="Market filter">
+            <button class="watchlist-filter active" type="button" data-watchlist-market="all">All</button>
+            <button class="watchlist-filter" type="button" data-watchlist-market="favorites">Favorites</button>
+            <button class="watchlist-filter" type="button" data-watchlist-market="stocks">Stocks</button>
+            <button class="watchlist-filter" type="button" data-watchlist-market="etfs">ETFs</button>
+            <button class="watchlist-filter" type="button" data-watchlist-market="commodities">Commodities</button>
+            <button class="watchlist-filter" type="button" data-watchlist-market="USDT">USDT</button>
+            <button class="watchlist-filter" type="button" data-watchlist-market="USDC">USDC</button>
+          </div>
+        </div>
+        <div class="watchlist-meta">
+          <span id="watchlist-count">0 markets</span>
+          <span id="watchlist-updated">Waiting for market data</span>
+        </div>
+        <div class="watchlist-list-shell">
+          <div class="watchlist-list-header" role="row">
+            <span aria-hidden="true"></span>
+            <button type="button" class="active desc" data-watchlist-sort="turnover_24h">Market / Turnover</button>
+            <button type="button" data-watchlist-sort="last">Last</button>
+            <button type="button" data-watchlist-sort="change_24h">24h</button>
+          </div>
+          <div id="watchlist-loading" class="watchlist-state">
+            <span class="assets-spinner" aria-hidden="true"></span>
+            <span>Loading futures markets...</span>
+          </div>
+          <div id="watchlist-error" class="watchlist-state watchlist-state-error hidden" role="alert"></div>
+          <div id="watchlist-empty" class="watchlist-state hidden">No matching futures markets.</div>
+          <div id="watchlist-list" class="watchlist-list" role="table" aria-label="Futures markets"></div>
+        </div>
+        <div id="watchlist-exchange-errors" class="watchlist-exchange-errors hidden"></div>
+      </div>
+    </div>
+  </div>
 
   <div id="calendar-modal" class="modal calendar-modal hidden" aria-hidden="true">
     <div class="modal-box calendar-modal-box" role="dialog" aria-modal="true" aria-labelledby="calendar-title">
@@ -802,6 +874,6 @@
     </form>
   </div>
 
-  <script src="/static/dashboard.js?v=130"></script>
+  <script src="/static/dashboard.js?v=137"></script>
 </body>
 </html>

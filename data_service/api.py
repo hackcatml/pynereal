@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from fastapi import APIRouter, Body, File, Request, UploadFile
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from markdown_it import MarkdownIt
 
 from pynecore.cli.app import app_state
@@ -52,6 +52,7 @@ from manual_alerts import send_manual_alert_payload
 from ohlcv_io import make_ccxt_pro_client
 from ohlcv_paths import make_cache_path
 from update_service import UpdateService, UpdateServiceError
+from watchlist import WatchlistService
 
 # Cache of exchange -> ccxt markets so symbol validation hits the network at most
 # once per exchange for the hub's lifetime.
@@ -703,6 +704,7 @@ def build_control_router(
     account_data_service: AccountDataService,
     asset_portfolio_service: AssetPortfolioService,
     asset_transfer_service: AssetTransferService,
+    watchlist_service: WatchlistService,
     update_service: UpdateService,
 ) -> APIRouter:
     r = APIRouter()
@@ -736,6 +738,55 @@ def build_control_router(
         except UpdateServiceError as exc:
             return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
         return JSONResponse(result, status_code=202)
+
+    @r.get("/api/watchlist/favorites")
+    async def get_watchlist_favorites() -> JSONResponse:
+        result = await asyncio.to_thread(watchlist_service.favorites_payload)
+        return JSONResponse(result)
+
+    @r.get("/api/watchlist/logos/{cmc_id}.png")
+    async def get_watchlist_logo(cmc_id: int) -> Response:
+        try:
+            path = await watchlist_service.logo_path(cmc_id)
+        except Exception:
+            return Response(status_code=404)
+        return FileResponse(
+            path,
+            media_type="image/png",
+            headers={
+                "Cache-Control": "public, max-age=2592000",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @r.put("/api/watchlist/favorites")
+    async def set_watchlist_favorite(
+        payload: dict = Body(default_factory=dict),
+    ) -> JSONResponse:
+        exchange = payload.get("exchange")
+        symbol = payload.get("symbol")
+        favorite = payload.get("favorite")
+        if not isinstance(exchange, str) or not isinstance(symbol, str):
+            return JSONResponse(
+                {"error": "exchange and symbol must be strings"},
+                status_code=400,
+            )
+        if not isinstance(favorite, bool):
+            return JSONResponse(
+                {"error": "favorite must be a boolean"},
+                status_code=400,
+            )
+        try:
+            result = await asyncio.to_thread(
+                watchlist_service.set_favorite,
+                exchange,
+                symbol,
+                favorite,
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        await watchlist_service.broadcast_favorites(result)
+        return JSONResponse(result)
 
     @r.get("/api/assets")
     @r.get("/api/account/assets")

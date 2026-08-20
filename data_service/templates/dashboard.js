@@ -39,6 +39,26 @@
   let calendarAddSessionMenuOpen = false;
   let calendarAddComposing = false;
   const calendarAddSessionIds = new Set();
+  let watchlistRows = [];
+  let watchlistErrors = [];
+  let watchlistCollectedAt = "";
+  let watchlistHasSnapshot = false;
+  let watchlistExchange = "all";
+  let watchlistMarketFilter = "all";
+  let watchlistSearch = "";
+  let watchlistSort = "turnover_24h";
+  let watchlistSortDescending = true;
+  let watchlistWs = null;
+  let watchlistGeneration = 0;
+  let watchlistReconnectTimer = null;
+  let watchlistKeepaliveTimer = null;
+  let watchlistOpenTimer = null;
+  let watchlistCloseTimer = null;
+  let watchlistUiError = "";
+  let watchlistFilteredRowsCache = [];
+  let watchlistWindowRenderFrame = null;
+  const watchlistFavorites = new Set();
+  const watchlistOverscanRows = 8;
   let registerAnimatedPepeFace = () => {};
   const assetColors = [
     "#3b82f6", "#f59e0b", "#10b981", "#ef4444",
@@ -59,6 +79,7 @@
   let assetsHaveData = false;
   let assetsPayload = null;
   let selectedAssetExchange = null;
+  const assetAccountTypeDonuts = new Set();
   let accountView = "assets";
   let accountPagerScrollToView = null;
   let positionsRequestSeq = 0;
@@ -407,6 +428,512 @@
     menu.setAttribute("aria-hidden", "true");
     backdrop.setAttribute("aria-hidden", "true");
     el("hub-menu-button").setAttribute("aria-expanded", "false");
+  }
+
+  const watchlistExchangeNames = {
+    binance: "Binance",
+    bitget: "Bitget",
+    bybit: "Bybit",
+    okx: "OKX",
+    hyperliquid: "Hyperliquid",
+  };
+
+  function isWatchlistOpen() {
+    return !el("watchlist-modal").classList.contains("hidden");
+  }
+
+  function watchlistFavoriteKey(exchange, symbol) {
+    return `${String(exchange || "").toLowerCase()}|${String(symbol || "").toUpperCase()}`;
+  }
+
+  function applyWatchlistFavorites(payload) {
+    watchlistFavorites.clear();
+    const favorites = payload && Array.isArray(payload.favorites) ? payload.favorites : [];
+    for (const item of favorites) {
+      if (!item || typeof item !== "object") continue;
+      watchlistFavorites.add(watchlistFavoriteKey(item.exchange, item.symbol));
+    }
+    if (isWatchlistOpen()) renderWatchlist();
+  }
+
+  function watchlistNumber(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function formatWatchlistPrice(value) {
+    const number = watchlistNumber(value);
+    if (number === null) return "—";
+    const absolute = Math.abs(number);
+    let digits = 8;
+    if (absolute >= 1000) digits = 2;
+    else if (absolute >= 1) digits = 4;
+    else if (absolute >= 0.01) digits = 6;
+    return new Intl.NumberFormat("en-US", {
+      maximumFractionDigits: digits,
+      minimumFractionDigits: 0,
+    }).format(number);
+  }
+
+  function formatWatchlistTurnover(value) {
+    const number = watchlistNumber(value);
+    if (number === null) return "Turnover unavailable";
+    return `${new Intl.NumberFormat("en-US", {
+      notation: "compact",
+      maximumFractionDigits: 2,
+    }).format(number)} 24h turnover`;
+  }
+
+  function formatWatchlistChange(value) {
+    const number = watchlistNumber(value);
+    if (number === null) return "—";
+    return `${number > 0 ? "+" : ""}${number.toFixed(2)}%`;
+  }
+
+  function formatWatchlistUpdated(value) {
+    const date = new Date(value || "");
+    if (!Number.isFinite(date.getTime())) return "Waiting for market data";
+    return `Updated ${date.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    })}`;
+  }
+
+  function setWatchlistStatus(text, state = "") {
+    const node = el("watchlist-live-status");
+    node.textContent = text;
+    node.className = `watchlist-live-status${state ? ` ${state}` : ""}`;
+  }
+
+  function filteredWatchlistRows() {
+    const search = watchlistSearch.trim().toUpperCase();
+    const rows = watchlistRows.filter((row) => {
+      if (!row || typeof row !== "object") return false;
+      const exchange = String(row.exchange || "").toLowerCase();
+      if (watchlistExchange !== "all" && exchange !== watchlistExchange) return false;
+      const key = watchlistFavoriteKey(exchange, row.symbol);
+      if (watchlistMarketFilter === "favorites" && !watchlistFavorites.has(key)) return false;
+      if (
+        ["stocks", "etfs", "commodities"].includes(watchlistMarketFilter)
+        && String(row.category || "crypto").toLowerCase() !== watchlistMarketFilter
+      ) return false;
+      if (
+        (watchlistMarketFilter === "USDT" || watchlistMarketFilter === "USDC")
+        && String(row.quote || "").toUpperCase() !== watchlistMarketFilter
+      ) return false;
+      if (!search) return true;
+      return [row.symbol, row.market_id, row.base, row.quote, row.exchange]
+        .some((value) => String(value || "").toUpperCase().includes(search));
+    });
+    const direction = watchlistSortDescending ? -1 : 1;
+    rows.sort((left, right) => {
+      const leftValue = watchlistNumber(left[watchlistSort]);
+      const rightValue = watchlistNumber(right[watchlistSort]);
+      const leftValid = leftValue !== null;
+      const rightValid = rightValue !== null;
+      if (leftValid && rightValid && leftValue !== rightValue) {
+        return (leftValue - rightValue) * direction;
+      }
+      if (leftValid !== rightValid) return leftValid ? -1 : 1;
+      return String(left.symbol || "").localeCompare(String(right.symbol || ""));
+    });
+    return rows;
+  }
+
+  function watchlistRowHeight() {
+    const value = Number.parseFloat(
+      getComputedStyle(el("watchlist-list")).getPropertyValue("--watchlist-row-height"),
+    );
+    return Number.isFinite(value) && value > 0 ? value : 57;
+  }
+
+  function renderWatchlistWindow() {
+    watchlistWindowRenderFrame = null;
+    const list = el("watchlist-list");
+    const rows = watchlistFilteredRowsCache;
+    if (list.classList.contains("hidden") || rows.length === 0) {
+      list.replaceChildren();
+      return;
+    }
+
+    const rowHeight = watchlistRowHeight();
+    const viewportRows = Math.max(1, Math.ceil(list.clientHeight / rowHeight));
+    const requestedStart = Math.max(
+      0,
+      Math.floor(list.scrollTop / rowHeight) - watchlistOverscanRows,
+    );
+    const start = Math.min(requestedStart, Math.max(0, rows.length - viewportRows));
+    const end = Math.min(rows.length, start + viewportRows + watchlistOverscanRows * 2);
+    const existing = new Map(
+      Array.from(list.querySelectorAll(".watchlist-row"))
+        .map((item) => [item.dataset.watchlistKey, item]),
+    );
+    const fragment = document.createDocumentFragment();
+    const topSpacer = document.createElement("div");
+    topSpacer.className = "watchlist-spacer";
+    topSpacer.style.height = `${start * rowHeight}px`;
+    fragment.appendChild(topSpacer);
+
+    for (let index = start; index < end; index += 1) {
+      const row = rows[index];
+      const key = watchlistFavoriteKey(row.exchange, row.symbol);
+      const item = existing.get(key) || createWatchlistRow();
+      patchWatchlistRow(item, row);
+      fragment.appendChild(item);
+    }
+
+    const bottomSpacer = document.createElement("div");
+    bottomSpacer.className = "watchlist-spacer";
+    bottomSpacer.style.height = `${(rows.length - end) * rowHeight}px`;
+    fragment.appendChild(bottomSpacer);
+    list.replaceChildren(fragment);
+  }
+
+  function scheduleWatchlistWindowRender() {
+    if (watchlistWindowRenderFrame !== null) return;
+    watchlistWindowRenderFrame = window.requestAnimationFrame(renderWatchlistWindow);
+  }
+
+  function createWatchlistRow() {
+    const item = document.createElement("div");
+    item.className = "watchlist-row";
+    item.setAttribute("role", "row");
+
+    const favorite = document.createElement("button");
+    favorite.type = "button";
+    favorite.className = "watchlist-favorite";
+    favorite.textContent = "★";
+    item.appendChild(favorite);
+
+    const market = document.createElement("div");
+    market.className = "watchlist-market";
+    const logo = document.createElement("img");
+    logo.className = "watchlist-exchange-logo";
+    logo.alt = "";
+    logo.decoding = "async";
+    logo.loading = "lazy";
+    logo.fetchPriority = "low";
+    logo.addEventListener("error", () => {
+      const current = logo.getAttribute("src") || "";
+      const fallback = logo.dataset.fallbackSrc || "";
+      if (fallback && current !== fallback) {
+        logo.dataset.failedSrc = current;
+        logo.src = fallback;
+        logo.hidden = false;
+        return;
+      }
+      logo.hidden = true;
+    });
+    market.appendChild(logo);
+    const text = document.createElement("div");
+    text.className = "watchlist-market-text";
+    const name = document.createElement("div");
+    name.className = "watchlist-market-name";
+    const symbol = document.createElement("strong");
+    const exchange = document.createElement("span");
+    name.append(symbol, exchange);
+    const meta = document.createElement("span");
+    meta.className = "watchlist-market-meta";
+    text.append(name, meta);
+    market.appendChild(text);
+    item.appendChild(market);
+
+    const last = document.createElement("span");
+    last.className = "watchlist-number";
+    item.appendChild(last);
+
+    const change = document.createElement("span");
+    change.className = "watchlist-number watchlist-change";
+    item.appendChild(change);
+    item._watchlistNodes = { favorite, logo, symbol, exchange, meta, last, change };
+    return item;
+  }
+
+  function patchWatchlistRow(item, row) {
+    const nodes = item._watchlistNodes;
+    if (!nodes) return;
+    const key = watchlistFavoriteKey(row.exchange, row.symbol);
+    const isFavorite = watchlistFavorites.has(key);
+    item.dataset.watchlistKey = key;
+    nodes.favorite.classList.toggle("active", isFavorite);
+    nodes.favorite.dataset.watchlistFavoriteExchange = String(row.exchange || "");
+    nodes.favorite.dataset.watchlistFavoriteSymbol = String(row.symbol || "");
+    nodes.favorite.setAttribute("aria-pressed", String(isFavorite));
+    nodes.favorite.setAttribute("aria-label", `${isFavorite ? "Remove" : "Add"} ${row.symbol} favorite`);
+    nodes.favorite.title = isFavorite ? "Remove favorite" : "Add favorite";
+    const symbolLogoUrl = String(row.symbol_logo_url || "");
+    const fallbackLogoUrl = String(row.exchange_logo_url || "");
+    nodes.logo.dataset.fallbackSrc = fallbackLogoUrl;
+    const logoUrl = (
+      symbolLogoUrl && nodes.logo.dataset.failedSrc !== symbolLogoUrl
+        ? symbolLogoUrl
+        : fallbackLogoUrl
+    );
+    if (logoUrl) {
+      if (nodes.logo.getAttribute("src") !== logoUrl) nodes.logo.src = logoUrl;
+      nodes.logo.hidden = false;
+    } else {
+      nodes.logo.hidden = true;
+      nodes.logo.removeAttribute("src");
+    }
+    nodes.symbol.textContent = `${String(row.base || "")} / ${String(row.quote || "")}`;
+    const showExchange = watchlistExchange === "all";
+    nodes.exchange.textContent = showExchange
+      ? watchlistExchangeNames[row.exchange] || String(row.exchange || "")
+      : "";
+    nodes.exchange.hidden = !showExchange;
+    nodes.meta.textContent = formatWatchlistTurnover(row.turnover_24h);
+    nodes.last.textContent = formatWatchlistPrice(row.last);
+    const changeValue = watchlistNumber(row.change_24h);
+    nodes.change.classList.toggle("positive", changeValue !== null && changeValue > 0);
+    nodes.change.classList.toggle("negative", changeValue !== null && changeValue < 0);
+    nodes.change.textContent = formatWatchlistChange(row.change_24h);
+  }
+
+  function renderWatchlist(resetScroll = false) {
+    const rows = filteredWatchlistRows();
+    const list = el("watchlist-list");
+    const loading = el("watchlist-loading");
+    const error = el("watchlist-error");
+    const empty = el("watchlist-empty");
+    const noDataError = Boolean(watchlistUiError && !watchlistHasSnapshot);
+    loading.classList.toggle("hidden", watchlistHasSnapshot || noDataError);
+    error.classList.toggle("hidden", !noDataError);
+    error.textContent = noDataError ? watchlistUiError : "";
+    empty.classList.toggle("hidden", !watchlistHasSnapshot || rows.length > 0);
+    list.classList.toggle("hidden", !watchlistHasSnapshot || rows.length === 0);
+    watchlistFilteredRowsCache = rows;
+    if (resetScroll) list.scrollTop = 0;
+    scheduleWatchlistWindowRender();
+    el("watchlist-count").textContent = `${rows.length.toLocaleString()} of ${watchlistRows.length.toLocaleString()} markets`;
+    el("watchlist-updated").textContent = formatWatchlistUpdated(watchlistCollectedAt);
+
+    document.querySelectorAll("[data-watchlist-exchange]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.watchlistExchange === watchlistExchange);
+    });
+    document.querySelectorAll("[data-watchlist-market]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.watchlistMarket === watchlistMarketFilter);
+    });
+    document.querySelectorAll("[data-watchlist-sort]").forEach((button) => {
+      const active = button.dataset.watchlistSort === watchlistSort;
+      button.classList.toggle("active", active);
+      button.classList.toggle("desc", active && watchlistSortDescending);
+    });
+
+    const exchangeErrors = watchlistErrors.map((item) => {
+      const exchangeName = watchlistExchangeNames[item && item.exchange] || String(item && item.exchange || "Exchange");
+      return `${exchangeName} unavailable`;
+    });
+    if (watchlistUiError && watchlistHasSnapshot) exchangeErrors.unshift(watchlistUiError);
+    const errorSummary = el("watchlist-exchange-errors");
+    errorSummary.textContent = exchangeErrors.join(" · ");
+    errorSummary.title = errorSummary.textContent;
+    errorSummary.classList.toggle("hidden", exchangeErrors.length === 0);
+  }
+
+  function clearWatchlistTimers() {
+    if (watchlistReconnectTimer !== null) {
+      clearTimeout(watchlistReconnectTimer);
+      watchlistReconnectTimer = null;
+    }
+    if (watchlistKeepaliveTimer !== null) {
+      clearInterval(watchlistKeepaliveTimer);
+      watchlistKeepaliveTimer = null;
+    }
+  }
+
+  function closeWatchlistSocket() {
+    clearWatchlistTimers();
+    const ws = watchlistWs;
+    watchlistWs = null;
+    if (!ws) return;
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onclose = null;
+    ws.onerror = null;
+    if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+      try { ws.close(); } catch {}
+    }
+  }
+
+  function scheduleWatchlistReconnect(generation) {
+    if (watchlistReconnectTimer !== null || !isWatchlistOpen()) return;
+    watchlistReconnectTimer = window.setTimeout(() => {
+      watchlistReconnectTimer = null;
+      connectWatchlist(generation);
+    }, 2000);
+  }
+
+  function connectWatchlist(generation = watchlistGeneration) {
+    if (
+      generation !== watchlistGeneration
+      || !isWatchlistOpen()
+      || document.visibilityState !== "visible"
+    ) return;
+    if (
+      watchlistWs
+      && (watchlistWs.readyState === WebSocket.OPEN || watchlistWs.readyState === WebSocket.CONNECTING)
+    ) return;
+    setWatchlistStatus("Connecting");
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(`${proto}//${location.host}/ws/watchlist`);
+    watchlistWs = ws;
+    ws.onopen = () => {
+      if (watchlistWs !== ws || generation !== watchlistGeneration) return;
+      setWatchlistStatus(watchlistHasSnapshot ? "Live" : "Syncing", watchlistHasSnapshot ? "live" : "");
+      watchlistKeepaliveTimer = window.setInterval(() => {
+        if (watchlistWs === ws && ws.readyState === WebSocket.OPEN) ws.send("ping");
+      }, 15000);
+    };
+    ws.onmessage = (event) => {
+      if (watchlistWs !== ws || generation !== watchlistGeneration) return;
+      try {
+        const message = JSON.parse(event.data);
+        if (message.type === "watchlist.snapshot") {
+          const payload = message.payload && typeof message.payload === "object" ? message.payload : {};
+          watchlistRows = Array.isArray(payload.results) ? payload.results : [];
+          watchlistErrors = Array.isArray(payload.errors) ? payload.errors : [];
+          watchlistCollectedAt = String(payload.collected_at || "");
+          watchlistHasSnapshot = true;
+          watchlistUiError = "";
+          setWatchlistStatus("Live", "live");
+          renderWatchlist();
+        } else if (message.type === "watchlist.favorites") {
+          applyWatchlistFavorites(message.payload);
+        }
+      } catch {
+        watchlistUiError = "Invalid watchlist response";
+        renderWatchlist();
+      }
+    };
+    ws.onclose = () => {
+      if (watchlistWs !== ws || generation !== watchlistGeneration) return;
+      watchlistWs = null;
+      clearWatchlistTimers();
+      setWatchlistStatus("Reconnecting", "error");
+      scheduleWatchlistReconnect(generation);
+    };
+    ws.onerror = () => {
+      if (watchlistWs !== ws || generation !== watchlistGeneration) return;
+      setWatchlistStatus("Reconnecting", "error");
+    };
+  }
+
+  function finishWatchlistOpening() {
+    if (watchlistOpenTimer !== null) clearTimeout(watchlistOpenTimer);
+    watchlistOpenTimer = null;
+    el("watchlist-modal").classList.remove("watchlist-opening");
+  }
+
+  function finishWatchlistClose() {
+    const modal = el("watchlist-modal");
+    const box = modal.querySelector(".watchlist-modal-box");
+    modal.classList.remove(
+      "watchlist-closing",
+      "watchlist-dragging",
+      "watchlist-swipe-closing",
+      "watchlist-opening",
+    );
+    modal.classList.add("hidden");
+    modal.style.background = "";
+    box.style.transform = "";
+    box.style.transition = "";
+    modal.setAttribute("aria-hidden", "true");
+    watchlistCloseTimer = null;
+    watchlistOpenTimer = null;
+    unlockBodyScroll();
+  }
+
+  function openWatchlist() {
+    closeHubMenu();
+    closeAiChat();
+    if (watchlistCloseTimer !== null) {
+      clearTimeout(watchlistCloseTimer);
+      watchlistCloseTimer = null;
+    }
+    if (watchlistOpenTimer !== null) {
+      clearTimeout(watchlistOpenTimer);
+      watchlistOpenTimer = null;
+    }
+    const modal = el("watchlist-modal");
+    const box = modal.querySelector(".watchlist-modal-box");
+    modal.classList.remove(
+      "watchlist-closing",
+      "watchlist-dragging",
+      "watchlist-swipe-closing",
+      "watchlist-opening",
+      "hidden",
+    );
+    modal.classList.add("watchlist-opening");
+    modal.style.background = "";
+    box.style.transform = "";
+    box.style.transition = "";
+    modal.setAttribute("aria-hidden", "false");
+    watchlistOpenTimer = window.setTimeout(finishWatchlistOpening, 230);
+    lockBodyScroll();
+    renderWatchlist();
+    watchlistGeneration += 1;
+    connectWatchlist(watchlistGeneration);
+  }
+
+  function closeWatchlist(options = {}) {
+    if (!isWatchlistOpen()) return;
+    const modal = el("watchlist-modal");
+    if (modal.classList.contains("watchlist-closing")) return;
+    finishWatchlistOpening();
+    watchlistGeneration += 1;
+    closeWatchlistSocket();
+    setWatchlistStatus("Offline");
+    if (!mobileHubQuery.matches) {
+      modal.classList.add("watchlist-closing");
+      watchlistCloseTimer = window.setTimeout(finishWatchlistClose, 220);
+      return;
+    }
+    const box = modal.querySelector(".watchlist-modal-box");
+    modal.classList.remove("watchlist-dragging");
+    if (options.fromDrag === true) {
+      modal.classList.add("watchlist-swipe-closing");
+      box.style.transition = "transform 220ms cubic-bezier(0.55, 0, 1, 0.45)";
+      window.requestAnimationFrame(() => {
+        box.style.transform = "translateY(100dvh)";
+      });
+    } else {
+      box.style.transform = "";
+      box.style.transition = "";
+    }
+    modal.classList.add("watchlist-closing");
+    watchlistCloseTimer = window.setTimeout(finishWatchlistClose, 220);
+  }
+
+  async function toggleWatchlistFavorite(button) {
+    const exchange = String(button.dataset.watchlistFavoriteExchange || "");
+    const symbol = String(button.dataset.watchlistFavoriteSymbol || "");
+    const key = watchlistFavoriteKey(exchange, symbol);
+    const favorite = !watchlistFavorites.has(key);
+    if (favorite) watchlistFavorites.add(key);
+    else watchlistFavorites.delete(key);
+    renderWatchlist();
+    try {
+      const payload = await api("/api/watchlist/favorites", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ exchange, symbol, favorite }),
+      });
+      applyWatchlistFavorites(payload);
+    } catch (error) {
+      if (favorite) watchlistFavorites.delete(key);
+      else watchlistFavorites.add(key);
+      watchlistUiError = error && error.message ? error.message : "Favorite could not be saved";
+      renderWatchlist();
+      window.setTimeout(() => {
+        if (!watchlistUiError) return;
+        watchlistUiError = "";
+        if (isWatchlistOpen()) renderWatchlist();
+      }, 5000);
+    }
   }
 
   async function openCalendar() {
@@ -1449,6 +1976,12 @@
     return `${String(exchange || "")}:${String(quoteCurrency || "")}`;
   }
 
+  function assetPortfolioDonutKey(portfolio) {
+    return [portfolio.exchange, portfolio.account, portfolio.quote_currency]
+      .map((value) => String(value || ""))
+      .join("\u0000");
+  }
+
   function groupAssetPortfolios(portfolios) {
     const groups = new Map();
     portfolios.forEach((portfolio) => {
@@ -1530,7 +2063,8 @@
 
     const legend = document.createElement("div");
     legend.className = "assets-legend";
-    let showAccountTypes = false;
+    const donutKey = assetPortfolioDonutKey(portfolio);
+    let showAccountTypes = assetAccountTypeDonuts.has(donutKey);
 
     function renderDonutMode() {
       const slices = showAccountTypes
@@ -1632,6 +2166,8 @@
     }
     donut.addEventListener("click", () => {
       showAccountTypes = !showAccountTypes;
+      if (showAccountTypes) assetAccountTypeDonuts.add(donutKey);
+      else assetAccountTypeDonuts.delete(donutKey);
       renderDonutMode();
     });
     renderDonutMode();
@@ -4808,8 +5344,68 @@
     header.addEventListener("pointercancel", (event) => endAssetsCloseDrag(event, true));
   }
 
+  function initMobileWatchlistGestures() {
+    const modal = el("watchlist-modal");
+    const box = modal.querySelector(".watchlist-modal-box");
+    const header = modal.querySelector(".watchlist-modal-header");
+    let closeDrag = null;
+
+    header.addEventListener("pointerdown", (event) => {
+      if (!mobileHubQuery.matches || !event.isPrimary) return;
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      closeDrag = {
+        id: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        dy: 0,
+        active: false,
+      };
+      try { header.setPointerCapture(event.pointerId); } catch {}
+    });
+    header.addEventListener("pointermove", (event) => {
+      if (!closeDrag || event.pointerId !== closeDrag.id) return;
+      const dx = event.clientX - closeDrag.startX;
+      const dy = event.clientY - closeDrag.startY;
+      if (!closeDrag.active) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < 8) return;
+        if (dy <= 0 || Math.abs(dy) <= Math.abs(dx)) {
+          closeDrag = null;
+          return;
+        }
+        closeDrag.active = true;
+        finishWatchlistOpening();
+        modal.classList.add("watchlist-dragging");
+      }
+      event.preventDefault();
+      closeDrag.dy = Math.max(0, dy);
+      box.style.transform = `translateY(${closeDrag.dy}px)`;
+    }, { passive: false });
+    function endWatchlistCloseDrag(event, cancelled = false) {
+      if (!closeDrag || (event && event.pointerId !== closeDrag.id)) return;
+      const current = closeDrag;
+      closeDrag = null;
+      try { header.releasePointerCapture(current.id); } catch {}
+      modal.classList.remove("watchlist-dragging");
+      if (!cancelled && current.active && current.dy > 100) {
+        closeWatchlist({ fromDrag: true });
+        return;
+      }
+      if (!current.active) return;
+      box.style.transition = "transform 180ms ease";
+      box.style.transform = "translateY(0)";
+      window.setTimeout(() => {
+        if (!isWatchlistOpen() || modal.classList.contains("watchlist-closing")) return;
+        box.style.transition = "";
+        box.style.transform = "";
+      }, 190);
+    }
+    header.addEventListener("pointerup", (event) => endWatchlistCloseDrag(event));
+    header.addEventListener("pointercancel", (event) => endWatchlistCloseDrag(event, true));
+  }
+
   function initHubMenuCalendar() {
     const calendarModal = el("calendar-modal");
+    const watchlistModal = el("watchlist-modal");
     calendarModal.addEventListener("touchend", (event) => {
       if (Date.now() < calendarSuppressTapUntil) {
         lastCalendarTouchAt = 0;
@@ -4832,6 +5428,7 @@
     el("hub-menu-button").addEventListener("click", openHubMenu);
     el("hub-menu-close").addEventListener("click", closeHubMenu);
     el("hub-menu-backdrop").addEventListener("click", closeHubMenu);
+    el("hub-watchlist-open").addEventListener("click", openWatchlist);
     el("hub-calendar-open").addEventListener("click", openCalendar);
     // Expand/collapse an accordion section to its exact content height so the
     // easing settles on-screen instead of being cut off mid-curve (which reads
@@ -4882,6 +5479,54 @@
       if (event.target === el("update-modal")) closeUpdateModal();
     });
     el("calendar-close").addEventListener("click", closeCalendar);
+    el("watchlist-close").addEventListener("click", closeWatchlist);
+    watchlistModal.addEventListener("click", (event) => {
+      if (event.target === watchlistModal) closeWatchlist();
+    });
+    el("watchlist-search").addEventListener("input", (event) => {
+      watchlistSearch = String(event.target.value || "");
+      renderWatchlist(true);
+    });
+    el("watchlist-exchange-filters").addEventListener("click", (event) => {
+      const button = event.target && event.target.closest
+        ? event.target.closest("[data-watchlist-exchange]")
+        : null;
+      if (!button) return;
+      watchlistExchange = String(button.dataset.watchlistExchange || "all");
+      renderWatchlist(true);
+    });
+    el("watchlist-market-filters").addEventListener("click", (event) => {
+      const button = event.target && event.target.closest
+        ? event.target.closest("[data-watchlist-market]")
+        : null;
+      if (!button) return;
+      watchlistMarketFilter = String(button.dataset.watchlistMarket || "all");
+      renderWatchlist(true);
+    });
+    watchlistModal.querySelector(".watchlist-list-header").addEventListener("click", (event) => {
+      const button = event.target && event.target.closest
+        ? event.target.closest("[data-watchlist-sort]")
+        : null;
+      if (!button) return;
+      const field = String(button.dataset.watchlistSort || "turnover_24h");
+      if (watchlistSort === field) watchlistSortDescending = !watchlistSortDescending;
+      else {
+        watchlistSort = field;
+        watchlistSortDescending = field !== "symbol";
+      }
+      renderWatchlist(true);
+    });
+    const watchlistList = el("watchlist-list");
+    watchlistList.addEventListener("scroll", scheduleWatchlistWindowRender, { passive: true });
+    watchlistList.addEventListener("click", (event) => {
+      const button = event.target && event.target.closest
+        ? event.target.closest("[data-watchlist-favorite-symbol]")
+        : null;
+      if (button) toggleWatchlistFavorite(button);
+    });
+    window.addEventListener("resize", () => {
+      if (isWatchlistOpen()) scheduleWatchlistWindowRender();
+    });
     calendarModal.addEventListener("click", (event) => {
       if (event.target === calendarModal) closeCalendar();
     });
@@ -5008,6 +5653,7 @@
     initMobileHubMenuSwipe();
     initMobileHubMenuEdgeSwipe();
     initMobileCalendarGestures();
+    initMobileWatchlistGestures();
     const accountTabs = document.querySelector(".account-tabs");
     let accountTabGesture = null;
     let suppressAccountTabClickUntil = 0;
@@ -8574,16 +9220,27 @@
       connectAccountPositions();
       scheduleAssetsRefresh();
       schedulePnlRefresh();
+      if (isWatchlistOpen()) {
+        watchlistGeneration += 1;
+        connectWatchlist(watchlistGeneration);
+      }
     } else {
       clearAssetsRefreshTimer();
       clearPnlRefreshTimer();
       closeForBackground();
       closeAccountPositionsSocket();
+      watchlistGeneration += 1;
+      closeWatchlistSocket();
+      if (isWatchlistOpen()) setWatchlistStatus("Paused");
     }
   });
   window.addEventListener("online", () => {
     rebuildHub();
     connectAccountPositions();
+    if (isWatchlistOpen()) {
+      watchlistGeneration += 1;
+      connectWatchlist(watchlistGeneration);
+    }
   });
 
   initHubMenuCalendar();
