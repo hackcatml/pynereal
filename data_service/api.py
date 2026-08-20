@@ -33,6 +33,7 @@ from calendar_store import CalendarEventStore, CalendarStoreError
 from data_integrity import DataIntegrityCancelled, inspect_data_integrity
 from registry import (
     HistoryNotReadyError,
+    RunnerActiveError,
     SessionExistsError,
     SessionLimitError,
     SessionNotFoundError,
@@ -351,6 +352,23 @@ def _resolve_script_path(spec: SessionSpec) -> Path:
     if script_path.suffix != ".py":
         raise ValueError("script must be a .py file")
     return script_path
+
+
+def _validate_script_name(raw: object) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        raise ValueError("script_name is required")
+    scripts_dir = app_state.scripts_dir.resolve()
+    script_path = (scripts_dir / value).resolve()
+    try:
+        relative = script_path.relative_to(scripts_dir)
+    except ValueError as exc:
+        raise ValueError("script path must be inside scripts directory") from exc
+    if script_path.suffix != ".py" or not script_path.is_file():
+        raise ValueError(f"script not found: {value}")
+    if not _declares_strategy(script_path):
+        raise ValueError("script must declare script.strategy(...)")
+    return relative.as_posix()
 
 
 def _script_source_display_name(spec: SessionSpec, script_path: Path | None = None) -> str:
@@ -1618,6 +1636,30 @@ def build_control_router(
         except Exception as e:
             return JSONResponse({"error": f"failed to update history_since: {e}"}, status_code=500)
         return JSONResponse({"ok": True, "history_since": value})
+
+    @r.patch("/api/sessions/{session_id}/script")
+    async def update_session_script(
+        session_id: str,
+        payload: dict = Body(default_factory=dict),
+    ) -> JSONResponse:
+        try:
+            script_name = _validate_script_name(payload.get("script_name"))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        try:
+            spec = await registry.update_script_name(session_id, script_name)
+        except SessionNotFoundError:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        except RunnerActiveError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        except SessionExistsError:
+            return JSONResponse(
+                {"error": "this script is already assigned to the same market session"},
+                status_code=409,
+            )
+        except Exception as exc:
+            return JSONResponse({"error": f"failed to update script: {exc}"}, status_code=500)
+        return JSONResponse({"ok": True, "id": spec.id, "script_name": spec.script_name})
 
     @r.get("/api/sessions/{session_id}/data-integrity")
     async def check_data_integrity(session_id: str) -> JSONResponse:

@@ -36,6 +36,10 @@ class SessionOrderError(Exception):
     pass
 
 
+class RunnerActiveError(Exception):
+    pass
+
+
 class SessionRegistry:
     """Owns Feeds (one per market, shared) and Sessions (one per strategy), their
     background tasks, the runner supervisor, and the dashboard (/ws/hub) push.
@@ -320,6 +324,40 @@ class SessionRegistry:
             raise
         await self.notify_hub()
         return self.snapshots()
+
+    async def update_script_name(self, session_id: str, script_name: str) -> SessionSpec:
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise SessionNotFoundError(session_id)
+        if self.supervisor.is_active(session_id) or session.runner_count > 0:
+            raise RunnerActiveError("stop the runner before changing its script")
+        if session.spec.script_name == script_name:
+            return session.spec
+
+        for other in self.sessions.values():
+            if other is session:
+                continue
+            if other.spec.feed_id == session.spec.feed_id and other.spec.script_name == script_name:
+                raise SessionExistsError(other.spec.id)
+
+        previous_spec = session.spec
+        next_spec = replace(previous_spec, script_name=script_name)
+        session.spec = next_spec
+        try:
+            self._persist()
+        except Exception:
+            session.spec = previous_spec
+            raise
+
+        session.reconfigure_script(next_spec)
+        for path in (session.paths.plot_path, session.paths.hash_path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                print(f"[registry] failed to clear stale strategy output {path}: {exc}")
+        await session.send_to_charts({"type": "script_modified"})
+        await self.notify_hub()
+        return next_spec
 
     async def update_webhook(self, session_id: str, *, enabled: bool | None = None,
                              telegram_notification: bool | None = None,

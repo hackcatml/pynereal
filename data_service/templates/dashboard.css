@@ -596,6 +596,17 @@ body {
   font-size: 12px;
   line-height: 1;
 }
+.script-select-toggle-chevron {
+  flex: 0 0 auto;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid var(--muted);
+  transform-origin: 40% 50%;
+  transition: transform 220ms cubic-bezier(0.22, 0.75, 0.25, 1);
+}
+.script-select-animated.open .script-select-toggle-chevron { transform: rotate(90deg); }
 .script-select-options {
   position: absolute;
   top: calc(100% + 4px);
@@ -614,6 +625,43 @@ body {
 }
 .script-select-options.hidden {
   display: none;
+}
+.script-select.script-select-animated .script-select-options,
+.script-select.script-select-animated .script-select-options.hidden {
+  display: block;
+  max-height: 0;
+  overflow: hidden;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-color: transparent;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-5px);
+  transition:
+    max-height 240ms cubic-bezier(0.22, 0.75, 0.25, 1),
+    padding 240ms cubic-bezier(0.22, 0.75, 0.25, 1),
+    opacity 170ms ease,
+    transform 240ms cubic-bezier(0.22, 0.75, 0.25, 1),
+    visibility 0s linear 240ms,
+    border-color 0s linear 240ms;
+}
+.script-select.script-select-animated.open .script-select-options {
+  overflow-y: auto;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  border-color: var(--border);
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateY(0);
+  transition:
+    max-height 240ms cubic-bezier(0.22, 0.75, 0.25, 1),
+    padding 240ms cubic-bezier(0.22, 0.75, 0.25, 1),
+    opacity 170ms ease 30ms,
+    transform 240ms cubic-bezier(0.22, 0.75, 0.25, 1),
+    visibility 0s,
+    border-color 0s;
 }
 .script-select-options::-webkit-scrollbar {
   width: 10px;
@@ -1182,12 +1230,31 @@ tr:last-child td { border-bottom: none; }
   gap: 5px;
   min-width: 0;
 }
-.watchlist-market-name strong {
+.watchlist-symbol-button {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px dashed #8b949e;
+  background: transparent;
   overflow: hidden;
   color: #f2f5f8;
+  font: inherit;
   font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
+}
+.watchlist-symbol-button:hover {
+  color: #79c0ff;
+  border-bottom-color: currentColor;
+}
+.watchlist-symbol-button:focus-visible {
+  border-radius: 3px;
+  outline: 2px solid #4b87c5;
+  outline-offset: 2px;
 }
 .watchlist-market-name span {
   flex: none;
@@ -1302,10 +1369,260 @@ tr:last-child td { border-bottom: none; }
   .watchlist-row { padding: 0 8px; }
   .watchlist-exchange-logo { width: 22px; height: 22px; }
   .watchlist-market { gap: 7px; }
-  .watchlist-market-name strong { font-size: 11px; }
+  .watchlist-symbol-button { font-size: 11px; }
   .watchlist-number { font-size: 11px; }
   .watchlist-exchange-errors { margin: 7px 2px 0; }
 }
+.watchlist-add-modal { z-index: 90; }
+.watchlist-add-modal button { touch-action: manipulation; }
+.watchlist-add-modal-box { overflow: visible; }
+.watchlist-add-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px;
+}
+.watchlist-add-market {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+.watchlist-add-logo {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: #fff;
+  object-fit: contain;
+}
+.watchlist-add-market > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.watchlist-add-market strong {
+  overflow: hidden;
+  color: #f2f5f8;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.watchlist-add-market span {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.watchlist-add-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.watchlist-add-field small {
+  color: #697482;
+  font-size: 9px;
+  font-weight: 500;
+}
+.watchlist-add-field input,
+.watchlist-add-date-button {
+  width: 100%;
+  height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  letter-spacing: 0;
+  color-scheme: dark;
+}
+.watchlist-add-field input:focus,
+.watchlist-add-date-button:focus-visible {
+  border-color: #4b87c5;
+  outline: none;
+}
+.watchlist-add-history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 82px;
+  gap: 10px;
+  align-items: end;
+}
+.watchlist-add-date-picker { position: relative; }
+.watchlist-add-date-button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: left;
+  cursor: pointer;
+}
+.watchlist-add-date-button .icon {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: #8b949e;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.watchlist-add-calendar {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #303843;
+  border-radius: 6px;
+  background: #151b23;
+  box-shadow: 0 14px 34px rgb(0 0 0 / 45%);
+}
+.watchlist-add-calendar.above {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+.watchlist-add-calendar-toolbar {
+  display: grid;
+  grid-template-columns: 30px 1fr 30px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.watchlist-add-calendar-toolbar strong {
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+}
+.watchlist-add-calendar-toolbar .btn-icon {
+  width: 28px;
+  height: 28px;
+  font-size: 20px;
+  line-height: 1;
+}
+.watchlist-add-calendar-weekdays,
+.watchlist-add-calendar-days {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+}
+.watchlist-add-calendar-days {
+  overflow: hidden;
+  touch-action: pan-y;
+}
+.watchlist-add-calendar-days.month-prev {
+  animation: watchlist-calendar-prev 340ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.watchlist-add-calendar-days.month-next {
+  animation: watchlist-calendar-next 340ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes watchlist-calendar-prev {
+  from { opacity: 0.65; transform: translateX(-14px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes watchlist-calendar-next {
+  from { opacity: 0.65; transform: translateX(14px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.watchlist-add-calendar-weekdays span {
+  padding: 4px 0 6px;
+  color: #727e8c;
+  font-size: 9px;
+  text-align: center;
+}
+.watchlist-add-calendar-day {
+  aspect-ratio: 1;
+  min-width: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #c9d1d9;
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+.watchlist-add-calendar-day:hover:not(:disabled) { background: #222a35; }
+.watchlist-add-calendar-day.outside { color: #5d6875; }
+.watchlist-add-calendar-day.today { box-shadow: inset 0 0 0 1px #4b87c5; }
+.watchlist-add-calendar-day.selected {
+  background: #2463a7;
+  color: #fff;
+  font-weight: 600;
+}
+.watchlist-add-calendar-day:disabled {
+  color: #3f4853;
+  cursor: default;
+}
+.watchlist-add-select { width: 100%; min-width: 0; flex: none; }
+.watchlist-add-select .script-select-button { height: 38px; }
+.watchlist-add-form .error:empty { display: none; }
+.script-change-modal { z-index: 90; }
+.script-change-modal-box { overflow: visible; }
+.script-change-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px;
+}
+.script-change-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.script-change-select { width: 100%; min-width: 0; flex: none; }
+.script-change-select .script-select-button { height: 38px; }
+.script-change-body .error:empty { display: none; }
+.session-script-button {
+  min-width: 0;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 3px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: 0;
+  text-align: left;
+}
+.session-script-button:not(:disabled) { cursor: pointer; }
+.session-script-button:not(:disabled):hover,
+.session-script-button:not(:disabled):focus-visible {
+  background: #1b222b;
+  color: #f2f5f8;
+  outline: none;
+}
+.session-script-button.empty:not(:disabled) { color: #79c0ff; }
+.session-script-button:disabled { cursor: default; opacity: 1; }
+.session-script-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-script-edit-icon {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  transform: translateY(2px);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.session-script-button:disabled .session-script-edit-icon { display: none; }
 .calendar-toolbar {
   position: relative;
   min-height: 34px;
@@ -4557,9 +4874,44 @@ tr:last-child td { border-bottom: none; }
   .watchlist-row { padding: 0 8px; }
   .watchlist-exchange-logo { width: 22px; height: 22px; }
   .watchlist-market { gap: 7px; }
-  .watchlist-market-name strong { font-size: 11px; }
+  .watchlist-symbol-button { font-size: 11px; }
   .watchlist-number { font-size: 11px; }
   .watchlist-exchange-errors { margin: 7px 2px 0; }
+  .watchlist-add-modal { padding: 12px; }
+  .watchlist-add-modal-box {
+    width: 100%;
+    max-height: calc(100dvh - 24px);
+  }
+  .watchlist-add-history-row {
+    grid-template-columns: minmax(0, 1fr) 72px;
+    gap: 8px;
+  }
+  .watchlist-add-calendar { padding: 7px; }
+  .watchlist-add-calendar-toolbar {
+    grid-template-columns: 25px 1fr 25px;
+    margin-bottom: 3px;
+  }
+  .watchlist-add-calendar-toolbar .btn-icon {
+    width: 24px;
+    height: 24px;
+    font-size: 18px;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .watchlist-add-calendar-toolbar strong { font-size: 11px; }
+  .watchlist-add-calendar-weekdays span {
+    padding: 2px 0 3px;
+    font-size: 8px;
+  }
+  .watchlist-add-calendar-day { font-size: 10px; }
+  #watchlist-add-timeframe-button,
+  .watchlist-add-date-button,
+  .watchlist-add-time-field input {
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 400;
+  }
+  .watchlist-add-select .script-select-option { min-height: 38px; font-size: 14px; }
   .assets-modal { padding: 0; }
   .assets-modal-box {
     position: relative;

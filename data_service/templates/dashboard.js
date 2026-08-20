@@ -57,6 +57,16 @@
   let watchlistUiError = "";
   let watchlistFilteredRowsCache = [];
   let watchlistWindowRenderFrame = null;
+  let watchlistAddRow = null;
+  let watchlistAddTimeframe = "5m";
+  let watchlistAddHistoryDate = "";
+  let watchlistAddCalendarMonth = new Date(Date.UTC(1970, 0, 1));
+  let watchlistAddCalendarSuppressTapUntil = 0;
+  let lastWatchlistAddCalendarTouchAt = 0;
+  let watchlistAddPending = false;
+  let scriptChangeSessionId = null;
+  let scriptChangeSelected = "";
+  let scriptChangePending = false;
   const watchlistFavorites = new Set();
   const watchlistOverscanRows = 8;
   let registerAnimatedPepeFace = () => {};
@@ -632,7 +642,10 @@
     text.className = "watchlist-market-text";
     const name = document.createElement("div");
     name.className = "watchlist-market-name";
-    const symbol = document.createElement("strong");
+    const symbol = document.createElement("button");
+    symbol.type = "button";
+    symbol.className = "watchlist-symbol-button";
+    symbol.dataset.watchlistAddSymbol = "";
     const exchange = document.createElement("span");
     name.append(symbol, exchange);
     const meta = document.createElement("span");
@@ -658,6 +671,7 @@
     const key = watchlistFavoriteKey(row.exchange, row.symbol);
     const isFavorite = watchlistFavorites.has(key);
     item.dataset.watchlistKey = key;
+    item._watchlistRow = row;
     nodes.favorite.classList.toggle("active", isFavorite);
     nodes.favorite.dataset.watchlistFavoriteExchange = String(row.exchange || "");
     nodes.favorite.dataset.watchlistFavoriteSymbol = String(row.symbol || "");
@@ -680,6 +694,9 @@
       nodes.logo.removeAttribute("src");
     }
     nodes.symbol.textContent = `${String(row.base || "")} / ${String(row.quote || "")}`;
+    nodes.symbol.dataset.watchlistAddSymbol = String(row.symbol || "");
+    nodes.symbol.title = `Add ${String(row.symbol || "")} session`;
+    nodes.symbol.setAttribute("aria-label", `Add ${String(row.symbol || "")} session`);
     const showExchange = watchlistExchange === "all";
     nodes.exchange.textContent = showExchange
       ? watchlistExchangeNames[row.exchange] || String(row.exchange || "")
@@ -933,6 +950,317 @@
         watchlistUiError = "";
         if (isWatchlistOpen()) renderWatchlist();
       }, 5000);
+    }
+  }
+
+  function defaultWatchlistHistorySince() {
+    const now = new Date();
+    const targetYear = now.getUTCFullYear();
+    const targetMonth = now.getUTCMonth() - 2;
+    const day = now.getUTCDate();
+    const lastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+    return new Date(Date.UTC(targetYear, targetMonth, Math.min(day, lastDay)))
+      .toISOString()
+      .slice(0, 10);
+  }
+
+  function watchlistDateFromKey(value) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ""));
+    if (!match) return null;
+    const year = Number(match[1]);
+    const month = Number(match[2]) - 1;
+    const day = Number(match[3]);
+    const date = new Date(Date.UTC(year, month, day));
+    if (
+      date.getUTCFullYear() !== year
+      || date.getUTCMonth() !== month
+      || date.getUTCDate() !== day
+    ) return null;
+    return date;
+  }
+
+  function watchlistDateKey(date) {
+    return new Date(Date.UTC(
+      date.getUTCFullYear(),
+      date.getUTCMonth(),
+      date.getUTCDate(),
+    )).toISOString().slice(0, 10);
+  }
+
+  function watchlistDateLabel(value) {
+    const date = watchlistDateFromKey(value);
+    if (!date) return "Select date";
+    return date.toLocaleDateString("en-US", {
+      timeZone: "UTC",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+  }
+
+  function setWatchlistAddHistoryDate(value) {
+    const date = watchlistDateFromKey(value);
+    if (!date) return;
+    watchlistAddHistoryDate = watchlistDateKey(date);
+    el("watchlist-add-date-label").textContent = watchlistDateLabel(watchlistAddHistoryDate);
+  }
+
+  function renderWatchlistAddCalendar() {
+    const month = watchlistAddCalendarMonth;
+    el("watchlist-add-calendar-title").textContent = month.toLocaleDateString("en-US", {
+      timeZone: "UTC",
+      year: "numeric",
+      month: "long",
+    });
+    const todayKey = new Date().toISOString().slice(0, 10);
+    const today = watchlistDateFromKey(todayKey);
+    const currentMonthIndex = month.getUTCFullYear() * 12 + month.getUTCMonth();
+    const todayMonthIndex = today.getUTCFullYear() * 12 + today.getUTCMonth();
+    el("watchlist-add-calendar-next").disabled = currentMonthIndex >= todayMonthIndex;
+
+    const year = month.getUTCFullYear();
+    const monthIndex = month.getUTCMonth();
+    const firstWeekday = new Date(Date.UTC(year, monthIndex, 1)).getUTCDay();
+    const days = [];
+    for (let index = 0; index < 42; index += 1) {
+      const date = new Date(Date.UTC(year, monthIndex, 1 - firstWeekday + index));
+      const key = watchlistDateKey(date);
+      const outside = date.getUTCMonth() !== monthIndex;
+      const future = key > todayKey;
+      const classes = [
+        "watchlist-add-calendar-day",
+        outside ? "outside" : "",
+        key === todayKey ? "today" : "",
+        key === watchlistAddHistoryDate ? "selected" : "",
+      ].filter(Boolean).join(" ");
+      days.push(
+        `<button type="button" class="${classes}" data-watchlist-history-date="${key}" `
+        + `aria-label="${esc(watchlistDateLabel(key))}" `
+        + `aria-selected="${key === watchlistAddHistoryDate ? "true" : "false"}"`
+        + `${future ? " disabled" : ""}>${date.getUTCDate()}</button>`,
+      );
+    }
+    el("watchlist-add-calendar-days").innerHTML = days.join("");
+  }
+
+  function closeWatchlistAddCalendar() {
+    const calendar = el("watchlist-add-calendar");
+    calendar.classList.add("hidden");
+    calendar.classList.remove("above");
+    el("watchlist-add-date-picker").classList.remove("open");
+    el("watchlist-add-date-button").setAttribute("aria-expanded", "false");
+  }
+
+  function toggleWatchlistAddCalendar() {
+    const calendar = el("watchlist-add-calendar");
+    if (!calendar.classList.contains("hidden")) {
+      closeWatchlistAddCalendar();
+      return;
+    }
+    const selected = watchlistDateFromKey(watchlistAddHistoryDate) || new Date();
+    watchlistAddCalendarMonth = new Date(Date.UTC(
+      selected.getUTCFullYear(),
+      selected.getUTCMonth(),
+      1,
+    ));
+    closeWatchlistAddTimeframeOptions();
+    renderWatchlistAddCalendar();
+    el("watchlist-add-date-picker").classList.add("open");
+    calendar.classList.remove("above");
+    calendar.classList.remove("hidden");
+    el("watchlist-add-date-button").setAttribute("aria-expanded", "true");
+    window.requestAnimationFrame(() => {
+      if (calendar.classList.contains("hidden")) return;
+      const calendarRect = calendar.getBoundingClientRect();
+      const buttonRect = el("watchlist-add-date-button").getBoundingClientRect();
+      if (
+        calendarRect.bottom > window.innerHeight - 8
+        && buttonRect.top >= calendarRect.height + 8
+      ) calendar.classList.add("above");
+    });
+  }
+
+  function moveWatchlistAddCalendarMonth(delta) {
+    const next = new Date(Date.UTC(
+      watchlistAddCalendarMonth.getUTCFullYear(),
+      watchlistAddCalendarMonth.getUTCMonth() + delta,
+      1,
+    ));
+    const today = new Date();
+    const nextIndex = next.getUTCFullYear() * 12 + next.getUTCMonth();
+    const todayIndex = today.getUTCFullYear() * 12 + today.getUTCMonth();
+    if (nextIndex > todayIndex) return;
+    watchlistAddCalendarMonth = next;
+    renderWatchlistAddCalendar();
+    const days = el("watchlist-add-calendar-days");
+    days.classList.remove("month-prev", "month-next");
+    void days.offsetWidth;
+    days.classList.add(delta < 0 ? "month-prev" : "month-next");
+  }
+
+  function normalizeWatchlistHistoryTime(raw) {
+    const value = String(raw || "").trim();
+    if (!value) return "00:00";
+    let hours;
+    let minutes;
+    const colonMatch = /^(\d{1,2}):(\d{1,2})$/.exec(value);
+    if (colonMatch) {
+      hours = Number(colonMatch[1]);
+      minutes = Number(colonMatch[2]);
+    } else if (/^\d{1,4}$/.test(value)) {
+      if (value.length <= 2) {
+        hours = Number(value);
+        minutes = 0;
+      } else {
+        hours = Number(value.slice(0, -2));
+        minutes = Number(value.slice(-2));
+      }
+    } else {
+      return null;
+    }
+    if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+  }
+
+  function isWatchlistAddOpen() {
+    return !el("watchlist-add-modal").classList.contains("hidden");
+  }
+
+  function closeWatchlistAddTimeframeOptions() {
+    setAnimatedScriptOptions(
+      el("watchlist-add-timeframe-control"),
+      el("watchlist-add-timeframe-button"),
+      el("watchlist-add-timeframe-options"),
+      false,
+    );
+  }
+
+  function setWatchlistAddTimeframe(value) {
+    watchlistAddTimeframe = String(value || "5m");
+    el("watchlist-add-timeframe-label").textContent = watchlistAddTimeframe;
+    el("watchlist-add-timeframe-options").querySelectorAll("[data-watchlist-timeframe]").forEach((option) => {
+      const selected = option.dataset.watchlistTimeframe === watchlistAddTimeframe;
+      option.classList.toggle("selected", selected);
+      option.setAttribute("aria-selected", String(selected));
+    });
+  }
+
+  function toggleWatchlistAddTimeframeOptions() {
+    const options = el("watchlist-add-timeframe-options");
+    const opening = options.classList.contains("hidden");
+    if (!opening) {
+      closeWatchlistAddTimeframeOptions();
+      return;
+    }
+    closeWatchlistAddCalendar();
+    setAnimatedScriptOptions(
+      el("watchlist-add-timeframe-control"),
+      el("watchlist-add-timeframe-button"),
+      options,
+      true,
+    );
+  }
+
+  function setWatchlistAddPending(pending) {
+    watchlistAddPending = Boolean(pending);
+    el("watchlist-add-submit").disabled = watchlistAddPending;
+    el("watchlist-add-cancel").disabled = watchlistAddPending;
+    el("watchlist-add-close").disabled = watchlistAddPending;
+    el("watchlist-add-date-button").disabled = watchlistAddPending;
+    el("watchlist-add-history-time").disabled = watchlistAddPending;
+    el("watchlist-add-submit").textContent = watchlistAddPending ? "Adding" : "Add";
+  }
+
+  function openWatchlistAddModal(row) {
+    if (!row || !row.exchange || !row.symbol) return;
+    watchlistAddRow = row;
+    watchlistAddCalendarSuppressTapUntil = 0;
+    lastWatchlistAddCalendarTouchAt = 0;
+    setWatchlistAddPending(false);
+    setWatchlistAddTimeframe("5m");
+    closeWatchlistAddTimeframeOptions();
+    closeWatchlistAddCalendar();
+    el("watchlist-add-error").textContent = "";
+    el("watchlist-add-symbol").textContent = String(row.symbol);
+    el("watchlist-add-exchange").textContent = watchlistExchangeNames[row.exchange]
+      || String(row.exchange);
+    setWatchlistAddHistoryDate(defaultWatchlistHistorySince());
+    el("watchlist-add-history-time").value = "00:00";
+
+    const logo = el("watchlist-add-logo");
+    const primary = String(row.symbol_logo_url || "");
+    const fallback = String(row.exchange_logo_url || "");
+    logo.dataset.fallbackSrc = fallback;
+    logo.onerror = () => {
+      if (fallback && logo.getAttribute("src") !== fallback) {
+        logo.src = fallback;
+        logo.hidden = false;
+      } else {
+        logo.hidden = true;
+      }
+    };
+    if (primary || fallback) {
+      logo.src = primary || fallback;
+      logo.hidden = false;
+    } else {
+      logo.removeAttribute("src");
+      logo.hidden = true;
+    }
+
+    const modal = el("watchlist-add-modal");
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    window.requestAnimationFrame(() => el("watchlist-add-timeframe-button").focus());
+  }
+
+  function closeWatchlistAddModal() {
+    if (!isWatchlistAddOpen() || watchlistAddPending) return;
+    closeWatchlistAddTimeframeOptions();
+    closeWatchlistAddCalendar();
+    el("watchlist-add-modal").classList.add("hidden");
+    el("watchlist-add-modal").setAttribute("aria-hidden", "true");
+    watchlistAddRow = null;
+    el("watchlist-add-error").textContent = "";
+  }
+
+  async function submitWatchlistSession() {
+    if (!watchlistAddRow || watchlistAddPending) return;
+    if (!watchlistAddHistoryDate) {
+      el("watchlist-add-error").textContent = "Select a history start date.";
+      el("watchlist-add-date-button").focus();
+      return;
+    }
+    const historyTime = normalizeWatchlistHistoryTime(el("watchlist-add-history-time").value);
+    if (!historyTime) {
+      el("watchlist-add-error").textContent = "Use a valid 24-hour time (HH:MM).";
+      el("watchlist-add-history-time").focus();
+      return;
+    }
+    el("watchlist-add-history-time").value = historyTime;
+    const historySince = `${watchlistAddHistoryDate} ${historyTime}`;
+    closeWatchlistAddCalendar();
+    setWatchlistAddPending(true);
+    el("watchlist-add-error").textContent = "";
+    try {
+      await api("/api/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: "ccxt",
+          exchange: String(watchlistAddRow.exchange),
+          symbol: String(watchlistAddRow.symbol),
+          timeframe: watchlistAddTimeframe,
+          history_since: historySince,
+          market_type: "linear",
+        }),
+      });
+      setWatchlistAddPending(false);
+      closeWatchlistAddModal();
+    } catch (error) {
+      setWatchlistAddPending(false);
+      el("watchlist-add-error").textContent = error && error.message
+        ? error.message
+        : "Session could not be added.";
     }
   }
 
@@ -5483,6 +5811,171 @@
     watchlistModal.addEventListener("click", (event) => {
       if (event.target === watchlistModal) closeWatchlist();
     });
+    const watchlistAddModal = el("watchlist-add-modal");
+    watchlistAddModal.addEventListener("touchend", (event) => {
+      const button = event.target && event.target.closest
+        ? event.target.closest("#watchlist-add-calendar-prev, #watchlist-add-calendar-next")
+        : null;
+      if (!button) return;
+      const now = Date.now();
+      const isDoubleTap = now - lastWatchlistAddCalendarTouchAt < 360;
+      lastWatchlistAddCalendarTouchAt = now;
+      if (!isDoubleTap) return;
+      event.preventDefault();
+      button.click();
+    }, { passive: false });
+    el("watchlist-add-close").addEventListener("click", closeWatchlistAddModal);
+    el("watchlist-add-cancel").addEventListener("click", closeWatchlistAddModal);
+    watchlistAddModal.addEventListener("click", (event) => {
+      if (event.target === watchlistAddModal) closeWatchlistAddModal();
+    });
+    el("watchlist-add-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitWatchlistSession();
+    });
+    el("watchlist-add-timeframe-button").addEventListener("click", (event) => {
+      event.preventDefault();
+      toggleWatchlistAddTimeframeOptions();
+    });
+    el("watchlist-add-timeframe-options").addEventListener("click", (event) => {
+      const option = event.target && event.target.closest
+        ? event.target.closest("[data-watchlist-timeframe]")
+        : null;
+      if (!option) return;
+      setWatchlistAddTimeframe(option.dataset.watchlistTimeframe);
+      closeWatchlistAddTimeframeOptions();
+      el("watchlist-add-timeframe-button").focus();
+    });
+    el("watchlist-add-date-button").addEventListener("click", (event) => {
+      event.preventDefault();
+      toggleWatchlistAddCalendar();
+    });
+    el("watchlist-add-calendar-prev").addEventListener("click", () => {
+      moveWatchlistAddCalendarMonth(-1);
+    });
+    el("watchlist-add-calendar-next").addEventListener("click", () => {
+      moveWatchlistAddCalendarMonth(1);
+    });
+    const watchlistAddCalendarDays = el("watchlist-add-calendar-days");
+    let watchlistAddMonthDrag = null;
+    watchlistAddCalendarDays.addEventListener("pointerdown", (event) => {
+      if (!mobileHubQuery.matches || !event.isPrimary) return;
+      watchlistAddMonthDrag = {
+        id: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        dx: 0,
+        axis: null,
+      };
+    });
+    window.addEventListener("pointermove", (event) => {
+      if (!watchlistAddMonthDrag || event.pointerId !== watchlistAddMonthDrag.id) return;
+      const dx = event.clientX - watchlistAddMonthDrag.startX;
+      const dy = event.clientY - watchlistAddMonthDrag.startY;
+      if (!watchlistAddMonthDrag.axis) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < 8) return;
+        watchlistAddMonthDrag.axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+        if (watchlistAddMonthDrag.axis === "x") {
+          try { watchlistAddCalendarDays.setPointerCapture(event.pointerId); } catch {}
+        }
+      }
+      if (watchlistAddMonthDrag.axis !== "x") return;
+      event.preventDefault();
+      watchlistAddMonthDrag.dx = dx;
+      watchlistAddCalendarSuppressTapUntil = Date.now() + 500;
+    }, { passive: false });
+    function endWatchlistAddMonthDrag(event) {
+      if (
+        !watchlistAddMonthDrag
+        || (event && event.pointerId !== watchlistAddMonthDrag.id)
+      ) return;
+      const current = watchlistAddMonthDrag;
+      watchlistAddMonthDrag = null;
+      try { watchlistAddCalendarDays.releasePointerCapture(current.id); } catch {}
+      if (current.axis !== "x" || Math.abs(current.dx) < 42) return;
+      moveWatchlistAddCalendarMonth(current.dx < 0 ? 1 : -1);
+    }
+    window.addEventListener("pointerup", endWatchlistAddMonthDrag);
+    window.addEventListener("pointercancel", endWatchlistAddMonthDrag);
+    watchlistAddCalendarDays.addEventListener("click", (event) => {
+      const day = event.target && event.target.closest
+        ? event.target.closest("[data-watchlist-history-date]")
+        : null;
+      if (!day || day.disabled) return;
+      setWatchlistAddHistoryDate(day.dataset.watchlistHistoryDate);
+      closeWatchlistAddCalendar();
+      el("watchlist-add-date-button").focus();
+    });
+    watchlistAddCalendarDays.addEventListener("click", (event) => {
+      if (Date.now() >= watchlistAddCalendarSuppressTapUntil) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, true);
+    el("watchlist-add-history-time").addEventListener("input", (event) => {
+      event.target.value = String(event.target.value || "").replace(/[^0-9:]/g, "").slice(0, 5);
+    });
+    el("watchlist-add-history-time").addEventListener("blur", (event) => {
+      const normalized = normalizeWatchlistHistoryTime(event.target.value);
+      if (normalized) event.target.value = normalized;
+    });
+    watchlistAddModal.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      if (!el("watchlist-add-timeframe-options").classList.contains("hidden")) {
+        closeWatchlistAddTimeframeOptions();
+        el("watchlist-add-timeframe-button").focus();
+      } else if (!el("watchlist-add-calendar").classList.contains("hidden")) {
+        closeWatchlistAddCalendar();
+        el("watchlist-add-date-button").focus();
+      } else {
+        closeWatchlistAddModal();
+      }
+    });
+    document.addEventListener("pointerdown", (event) => {
+      if (!isWatchlistAddOpen()) return;
+      const target = event.target && event.target.closest ? event.target : null;
+      if (!target || !target.closest("#watchlist-add-timeframe-control")) {
+        closeWatchlistAddTimeframeOptions();
+      }
+      if (!target || !target.closest("#watchlist-add-date-picker")) {
+        closeWatchlistAddCalendar();
+      }
+    }, { passive: true });
+    const scriptChangeModal = el("script-change-modal");
+    el("script-change-close").addEventListener("click", closeScriptChange);
+    el("script-change-cancel").addEventListener("click", closeScriptChange);
+    el("script-change-save").addEventListener("click", saveScriptChange);
+    scriptChangeModal.addEventListener("click", (event) => {
+      if (event.target === scriptChangeModal) closeScriptChange();
+    });
+    el("script-change-select-button").addEventListener("click", (event) => {
+      event.preventDefault();
+      toggleScriptChangeOptions();
+    });
+    el("script-change-options").addEventListener("click", (event) => {
+      const option = event.target && event.target.closest
+        ? event.target.closest("[data-script-change-value]")
+        : null;
+      if (!option) return;
+      scriptChangeSelected = String(option.dataset.scriptChangeValue || "");
+      syncScriptChangeSelection();
+      closeScriptChangeOptions();
+      el("script-change-select-button").focus();
+    });
+    scriptChangeModal.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      if (!el("script-change-options").classList.contains("hidden")) {
+        closeScriptChangeOptions();
+        el("script-change-select-button").focus();
+      } else {
+        closeScriptChange();
+      }
+    });
+    document.addEventListener("pointerdown", (event) => {
+      if (!isScriptChangeOpen()) return;
+      const target = event.target && event.target.closest ? event.target : null;
+      if (target && target.closest("#script-change-select")) return;
+      closeScriptChangeOptions();
+    }, { passive: true });
     el("watchlist-search").addEventListener("input", (event) => {
       watchlistSearch = String(event.target.value || "");
       renderWatchlist(true);
@@ -5519,6 +6012,14 @@
     const watchlistList = el("watchlist-list");
     watchlistList.addEventListener("scroll", scheduleWatchlistWindowRender, { passive: true });
     watchlistList.addEventListener("click", (event) => {
+      const addButton = event.target && event.target.closest
+        ? event.target.closest("[data-watchlist-add-symbol]")
+        : null;
+      if (addButton) {
+        const row = addButton.closest(".watchlist-row");
+        openWatchlistAddModal(row && row._watchlistRow);
+        return;
+      }
       const button = event.target && event.target.closest
         ? event.target.closest("[data-watchlist-favorite-symbol]")
         : null;
@@ -6190,7 +6691,9 @@
       return `<button class="btn" data-runner="stop">Stop</button>` +
              `<button class="btn" data-runner="restart"${dataReady ? "" : " disabled"}>Restart</button>`;
     }
-    return `<button class="btn btn-primary" data-runner="start"${dataReady ? "" : " disabled"}>Start</button>`;
+    const canStart = dataReady && Boolean(s.script_name);
+    const title = s.script_name ? "" : ' title="Select a script first"';
+    return `<button class="btn btn-primary" data-runner="start"${canStart ? "" : " disabled"}${title}>Start</button>`;
   }
 
   function esc(s) {
@@ -6297,24 +6800,39 @@
     if (active) active.scrollIntoView({ block: "nearest" });
   }
 
+  function setAnimatedScriptOptions(control, button, options, expanded) {
+    if (!control || !button || !options) return;
+    button.setAttribute("aria-expanded", String(expanded));
+    if (expanded) {
+      options.classList.remove("hidden");
+      options.style.maxHeight = "0px";
+      void options.offsetHeight;
+      control.classList.add("open");
+      const limit = Math.min(320, window.innerHeight * 0.48);
+      options.style.maxHeight = `${Math.min(options.scrollHeight, limit)}px`;
+      return;
+    }
+    options.style.maxHeight = `${options.getBoundingClientRect().height}px`;
+    void options.offsetHeight;
+    control.classList.remove("open");
+    options.classList.add("hidden");
+    options.style.maxHeight = "0px";
+  }
+
   function openScriptDropdown() {
     const nodes = scriptSelectNodes();
     if (!nodes.control || !nodes.button || !nodes.options) return;
     const currentIndex = scriptOptions.indexOf(selectedScriptValue());
     scriptActiveIndex = currentIndex >= 0 ? currentIndex : 0;
     renderScriptOptions();
-    nodes.control.classList.add("open");
-    nodes.button.setAttribute("aria-expanded", "true");
-    nodes.options.classList.remove("hidden");
+    setAnimatedScriptOptions(nodes.control, nodes.button, nodes.options, true);
     nodes.options.setAttribute("tabindex", "-1");
   }
 
   function closeScriptDropdown() {
     const nodes = scriptSelectNodes();
     if (!nodes.control || !nodes.button || !nodes.options) return;
-    nodes.control.classList.remove("open");
-    nodes.button.setAttribute("aria-expanded", "false");
-    nodes.options.classList.add("hidden");
+    setAnimatedScriptOptions(nodes.control, nodes.button, nodes.options, false);
   }
 
   function toggleScriptDropdown() {
@@ -6347,6 +6865,134 @@
     return true;
   }
 
+  function isScriptChangeOpen() {
+    return !el("script-change-modal").classList.contains("hidden");
+  }
+
+  function scriptChangeSession() {
+    return sessions.find((session) => sessionId(session) === scriptChangeSessionId) || null;
+  }
+
+  function syncScriptChangeSelection() {
+    const session = scriptChangeSession();
+    const current = String(session && session.script_name || "");
+    el("script-change-select-label").textContent = scriptChangeSelected || "Select script";
+    el("script-change-select-button").title = scriptChangeSelected || "Select script";
+    el("script-change-options").querySelectorAll("[data-script-change-value]").forEach((option) => {
+      const selected = option.dataset.scriptChangeValue === scriptChangeSelected;
+      option.classList.toggle("selected", selected);
+      option.setAttribute("aria-selected", String(selected));
+    });
+    el("script-change-save").disabled = (
+      scriptChangePending || !scriptChangeSelected || scriptChangeSelected === current
+    );
+  }
+
+  function renderScriptChangeOptions(loading = false) {
+    const options = el("script-change-options");
+    if (loading) {
+      options.innerHTML = '<div class="script-select-empty">Loading scripts...</div>';
+    } else if (!scriptOptions.length) {
+      options.innerHTML = '<div class="script-select-empty">No scripts found</div>';
+    } else {
+      options.innerHTML = scriptOptions.map((script) => (
+        `<button type="button" role="option" class="script-select-option" `
+        + `data-script-change-value="${esc(script)}" title="${esc(script)}">${esc(script)}</button>`
+      )).join("");
+    }
+    syncScriptChangeSelection();
+  }
+
+  function closeScriptChangeOptions() {
+    setAnimatedScriptOptions(
+      el("script-change-select"),
+      el("script-change-select-button"),
+      el("script-change-options"),
+      false,
+    );
+  }
+
+  function toggleScriptChangeOptions() {
+    const options = el("script-change-options");
+    if (!options.classList.contains("hidden")) {
+      closeScriptChangeOptions();
+      return;
+    }
+    renderScriptChangeOptions();
+    setAnimatedScriptOptions(
+      el("script-change-select"),
+      el("script-change-select-button"),
+      options,
+      true,
+    );
+  }
+
+  function setScriptChangePending(pending) {
+    scriptChangePending = Boolean(pending);
+    el("script-change-close").disabled = scriptChangePending;
+    el("script-change-cancel").disabled = scriptChangePending;
+    el("script-change-select-button").disabled = scriptChangePending;
+    el("script-change-save").textContent = scriptChangePending ? "Saving" : "Save";
+    syncScriptChangeSelection();
+  }
+
+  async function openScriptChange(id) {
+    const session = sessions.find((item) => sessionId(item) === id);
+    if (!session) return;
+    const runner = String(session.runner || "stopped");
+    if (runner === "running" || runner === "starting") return;
+    scriptChangeSessionId = id;
+    scriptChangeSelected = String(session.script_name || "");
+    setScriptChangePending(false);
+    closeScriptChangeOptions();
+    el("script-change-error").textContent = "";
+    el("script-change-session").textContent = `${session.symbol} · ${session.timeframe} · ${String(session.exchange || "").toUpperCase()}`;
+    el("script-change-title").textContent = session.script_name ? "Change script" : "Select script";
+    renderScriptChangeOptions(true);
+    const modal = el("script-change-modal");
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+    lockBodyScroll();
+    await loadScripts();
+    if (!isScriptChangeOpen() || scriptChangeSessionId !== id) return;
+    renderScriptChangeOptions();
+    el("script-change-select-button").focus();
+  }
+
+  function closeScriptChange() {
+    if (!isScriptChangeOpen() || scriptChangePending) return;
+    closeScriptChangeOptions();
+    el("script-change-modal").classList.add("hidden");
+    el("script-change-modal").setAttribute("aria-hidden", "true");
+    el("script-change-error").textContent = "";
+    scriptChangeSessionId = null;
+    scriptChangeSelected = "";
+    unlockBodyScroll();
+  }
+
+  async function saveScriptChange() {
+    if (!scriptChangeSessionId || !scriptChangeSelected || scriptChangePending) return;
+    const id = scriptChangeSessionId;
+    setScriptChangePending(true);
+    closeScriptChangeOptions();
+    el("script-change-error").textContent = "";
+    try {
+      await api(`/api/sessions/${encodeURIComponent(id)}/script`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ script_name: scriptChangeSelected }),
+      });
+      setScriptChangePending(false);
+      closeScriptChange();
+      await refresh();
+    } catch (error) {
+      setScriptChangePending(false);
+      el("script-change-error").textContent = error && error.message
+        ? error.message
+        : "Script could not be changed.";
+    }
+  }
+
   function toggleDataSinceTooltip(tr) {
     const wrap = tr.querySelector(".data-badge-wrap");
     if (!wrap) return;
@@ -6377,7 +7023,15 @@
       `<td data-label="Symbol" class="mono"><span data-field="symbol-cell" class="symbol-cell"></span></td>` +
       `<td data-label="TF" data-field="timeframe"></td>` +
       `<td data-label="Exchange"><span data-field="exchange-cell" class="exchange-cell"></span></td>` +
-      `<td data-label="Script" class="mono" data-field="script-name"></td>` +
+      `<td data-label="Script" class="mono script-cell">` +
+        `<button type="button" class="session-script-button" data-act="script-edit">` +
+          `<span data-field="script-name" class="session-script-label"></span>` +
+          `<svg class="session-script-edit-icon" viewBox="0 0 24 24" aria-hidden="true">` +
+            `<path d="M12 20h9"></path>` +
+            `<path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path>` +
+          `</svg>` +
+        `</button>` +
+      `</td>` +
       `<td data-label="Data" class="data-cell"><span class="data-controls">` +
         `<span class="data-badge-wrap">` +
           `<span data-field="collector-badge" class="badge data-badge" ` +
@@ -6441,6 +7095,7 @@
         }
       } else if (act === "data-edit") openSettings(id, "data-since");
       else if (act === "data-integrity") openSettings(id, "data-integrity");
+      else if (act === "script-edit") openScriptChange(id);
       else if (act === "delete") openRemoveConfirm(id);
       else if (act === "logs") openLogs(id);
       else if (act === "webhook-settings") openSettings(id, "webhook");
@@ -6452,7 +7107,7 @@
   function patchSessionRow(tr, s) {
     const id = sessionId(s);
     const runner = s.runner || "stopped";
-    const runnerControlsKey = `${runner}:${s.history_ready ? "ready" : "preparing"}`;
+    const runnerControlsKey = `${runner}:${s.history_ready ? "ready" : "preparing"}:${s.script_name ? "script" : "no-script"}`;
     const collector = s.collector || "stopped";
     const wh = s.webhook || {};
     const exchange = (s.exchange || "").toUpperCase();
@@ -6482,7 +7137,21 @@
     }
 
     setText(tr.querySelector('[data-field="timeframe"]'), s.timeframe);
-    setText(tr.querySelector('[data-field="script-name"]'), s.script_name);
+    const scriptButton = tr.querySelector('[data-act="script-edit"]');
+    const scriptEditable = runner !== "running" && runner !== "starting";
+    const scriptName = String(s.script_name || "");
+    setText(tr.querySelector('[data-field="script-name"]'), scriptName || "Select script");
+    if (scriptButton) {
+      setClass(
+        scriptButton,
+        `session-script-button${scriptName ? "" : " empty"}`,
+      );
+      scriptButton.disabled = !scriptEditable;
+      scriptButton.title = scriptEditable
+        ? (scriptName ? "Change script" : "Select script")
+        : "Stop runner to change script";
+      scriptButton.setAttribute("aria-label", scriptButton.title);
+    }
 
     const badge = tr.querySelector('[data-field="collector-badge"]');
     setClass(badge, `badge data-badge badge-${collector}`);
