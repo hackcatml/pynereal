@@ -225,6 +225,7 @@ async def main() -> None:
         project_root=_PROJECT_ROOT,
         session_registry=registry,
         calendar_store=calendar_store,
+        account_data_service=account_data_service,
         startup_enabled=os.environ.get("PYNEREAL_UPDATE_AI_ENABLED") != "0",
     )
     update_shutdown = asyncio.Event()
