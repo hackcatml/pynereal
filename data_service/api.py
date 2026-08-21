@@ -1067,6 +1067,34 @@ def build_control_router(
             )
         return JSONResponse(result)
 
+    @r.get("/api/assets/transfer/history")
+    async def get_asset_transfer_history(
+        exchange: str,
+        account: str,
+        cursor: str = "",
+        limit: int = 50,
+        force: bool = False,
+        assets: str = "",
+        account_types: str = "",
+    ) -> JSONResponse:
+        try:
+            result = await account_data_service.transfer_history(
+                exchange=exchange,
+                account=account,
+                cursor=cursor or None,
+                limit=limit,
+                force=force,
+                assets=[value for value in assets.split(",") if value],
+                account_types=[
+                    value for value in account_types.split(",") if value
+                ],
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except AccountDataError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+        return JSONResponse(result)
+
     @r.post("/api/assets/transfer")
     async def execute_asset_transfer(
         payload: dict = Body(default_factory=dict),
@@ -1081,6 +1109,11 @@ def build_control_router(
                 status_code=exc.status_code,
             )
         await asset_portfolio_service.invalidate()
+        try:
+            await account_data_service.record_transfer_result(result)
+        except AccountDataError as exc:
+            timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+            print(f"[{timestamp}][account] transfer history write failed: {exc}")
         return JSONResponse(result)
 
     @r.get("/api/ai/chat")

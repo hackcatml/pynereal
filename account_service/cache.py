@@ -371,6 +371,31 @@ class AccountCache:
                 PRIMARY KEY (account, exchange, event_id, event_type)
             );
 
+            CREATE TABLE IF NOT EXISTS transfer_history (
+                account TEXT NOT NULL,
+                exchange TEXT NOT NULL,
+                transfer_id TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                asset TEXT NOT NULL DEFAULT '',
+                amount TEXT NOT NULL DEFAULT '',
+                direction TEXT NOT NULL DEFAULT 'internal',
+                status TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT 'native',
+                payload_json TEXT NOT NULL,
+                PRIMARY KEY (account, exchange, transfer_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS transfer_sync_status (
+                account TEXT PRIMARY KEY,
+                exchange TEXT NOT NULL,
+                status TEXT NOT NULL,
+                last_attempt_at TEXT NOT NULL,
+                last_success_at TEXT,
+                last_error TEXT,
+                warnings_json TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS account_sync_status (
                 account TEXT PRIMARY KEY,
                 exchange TEXT NOT NULL,
@@ -426,6 +451,8 @@ class AccountCache:
                 ON fills (occurred_at DESC, account);
             CREATE INDEX IF NOT EXISTS idx_pnl_events_occurred
                 ON pnl_events (occurred_at DESC, account);
+            CREATE INDEX IF NOT EXISTS idx_transfer_history_occurred
+                ON transfer_history (account, occurred_at DESC);
             CREATE INDEX IF NOT EXISTS idx_csv_imports_imported
                 ON csv_imports (imported_at DESC);
             """
@@ -1985,6 +2012,319 @@ class AccountCache:
             connection.rollback()
             raise
 
+    def apply_transfer_batch(
+        self,
+        transfers: list[dict[str, Any]],
+        *,
+        account: str,
+        exchange: str,
+        cursor: str | None = None,
+        warnings: list[str] | None = None,
+        status: str = "ok",
+        error: str = "",
+        update_sync: bool = True,
+    ) -> dict[str, Any]:
+        normalized_account = account.strip()
+        normalized_exchange = exchange.strip().lower()
+        if not normalized_account or not normalized_exchange:
+            raise ValueError("transfer account and exchange are required")
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        connection = self._connect()
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            stored = 0
+            for record in transfers:
+                if not isinstance(record, dict):
+                    continue
+                payload = record.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                record_account = str(record.get("account") or "").strip()
+                record_exchange = str(record.get("exchange") or "").strip().lower()
+                transfer_id = str(record.get("transfer_id") or "").strip()
+                occurred_at = str(record.get("occurred_at") or "").strip()
+                if not all((record_account, record_exchange, transfer_id, occurred_at)):
+                    continue
+                if str(record.get("source") or "native") == "native":
+                    self._remove_matching_local_transfer(
+                        connection,
+                        record,
+                        account=record_account,
+                        exchange=record_exchange,
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO transfer_history (
+                        account, exchange, transfer_id, occurred_at, asset,
+                        amount, direction, status, source, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(account, exchange, transfer_id) DO UPDATE SET
+                        occurred_at = excluded.occurred_at,
+                        asset = excluded.asset,
+                        amount = excluded.amount,
+                        direction = excluded.direction,
+                        status = excluded.status,
+                        source = excluded.source,
+                        payload_json = excluded.payload_json
+                    WHERE transfer_history.source != 'native'
+                       OR excluded.source = 'native'
+                    """,
+                    (
+                        record_account,
+                        record_exchange,
+                        transfer_id,
+                        occurred_at,
+                        str(record.get("asset") or ""),
+                        str(record.get("amount") or ""),
+                        str(record.get("direction") or "internal"),
+                        str(record.get("status") or ""),
+                        str(record.get("source") or "native"),
+                        _json(payload),
+                    ),
+                )
+                stored += 1
+            if cursor is not None:
+                connection.execute(
+                    """
+                    INSERT INTO sync_cursors (
+                        account, exchange, stream, market_scope, cursor, updated_at
+                    ) VALUES (?, ?, 'transfers', '', ?, ?)
+                    ON CONFLICT(account, exchange, stream, market_scope)
+                    DO UPDATE SET cursor = excluded.cursor, updated_at = excluded.updated_at
+                    """,
+                    (
+                        normalized_account,
+                        normalized_exchange,
+                        str(cursor),
+                        now,
+                    ),
+                )
+            if update_sync:
+                previous = connection.execute(
+                    """
+                    SELECT last_success_at
+                    FROM transfer_sync_status
+                    WHERE account = ?
+                    """,
+                    (normalized_account,),
+                ).fetchone()
+                last_success = (
+                    now
+                    if status in {"ok", "partial"}
+                    else (
+                        str(previous["last_success_at"])
+                        if previous and previous["last_success_at"]
+                        else None
+                    )
+                )
+                connection.execute(
+                    """
+                    INSERT INTO transfer_sync_status (
+                        account, exchange, status, last_attempt_at, last_success_at,
+                        last_error, warnings_json, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(account) DO UPDATE SET
+                        exchange = excluded.exchange,
+                        status = excluded.status,
+                        last_attempt_at = excluded.last_attempt_at,
+                        last_success_at = excluded.last_success_at,
+                        last_error = excluded.last_error,
+                        warnings_json = excluded.warnings_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        normalized_account,
+                        normalized_exchange,
+                        status,
+                        now,
+                        last_success,
+                        error or None,
+                        _json(warnings or []),
+                        now,
+                    ),
+                )
+            connection.commit()
+            return {"status": status, "stored": stored}
+        except BaseException:
+            connection.rollback()
+            raise
+
+    @staticmethod
+    def _remove_matching_local_transfer(
+        connection: sqlite3.Connection,
+        record: dict[str, Any],
+        *,
+        account: str,
+        exchange: str,
+    ) -> None:
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            return
+        occurred_at = str(record.get("occurred_at") or "")
+        try:
+            occurred = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+        except ValueError:
+            return
+        start = (occurred - timedelta(minutes=5)).astimezone(UTC).isoformat().replace(
+            "+00:00", "Z"
+        )
+        end = (occurred + timedelta(minutes=5)).astimezone(UTC).isoformat().replace(
+            "+00:00", "Z"
+        )
+        candidates = connection.execute(
+            """
+            SELECT transfer_id, asset, amount, direction, payload_json
+            FROM transfer_history
+            WHERE account = ? AND exchange = ? AND source = 'local'
+              AND occurred_at BETWEEN ? AND ?
+            """,
+            (account, exchange, start, end),
+        ).fetchall()
+
+        def matches(candidate: sqlite3.Row) -> bool:
+            candidate_payload = _payload_object(candidate["payload_json"])
+            try:
+                same_amount = Decimal(str(candidate["amount"])) == Decimal(
+                    str(record.get("amount") or "0")
+                )
+            except (InvalidOperation, TypeError, ValueError):
+                same_amount = str(candidate["amount"]) == str(record.get("amount") or "")
+            return (
+                str(candidate["asset"]) == str(record.get("asset") or "")
+                and same_amount
+                and str(candidate["direction"]) == str(record.get("direction") or "")
+                and str(candidate_payload.get("from_account_type") or "")
+                == str(payload.get("from_account_type") or "")
+                and str(candidate_payload.get("to_account_type") or "")
+                == str(payload.get("to_account_type") or "")
+            )
+
+        matching_ids = [str(row["transfer_id"]) for row in candidates if matches(row)]
+        if len(matching_ids) == 1 and matching_ids[0] != str(record.get("transfer_id") or ""):
+            connection.execute(
+                """
+                DELETE FROM transfer_history
+                WHERE account = ? AND exchange = ? AND transfer_id = ? AND source = 'local'
+                """,
+                (account, exchange, matching_ids[0]),
+            )
+
+    def transfer_sync_state(self, account: str, exchange: str) -> dict[str, Any]:
+        connection = self._read_connection()
+        if connection is None:
+            return {}
+        try:
+            row = connection.execute(
+                """
+                SELECT status, last_attempt_at, last_success_at, last_error,
+                       warnings_json, updated_at
+                FROM transfer_sync_status
+                WHERE account = ? AND exchange = ?
+                """,
+                (account.strip(), exchange.strip().lower()),
+            ).fetchone()
+            cursor = connection.execute(
+                """
+                SELECT cursor, updated_at
+                FROM sync_cursors
+                WHERE account = ? AND exchange = ?
+                  AND stream = 'transfers' AND market_scope = ''
+                """,
+                (account.strip(), exchange.strip().lower()),
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return {}
+            raise
+        finally:
+            connection.close()
+        if row is None:
+            return {}
+        try:
+            warnings = json.loads(str(row["warnings_json"] or "[]"))
+        except json.JSONDecodeError:
+            warnings = []
+        return {
+            "status": str(row["status"] or ""),
+            "last_attempt_at": row["last_attempt_at"],
+            "last_success_at": row["last_success_at"],
+            "last_error": row["last_error"],
+            "warnings": warnings if isinstance(warnings, list) else [],
+            "cursor": str(cursor["cursor"] or "") if cursor else "",
+            "cursor_updated_at": cursor["updated_at"] if cursor else None,
+        }
+
+    def transfer_history_page(
+        self,
+        *,
+        account: str,
+        exchange: str,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        normalized_limit = _page_limit(limit)
+        decoded_cursor = _decode_cursor(cursor, 2)
+        connection = self._read_connection()
+        if connection is None:
+            return {"results": [], "next_cursor": None, "total": 0}
+        clauses = ["account = ?", "exchange = ?"]
+        parameters: list[Any] = [account.strip(), exchange.strip().lower()]
+        if decoded_cursor is not None:
+            occurred_at, transfer_id = decoded_cursor
+            if not isinstance(occurred_at, str) or not isinstance(transfer_id, str):
+                connection.close()
+                raise ValueError("invalid history cursor")
+            clauses.append("(occurred_at < ? OR (occurred_at = ? AND transfer_id < ?))")
+            parameters.extend([occurred_at, occurred_at, transfer_id])
+        where = " AND ".join(clauses)
+        try:
+            total = int(connection.execute(
+                "SELECT COUNT(*) FROM transfer_history WHERE account = ? AND exchange = ?",
+                (account.strip(), exchange.strip().lower()),
+            ).fetchone()[0])
+            rows = connection.execute(
+                f"""
+                SELECT account, exchange, transfer_id, occurred_at, asset,
+                       amount, direction, status, source, payload_json
+                FROM transfer_history
+                WHERE {where}
+                ORDER BY occurred_at DESC, transfer_id DESC
+                LIMIT ?
+                """,
+                [*parameters, normalized_limit + 1],
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return {"results": [], "next_cursor": None, "total": 0}
+            raise
+        finally:
+            connection.close()
+        has_more = len(rows) > normalized_limit
+        selected = rows[:normalized_limit]
+        results: list[dict[str, Any]] = []
+        for row in selected:
+            payload = _payload_object(row["payload_json"])
+            payload.update({
+                "account": str(row["account"]),
+                "exchange": str(row["exchange"]),
+                "id": str(row["transfer_id"]),
+                "datetime": str(row["occurred_at"]),
+                "currency": str(row["asset"]),
+                "amount": str(row["amount"]),
+                "direction": str(row["direction"]),
+                "status": str(row["status"]),
+                "source": str(row["source"]),
+            })
+            results.append(payload)
+        next_cursor = None
+        if has_more and selected:
+            last = selected[-1]
+            next_cursor = _encode_cursor([
+                str(last["occurred_at"]),
+                str(last["transfer_id"]),
+            ])
+        return {"results": results, "next_cursor": next_cursor, "total": total}
+
     def rows(self, table: str) -> list[dict[str, Any]]:
         if table not in {
             "current_positions",
@@ -1992,6 +2332,8 @@ class AccountCache:
             "orders",
             "fills",
             "pnl_events",
+            "transfer_history",
+            "transfer_sync_status",
             "account_sync_status",
             "csv_imports",
         }:
