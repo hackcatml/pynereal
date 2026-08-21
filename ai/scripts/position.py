@@ -49,6 +49,8 @@ BITGET_ALL_POSITION_SCOPES = (
 )
 BYBIT_TRANSACTION_MAX_RANGE_MS = 7 * 24 * 60 * 60 * 1000
 BYBIT_BREAKDOWN_MAX_AGE_MS = 31 * 24 * 60 * 60 * 1000
+BINANCE_TRADE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+BINANCE_POSITION_TRADE_WINDOWS = 14
 
 
 def normalized_side(position: dict[str, Any], contracts: int | float | None) -> str | None:
@@ -283,17 +285,45 @@ def enrich_binance_realized_pnl(
         trades_call = exchange.fapiPrivateGetUserTrades
         income_call = exchange.fapiPrivateGetIncome
 
-    trades = _private_call_with_retry(
-        exchange,
-        trades_call,
-        {"symbol": raw_symbol, "limit": 1000},
-        attempts,
-        secrets,
-        f"{market_scope} user trades",
-    )
-    if not isinstance(trades, list):
-        return
-    cycle = _binance_position_cycle(trades, position, normalized)
+    trades: list[dict[str, Any]] = []
+    end_time: int | None = None
+    cycle = None
+    for _ in range(BINANCE_POSITION_TRADE_WINDOWS):
+        params: dict[str, Any] = {"symbol": raw_symbol, "limit": 1000}
+        if end_time is not None:
+            params["endTime"] = end_time
+        batch = _private_call_with_retry(
+            exchange,
+            trades_call,
+            params,
+            attempts,
+            secrets,
+            f"{market_scope} user trades",
+        )
+        if not isinstance(batch, list):
+            return
+        trades.extend(trade for trade in batch if isinstance(trade, dict))
+        cycle = _binance_position_cycle(trades, position, normalized)
+        if cycle is not None:
+            break
+        timestamps = [
+            timestamp
+            for trade in batch
+            if isinstance(trade, dict)
+            if (timestamp := _integer_or_none(trade.get("time"))) is not None
+        ]
+        if timestamps:
+            end_time = min(timestamps) - 1
+        elif end_time is None:
+            position_time = _integer_or_none(normalized.get("timestamp"))
+            if position_time is None:
+                return
+            end_time = min(
+                int(time.time() * 1000),
+                position_time + BINANCE_TRADE_WINDOW_MS - 1,
+            )
+        else:
+            end_time -= BINANCE_TRADE_WINDOW_MS
     if cycle is None:
         return
     start_time, cycle_trades = cycle
