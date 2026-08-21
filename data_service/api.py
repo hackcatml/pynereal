@@ -1093,6 +1093,36 @@ def build_control_router(
             return JSONResponse({"error": str(exc)}, status_code=400)
         except AccountDataError as exc:
             return JSONResponse({"error": str(exc)}, status_code=503)
+        external_accounts = [
+            str(record.get(field) or "").strip().lower()
+            for record in result.get("results", [])
+            if isinstance(record, dict)
+            for field in ("from_account", "to_account")
+        ]
+        needs_aliases = any(
+            value.isdigit()
+            or "@" in value
+            or (value.startswith("0x") and len(value) == 42)
+            for value in external_accounts
+        )
+        if needs_aliases:
+            try:
+                aliases = await asyncio.to_thread(
+                    asset_transfer_service.account_name_aliases,
+                    exchange,
+                )
+            except Exception:
+                aliases = {}
+        else:
+            aliases = {}
+        for record in result.get("results", []):
+            if not isinstance(record, dict):
+                continue
+            for field in ("from_account", "to_account"):
+                external_id = str(record.get(field) or "").strip().lower()
+                account_name = aliases.get(external_id)
+                if account_name:
+                    record[field] = account_name
         return JSONResponse(result)
 
     @r.post("/api/assets/transfer")

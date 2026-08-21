@@ -516,7 +516,16 @@ secret = "your_binance_secret"
 apiKey = "your_bitget_api_key"
 secret = "your_bitget_secret"
 password = "your_bitget_passphrase"
+
+[ccxt.hyperliquid]
+walletAddress = "0x_your_main_account_address"
 ```
+
+Hyperliquid account inspection requires only the main account's public
+`walletAddress`. PyneReal treats Hyperliquid accounts as read-only in Account
+Center and does not support wallet, Spot/Perps, or main/sub-account transfers in
+any account abstraction mode. Do not add a main-wallet private key for this
+integration.
 
 Multiple accounts on the same exchange can be configured with named account
 tables:

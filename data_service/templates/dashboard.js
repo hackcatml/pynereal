@@ -79,7 +79,6 @@
     bitget: new Set(["spot", "swap", "margin", "funding", "earn"]),
     bybit: new Set(["spot", "swap", "margin", "funding"]),
     okx: new Set(["spot", "funding"]),
-    hyperliquid: new Set(["spot", "swap"]),
   };
   let assetsRequestSeq = 0;
   const assetsRefreshIntervalMs = 10000;
@@ -2304,7 +2303,11 @@
     assetTransferHistoryCursor = null;
     assetTransferHistoryLoading = false;
     const modal = el("asset-transfer-history-modal");
+    const box = modal.querySelector(".asset-transfer-history-box");
+    modal.classList.remove("asset-transfer-history-dragging");
     modal.classList.add("hidden");
+    box.style.transform = "";
+    box.style.transition = "";
     modal.setAttribute("aria-hidden", "true");
     el("asset-transfer-history-refresh").classList.remove("assets-refreshing");
   }
@@ -2312,13 +2315,34 @@
   function transferHistoryRoute(record, exchangeId) {
     const sourceAccount = String(record.from_account || record.account || "");
     const targetAccount = String(record.to_account || record.account || "");
+    const sourceAccountLabel = transferHistoryAccountLabel(
+      sourceAccount,
+      record.from_account_label,
+    );
+    const targetAccountLabel = transferHistoryAccountLabel(
+      targetAccount,
+      record.to_account_label,
+    );
     const sourceType = assetAccountTypeLabel(record.from_account_type, exchangeId);
     const targetType = assetAccountTypeLabel(record.to_account_type, exchangeId);
-    const crossAccount = sourceAccount && targetAccount && sourceAccount !== targetAccount;
+    const accountTransfer = String(record.transfer_kind || "wallet") === "account";
+    const crossAccount = accountTransfer
+      || (sourceAccount && targetAccount && sourceAccount !== targetAccount);
     if (crossAccount) {
-      return `${sourceAccount} · ${sourceType} → ${targetAccount} · ${targetType}`;
+      return `Account transfer · ${sourceAccountLabel} · ${sourceType} → ${targetAccountLabel} · ${targetType}`;
     }
     return `${sourceType} → ${targetType}`;
+  }
+
+  function transferHistoryAccountLabel(value, label) {
+    const explicit = String(label || "").trim();
+    if (explicit) return explicit;
+    const raw = String(value || "").trim();
+    if (!raw) return "Account";
+    const normalized = raw.toLowerCase();
+    if (normalized === "main_account") return "Main account";
+    if (normalized === "sub_account") return "Sub account";
+    return raw;
   }
 
   function renderAssetTransferHistory(payload, append = false) {
@@ -2454,7 +2478,10 @@
     el("asset-transfer-history-error").classList.add("hidden");
     el("asset-transfer-history-loading").classList.remove("hidden");
     const modal = el("asset-transfer-history-modal");
-    modal.classList.remove("hidden");
+    const box = modal.querySelector(".asset-transfer-history-box");
+    modal.classList.remove("asset-transfer-history-dragging", "hidden");
+    box.style.transform = "";
+    box.style.transition = "";
     modal.setAttribute("aria-hidden", "false");
     loadAssetTransferHistory();
   }
@@ -5860,6 +5887,70 @@
     header.addEventListener("pointercancel", (event) => endAssetsCloseDrag(event, true));
   }
 
+  function initMobileAssetTransferHistoryGestures() {
+    const modal = el("asset-transfer-history-modal");
+    const box = modal.querySelector(".asset-transfer-history-box");
+    const header = modal.querySelector(".asset-transfer-history-header");
+    let closeDrag = null;
+
+    header.addEventListener("pointerdown", (event) => {
+      if (!mobileHubQuery.matches || !event.isPrimary) return;
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      closeDrag = {
+        id: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        dy: 0,
+        active: false,
+      };
+      try { header.setPointerCapture(event.pointerId); } catch {}
+    });
+    header.addEventListener("pointermove", (event) => {
+      if (!closeDrag || event.pointerId !== closeDrag.id) return;
+      const dx = event.clientX - closeDrag.startX;
+      const dy = event.clientY - closeDrag.startY;
+      if (!closeDrag.active) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < 8) return;
+        if (dy <= 0 || Math.abs(dy) <= Math.abs(dx)) {
+          closeDrag = null;
+          return;
+        }
+        closeDrag.active = true;
+        modal.classList.add("asset-transfer-history-dragging");
+      }
+      event.preventDefault();
+      closeDrag.dy = Math.max(0, dy);
+      box.style.transform = `translateY(${closeDrag.dy}px)`;
+    }, { passive: false });
+    function endCloseDrag(event, cancelled = false) {
+      if (!closeDrag || (event && event.pointerId !== closeDrag.id)) return;
+      const current = closeDrag;
+      closeDrag = null;
+      try { header.releasePointerCapture(current.id); } catch {}
+      modal.classList.remove("asset-transfer-history-dragging");
+      if (!cancelled && current.active && current.dy > 100) {
+        box.style.transition = "transform 220ms cubic-bezier(0.55, 0, 1, 0.45)";
+        box.style.transform = "translateY(100dvh)";
+        window.setTimeout(() => {
+          if (isAssetTransferHistoryOpen()) closeAssetTransferHistory();
+        }, 220);
+        return;
+      }
+      if (!current.active) return;
+      box.style.transition = "transform 180ms ease";
+      box.style.transform = "translateY(0)";
+      window.setTimeout(() => {
+        if (
+          !isAssetTransferHistoryOpen()
+        ) return;
+        box.style.transition = "";
+        box.style.transform = "";
+      }, 190);
+    }
+    header.addEventListener("pointerup", (event) => endCloseDrag(event));
+    header.addEventListener("pointercancel", (event) => endCloseDrag(event, true));
+  }
+
   function initMobileWatchlistGestures() {
     const modal = el("watchlist-modal");
     const box = modal.querySelector(".watchlist-modal-box");
@@ -6737,6 +6828,7 @@
       );
     }
     initMobileAssetsGestures();
+    initMobileAssetTransferHistoryGestures();
     initMobileAccountPager();
   }
 

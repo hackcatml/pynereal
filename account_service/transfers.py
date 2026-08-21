@@ -77,6 +77,7 @@ _OKX_ACCOUNT_TYPES = {
     "6": "funding",
     "18": "spot",
 }
+_OKX_ACCOUNT_TRANSFER_TYPES = {"20", "21", "22", "23"}
 _NETWORK_ERRORS = (
     ccxt.NetworkError,
     ccxt.RequestTimeout,
@@ -167,6 +168,9 @@ def _record(
     to_account: Any = "",
     client_id: Any = "",
     source: str = "native",
+    transfer_kind: str = "wallet",
+    from_account_label: Any = "",
+    to_account_label: Any = "",
     info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     occurred = _iso_time(occurred_at)
@@ -195,8 +199,11 @@ def _record(
         "direction": direction,
         "from_account": str(from_account or account),
         "to_account": str(to_account or account),
+        "from_account_label": str(from_account_label or ""),
+        "to_account_label": str(to_account_label or ""),
         "from_account_type": str(from_type or "").strip().lower(),
         "to_account_type": str(to_type or "").strip().lower(),
+        "transfer_kind": "account" if transfer_kind == "account" else "wallet",
         "status": str(status or "unknown").strip().lower(),
         "source": source,
     }
@@ -323,7 +330,15 @@ def _collect_binance(
                         str(item.get("toAccountType") or "").upper(),
                         str(item.get("toAccountType") or "").lower(),
                     )
-                    direction = "out"
+                    direction = (
+                        "out"
+                        if from_email == account.name and to_email != account.name
+                        else (
+                            "in"
+                            if to_email == account.name and from_email != account.name
+                            else "internal"
+                        )
+                    )
                     records.append(_record(
                         account.name,
                         "binance",
@@ -337,6 +352,7 @@ def _collect_binance(
                         direction=direction,
                         from_account=from_email,
                         to_account=to_email,
+                        transfer_kind="account",
                         client_id=item.get("clientTranId"),
                         info=item,
                     ))
@@ -455,6 +471,7 @@ def _collect_bitget(
                         direction=direction,
                         from_account=item.get("fromUserId"),
                         to_account=item.get("toUserId"),
+                        transfer_kind="account",
                         client_id=item.get("clientOid"),
                         info=item,
                     ))
@@ -581,6 +598,7 @@ def _collect_bybit(
                 direction=direction,
                 from_account=from_uid,
                 to_account=to_uid,
+                transfer_kind="account",
                 info=item,
             ))
     except Exception as exc:
@@ -614,6 +632,60 @@ def _okx_bill_pages(
     return records
 
 
+def _okx_asset_bill_pages(
+    method: Callable[[dict[str, Any]], Any],
+    since_ms: int,
+    until_ms: int,
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    after = str(until_ms + 1)
+    before = str(max(0, since_ms - 1))
+    for page in range(20):
+        params: dict[str, Any] = {
+            "after": after,
+            "before": before,
+            "limit": 100,
+            "pagingType": "1",
+        }
+        response = _request(lambda params=params: method(params))
+        items = _rows(response, "data")
+        records.extend(
+            item
+            for item in items
+            if str(item.get("type") or "") in _OKX_ACCOUNT_TRANSFER_TYPES
+        )
+        timestamps = [
+            int(item["ts"])
+            for item in items
+            if str(item.get("ts") or "").isdigit()
+        ]
+        next_after = str(min(timestamps)) if timestamps else ""
+        if (
+            len(items) < 100
+            or not next_after
+            or next_after == after
+            or int(next_after) <= since_ms
+        ):
+            break
+        after = next_after
+        if page < 19:
+            time.sleep(1.05)
+    return records
+
+
+def _okx_account_transfer_route(
+    account: ExchangeAccount,
+    bill_type: str,
+) -> tuple[str, str, str]:
+    if bill_type == "20":
+        return account.name, "sub_account", "out"
+    if bill_type == "21":
+        return "sub_account", account.name, "in"
+    if bill_type == "22":
+        return account.name, "main_account", "out"
+    return "main_account", account.name, "in"
+
+
 def _collect_okx(
     exchange: ccxt.Exchange,
     account: ExchangeAccount,
@@ -643,7 +715,7 @@ def _collect_okx(
         records.append(_record(
             account.name,
             "okx",
-            item.get("transId") or item.get("billId"),
+            item.get("billId") or item.get("transId"),
             asset=item.get("ccy"),
             amount=amount,
             occurred_at=item.get("ts"),
@@ -652,6 +724,39 @@ def _collect_okx(
             status="success",
             from_account=item.get("fromSubAcct") or account.name,
             to_account=item.get("toSubAcct") or item.get("subAcct") or account.name,
+            client_id=item.get("clientId"),
+            info=item,
+        ))
+
+    try:
+        asset_bills = _okx_asset_bill_pages(
+            exchange.privateGetAssetBillsHistory,
+            since_ms,
+            until_ms,
+        )
+    except Exception as exc:
+        _append_warning(warnings, "OKX account transfer", exc, secrets)
+        return records
+    for item in asset_bills:
+        bill_type = str(item.get("type") or "")
+        from_account, to_account, direction = _okx_account_transfer_route(
+            account,
+            bill_type,
+        )
+        records.append(_record(
+            account.name,
+            "okx",
+            f"asset:{item.get('billId')}",
+            asset=item.get("ccy"),
+            amount=item.get("balChg"),
+            occurred_at=item.get("ts"),
+            from_type="funding",
+            to_type="funding",
+            status="success",
+            direction=direction,
+            from_account=from_account,
+            to_account=to_account,
+            transfer_kind="account",
             client_id=item.get("clientId"),
             info=item,
         ))
@@ -735,6 +840,7 @@ def _collect_hyperliquid(
             direction=direction,
             from_account=sender,
             to_account=recipient,
+            transfer_kind="account" if kind == "subAccountTransfer" else "wallet",
             info=item,
         ))
     return records
@@ -835,6 +941,9 @@ def records_from_transfer_result(result: dict[str, Any]) -> list[dict[str, Any]]
             from_account=account,
             to_account=target_account,
             source="local",
+            transfer_kind="account" if is_account_transfer else "wallet",
+            from_account_label=step.get("source_account"),
+            to_account_label=step.get("target_account"),
             info=step,
         )
         records.append(source_record)
@@ -853,6 +962,9 @@ def records_from_transfer_result(result: dict[str, Any]) -> list[dict[str, Any]]
                 from_account=account,
                 to_account=target_account,
                 source="local",
+                transfer_kind="account",
+                from_account_label=step.get("source_account"),
+                to_account_label=step.get("target_account"),
                 info=step,
             ))
     return _deduplicate(records)

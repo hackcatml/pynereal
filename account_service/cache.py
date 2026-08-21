@@ -2046,6 +2046,19 @@ class AccountCache:
                 if not all((record_account, record_exchange, transfer_id, occurred_at)):
                     continue
                 if str(record.get("source") or "native") == "native":
+                    if self._native_transfer_has_local_account_record(
+                        connection,
+                        record,
+                        account=record_account,
+                        exchange=record_exchange,
+                    ):
+                        continue
+                    self._remove_legacy_okx_transfer_key(
+                        connection,
+                        record,
+                        account=record_account,
+                        exchange=record_exchange,
+                    )
                     self._remove_matching_local_transfer(
                         connection,
                         record,
@@ -2148,6 +2161,96 @@ class AccountCache:
         except BaseException:
             connection.rollback()
             raise
+
+    @staticmethod
+    def _native_transfer_has_local_account_record(
+        connection: sqlite3.Connection,
+        record: dict[str, Any],
+        *,
+        account: str,
+        exchange: str,
+    ) -> bool:
+        payload = record.get("payload")
+        if not isinstance(payload, dict) or payload.get("transfer_kind") != "account":
+            return False
+        occurred_at = str(record.get("occurred_at") or "")
+        try:
+            occurred = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        start = (occurred - timedelta(minutes=5)).astimezone(UTC).isoformat().replace(
+            "+00:00", "Z"
+        )
+        end = (occurred + timedelta(minutes=5)).astimezone(UTC).isoformat().replace(
+            "+00:00", "Z"
+        )
+        candidates = connection.execute(
+            """
+            SELECT asset, amount, direction, payload_json
+            FROM transfer_history
+            WHERE account = ? AND exchange = ? AND source = 'local'
+              AND occurred_at BETWEEN ? AND ?
+            """,
+            (account, exchange, start, end),
+        ).fetchall()
+        for candidate in candidates:
+            candidate_payload = _payload_object(candidate["payload_json"])
+            if candidate_payload.get("transfer_kind") != "account":
+                continue
+            try:
+                same_amount = Decimal(str(candidate["amount"])) == Decimal(
+                    str(record.get("amount") or "0")
+                )
+            except (InvalidOperation, TypeError, ValueError):
+                same_amount = str(candidate["amount"]) == str(record.get("amount") or "")
+            if (
+                str(candidate["asset"]) == str(record.get("asset") or "")
+                and same_amount
+                and str(candidate["direction"]) == str(record.get("direction") or "")
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _remove_legacy_okx_transfer_key(
+        connection: sqlite3.Connection,
+        record: dict[str, Any],
+        *,
+        account: str,
+        exchange: str,
+    ) -> None:
+        if exchange != "okx":
+            return
+        payload = record.get("payload")
+        info = payload.get("info") if isinstance(payload, dict) else None
+        if not isinstance(info, dict):
+            return
+        bill_id = str(info.get("billId") or "")
+        legacy_id = str(info.get("transId") or "")
+        if not bill_id or not legacy_id or bill_id == legacy_id:
+            return
+        row = connection.execute(
+            """
+            SELECT payload_json
+            FROM transfer_history
+            WHERE account = ? AND exchange = 'okx' AND transfer_id = ?
+              AND source = 'native'
+            """,
+            (account, legacy_id),
+        ).fetchone()
+        if row is None:
+            return
+        legacy_payload = _payload_object(row["payload_json"])
+        legacy_info = legacy_payload.get("info")
+        if isinstance(legacy_info, dict) and str(legacy_info.get("billId") or "") == bill_id:
+            connection.execute(
+                """
+                DELETE FROM transfer_history
+                WHERE account = ? AND exchange = 'okx' AND transfer_id = ?
+                  AND source = 'native'
+                """,
+                (account, legacy_id),
+            )
 
     @staticmethod
     def _remove_matching_local_transfer(
@@ -2293,29 +2396,31 @@ class AccountCache:
                 """,
                 [*parameters, normalized_limit + 1],
             ).fetchall()
+            has_more = len(rows) > normalized_limit
+            selected = rows[:normalized_limit]
+            results: list[dict[str, Any]] = []
+            for row in selected:
+                payload = _payload_object(row["payload_json"])
+                payload.update({
+                    "account": str(row["account"]),
+                    "exchange": str(row["exchange"]),
+                    "id": str(row["transfer_id"]),
+                    "datetime": str(row["occurred_at"]),
+                    "currency": str(row["asset"]),
+                    "amount": str(row["amount"]),
+                    "direction": str(row["direction"]),
+                    "status": str(row["status"]),
+                    "source": str(row["source"]),
+                })
+                results.append(payload)
+            self._match_okx_transfer_accounts(connection, results)
+            self._match_transfer_account_ids(connection, results)
         except sqlite3.OperationalError as exc:
             if "no such table" in str(exc).lower():
                 return {"results": [], "next_cursor": None, "total": 0}
             raise
         finally:
             connection.close()
-        has_more = len(rows) > normalized_limit
-        selected = rows[:normalized_limit]
-        results: list[dict[str, Any]] = []
-        for row in selected:
-            payload = _payload_object(row["payload_json"])
-            payload.update({
-                "account": str(row["account"]),
-                "exchange": str(row["exchange"]),
-                "id": str(row["transfer_id"]),
-                "datetime": str(row["occurred_at"]),
-                "currency": str(row["asset"]),
-                "amount": str(row["amount"]),
-                "direction": str(row["direction"]),
-                "status": str(row["status"]),
-                "source": str(row["source"]),
-            })
-            results.append(payload)
         next_cursor = None
         if has_more and selected:
             last = selected[-1]
@@ -2324,6 +2429,123 @@ class AccountCache:
                 str(last["transfer_id"]),
             ])
         return {"results": results, "next_cursor": next_cursor, "total": total}
+
+    @staticmethod
+    def _match_okx_transfer_accounts(
+        connection: sqlite3.Connection,
+        results: list[dict[str, Any]],
+    ) -> None:
+        counterpart_types = {"20": "23", "21": "22", "22": "21", "23": "20"}
+        account_fields = {
+            "20": "to_account",
+            "21": "from_account",
+            "22": "to_account",
+            "23": "from_account",
+        }
+        generic_accounts = {"main_account", "sub_account"}
+        for payload in results:
+            if (
+                payload.get("exchange") != "okx"
+                or payload.get("transfer_kind") != "account"
+            ):
+                continue
+            info = payload.get("info")
+            bill_type = str(info.get("type") or "") if isinstance(info, dict) else ""
+            field = account_fields.get(bill_type)
+            if field is None or str(payload.get(field) or "") not in generic_accounts:
+                continue
+            occurred = _iso_timestamp(payload.get("datetime"))
+            if occurred is None:
+                continue
+            start = datetime.fromtimestamp(occurred - 2, UTC).isoformat().replace(
+                "+00:00", "Z"
+            )
+            end = datetime.fromtimestamp(occurred + 2, UTC).isoformat().replace(
+                "+00:00", "Z"
+            )
+            candidates = connection.execute(
+                """
+                SELECT account, amount, payload_json
+                FROM transfer_history
+                WHERE exchange = 'okx' AND account != ? AND asset = ?
+                  AND occurred_at BETWEEN ? AND ?
+                """,
+                (
+                    str(payload.get("account") or ""),
+                    str(payload.get("currency") or ""),
+                    start,
+                    end,
+                ),
+            ).fetchall()
+            matches: list[str] = []
+            for candidate in candidates:
+                candidate_payload = _payload_object(candidate["payload_json"])
+                candidate_info = candidate_payload.get("info")
+                candidate_type = (
+                    str(candidate_info.get("type") or "")
+                    if isinstance(candidate_info, dict)
+                    else ""
+                )
+                if candidate_type != counterpart_types[bill_type]:
+                    continue
+                try:
+                    same_amount = Decimal(str(candidate["amount"])) == Decimal(
+                        str(payload.get("amount") or "0")
+                    )
+                except (InvalidOperation, TypeError, ValueError):
+                    same_amount = str(candidate["amount"]) == str(
+                        payload.get("amount") or ""
+                    )
+                if same_amount:
+                    matches.append(str(candidate["account"]))
+            if len(matches) == 1:
+                payload[field] = matches[0]
+
+    @staticmethod
+    def _match_transfer_account_ids(
+        connection: sqlite3.Connection,
+        results: list[dict[str, Any]],
+    ) -> None:
+        exchanges = {
+            str(payload.get("exchange") or "")
+            for payload in results
+            if payload.get("exchange") in {
+                "binance",
+                "bitget",
+                "bybit",
+                "hyperliquid",
+            }
+        }
+        for exchange in exchanges:
+            rows = connection.execute(
+                """
+                SELECT account, direction, payload_json
+                FROM transfer_history
+                WHERE exchange = ? AND direction IN ('in', 'out')
+                """,
+                (exchange,),
+            ).fetchall()
+            accounts_by_id: dict[str, set[str]] = {}
+            for row in rows:
+                payload = _payload_object(row["payload_json"])
+                direction = str(row["direction"] or "")
+                field = "from_account" if direction == "out" else "to_account"
+                external_id = str(payload.get(field) or "").strip()
+                account_name = str(row["account"] or "").strip()
+                if external_id and account_name:
+                    accounts_by_id.setdefault(external_id, set()).add(account_name)
+            resolved = {
+                external_id: next(iter(account_names))
+                for external_id, account_names in accounts_by_id.items()
+                if len(account_names) == 1
+            }
+            for payload in results:
+                if payload.get("exchange") != exchange:
+                    continue
+                for field in ("from_account", "to_account"):
+                    external_id = str(payload.get(field) or "").strip()
+                    if external_id in resolved:
+                        payload[field] = resolved[external_id]
 
     def rows(self, table: str) -> list[dict[str, Any]]:
         if table not in {
