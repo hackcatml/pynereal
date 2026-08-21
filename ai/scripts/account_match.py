@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import math
 import re
+from datetime import UTC, datetime
 from typing import Any
+
+
+MAX_RECENT_MATCHED_ORDERS = 50
 
 
 def canonical_symbol(value: Any) -> str:
@@ -58,11 +62,19 @@ def _relative_distance(left: Any, right: Any) -> float | None:
 
 def _timestamp_milliseconds(value: Any) -> int | None:
     number = _number(value)
-    if number is None or number <= 0:
-        return None
-    if number < 10_000_000_000:
-        number *= 1000
-    return int(number)
+    if number is not None and number > 0:
+        if number < 10_000_000_000:
+            number *= 1000
+        return int(number)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return int(parsed.timestamp() * 1000)
+    return None
 
 
 def _simulation_values(
@@ -95,6 +107,7 @@ def match_session_account(
     context: dict[str, Any],
     positions_payload: dict[str, Any],
     orders_payload: dict[str, Any],
+    position_history_payload: dict[str, Any] | None = None,
     *,
     explicit_account: str | None = None,
 ) -> dict[str, Any]:
@@ -118,6 +131,7 @@ def match_session_account(
             "reasons": [],
             "positions": [],
             "recent_orders": [],
+            "recent_positions": [],
             "collection_status": {},
         })
         if exchange == target_exchange and "same_exchange" not in item["reasons"]:
@@ -189,7 +203,9 @@ def match_session_account(
             and canonical_symbol(order.get("symbol")) == target_symbol
         ]
         if matching_orders:
-            item["recent_orders"].extend(matching_orders[:20])
+            item["recent_orders"].extend(
+                matching_orders[:MAX_RECENT_MATCHED_ORDERS]
+            )
             item["score"] += 300 + min(len(matching_orders), 10) * 20
             item["reasons"].append("recent_orders_same_symbol")
             if any(order.get("status") == "open" for order in matching_orders):
@@ -258,19 +274,46 @@ def match_session_account(
                     item["score"] += 30
                     item["reasons"].append("order_time_within_1_day")
 
+    for row in _account_rows(position_history_payload or {}):
+        account = str(row.get("account") or "")
+        exchange = str(row.get("exchange") or "").lower()
+        if not account:
+            continue
+        item = candidate(account, exchange)
+        item["collection_status"]["position_history"] = row.get("status")
+        matching_positions = [
+            position for position in (row.get("positions") or [])
+            if isinstance(position, dict)
+            and canonical_symbol(position.get("symbol")) == target_symbol
+        ]
+        if not matching_positions:
+            continue
+        item["recent_positions"].extend(matching_positions[:20])
+        item["score"] += 180 + min(len(matching_positions), 5) * 20
+        item["reasons"].append("position_history_same_symbol")
+
+        historical_sides = {
+            str(position.get("side") or "").lower()
+            for position in matching_positions
+        }
+        if simulation_side in {"long", "short"} and simulation_side in historical_sides:
+            item["score"] += 40
+            item["reasons"].append("position_history_side_matches_simulation")
+
     ranked = sorted(
         candidates.values(),
         key=lambda item: (
             int(item["score"]),
             len(item["positions"]),
             len(item["recent_orders"]),
+            len(item["recent_positions"]),
             item["account"],
         ),
         reverse=True,
     )
     evidence_candidates = [
         item for item in ranked
-        if item["positions"] or item["recent_orders"]
+        if item["positions"] or item["recent_orders"] or item["recent_positions"]
     ]
     selected = evidence_candidates[0] if evidence_candidates else None
     status = "no_match"
@@ -287,6 +330,7 @@ def match_session_account(
                 "reasons": ["user_selected_account"],
                 "positions": [],
                 "recent_orders": [],
+                "recent_positions": [],
                 "collection_status": {},
             }
         elif "user_selected_account" not in selected["reasons"]:
@@ -305,7 +349,11 @@ def match_session_account(
             confidence = "high" if top_score >= 1000 else "medium"
 
     collection_errors = []
-    for source, payload in (("positions", positions_payload), ("orders", orders_payload)):
+    for source, payload in (
+        ("positions", positions_payload),
+        ("orders", orders_payload),
+        ("position_history", position_history_payload or {}),
+    ):
         summary = payload.get("summary") if isinstance(payload, dict) else None
         if isinstance(summary, dict) and int(summary.get("failed") or 0) > 0:
             collection_errors.append({
@@ -325,11 +373,15 @@ def match_session_account(
         "collection": {
             "positions_collected_at": positions_payload.get("collected_at"),
             "orders_collected_at": orders_payload.get("collected_at"),
+            "position_history_collected_at": (
+                (position_history_payload or {}).get("collected_at")
+            ),
             "errors": collection_errors,
         },
         "rule": (
-            "No static account binding is used. Matching requires same-symbol position "
-            "or recent order evidence; exchange, side, entry price, size, and order time "
-            "refine ranking. An explicitly selected account always takes precedence."
+            "No static account binding is used. Matching requires same-symbol current "
+            "position, order, or position-history evidence from the session exchange; "
+            "side, entry price, size, and order time refine ranking. An explicitly "
+            "selected account always takes precedence."
         ),
     }

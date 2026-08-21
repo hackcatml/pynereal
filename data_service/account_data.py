@@ -25,7 +25,10 @@ from account_service.csv_import import (
     preview_history_files,
 )
 from account_service.live_positions import run_positions_stream
-from account_service.positions import collect_positions_snapshot
+from account_service.positions import (
+    collect_positions_snapshot,
+    collect_positions_snapshot_scope,
+)
 from account_service.transfers import (
     TRANSFER_CACHE_TTL_SECONDS,
     records_from_transfer_result,
@@ -42,6 +45,25 @@ from ws_manager import WSManager
 
 class AccountDataError(RuntimeError):
     pass
+
+
+_EVALUATION_POSITION_MAX_AGE_SECONDS = 6 * 60.0
+_EVALUATION_HISTORY_MAX_AGE_SECONDS = 35 * 60.0
+
+
+def _evaluation_position_account_type(
+    exchange: str,
+    symbol: str,
+    market_type: str,
+) -> str:
+    if market_type == "inverse":
+        return "delivery"
+    if market_type == "spot":
+        return "spot"
+    settlement = symbol.rsplit(":", 1)[1].split("-", 1)[0].upper() if ":" in symbol else ""
+    if exchange == "bitget" and settlement == "USDC":
+        return "usdc"
+    return "swap"
 
 
 def _fetch_okx_account_uid(account: ExchangeAccount) -> str:
@@ -207,6 +229,166 @@ class AccountDataService:
             output = copy.deepcopy(result)
             output["cached"] = False
             return output
+
+    async def session_evaluation_evidence(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        market_type: str,
+        account: str | None = None,
+    ) -> dict[str, Any]:
+        """Return cache-first evidence, refreshing only stale session scope."""
+
+        normalized_exchange = exchange.strip().lower()
+        normalized_symbol = symbol.strip()
+        data = await asyncio.to_thread(read_provider_config, self.config_path)
+        candidates = [
+            item
+            for item in configured_accounts(data)
+            if item.exchange_id == normalized_exchange
+            and (account is None or item.name == account)
+        ]
+        account_names = [item.name for item in candidates]
+        cache = AccountCache(self.cache_path)
+
+        async def read_cache() -> dict[str, Any]:
+            return await asyncio.to_thread(
+                cache.session_evaluation_evidence,
+                accounts=account_names,
+                exchange=normalized_exchange,
+                symbol=normalized_symbol,
+                position_max_age_seconds=_EVALUATION_POSITION_MAX_AGE_SECONDS,
+                history_max_age_seconds=_EVALUATION_HISTORY_MAX_AGE_SECONDS,
+            )
+
+        evidence = await read_cache()
+        freshness = evidence.get("freshness") or {}
+        refreshes: list[dict[str, Any]] = []
+
+        stale_position_accounts = list(
+            (freshness.get("positions") or {}).get("stale_accounts") or []
+        )
+        if stale_position_accounts and market_type != "spot":
+            loop = asyncio.get_running_loop()
+            try:
+                snapshot = await loop.run_in_executor(
+                    self._ensure_executor(),
+                    collect_positions_snapshot_scope,
+                    str(self.config_path),
+                    normalized_exchange,
+                    tuple(stale_position_accounts),
+                    normalized_symbol,
+                    _evaluation_position_account_type(
+                        normalized_exchange,
+                        normalized_symbol,
+                        market_type,
+                    ),
+                )
+                failed_accounts = [
+                    str(row.get("account") or "")
+                    for row in snapshot.get("results", [])
+                    if isinstance(row, dict) and row.get("status") != "ok"
+                ]
+                refreshes.append({
+                    "source": "positions",
+                    "status": "ok" if not failed_accounts else "partial",
+                    "accounts": stale_position_accounts,
+                    "failed_accounts": failed_accounts,
+                })
+                fresh_rows = {
+                    str(row.get("account") or ""): row
+                    for row in snapshot.get("results", [])
+                    if isinstance(row, dict)
+                }
+                cached_rows = {
+                    str(row.get("account") or ""): row
+                    for row in evidence["positions"].get("results", [])
+                    if isinstance(row, dict)
+                }
+                cached_rows.update(fresh_rows)
+                evidence["positions"] = snapshot
+                evidence["positions"]["results"] = [
+                    cached_rows[name]
+                    for name in account_names
+                    if name in cached_rows
+                ]
+                position_results = evidence["positions"]["results"]
+                evidence["positions"]["summary"] = {
+                    "requested": len(position_results),
+                    "succeeded": sum(
+                        row.get("status") == "ok" for row in position_results
+                    ),
+                    "failed": sum(
+                        row.get("status") != "ok" for row in position_results
+                    ),
+                }
+            except Exception as exc:
+                refreshes.append({
+                    "source": "positions",
+                    "status": "error",
+                    "accounts": stale_position_accounts,
+                    "error": {"type": type(exc).__name__, "message": str(exc)[:500]},
+                })
+
+        for source, kind in (("orders", "order"), ("position_history", "position")):
+            stale_accounts = list(
+                (freshness.get(source) or {}).get("stale_accounts") or []
+            )
+            if not stale_accounts:
+                continue
+            try:
+                await self.refresh_history(
+                    kind=kind,
+                    exchange=normalized_exchange,
+                    symbol=normalized_symbol,
+                    accounts=stale_accounts,
+                )
+                refreshes.append({
+                    "source": source,
+                    "status": "ok",
+                    "accounts": stale_accounts,
+                })
+            except Exception as exc:
+                refreshes.append({
+                    "source": source,
+                    "status": "error",
+                    "accounts": stale_accounts,
+                    "error": {"type": type(exc).__name__, "message": str(exc)[:500]},
+                })
+
+        if any(item["source"] != "positions" and item["status"] == "ok" for item in refreshes):
+            refreshed = await read_cache()
+            for source in ("orders", "position_history"):
+                successful_accounts = {
+                    account_name
+                    for item in refreshes
+                    if item["source"] == source and item["status"] == "ok"
+                    for account_name in item["accounts"]
+                }
+                if not successful_accounts:
+                    continue
+                evidence[source] = refreshed[source]
+                rows = evidence[source].get("results", [])
+                for row in rows:
+                    if isinstance(row, dict) and row.get("account") in successful_accounts:
+                        row["status"] = "ok"
+                evidence[source]["summary"] = {
+                    "requested": len(rows),
+                    "succeeded": sum(
+                        isinstance(row, dict) and row.get("status") == "ok"
+                        for row in rows
+                    ),
+                    "failed": sum(
+                        not isinstance(row, dict) or row.get("status") != "ok"
+                        for row in rows
+                    ),
+                }
+
+        evidence["account_candidates"] = account_names
+        evidence["refreshes"] = refreshes
+        evidence["source"] = "account_center_cache"
+        return evidence
 
     def _sync_live_snapshot(self, snapshot: dict[str, Any]) -> None:
         input_queue = self._live_input
@@ -1009,24 +1191,26 @@ class AccountDataService:
         account: str = "",
         exchange: str = "",
         symbol: str = "",
+        accounts: list[str] | None = None,
     ) -> dict[str, Any]:
         normalized_kind = kind.strip().lower()
         if normalized_kind not in {"order", "position"}:
             raise AccountDataError("history kind must be order or position")
 
         account_filter = account.strip()
-        account_names: list[str] = []
+        account_names = list(dict.fromkeys(accounts or []))
         if not account_filter:
-            try:
-                account_names = await asyncio.to_thread(
-                    AccountCache(self.cache_path).history_accounts,
-                    kind=normalized_kind,
-                    exchange=exchange,
-                    symbol=symbol,
-                )
-            except Exception as exc:
-                message = str(exc).replace("\n", " ").strip()
-                raise AccountDataError(message[:500] or type(exc).__name__) from exc
+            if not account_names:
+                try:
+                    account_names = await asyncio.to_thread(
+                        AccountCache(self.cache_path).history_accounts,
+                        kind=normalized_kind,
+                        exchange=exchange,
+                        symbol=symbol,
+                    )
+                except Exception as exc:
+                    message = str(exc).replace("\n", " ").strip()
+                    raise AccountDataError(message[:500] or type(exc).__name__) from exc
             if not account_names:
                 raise AccountDataError(
                     "no cached accounts match the selected history scope"
