@@ -79,7 +79,6 @@
     bitget: new Set(["spot", "swap", "margin", "funding", "earn"]),
     bybit: new Set(["spot", "swap", "margin", "funding"]),
     okx: new Set(["spot", "funding"]),
-    hyperliquid: new Set(["spot", "swap"]),
   };
   let assetsRequestSeq = 0;
   const assetsRefreshIntervalMs = 10000;
@@ -144,6 +143,11 @@
   let assetTransferReview = null;
   let assetTransferMode = "options";
   let assetTransferSubmitting = false;
+  let assetTransferHistoryRequestSeq = 0;
+  let assetTransferHistoryPortfolio = null;
+  let assetTransferHistoryRows = [];
+  let assetTransferHistoryCursor = null;
+  let assetTransferHistoryLoading = false;
   let updateConfirmationToken = "";
   let updatePollTimer = null;
   let updateMessageTimer = null;
@@ -1467,6 +1471,7 @@
 
   function closeAssets(options = {}) {
     if (!isAssetsOpen()) return;
+    closeAssetTransferHistory();
     closeAssetTransfer();
     closePositionPnlPopover();
     const modal = el("assets-modal");
@@ -2286,6 +2291,201 @@
     }
   }
 
+  function isAssetTransferHistoryOpen() {
+    return !el("asset-transfer-history-modal").classList.contains("hidden");
+  }
+
+  function closeAssetTransferHistory() {
+    if (!isAssetTransferHistoryOpen()) return;
+    assetTransferHistoryRequestSeq += 1;
+    assetTransferHistoryPortfolio = null;
+    assetTransferHistoryRows = [];
+    assetTransferHistoryCursor = null;
+    assetTransferHistoryLoading = false;
+    const modal = el("asset-transfer-history-modal");
+    const box = modal.querySelector(".asset-transfer-history-box");
+    modal.classList.remove("asset-transfer-history-dragging");
+    modal.classList.add("hidden");
+    box.style.transform = "";
+    box.style.transition = "";
+    modal.setAttribute("aria-hidden", "true");
+    el("asset-transfer-history-refresh").classList.remove("assets-refreshing");
+  }
+
+  function transferHistoryRoute(record, exchangeId) {
+    const sourceAccount = String(record.from_account || record.account || "");
+    const targetAccount = String(record.to_account || record.account || "");
+    const sourceAccountLabel = transferHistoryAccountLabel(
+      sourceAccount,
+      record.from_account_label,
+    );
+    const targetAccountLabel = transferHistoryAccountLabel(
+      targetAccount,
+      record.to_account_label,
+    );
+    const sourceType = assetAccountTypeLabel(record.from_account_type, exchangeId);
+    const targetType = assetAccountTypeLabel(record.to_account_type, exchangeId);
+    const accountTransfer = String(record.transfer_kind || "wallet") === "account";
+    const crossAccount = accountTransfer
+      || (sourceAccount && targetAccount && sourceAccount !== targetAccount);
+    if (crossAccount) {
+      return `Account transfer · ${sourceAccountLabel} · ${sourceType} → ${targetAccountLabel} · ${targetType}`;
+    }
+    return `${sourceType} → ${targetType}`;
+  }
+
+  function transferHistoryAccountLabel(value, label) {
+    const explicit = String(label || "").trim();
+    if (explicit) return explicit;
+    const raw = String(value || "").trim();
+    if (!raw) return "Account";
+    const normalized = raw.toLowerCase();
+    if (normalized === "main_account") return "Main account";
+    if (normalized === "sub_account") return "Sub account";
+    return raw;
+  }
+
+  function renderAssetTransferHistory(payload, append = false) {
+    const incoming = Array.isArray(payload.results) ? payload.results : [];
+    if (append) {
+      const byId = new Map(assetTransferHistoryRows.map((row) => [String(row.id), row]));
+      incoming.forEach((row) => byId.set(String(row.id), row));
+      assetTransferHistoryRows = Array.from(byId.values());
+    } else {
+      assetTransferHistoryRows = incoming;
+    }
+    assetTransferHistoryCursor = payload.next_cursor || null;
+    const list = el("asset-transfer-history-list");
+    list.replaceChildren();
+    const exchangeId = String(payload.exchange || "");
+    assetTransferHistoryRows.forEach((record) => {
+      const row = document.createElement("article");
+      row.className = "asset-transfer-history-row";
+
+      const top = document.createElement("div");
+      top.className = "asset-transfer-history-row-top";
+      const amount = document.createElement("strong");
+      amount.className = "asset-transfer-history-amount mono";
+      const direction = String(record.direction || "internal");
+      const prefix = direction === "out" ? "-" : direction === "in" ? "+" : "";
+      amount.textContent = `${prefix}${formatAssetAmount(record.amount)} ${record.currency || ""}`;
+      const status = document.createElement("span");
+      const statusText = String(record.status || "unknown");
+      const statusClass = statusText.toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
+      status.className = `asset-transfer-history-status status-${statusClass}`;
+      status.textContent = statusText;
+      top.append(amount, status);
+
+      const route = document.createElement("div");
+      route.className = "asset-transfer-history-route";
+      route.textContent = transferHistoryRoute(record, exchangeId);
+
+      const meta = document.createElement("div");
+      meta.className = "asset-transfer-history-meta";
+      const occurred = document.createElement("time");
+      occurred.textContent = formatAccountHistoryDate(record.datetime, true, true);
+      const identifier = document.createElement("span");
+      identifier.className = "mono";
+      const rawId = String(record.id || "");
+      identifier.textContent = rawId ? `ID ${rawId.length > 18 ? `${rawId.slice(0, 8)}…${rawId.slice(-6)}` : rawId}` : "";
+      identifier.title = rawId;
+      meta.append(occurred, identifier);
+      row.append(top, route, meta);
+      list.appendChild(row);
+    });
+
+    const sync = payload.sync && typeof payload.sync === "object" ? payload.sync : {};
+    const warnings = Array.isArray(sync.warnings) ? [...sync.warnings] : [];
+    if (sync.last_error) warnings.push(String(sync.last_error));
+    const notice = el("asset-transfer-history-notice");
+    notice.textContent = warnings.join(" ");
+    notice.classList.toggle("hidden", warnings.length === 0);
+    list.classList.toggle("hidden", assetTransferHistoryRows.length === 0);
+    el("asset-transfer-history-empty").classList.toggle(
+      "hidden",
+      assetTransferHistoryRows.length !== 0,
+    );
+    el("asset-transfer-history-more").classList.toggle(
+      "hidden",
+      !assetTransferHistoryCursor,
+    );
+  }
+
+  async function loadAssetTransferHistory({ append = false, force = false } = {}) {
+    if (!assetTransferHistoryPortfolio || assetTransferHistoryLoading) return;
+    const requestId = ++assetTransferHistoryRequestSeq;
+    const firstLoad = !assetTransferHistoryRows.length && !append;
+    assetTransferHistoryLoading = true;
+    el("asset-transfer-history-loading").classList.toggle("hidden", !firstLoad);
+    el("asset-transfer-history-error").classList.add("hidden");
+    el("asset-transfer-history-refresh").classList.add("assets-refreshing");
+    el("asset-transfer-history-more").disabled = true;
+    const portfolio = assetTransferHistoryPortfolio;
+    const assets = (Array.isArray(portfolio.assets) ? portfolio.assets : [])
+      .map((item) => String(item.currency || "").toUpperCase())
+      .filter(Boolean);
+    const accountTypes = (Array.isArray(portfolio.account_type_statuses)
+      ? portfolio.account_type_statuses
+      : [])
+      .filter((item) => item.status === "ok")
+      .map((item) => String(item.account_type || "").toLowerCase())
+      .filter(Boolean);
+    const query = new URLSearchParams({
+      exchange: String(portfolio.exchange || ""),
+      account: String(portfolio.account || ""),
+      limit: "50",
+      force: force ? "true" : "false",
+      assets: Array.from(new Set(assets)).join(","),
+      account_types: Array.from(new Set(accountTypes)).join(","),
+    });
+    if (append && assetTransferHistoryCursor) {
+      query.set("cursor", assetTransferHistoryCursor);
+    }
+    try {
+      const payload = await api(`/api/assets/transfer/history?${query}`);
+      if (requestId !== assetTransferHistoryRequestSeq || !isAssetTransferHistoryOpen()) return;
+      renderAssetTransferHistory(payload, append);
+    } catch (error) {
+      if (requestId !== assetTransferHistoryRequestSeq || !isAssetTransferHistoryOpen()) return;
+      const errorElement = el("asset-transfer-history-error");
+      errorElement.textContent = error.message || String(error);
+      errorElement.classList.remove("hidden");
+      if (!assetTransferHistoryRows.length) {
+        el("asset-transfer-history-empty").classList.add("hidden");
+      }
+    } finally {
+      if (requestId === assetTransferHistoryRequestSeq) {
+        assetTransferHistoryLoading = false;
+        el("asset-transfer-history-loading").classList.add("hidden");
+        el("asset-transfer-history-refresh").classList.remove("assets-refreshing");
+        el("asset-transfer-history-more").disabled = false;
+      }
+    }
+  }
+
+  function openAssetTransferHistory(portfolio) {
+    assetTransferHistoryPortfolio = portfolio;
+    assetTransferHistoryRows = [];
+    assetTransferHistoryCursor = null;
+    assetTransferHistoryLoading = false;
+    el("asset-transfer-history-title").textContent = "Transfer History";
+    el("asset-transfer-history-subtitle").textContent =
+      `${portfolio.account} · ${assetExchangeLabel(portfolio.exchange)}`;
+    el("asset-transfer-history-list").replaceChildren();
+    el("asset-transfer-history-list").classList.add("hidden");
+    el("asset-transfer-history-empty").classList.add("hidden");
+    el("asset-transfer-history-notice").classList.add("hidden");
+    el("asset-transfer-history-error").classList.add("hidden");
+    el("asset-transfer-history-loading").classList.remove("hidden");
+    const modal = el("asset-transfer-history-modal");
+    const box = modal.querySelector(".asset-transfer-history-box");
+    modal.classList.remove("asset-transfer-history-dragging", "hidden");
+    box.style.transform = "";
+    box.style.transition = "";
+    modal.setAttribute("aria-hidden", "false");
+    loadAssetTransferHistory();
+  }
+
   function assetExchangeLabel(exchange) {
     const value = String(exchange || "Exchange");
     const labels = {
@@ -2542,7 +2742,22 @@
     statusText.textContent = availableTypes.length
       ? `Included: ${availableTypes.join(", ")}`
       : "No account balance type was available.";
-    footer.appendChild(statusText);
+    const primaryFooter = document.createElement("div");
+    primaryFooter.className = "assets-portfolio-footer-primary";
+    const historyLink = document.createElement("button");
+    historyLink.type = "button";
+    historyLink.className = "assets-transfer-history-link";
+    historyLink.textContent = "Transfer History";
+    historyLink.setAttribute(
+      "aria-label",
+      `Show transfer history for ${portfolio.account}`,
+    );
+    historyLink.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openAssetTransferHistory(portfolio);
+    });
+    primaryFooter.append(statusText, historyLink);
+    footer.appendChild(primaryFooter);
 
     const accountNames = Array.isArray(portfolio.account_names)
       ? portfolio.account_names
@@ -5672,6 +5887,70 @@
     header.addEventListener("pointercancel", (event) => endAssetsCloseDrag(event, true));
   }
 
+  function initMobileAssetTransferHistoryGestures() {
+    const modal = el("asset-transfer-history-modal");
+    const box = modal.querySelector(".asset-transfer-history-box");
+    const header = modal.querySelector(".asset-transfer-history-header");
+    let closeDrag = null;
+
+    header.addEventListener("pointerdown", (event) => {
+      if (!mobileHubQuery.matches || !event.isPrimary) return;
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      closeDrag = {
+        id: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        dy: 0,
+        active: false,
+      };
+      try { header.setPointerCapture(event.pointerId); } catch {}
+    });
+    header.addEventListener("pointermove", (event) => {
+      if (!closeDrag || event.pointerId !== closeDrag.id) return;
+      const dx = event.clientX - closeDrag.startX;
+      const dy = event.clientY - closeDrag.startY;
+      if (!closeDrag.active) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < 8) return;
+        if (dy <= 0 || Math.abs(dy) <= Math.abs(dx)) {
+          closeDrag = null;
+          return;
+        }
+        closeDrag.active = true;
+        modal.classList.add("asset-transfer-history-dragging");
+      }
+      event.preventDefault();
+      closeDrag.dy = Math.max(0, dy);
+      box.style.transform = `translateY(${closeDrag.dy}px)`;
+    }, { passive: false });
+    function endCloseDrag(event, cancelled = false) {
+      if (!closeDrag || (event && event.pointerId !== closeDrag.id)) return;
+      const current = closeDrag;
+      closeDrag = null;
+      try { header.releasePointerCapture(current.id); } catch {}
+      modal.classList.remove("asset-transfer-history-dragging");
+      if (!cancelled && current.active && current.dy > 100) {
+        box.style.transition = "transform 220ms cubic-bezier(0.55, 0, 1, 0.45)";
+        box.style.transform = "translateY(100dvh)";
+        window.setTimeout(() => {
+          if (isAssetTransferHistoryOpen()) closeAssetTransferHistory();
+        }, 220);
+        return;
+      }
+      if (!current.active) return;
+      box.style.transition = "transform 180ms ease";
+      box.style.transform = "translateY(0)";
+      window.setTimeout(() => {
+        if (
+          !isAssetTransferHistoryOpen()
+        ) return;
+        box.style.transition = "";
+        box.style.transform = "";
+      }, 190);
+    }
+    header.addEventListener("pointerup", (event) => endCloseDrag(event));
+    header.addEventListener("pointercancel", (event) => endCloseDrag(event, true));
+  }
+
   function initMobileWatchlistGestures() {
     const modal = el("watchlist-modal");
     const box = modal.querySelector(".watchlist-modal-box");
@@ -6451,6 +6730,20 @@
     window.addEventListener("resize", closePositionPnlPopover, { passive: true });
     window.addEventListener("resize", schedulePnlListSizing, { passive: true });
     el("asset-transfer-close").addEventListener("click", closeAssetTransfer);
+    el("asset-transfer-history-close").addEventListener(
+      "click",
+      closeAssetTransferHistory,
+    );
+    el("asset-transfer-history-refresh").addEventListener("click", () => {
+      loadAssetTransferHistory({ force: true });
+    });
+    el("asset-transfer-history-more").addEventListener("click", () => {
+      loadAssetTransferHistory({ append: true });
+    });
+    const transferHistoryModal = el("asset-transfer-history-modal");
+    transferHistoryModal.addEventListener("click", (event) => {
+      if (event.target === transferHistoryModal) closeAssetTransferHistory();
+    });
     el("asset-transfer-back").addEventListener("click", () => {
       if (assetTransferMode === "review") {
         assetTransferReview = null;
@@ -6535,6 +6828,7 @@
       );
     }
     initMobileAssetsGestures();
+    initMobileAssetTransferHistoryGestures();
     initMobileAccountPager();
   }
 
@@ -9471,7 +9765,8 @@
     }
     closeHubMenu();
     if (isCalendarOpen()) closeCalendar();
-    if (isAssetTransferOpen()) closeAssetTransfer();
+    if (isAssetTransferHistoryOpen()) closeAssetTransferHistory();
+    else if (isAssetTransferOpen()) closeAssetTransfer();
     else if (isAssetsOpen()) closeAssets();
     closeScriptDropdown();
     closeDataSinceTooltips();

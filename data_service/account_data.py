@@ -29,6 +29,10 @@ from account_service.positions import (
     collect_positions_snapshot,
     collect_positions_snapshot_scope,
 )
+from account_service.transfers import (
+    TRANSFER_CACHE_TTL_SECONDS,
+    records_from_transfer_result,
+)
 from ai.scripts.asset import (
     ExchangeAccount,
     build_exchange,
@@ -126,6 +130,8 @@ class AccountDataService:
         self._live_control_reader: asyncio.Task[None] | None = None
         self._history_refresh_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._history_import_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._transfer_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._transfer_refresh_locks: dict[str, asyncio.Lock] = {}
         self._history_import_previews: dict[str, dict[str, Any]] = {}
         self._history_import_jobs: dict[str, dict[str, Any]] = {}
         self._history_import_tasks: dict[str, asyncio.Task[None]] = {}
@@ -484,6 +490,180 @@ class AccountDataService:
             message = str(exc).replace("\n", " ").strip()
             raise AccountDataError(message[:500] or type(exc).__name__) from exc
         return self._history_group_response(groups, exchange=exchange)
+
+    async def transfer_history(
+        self,
+        *,
+        account: str,
+        exchange: str,
+        cursor: str | None = None,
+        limit: int = 50,
+        force: bool = False,
+        assets: list[str] | None = None,
+        account_types: list[str] | None = None,
+    ) -> dict[str, Any]:
+        normalized_account = account.strip()
+        normalized_exchange = exchange.strip().lower()
+        if not normalized_account or not normalized_exchange:
+            raise AccountDataError("transfer account and exchange are required")
+        asset_hints = list(dict.fromkeys(
+            str(value).strip().upper()
+            for value in (assets or [])
+            if str(value).strip()
+        ))[:20]
+        type_hints = list(dict.fromkeys(
+            str(value).strip().lower()
+            for value in (account_types or [])
+            if str(value).strip()
+        ))[:10]
+
+        lock = self._transfer_refresh_locks.setdefault(
+            f"{normalized_exchange}:{normalized_account}",
+            asyncio.Lock(),
+        )
+        refresh_error = ""
+        async with lock:
+            state = await asyncio.to_thread(
+                AccountCache(self.cache_path).transfer_sync_state,
+                normalized_account,
+                normalized_exchange,
+            )
+            last_success = str(state.get("last_success_at") or "")
+            stale = True
+            if last_success:
+                try:
+                    age = datetime.now(UTC).timestamp() - datetime.fromisoformat(
+                        last_success.replace("Z", "+00:00")
+                    ).timestamp()
+                    stale = age >= TRANSFER_CACHE_TTL_SECONDS
+                except ValueError:
+                    stale = True
+            if force or stale:
+                try:
+                    await self._refresh_transfers(
+                        normalized_account,
+                        normalized_exchange,
+                        asset_hints,
+                        type_hints,
+                    )
+                except AccountDataError as exc:
+                    refresh_error = str(exc)
+
+        try:
+            page, state = await asyncio.gather(
+                asyncio.to_thread(
+                    AccountCache(self.cache_path).transfer_history_page,
+                    account=normalized_account,
+                    exchange=normalized_exchange,
+                    cursor=cursor,
+                    limit=limit,
+                ),
+                asyncio.to_thread(
+                    AccountCache(self.cache_path).transfer_sync_state,
+                    normalized_account,
+                    normalized_exchange,
+                ),
+            )
+        except ValueError:
+            raise
+        except Exception as exc:
+            message = str(exc).replace("\n", " ").strip()
+            raise AccountDataError(message[:500] or type(exc).__name__) from exc
+        results = page.get("results") if isinstance(page, dict) else []
+        results = results if isinstance(results, list) else []
+        if refresh_error and not results:
+            raise AccountDataError(refresh_error)
+        if refresh_error:
+            state = {**state, "status": "error", "last_error": refresh_error}
+        return {
+            "schema_version": "1.0",
+            "collected_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "read_only": True,
+            "cached": True,
+            "account": normalized_account,
+            "exchange": normalized_exchange,
+            "results": results,
+            "next_cursor": page.get("next_cursor"),
+            "sync": state,
+            "summary": {
+                "total": int(page.get("total") or 0),
+                "returned": len(results),
+                "has_more": bool(page.get("next_cursor")),
+            },
+        }
+
+    async def _refresh_transfers(
+        self,
+        account: str,
+        exchange: str,
+        assets: list[str],
+        account_types: list[str],
+    ) -> dict[str, Any]:
+        await self._ensure_live_stream()
+        process = self._live_process
+        input_queue = self._live_input
+        if process is None or not process.is_alive() or input_queue is None:
+            raise AccountDataError("account worker is not available")
+        request_id = uuid4().hex
+        waiter = asyncio.get_running_loop().create_future()
+        self._transfer_waiters[request_id] = waiter
+        try:
+            await asyncio.to_thread(input_queue.put, {
+                "type": "transfer.refresh",
+                "request_id": request_id,
+                "account": account,
+                "exchange": exchange,
+                "assets": assets,
+                "account_types": account_types,
+            }, True, 5.0)
+            result = await asyncio.wait_for(asyncio.shield(waiter), timeout=300.0)
+        except (queue.Full, ValueError, OSError) as exc:
+            raise AccountDataError("account worker request queue is unavailable") from exc
+        except TimeoutError as exc:
+            raise AccountDataError("transfer history refresh timed out") from exc
+        finally:
+            self._transfer_waiters.pop(request_id, None)
+            if not waiter.done():
+                waiter.cancel()
+        if result.get("status") == "error":
+            error = result.get("error")
+            error = error if isinstance(error, dict) else {}
+            raise AccountDataError(
+                str(error.get("message") or "transfer history refresh failed")[:500]
+            )
+        return result
+
+    async def record_transfer_result(self, result: dict[str, Any]) -> None:
+        records = records_from_transfer_result(result)
+        if not records:
+            return
+        await self._ensure_live_stream()
+        process = self._live_process
+        input_queue = self._live_input
+        if process is None or not process.is_alive() or input_queue is None:
+            raise AccountDataError("account worker is not available")
+        request_id = uuid4().hex
+        waiter = asyncio.get_running_loop().create_future()
+        self._transfer_waiters[request_id] = waiter
+        try:
+            await asyncio.to_thread(input_queue.put, {
+                "type": "transfer.record",
+                "request_id": request_id,
+                "records": records,
+                "account": str(result.get("account") or ""),
+                "exchange": str(result.get("exchange") or ""),
+            }, True, 5.0)
+            response = await asyncio.wait_for(asyncio.shield(waiter), timeout=30.0)
+            if response.get("status") == "error":
+                error = response.get("error")
+                error = error if isinstance(error, dict) else {}
+                raise AccountDataError(
+                    str(error.get("message") or "transfer history write failed")[:500]
+                )
+        finally:
+            self._transfer_waiters.pop(request_id, None)
+            if not waiter.done():
+                waiter.cancel()
 
     async def pnl(
         self,
@@ -1210,6 +1390,7 @@ class AccountDataService:
                 waiters = [
                     *self._history_refresh_waiters.values(),
                     *self._history_import_waiters.values(),
+                    *self._transfer_waiters.values(),
                 ]
                 for waiter in waiters:
                     if not waiter.done():
@@ -1226,6 +1407,11 @@ class AccountDataService:
                 "history.import.delete.result",
             }:
                 waiter_map = self._history_import_waiters
+            elif message_type in {
+                "transfer.refresh.result",
+                "transfer.record.result",
+            }:
+                waiter_map = self._transfer_waiters
             else:
                 continue
             request_id = str(message.get("request_id") or "")
@@ -1254,9 +1440,11 @@ class AccountDataService:
         waiters = [
             *self._history_refresh_waiters.values(),
             *self._history_import_waiters.values(),
+            *self._transfer_waiters.values(),
         ]
         self._history_refresh_waiters.clear()
         self._history_import_waiters.clear()
+        self._transfer_waiters.clear()
         for waiter in waiters:
             if not waiter.done():
                 waiter.set_exception(AccountDataError("account worker stopped"))
