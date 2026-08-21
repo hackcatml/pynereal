@@ -23,9 +23,17 @@ from data_service.evaluation_context import (
 
 from .account_match import match_session_account, resolve_account_hint
 from .asset import configured_accounts, read_provider_config
+from .evidence_compare import (
+    build_evidence_summary,
+    compact_session_context,
+    compare_session_evidence,
+    comparison_context,
+    current_position_events,
+)
 
 
 _CONTEXT_TOOL_NAME = "get_session_evaluation_context"
+_COMPARE_TOOL_NAME = "compare_session_evidence"
 _CAPTURE_TOOL_NAME = "capture_session_chart"
 _MAX_CONFIRMED_BARS = 2_000
 _DEFAULT_CONFIRMED_BARS = 500
@@ -41,9 +49,15 @@ class SessionEvaluationToolError(ValueError):
 
 
 class SessionEvaluationBridge:
-    def __init__(self, project_root: Path, registry: Any) -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        registry: Any,
+        account_data_service: Any | None = None,
+    ) -> None:
         self._project_root = project_root.resolve()
         self._registry = registry
+        self._account_data_service = account_data_service
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread_id: int | None = None
 
@@ -174,6 +188,7 @@ class SessionEvaluationBridge:
             account_match,
             positions_payload,
             orders_payload,
+            position_history_payload,
             explicit_account,
         ) = await self._collect_account_match(
             context,
@@ -212,6 +227,7 @@ class SessionEvaluationBridge:
                 refreshed,
                 positions_payload,
                 orders_payload,
+                position_history_payload,
                 explicit_account=explicit_account,
             )
             context = refreshed
@@ -225,12 +241,19 @@ class SessionEvaluationBridge:
             )
         elif account_match["status"] == "no_match":
             context["warnings"].append(
-                "No configured account had a same-symbol position or recent order history."
+                "No account on the session exchange had same-symbol position, order, "
+                "or position-history evidence."
             )
         if account_match["collection"]["errors"]:
             context["warnings"].append(
                 "Some account position or order-history collectors were incomplete."
             )
+        strategy = context.get("strategy") or {}
+        strategy["current_position_events"] = current_position_events(
+            strategy.get("simulation"),
+            strategy.get("recent_trade_events"),
+        )
+        context["evidence_summary"] = build_evidence_summary(context)
         return context
 
     async def _collect_account_match(
@@ -238,7 +261,13 @@ class SessionEvaluationBridge:
         context: dict[str, Any],
         *,
         account_hint: str | None,
-    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str | None]:
+    ) -> tuple[
+        dict[str, Any],
+        dict[str, Any],
+        dict[str, Any],
+        dict[str, Any],
+        str | None,
+    ]:
         explicit_account: str | None = None
         if account_hint:
             config_path = self._project_root / "workdir" / "config" / "providers.toml"
@@ -256,13 +285,57 @@ class SessionEvaluationBridge:
         if market_type not in {"spot", "linear", "inverse"}:
             market_type = "linear" if ":" in symbol else "spot"
 
+        if self._account_data_service is not None:
+            try:
+                evidence = await self._account_data_service.session_evaluation_evidence(
+                    exchange=str(session.get("exchange") or ""),
+                    symbol=symbol,
+                    market_type=market_type,
+                    account=explicit_account,
+                )
+                positions_payload = evidence.get("positions") or {}
+                orders_payload = evidence.get("orders") or {}
+                position_history_payload = evidence.get("position_history") or {}
+                result = match_session_account(
+                    context,
+                    positions_payload,
+                    orders_payload,
+                    position_history_payload,
+                    explicit_account=explicit_account,
+                )
+                result["collection"]["source"] = evidence.get("source")
+                result["collection"]["refreshes"] = evidence.get("refreshes") or []
+                result["collection"]["account_candidates"] = (
+                    evidence.get("account_candidates") or []
+                )
+                return (
+                    result,
+                    positions_payload,
+                    orders_payload,
+                    position_history_payload,
+                    explicit_account,
+                )
+            except Exception as exc:
+                print(
+                    f"[ai] Account Center evidence unavailable: "
+                    f"{type(exc).__name__}: {str(exc)[:300]}"
+                )
+
+        exchange_args = account_args or [
+            "--exchange", str(session.get("exchange") or "")
+        ]
+        position_args = ["--symbol", symbol, *exchange_args]
+        if market_type == "inverse":
+            position_args.extend(["--account-type", "delivery"])
+        elif market_type == "linear":
+            position_args.extend(["--account-type", "swap"])
         positions_task = asyncio.create_task(self._run_account_collector(
             "position.py",
-            account_args,
+            position_args,
         ))
         orders_task = asyncio.create_task(self._run_account_collector(
             "order_history.py",
-            ["--symbol", symbol, "--market-type", market_type, *account_args],
+            ["--symbol", symbol, "--market-type", market_type, *exchange_args],
         ))
         positions_payload, orders_payload = await asyncio.gather(
             positions_task,
@@ -274,7 +347,18 @@ class SessionEvaluationBridge:
             orders_payload,
             explicit_account=explicit_account,
         )
-        return result, positions_payload, orders_payload, explicit_account
+        position_history_payload: dict[str, Any] = {
+            "results": [],
+            "summary": {"requested": 0, "succeeded": 0, "failed": 0},
+        }
+        result["collection"]["source"] = "scoped_exchange_collectors"
+        return (
+            result,
+            positions_payload,
+            orders_payload,
+            position_history_payload,
+            explicit_account,
+        )
 
     async def _run_account_collector(
         self,
@@ -419,14 +503,26 @@ class SessionEvaluationBridge:
 
 
 class SessionEvaluationTools:
-    def __init__(self, project_root: Path, registry: Any) -> None:
-        self.bridge = SessionEvaluationBridge(project_root, registry)
+    def __init__(
+        self,
+        project_root: Path,
+        registry: Any,
+        account_data_service: Any | None = None,
+    ) -> None:
+        self.bridge = SessionEvaluationBridge(
+            project_root,
+            registry,
+            account_data_service,
+        )
         self._turn_cache: OrderedDict[str, dict[str, dict[str, Any]]] = OrderedDict()
+        self._comparison_contexts: OrderedDict[str, dict[str, dict[str, Any]]] = (
+            OrderedDict()
+        )
         self._turn_cache_lock = threading.Lock()
 
     @property
     def names(self) -> set[str]:
-        return {_CONTEXT_TOOL_NAME, _CAPTURE_TOOL_NAME}
+        return {_CONTEXT_TOOL_NAME, _COMPARE_TOOL_NAME, _CAPTURE_TOOL_NAME}
 
     @property
     def specs(self) -> list[dict[str, Any]]:
@@ -441,9 +537,11 @@ class SessionEvaluationTools:
                     "ID. Then resolve exactly one returned session and call again with its ID. "
                     "When wait_for_ready is true, an in-progress pre-run is allowed to finish before "
                     "market bars, simulation state, trades, plots, source, and logs are returned. "
-                    "The exact-session call also reads configured account positions and recent "
-                    "orders. Pass account only when the user explicitly names one; otherwise the "
-                    "tool returns a deterministic evidence-based account match. Call the session "
+                    "The exact-session call reads Account Center's cached current positions, "
+                    "orders, and position history for accounts on the session exchange. Stale or "
+                    "missing cache scopes are refreshed only for that exchange and symbol. Pass "
+                    "account only when the user explicitly names one; otherwise the tool returns "
+                    "a deterministic evidence-based account match. Call the session "
                     "list at most once and each exact session at most once per user turn; repeated "
                     "calls return the first snapshot from that turn."
                 ),
@@ -474,11 +572,47 @@ class SessionEvaluationTools:
                             "minLength": 1,
                             "description": (
                                 "Human-readable configured account name explicitly supplied by "
-                                "the user, for example 'bitget sub2'. Omit it to match across all "
-                                "configured accounts from positions and recent order history."
+                                "the user, for example 'bitget sub2'. Omit it to match accounts "
+                                "on the session exchange from cached positions and history."
+                            ),
+                        },
+                        "detail_level": {
+                            "type": "string",
+                            "enum": ["standard", "compact"],
+                            "default": "standard",
+                            "description": (
+                                "Use compact only for mismatch diagnosis or verification. "
+                                "Standard preserves the normal session-evaluation response."
                             ),
                         },
                     },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "type": "function",
+                "name": _COMPARE_TOOL_NAME,
+                "description": (
+                    "Compare strategy lifecycle events with matched account orders from the "
+                    "same user-turn snapshot. Use after an exact session context when the user "
+                    "reports a mismatch, challenges a prior conclusion, requests verification, "
+                    "or evidence_summary recommends diagnostics. This tool performs no REST "
+                    "request and no strategy recalculation. It reports observations and the "
+                    "earliest divergence, not a guaranteed root cause."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string", "minLength": 1},
+                        "generation_id": {"type": "string", "minLength": 1},
+                        "max_events": {
+                            "type": "integer",
+                            "minimum": 5,
+                            "maximum": 80,
+                            "default": 40,
+                        },
+                    },
+                    "required": ["session_id", "generation_id"],
                     "additionalProperties": False,
                 },
             },
@@ -523,6 +657,7 @@ class SessionEvaluationTools:
         self.bridge.unbind_loop()
         with self._turn_cache_lock:
             self._turn_cache.clear()
+            self._comparison_contexts.clear()
 
     def handle_server_request(
         self,
@@ -549,8 +684,23 @@ class SessionEvaluationTools:
                         f"tool={tool} session={arguments.get('session_id') or 'list'}"
                     )
                     return cached
-            operation = "context" if tool == _CONTEXT_TOOL_NAME else "capture"
-            result = self.bridge.execute(operation, arguments)
+            if tool == _COMPARE_TOOL_NAME:
+                if not turn_id:
+                    raise SessionEvaluationToolError(
+                        "Evidence comparison requires a user-turn context"
+                    )
+                result = compare_session_evidence(
+                    self._comparison_context(
+                        turn_id,
+                        arguments["session_id"],
+                        arguments["generation_id"],
+                    ),
+                    max_events=arguments["max_events"],
+                )
+                operation = "compare"
+            else:
+                operation = "context" if tool == _CONTEXT_TOOL_NAME else "capture"
+                result = self.bridge.execute(operation, arguments)
             if operation == "capture":
                 image_path = Path(result.pop("image_path"))
                 image_url = "data:image/png;base64," + base64.b64encode(
@@ -563,6 +713,19 @@ class SessionEvaluationTools:
                         {"type": "inputImage", "imageUrl": image_url},
                     ],
                 }
+            elif operation == "context":
+                if turn_id and arguments.get("session_id"):
+                    self._cache_comparison_context(
+                        turn_id,
+                        arguments["session_id"],
+                        comparison_context(result),
+                    )
+                if (
+                    arguments.get("session_id")
+                    and arguments.get("detail_level") == "compact"
+                ):
+                    result = compact_session_context(result)
+                response = self._tool_response(True, result)
             else:
                 response = self._tool_response(True, result)
             if turn_id:
@@ -586,9 +749,12 @@ class SessionEvaluationTools:
     @staticmethod
     def _turn_cache_key(tool: str, arguments: dict[str, Any]) -> str:
         session_id = arguments.get("session_id") or "list"
-        if tool == _CAPTURE_TOOL_NAME:
+        if tool in {_CAPTURE_TOOL_NAME, _COMPARE_TOOL_NAME}:
             return f"{tool}:{session_id}:{arguments.get('generation_id')}"
-        return f"{tool}:{session_id}:{arguments.get('account') or 'auto'}"
+        return (
+            f"{tool}:{session_id}:{arguments.get('account') or 'auto'}:"
+            f"{arguments.get('detail_level') or 'standard'}"
+        )
 
     def _cached_response(self, turn_id: str, cache_key: str) -> dict[str, Any] | None:
         with self._turn_cache_lock:
@@ -611,19 +777,56 @@ class SessionEvaluationTools:
             while len(self._turn_cache) > _MAX_CACHED_TURNS:
                 self._turn_cache.popitem(last=False)
 
+    def _cache_comparison_context(
+        self,
+        turn_id: str,
+        session_id: str,
+        context: dict[str, Any],
+    ) -> None:
+        with self._turn_cache_lock:
+            turn = self._comparison_contexts.setdefault(turn_id, {})
+            turn[session_id] = context
+            self._comparison_contexts.move_to_end(turn_id)
+            while len(self._comparison_contexts) > _MAX_CACHED_TURNS:
+                self._comparison_contexts.popitem(last=False)
+
+    def _comparison_context(
+        self,
+        turn_id: str,
+        session_id: str,
+        generation_id: str,
+    ) -> dict[str, Any]:
+        with self._turn_cache_lock:
+            turn = self._comparison_contexts.get(turn_id)
+            context = turn.get(session_id) if turn else None
+            if context is None:
+                raise SessionEvaluationToolError(
+                    "Collect the exact session context in this user turn before comparing evidence"
+                )
+            cached_generation = (context.get("calculation") or {}).get("generation_id")
+            if cached_generation != generation_id:
+                raise SessionEvaluationToolError(
+                    "generation_id must match the exact session context from this user turn"
+                )
+            self._comparison_contexts.move_to_end(turn_id)
+            return copy.deepcopy(context)
+
     def _invalidate_session_cache(self, turn_id: str, session_id: Any) -> None:
         if not isinstance(session_id, str) or not session_id:
             return
         prefixes = (
             f"{_CONTEXT_TOOL_NAME}:{session_id}:",
+            f"{_COMPARE_TOOL_NAME}:{session_id}:",
             f"{_CAPTURE_TOOL_NAME}:{session_id}:",
         )
         with self._turn_cache_lock:
             turn = self._turn_cache.get(turn_id)
-            if turn is None:
-                return
-            for key in [key for key in turn if key.startswith(prefixes)]:
-                turn.pop(key, None)
+            if turn is not None:
+                for key in [key for key in turn if key.startswith(prefixes)]:
+                    turn.pop(key, None)
+            comparison_turn = self._comparison_contexts.get(turn_id)
+            if comparison_turn is not None:
+                comparison_turn.pop(session_id, None)
 
     @staticmethod
     def _validate(tool: str, raw_arguments: Any) -> dict[str, Any]:
@@ -636,6 +839,7 @@ class SessionEvaluationTools:
                 "confirmed_bar_limit",
                 "include_recent_logs",
                 "account",
+                "detail_level",
             }
             unexpected = sorted(set(raw_arguments) - allowed)
             if unexpected:
@@ -659,12 +863,44 @@ class SessionEvaluationTools:
                 raise SessionEvaluationToolError(
                     f"confirmed_bar_limit must be between 50 and {_MAX_CONFIRMED_BARS}"
                 )
+            detail_level = raw_arguments.get("detail_level", "standard")
+            if detail_level not in {"standard", "compact"}:
+                raise SessionEvaluationToolError(
+                    "detail_level must be either standard or compact"
+                )
             return {
                 "session_id": session_id.strip() if isinstance(session_id, str) else None,
                 "wait_for_ready": bool(raw_arguments.get("wait_for_ready", True)),
                 "confirmed_bar_limit": limit,
                 "include_recent_logs": bool(raw_arguments.get("include_recent_logs", True)),
                 "account": account.strip() if isinstance(account, str) else None,
+                "detail_level": detail_level,
+            }
+
+        if tool == _COMPARE_TOOL_NAME:
+            allowed = {"session_id", "generation_id", "max_events"}
+            unexpected = sorted(set(raw_arguments) - allowed)
+            if unexpected:
+                raise SessionEvaluationToolError(
+                    f"Unexpected argument field(s): {', '.join(unexpected)}"
+                )
+            for field in ("session_id", "generation_id"):
+                value = raw_arguments.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    raise SessionEvaluationToolError(f"{field} must be a non-empty string")
+            max_events = raw_arguments.get("max_events", 40)
+            if (
+                not isinstance(max_events, int)
+                or isinstance(max_events, bool)
+                or not 5 <= max_events <= 80
+            ):
+                raise SessionEvaluationToolError(
+                    "max_events must be an integer between 5 and 80"
+                )
+            return {
+                "session_id": raw_arguments["session_id"].strip(),
+                "generation_id": raw_arguments["generation_id"].strip(),
+                "max_events": max_events,
             }
 
         allowed = {"session_id", "generation_id", "width", "height"}

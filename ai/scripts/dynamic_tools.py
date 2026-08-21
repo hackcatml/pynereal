@@ -14,11 +14,22 @@ from .telegram_tool import TelegramMessageTool
 class AIDynamicTools:
     """Route app-server dynamic tool calls to server-controlled handlers."""
 
-    def __init__(self, project_root: Path, *, session_registry: Any, calendar_store: Any) -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        *,
+        session_registry: Any,
+        calendar_store: Any,
+        account_data_service: Any | None = None,
+    ) -> None:
         self.file_tools = RestrictedFileTools(project_root)
         self.manual_alert = ManualAlertTools(session_registry)
         self.calendar = CalendarTools(session_registry, calendar_store)
-        self.session_evaluation = SessionEvaluationTools(project_root, session_registry)
+        self.session_evaluation = SessionEvaluationTools(
+            project_root,
+            session_registry,
+            account_data_service,
+        )
         self.telegram = TelegramMessageTool()
 
     @property

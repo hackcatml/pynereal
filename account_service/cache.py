@@ -2445,6 +2445,274 @@ class AccountCache:
             connection.close()
         return [str(row["account"]) for row in rows if row["account"]]
 
+    def session_evaluation_evidence(
+        self,
+        *,
+        accounts: list[str],
+        exchange: str,
+        symbol: str,
+        position_max_age_seconds: float,
+        history_max_age_seconds: float,
+        limit_per_account: int = 100,
+    ) -> dict[str, Any]:
+        """Read account evidence for one strategy session without network access."""
+
+        selected_accounts = list(dict.fromkeys(
+            account.strip() for account in accounts if account.strip()
+        ))
+        normalized_exchange = exchange.strip().lower()
+        normalized_symbol = symbol.strip().lower()
+        now = datetime.now(UTC).timestamp()
+
+        def is_fresh(value: Any, max_age: float) -> bool:
+            timestamp = _iso_timestamp(value)
+            return (
+                timestamp is not None
+                and now - timestamp <= max_age
+                and timestamp - now <= 60.0
+            )
+
+        empty = {
+            "positions": {"results": [], "summary": {"requested": 0, "failed": 0}},
+            "orders": {"results": [], "summary": {"requested": 0, "failed": 0}},
+            "position_history": {
+                "results": [],
+                "summary": {"requested": 0, "failed": 0},
+            },
+            "freshness": {
+                "positions": {"fresh": False, "stale_accounts": selected_accounts},
+                "orders": {"fresh": False, "stale_accounts": selected_accounts},
+                "position_history": {
+                    "fresh": False,
+                    "stale_accounts": selected_accounts,
+                },
+            },
+            "cache_available": False,
+        }
+        if not selected_accounts:
+            return empty
+
+        connection = self._read_connection()
+        if connection is None:
+            return empty
+
+        placeholders = ",".join("?" for _ in selected_accounts)
+        account_params: list[Any] = [*selected_accounts, normalized_exchange]
+        try:
+            status_rows = {
+                str(row["account"]): row
+                for row in connection.execute(
+                    f"""
+                    SELECT account, stream_status, last_success_at
+                    FROM account_sync_status
+                    WHERE account IN ({placeholders}) AND LOWER(exchange) = ?
+                    """,
+                    account_params,
+                )
+            }
+            cursor_rows = connection.execute(
+                f"""
+                SELECT account, stream, MAX(updated_at) AS updated_at
+                FROM sync_cursors
+                WHERE account IN ({placeholders}) AND LOWER(exchange) = ?
+                GROUP BY account, stream
+                """,
+                account_params,
+            ).fetchall()
+            cursor_times: dict[str, dict[str, str]] = {}
+            for row in cursor_rows:
+                cursor_times.setdefault(str(row["account"]), {})[
+                    str(row["stream"])
+                ] = str(row["updated_at"] or "")
+
+            position_rows = []
+            order_rows = []
+            history_rows = []
+            position_stale: list[str] = []
+            order_stale: list[str] = []
+            history_stale: list[str] = []
+
+            for account in selected_accounts:
+                status = status_rows.get(account)
+                position_fresh = bool(
+                    status is not None
+                    and str(status["stream_status"] or "").lower()
+                    in {"ok", "live"}
+                    and is_fresh(
+                        status["last_success_at"],
+                        position_max_age_seconds,
+                    )
+                )
+                streams = cursor_times.get(account, {})
+                order_synced_at = max(
+                    (
+                        updated_at
+                        for stream, updated_at in streams.items()
+                        if stream.startswith("orders")
+                    ),
+                    default="",
+                )
+                position_history_synced_at = max(
+                    (
+                        updated_at
+                        for stream, updated_at in streams.items()
+                        if stream in {"fills", "positions"}
+                    ),
+                    default="",
+                )
+                order_fresh = is_fresh(order_synced_at, history_max_age_seconds)
+                position_history_fresh = is_fresh(
+                    position_history_synced_at,
+                    history_max_age_seconds,
+                )
+                if not position_fresh:
+                    position_stale.append(account)
+                if not order_fresh:
+                    order_stale.append(account)
+                if not position_history_fresh:
+                    history_stale.append(account)
+
+                positions = []
+                for row in connection.execute(
+                    """
+                    SELECT payload_json
+                    FROM current_positions
+                    WHERE account = ? AND LOWER(exchange) = ? AND LOWER(symbol) = ?
+                    ORDER BY last_seen_at DESC
+                    """,
+                    (account, normalized_exchange, normalized_symbol),
+                ):
+                    payload = _payload_object(row["payload_json"])
+                    if payload:
+                        positions.append(payload)
+                position_rows.append({
+                    "account": account,
+                    "exchange": normalized_exchange,
+                    "status": "ok" if position_fresh else "stale",
+                    "positions": positions,
+                    "position_count": len(positions),
+                })
+
+                orders = []
+                for row in connection.execute(
+                    """
+                    SELECT order_id, client_order_id, market_scope, symbol, status,
+                           side, order_type, created_at, updated_at, payload_json
+                    FROM orders
+                    WHERE account = ? AND LOWER(exchange) = ? AND LOWER(symbol) = ?
+                    ORDER BY COALESCE(updated_at, created_at, '') DESC
+                    LIMIT ?
+                    """,
+                    (
+                        account,
+                        normalized_exchange,
+                        normalized_symbol,
+                        limit_per_account,
+                    ),
+                ):
+                    payload = _payload_object(row["payload_json"])
+                    payload.setdefault("id", row["order_id"])
+                    payload.setdefault("client_order_id", row["client_order_id"])
+                    payload.setdefault("market_scope", row["market_scope"])
+                    payload.setdefault("symbol", row["symbol"])
+                    payload.setdefault("status", row["status"])
+                    payload.setdefault("side", row["side"])
+                    payload.setdefault("type", row["order_type"])
+                    payload.setdefault("datetime", row["created_at"] or row["updated_at"])
+                    orders.append(payload)
+                order_rows.append({
+                    "account": account,
+                    "exchange": normalized_exchange,
+                    "status": "ok" if order_fresh else "stale",
+                    "orders": orders,
+                    "order_count": len(orders),
+                })
+
+                positions_history = []
+                for row in connection.execute(
+                    """
+                    SELECT market_scope, dex, symbol, side, opened_at, closed_at,
+                           source, payload_json
+                    FROM position_history
+                    WHERE account = ? AND LOWER(exchange) = ? AND LOWER(symbol) = ?
+                    ORDER BY closed_at DESC
+                    LIMIT ?
+                    """,
+                    (
+                        account,
+                        normalized_exchange,
+                        normalized_symbol,
+                        limit_per_account,
+                    ),
+                ):
+                    payload = _payload_object(row["payload_json"])
+                    payload.setdefault("market_scope", row["market_scope"])
+                    payload.setdefault("dex", row["dex"])
+                    payload.setdefault("symbol", row["symbol"])
+                    payload.setdefault("side", row["side"])
+                    payload.setdefault("opened_at", row["opened_at"])
+                    payload.setdefault("closed_at", row["closed_at"])
+                    payload.setdefault("source", row["source"])
+                    positions_history.append(payload)
+                history_rows.append({
+                    "account": account,
+                    "exchange": normalized_exchange,
+                    "status": "ok" if position_history_fresh else "stale",
+                    "positions": positions_history,
+                    "position_count": len(positions_history),
+                })
+        except sqlite3.OperationalError:
+            return empty
+        finally:
+            connection.close()
+
+        def payload(source: str, rows: list[dict[str, Any]], failed: int) -> dict[str, Any]:
+            return {
+                "schema_version": "1.0",
+                "collected_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                "source": source,
+                "read_only": True,
+                "results": rows,
+                "summary": {
+                    "requested": len(rows),
+                    "succeeded": len(rows) - failed,
+                    "failed": failed,
+                },
+            }
+
+        return {
+            "positions": payload(
+                "account_cache.current_positions",
+                position_rows,
+                len(position_stale),
+            ),
+            "orders": payload(
+                "account_cache.orders",
+                order_rows,
+                len(order_stale),
+            ),
+            "position_history": payload(
+                "account_cache.position_history",
+                history_rows,
+                len(history_stale),
+            ),
+            "freshness": {
+                "positions": {
+                    "fresh": not position_stale,
+                    "stale_accounts": position_stale,
+                },
+                "orders": {
+                    "fresh": not order_stale,
+                    "stale_accounts": order_stale,
+                },
+                "position_history": {
+                    "fresh": not history_stale,
+                    "stale_accounts": history_stale,
+                },
+            },
+            "cache_available": True,
+        }
+
     def position_history_page(
         self,
         *,
