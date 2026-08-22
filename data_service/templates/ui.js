@@ -1287,6 +1287,82 @@ App.ui = {
     editor.selectionEnd = start + text.length;
     this.handleSourceInput();
   },
+  toggleSourceComments() {
+    const editor = this.elements.sourceCode;
+    const source = editor.value;
+    const selectionStart = editor.selectionStart;
+    const selectionEnd = editor.selectionEnd;
+    const lineStart = selectionStart === 0
+      ? 0
+      : source.lastIndexOf("\n", selectionStart - 1) + 1;
+    const effectiveEnd = (
+      selectionEnd > selectionStart && source[selectionEnd - 1] === "\n"
+    ) ? selectionEnd - 1 : selectionEnd;
+    const nextLineBreak = source.indexOf("\n", effectiveEnd);
+    const lineEnd = nextLineBreak === -1 ? source.length : nextLineBreak;
+    const selectedSource = source.slice(lineStart, lineEnd);
+    const lines = selectedSource.split("\n");
+    const nonEmptyLines = lines.filter((line) => line.trim().length > 0);
+    const removeComments = (
+      nonEmptyLines.length > 0 &&
+      nonEmptyLines.every((line) => /^\s*#/.test(line))
+    );
+    const commentBlankLines = nonEmptyLines.length === 0;
+    const edits = [];
+    const updatedLines = lines.map((line) => {
+      if (!line.trim() && !commentBlankLines) {
+        edits.push({ at: 0, delta: 0 });
+        return line;
+      }
+      const indentation = line.match(/^\s*/)?.[0].length || 0;
+      if (removeComments) {
+        const match = line.slice(indentation).match(/^# ?/);
+        const removed = match ? match[0].length : 0;
+        edits.push({ at: indentation, delta: -removed });
+        return line.slice(0, indentation) + line.slice(indentation + removed);
+      }
+      edits.push({ at: indentation, delta: 2 });
+      return `${line.slice(0, indentation)}# ${line.slice(indentation)}`;
+    });
+    const updatedSource = updatedLines.join("\n");
+    const originalLineStarts = [];
+    const updatedLineStarts = [];
+    let originalOffset = 0;
+    let updatedOffset = 0;
+    lines.forEach((line, index) => {
+      originalLineStarts.push(originalOffset);
+      updatedLineStarts.push(updatedOffset);
+      originalOffset += line.length + (index < lines.length - 1 ? 1 : 0);
+      updatedOffset += updatedLines[index].length + (index < lines.length - 1 ? 1 : 0);
+    });
+    const lengthDelta = updatedSource.length - selectedSource.length;
+    const mapSelection = (position) => {
+      if (position <= lineStart) return position;
+      if (position >= lineEnd) return position + lengthDelta;
+      const relative = position - lineStart;
+      let lineIndex = originalLineStarts.length - 1;
+      while (lineIndex > 0 && originalLineStarts[lineIndex] > relative) {
+        lineIndex -= 1;
+      }
+      const column = relative - originalLineStarts[lineIndex];
+      const edit = edits[lineIndex];
+      let updatedColumn = column;
+      if (edit.delta > 0 && column >= edit.at) {
+        updatedColumn += edit.delta;
+      } else if (edit.delta < 0 && column > edit.at) {
+        updatedColumn = Math.max(edit.at, column + edit.delta);
+      }
+      return lineStart + updatedLineStarts[lineIndex] + updatedColumn;
+    };
+
+    this.captureSourceUndo("toggleComment");
+    editor.value = source.slice(0, lineStart) + updatedSource + source.slice(lineEnd);
+    editor.setSelectionRange(
+      mapSelection(selectionStart),
+      mapSelection(selectionEnd),
+    );
+    this.handleSourceInput();
+  },
   escapeHtml(value) {
     return String(value).replace(/[&<>"']/g, (ch) => ({
       "&": "&amp;",
@@ -1724,6 +1800,15 @@ App.ui = {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
         this.saveSourcePanel();
+        return;
+      }
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey &&
+        (e.key === "/" || e.code === "Slash")
+      ) {
+        e.preventDefault();
+        this.toggleSourceComments();
         return;
       }
       if (e.key === "Tab") {
