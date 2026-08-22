@@ -263,6 +263,7 @@ class AccountCache:
         self._repair_bitget_history_scopes(connection)
         self._repair_bitget_position_history(connection)
         self._repair_okx_history_scopes(connection)
+        self._reset_okx_position_cursors_for_missing_sizes(connection)
         self._repair_hyperliquid_history_scopes(connection)
         self._repair_hyperliquid_csv_fill_overlaps(connection)
         self._rebuild_binance_position_history(connection)
@@ -812,6 +813,35 @@ class AccountCache:
                         f"UPDATE {table} SET market_scope = ? WHERE rowid = ?",
                         (canonical_scope, int(preferred["storage_id"])),
                     )
+
+    @staticmethod
+    def _reset_okx_position_cursors_for_missing_sizes(
+        connection: sqlite3.Connection,
+    ) -> None:
+        cutoff = (datetime.now(UTC) - timedelta(days=90)).isoformat().replace(
+            "+00:00",
+            "Z",
+        )
+        cursor_keys: set[tuple[str, str]] = set()
+        for row in connection.execute(
+            """
+            SELECT account, market_scope, payload_json
+            FROM position_history
+            WHERE exchange = 'okx' AND source = 'native' AND closed_at >= ?
+            """,
+            (cutoff,),
+        ):
+            payload = _payload_object(row["payload_json"])
+            if payload.get("quantity") is None and payload.get("contracts") is None:
+                cursor_keys.add((str(row["account"]), str(row["market_scope"])))
+        connection.executemany(
+            """
+            DELETE FROM sync_cursors
+            WHERE account = ? AND exchange = 'okx'
+              AND stream = 'positions' AND market_scope = ?
+            """,
+            sorted(cursor_keys),
+        )
 
     @staticmethod
     def _repair_replaced_derived_position_history(

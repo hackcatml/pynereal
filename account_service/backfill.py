@@ -352,6 +352,7 @@ def normalize_historical_position(
     info = info if isinstance(info, dict) else {}
     symbol = str(position.get("symbol") or "").strip()
     side = str(position.get("side") or "").strip().lower()
+    identity_side = side
     if not symbol:
         return None
 
@@ -373,6 +374,13 @@ def normalize_historical_position(
         return None
 
     contracts = _number(position.get("contracts"))
+    identity_contracts = contracts
+    if exchange_id == "okx":
+        direction = str(info.get("direction") or "").strip().lower()
+        if side in {"", "net"} and direction in {"long", "short"}:
+            side = direction
+        if contracts is None:
+            contracts = _first_number(info, ("closeTotalPos",))
     contract_size = _number(position.get("contractSize"))
     quantity = contracts
     if contracts is not None and contract_size is not None:
@@ -396,12 +404,12 @@ def normalize_historical_position(
         market_scope,
         native_id,
         symbol,
-        side,
+        identity_side,
         opened_at,
         closed_at,
         position.get("entryPrice"),
         position.get("lastPrice"),
-        contracts,
+        identity_contracts,
     ]
     digest = hashlib.sha256(
         json.dumps(identity, ensure_ascii=True, default=str).encode("utf-8")
