@@ -959,6 +959,18 @@ body.source-open .source-panel {
   font-size: 16px;
 }
 
+.source-undo {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  font-size: 21px;
+}
+.source-undo svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+
 .source-save.dirty:not(:disabled) {
   border-color: rgba(78, 201, 176, 0.55);
   background: rgba(78, 201, 176, 0.14);
@@ -974,6 +986,55 @@ body.source-open .source-panel {
   min-height: 0;
   overflow: hidden;
   background: #0b0f14;
+}
+
+.source-diff-gutter {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 2;
+  width: 6px;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.source-diff-markers {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  will-change: transform;
+}
+
+.source-diff-marker {
+  position: absolute;
+  left: 0;
+  width: 3px;
+  min-height: 2px;
+}
+
+.source-diff-marker.added {
+  background: #2ea043;
+}
+
+.source-diff-marker.modified {
+  background: #1f6feb;
+}
+
+.source-diff-marker.deleted {
+  width: 0;
+  min-height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid #f85149;
+}
+
+.source-line-anchor {
+  display: inline-block;
+  width: 0;
+  height: 1em;
+  pointer-events: none;
 }
 
 .source-code,
@@ -1080,6 +1141,10 @@ body.source-open .source-panel {
   .source-panel-header {
     padding: 12px 14px;
     border-radius: 12px 12px 0 0;
+  }
+
+  .source-undo {
+    display: inline-flex;
   }
 
   .source-code {

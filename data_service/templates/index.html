@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Chart</title>
-  <link rel="stylesheet" href="/static/styles.css?v=3" />
+  <link rel="stylesheet" href="/static/styles.css?v=6" />
   <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.9/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
@@ -69,12 +69,22 @@
       </div>
       <div class="source-panel-actions">
         <span id="source-status" class="source-status"></span>
+        <button id="source-undo" class="source-action source-undo" title="Undo edit" aria-label="Undo edit" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 14 4 9l5-5" />
+            <path d="M4 9h11a5 5 0 0 1 0 10h-1" />
+          </svg>
+        </button>
         <button id="source-save" class="source-action source-save" title="Save script" aria-label="Save script" disabled>💾</button>
         <button id="source-close" class="source-action source-close" title="Close" aria-label="Close source panel">&times;</button>
       </div>
     </div>
     <div class="source-editor-wrap">
-      <pre id="source-highlight" class="source-code source-highlight" aria-hidden="true">No source loaded.</pre>
+      <pre id="source-highlight" class="source-code source-highlight" aria-hidden="true" inert>No source loaded.</pre>
+      <div id="source-diff-gutter" class="source-diff-gutter" aria-hidden="true" inert>
+        <div id="source-diff-markers" class="source-diff-markers"></div>
+      </div>
       <textarea id="source-code" class="source-editor" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="soft">No source loaded.</textarea>
     </div>
   </aside>
@@ -154,7 +164,7 @@
   </section>
   <!--RUNTIME_CONFIG-->
   <script src="/static/state.js?v=2"></script>
-  <script src="/static/ui.js?v=2"></script>
+  <script src="/static/ui.js?v=4"></script>
   <script src="/static/bgcolor.js?v=2"></script>
   <script src="/static/chart.js?v=3"></script>
   <script src="/static/measure.js"></script>

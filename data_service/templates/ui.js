@@ -40,11 +40,14 @@ App.ui = {
     sourcePanel: document.getElementById("source-panel"),
     sourceBackdrop: document.getElementById("source-backdrop"),
     sourceClose: document.getElementById("source-close"),
+    sourceUndo: document.getElementById("source-undo"),
     sourceSave: document.getElementById("source-save"),
     sourceResizeHandle: document.getElementById("source-resize-handle"),
     sourcePanelName: document.getElementById("source-panel-name"),
     sourceStatus: document.getElementById("source-status"),
     sourceHighlight: document.getElementById("source-highlight"),
+    sourceDiffGutter: document.getElementById("source-diff-gutter"),
+    sourceDiffMarkers: document.getElementById("source-diff-markers"),
     sourceCode: document.getElementById("source-code")
   },
   manualAlertDragState: null,
@@ -53,6 +56,12 @@ App.ui = {
   manualAlertTriggerSyncTimer: null,
   manualAlertArmedInputDirty: false,
   activeTemplatePlaceholder: null,
+  sourceDiffTimer: null,
+  sourceUndoStack: [],
+  sourceUndoInputType: "",
+  sourceUndoCapturedAt: 0,
+  sourceApplyingUndo: false,
+  sourceComposing: false,
   setChartInfo(ohlcvText = null) {
     const state = App.state;
     const baseLine = ohlcvText
@@ -913,20 +922,315 @@ App.ui = {
     this.elements.sourcePanelName.textContent = name;
     if (!state.sourceDirty) {
       this.elements.sourceCode.value = source;
+      this.resetSourceUndo();
     }
     this.renderSourceHighlight();
     this.updateSourceSaveState();
   },
   renderSourceHighlight() {
     const source = this.elements.sourceCode.value || "No source loaded.";
-    this.elements.sourceHighlight.innerHTML = this.highlightPython(source);
+    let lineIndex = 0;
+    const highlighted = this.highlightPython(source).replace(/\n/g, () => {
+      lineIndex += 1;
+      return `\n<span class="source-line-anchor" data-line="${lineIndex}"></span>`;
+    });
+    this.elements.sourceHighlight.innerHTML =
+      `<span class="source-line-anchor" data-line="0"></span>${highlighted}`;
     this.syncSourceScroll();
+    this.scheduleSourceDiff();
   },
   syncSourceScroll() {
     const editor = this.elements.sourceCode;
     const highlight = this.elements.sourceHighlight;
     highlight.scrollTop = editor.scrollTop;
     highlight.scrollLeft = editor.scrollLeft;
+    this.syncSourceDiffScroll();
+  },
+  syncSourceDiffScroll() {
+    const markers = this.elements.sourceDiffMarkers;
+    const editor = this.elements.sourceCode;
+    if (!markers || !editor) return;
+    markers.style.transform = `translateY(${-editor.scrollTop}px)`;
+  },
+  clearSourceDiff() {
+    if (this.sourceDiffTimer !== null) {
+      clearTimeout(this.sourceDiffTimer);
+      this.sourceDiffTimer = null;
+    }
+    if (this.elements.sourceDiffMarkers) {
+      this.elements.sourceDiffMarkers.replaceChildren();
+      this.syncSourceDiffScroll();
+    }
+  },
+  scheduleSourceDiff() {
+    if (!App.state.sourceDirty) {
+      this.clearSourceDiff();
+      return;
+    }
+    if (this.sourceDiffTimer !== null) {
+      clearTimeout(this.sourceDiffTimer);
+    }
+    this.sourceDiffTimer = setTimeout(() => {
+      this.sourceDiffTimer = null;
+      requestAnimationFrame(() => this.renderSourceDiff());
+    }, 100);
+  },
+  sourceLineDiffOperations(before, after) {
+    const oldLines = String(before ?? "").replace(/\r\n?/g, "\n").split("\n");
+    const newLines = String(after ?? "").replace(/\r\n?/g, "\n").split("\n");
+    let prefix = 0;
+    while (
+      prefix < oldLines.length &&
+      prefix < newLines.length &&
+      oldLines[prefix] === newLines[prefix]
+    ) {
+      prefix += 1;
+    }
+
+    let suffix = 0;
+    while (
+      suffix < oldLines.length - prefix &&
+      suffix < newLines.length - prefix &&
+      oldLines[oldLines.length - suffix - 1] === newLines[newLines.length - suffix - 1]
+    ) {
+      suffix += 1;
+    }
+
+    const operations = Array(prefix).fill("equal");
+    const oldMiddle = oldLines.slice(prefix, oldLines.length - suffix);
+    const newMiddle = newLines.slice(prefix, newLines.length - suffix);
+    operations.push(...this.sourceLineMyersDiff(oldMiddle, newMiddle));
+    operations.push(...Array(suffix).fill("equal"));
+    return { operations, lineCount: newLines.length };
+  },
+  sourceLineMyersDiff(oldLines, newLines) {
+    if (!oldLines.length) return Array(newLines.length).fill("insert");
+    if (!newLines.length) return Array(oldLines.length).fill("delete");
+
+    const oldCount = oldLines.length;
+    const newCount = newLines.length;
+    const frontier = new Map([[1, 0]]);
+    const trace = [];
+    const maxDistance = Math.min(oldCount + newCount, 600);
+
+    for (let distance = 0; distance <= maxDistance; distance += 1) {
+      trace.push(new Map(frontier));
+      for (let diagonal = -distance; diagonal <= distance; diagonal += 2) {
+        const left = frontier.get(diagonal - 1) ?? Number.NEGATIVE_INFINITY;
+        const down = frontier.get(diagonal + 1) ?? Number.NEGATIVE_INFINITY;
+        let oldIndex;
+        if (diagonal === -distance || (diagonal !== distance && left < down)) {
+          oldIndex = Number.isFinite(down) ? down : 0;
+        } else {
+          oldIndex = (Number.isFinite(left) ? left : 0) + 1;
+        }
+        let newIndex = oldIndex - diagonal;
+        while (
+          oldIndex < oldCount &&
+          newIndex < newCount &&
+          oldLines[oldIndex] === newLines[newIndex]
+        ) {
+          oldIndex += 1;
+          newIndex += 1;
+        }
+        frontier.set(diagonal, oldIndex);
+        if (oldIndex >= oldCount && newIndex >= newCount) {
+          return this.backtrackSourceLineDiff(trace, oldLines, newLines);
+        }
+      }
+    }
+
+    return [
+      ...Array(oldCount).fill("delete"),
+      ...Array(newCount).fill("insert")
+    ];
+  },
+  backtrackSourceLineDiff(trace, oldLines, newLines) {
+    const operations = [];
+    let oldIndex = oldLines.length;
+    let newIndex = newLines.length;
+
+    for (let distance = trace.length - 1; distance >= 0; distance -= 1) {
+      const frontier = trace[distance];
+      const diagonal = oldIndex - newIndex;
+      const left = frontier.get(diagonal - 1) ?? Number.NEGATIVE_INFINITY;
+      const down = frontier.get(diagonal + 1) ?? Number.NEGATIVE_INFINITY;
+      const previousDiagonal = (
+        diagonal === -distance || (diagonal !== distance && left < down)
+      ) ? diagonal + 1 : diagonal - 1;
+      const previousOldIndex = frontier.get(previousDiagonal) ?? 0;
+      const previousNewIndex = previousOldIndex - previousDiagonal;
+
+      while (oldIndex > previousOldIndex && newIndex > previousNewIndex) {
+        operations.push("equal");
+        oldIndex -= 1;
+        newIndex -= 1;
+      }
+      if (distance === 0) break;
+      if (oldIndex === previousOldIndex) {
+        operations.push("insert");
+        newIndex -= 1;
+      } else {
+        operations.push("delete");
+        oldIndex -= 1;
+      }
+    }
+    return operations.reverse();
+  },
+  sourceDiffMarkers(before, after) {
+    const { operations, lineCount } = this.sourceLineDiffOperations(before, after);
+    const lines = new Map();
+    const deletions = new Set();
+    let currentLine = 0;
+    let index = 0;
+
+    while (index < operations.length) {
+      if (operations[index] === "equal") {
+        currentLine += 1;
+        index += 1;
+        continue;
+      }
+
+      const insertedLines = [];
+      let deletedCount = 0;
+      while (index < operations.length && operations[index] !== "equal") {
+        if (operations[index] === "insert") {
+          insertedLines.push(currentLine);
+          currentLine += 1;
+        } else {
+          deletedCount += 1;
+        }
+        index += 1;
+      }
+
+      const modifiedCount = Math.min(deletedCount, insertedLines.length);
+      insertedLines.forEach((line, insertedIndex) => {
+        lines.set(line, insertedIndex < modifiedCount ? "modified" : "added");
+      });
+      if (deletedCount > modifiedCount) {
+        deletions.add(Math.max(0, Math.min(currentLine, lineCount - 1)));
+      }
+    }
+    return { lines, deletions };
+  },
+  renderSourceDiff() {
+    const state = App.state;
+    const markers = this.elements.sourceDiffMarkers;
+    const highlight = this.elements.sourceHighlight;
+    if (!markers || !highlight || !state.scriptSourceLoaded || !state.sourceDirty) {
+      this.clearSourceDiff();
+      return;
+    }
+
+    const current = this.elements.sourceCode.value;
+    if (current === state.scriptSource) {
+      this.clearSourceDiff();
+      return;
+    }
+
+    const changes = this.sourceDiffMarkers(state.scriptSource, current);
+    const anchors = highlight.querySelectorAll(".source-line-anchor");
+    const highlightRect = highlight.getBoundingClientRect();
+    const lineHeight = parseFloat(getComputedStyle(highlight).lineHeight) || 18;
+    const topCache = new Map();
+    const lineTop = (line) => {
+      const clamped = Math.max(0, Math.min(line, anchors.length - 1));
+      if (topCache.has(clamped)) return topCache.get(clamped);
+      const anchor = anchors[clamped];
+      const top = anchor
+        ? anchor.getBoundingClientRect().top - highlightRect.top + highlight.scrollTop
+        : 0;
+      topCache.set(clamped, top);
+      return top;
+    };
+    const fragment = document.createDocumentFragment();
+
+    [...changes.lines.entries()].sort((a, b) => a[0] - b[0]).forEach(([line, type]) => {
+      const marker = document.createElement("span");
+      const top = lineTop(line);
+      const nextTop = line + 1 < anchors.length ? lineTop(line + 1) : top + lineHeight;
+      marker.className = `source-diff-marker ${type}`;
+      marker.style.top = `${top}px`;
+      marker.style.height = `${Math.max(2, nextTop - top)}px`;
+      fragment.appendChild(marker);
+    });
+
+    [...changes.deletions].sort((a, b) => a - b).forEach((line) => {
+      const marker = document.createElement("span");
+      marker.className = "source-diff-marker deleted";
+      marker.style.top = `${lineTop(line)}px`;
+      fragment.appendChild(marker);
+    });
+
+    markers.replaceChildren(fragment);
+    this.syncSourceDiffScroll();
+  },
+  resetSourceUndo() {
+    this.sourceUndoStack = [];
+    this.sourceUndoInputType = "";
+    this.sourceUndoCapturedAt = 0;
+    this.updateSourceUndoState();
+  },
+  updateSourceUndoState() {
+    const button = this.elements.sourceUndo;
+    if (!button) return;
+    button.disabled = !App.state.sourceDirty || this.sourceUndoStack.length === 0;
+  },
+  captureSourceUndo(inputType = "") {
+    if (inputType === "historyUndo" || inputType === "historyRedo") {
+      this.resetSourceUndo();
+      return;
+    }
+    if (
+      this.sourceApplyingUndo ||
+      this.sourceComposing
+    ) {
+      return;
+    }
+    const editor = this.elements.sourceCode;
+    const now = Date.now();
+    const groupedTypes = new Set([
+      "insertText",
+      "insertCompositionText",
+      "deleteContentBackward",
+      "deleteContentForward"
+    ]);
+    const shouldGroup = (
+      groupedTypes.has(inputType) &&
+      inputType === this.sourceUndoInputType &&
+      now - this.sourceUndoCapturedAt < 700
+    );
+    if (!shouldGroup) {
+      this.sourceUndoStack.push({
+        value: editor.value,
+        selectionStart: editor.selectionStart,
+        selectionEnd: editor.selectionEnd
+      });
+      if (this.sourceUndoStack.length > 100) {
+        this.sourceUndoStack.shift();
+      }
+    }
+    this.sourceUndoInputType = inputType;
+    this.sourceUndoCapturedAt = now;
+  },
+  undoSourceEdit() {
+    const editor = this.elements.sourceCode;
+    const snapshot = this.sourceUndoStack.pop();
+    if (!snapshot) return;
+
+    this.sourceApplyingUndo = true;
+    editor.value = snapshot.value;
+    editor.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
+    this.handleSourceInput();
+    this.sourceApplyingUndo = false;
+    this.sourceUndoInputType = "";
+    this.sourceUndoCapturedAt = 0;
+    if (App.state.sourceDirty) {
+      this.updateSourceUndoState();
+    } else {
+      this.resetSourceUndo();
+    }
+    editor.focus({ preventScroll: true });
   },
   updateSourceSaveState() {
     const state = App.state;
@@ -934,6 +1238,7 @@ App.ui = {
     this.elements.sourceSave.classList.toggle("dirty", state.sourceDirty);
     this.elements.sourceSave.classList.toggle("saving", state.sourceSaving);
     this.elements.sourceStatus.textContent = state.sourceSaving ? "Saving..." : (state.sourceSaveStatus || "");
+    this.updateSourceUndoState();
   },
   handleSourceInput() {
     const state = App.state;
@@ -956,6 +1261,7 @@ App.ui = {
     if (result && result.ok) {
       state.sourceSaveStatus = "Saved";
       this.elements.sourceCode.value = state.scriptSource;
+      this.resetSourceUndo();
       this.renderSourceHighlight();
       this.updateSourceSaveState();
       setTimeout(() => {
@@ -975,6 +1281,7 @@ App.ui = {
     const editor = this.elements.sourceCode;
     const start = editor.selectionStart;
     const end = editor.selectionEnd;
+    this.captureSourceUndo("insertText");
     editor.value = editor.value.slice(0, start) + text + editor.value.slice(end);
     editor.selectionStart = start + text.length;
     editor.selectionEnd = start + text.length;
@@ -1153,6 +1460,7 @@ App.ui = {
     const { min, max } = this.getSourcePaneBounds();
     const clamped = Math.max(min, Math.min(max, Math.round(width)));
     document.documentElement.style.setProperty("--source-pane-width", `${clamped}px`);
+    this.scheduleSourceDiff();
     if (App.chart && App.chart.resizeToContainer) {
       requestAnimationFrame(() => App.chart.resizeToContainer());
     }
@@ -1202,6 +1510,7 @@ App.ui = {
 
     window.addEventListener("resize", () => {
       if (window.matchMedia("(max-width: 640px), (hover: none) and (pointer: coarse)").matches) {
+        this.scheduleSourceDiff();
         return;
       }
       const panelWidth = this.elements.sourcePanel.getBoundingClientRect().width;
@@ -1240,6 +1549,7 @@ App.ui = {
       sourceToggle,
       sourceBackdrop,
       sourceClose,
+      sourceUndo,
       sourceSave,
       sourceCode
     } = this.elements;
@@ -1379,8 +1689,27 @@ App.ui = {
       this.toggleSourcePanel(false);
     });
 
+    sourceUndo.addEventListener("click", () => {
+      this.undoSourceEdit();
+    });
+
     sourceSave.addEventListener("click", () => {
       this.saveSourcePanel();
+    });
+
+    sourceCode.addEventListener("beforeinput", (e) => {
+      this.captureSourceUndo(e.inputType || "");
+    });
+
+    sourceCode.addEventListener("compositionstart", () => {
+      this.captureSourceUndo("insertCompositionText");
+      this.sourceComposing = true;
+    });
+
+    sourceCode.addEventListener("compositionend", () => {
+      this.sourceComposing = false;
+      this.sourceUndoInputType = "insertCompositionText";
+      this.sourceUndoCapturedAt = Date.now();
     });
 
     sourceCode.addEventListener("input", () => {
