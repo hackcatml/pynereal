@@ -4334,6 +4334,12 @@ tr:last-child td { border-bottom: none; }
   width: 13px;
   height: 13px;
 }
+/* webhook/telegram gear icons: match the 13px data-column icons */
+[data-act="webhook-settings"] .icon,
+[data-act="telegram-settings"] .icon {
+  width: 13px;
+  height: 13px;
+}
 #script-refresh.btn-icon {
   display: inline-flex;
   align-items: center;

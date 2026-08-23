@@ -7359,6 +7359,13 @@
     wrap.classList.toggle("show-since", show);
   }
 
+  // gear/cog line icon (matches the pencil/magnifier .icon line-icon style)
+  const settingsGearIcon =
+    `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">`
+    + `<circle cx="12" cy="12" r="3"></circle>`
+    + `<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>`
+    + `</svg>`;
+
   function createSessionRow(id) {
     const tr = document.createElement("tr");
     tr.dataset.sessionId = id;
@@ -7401,10 +7408,7 @@
           `<span data-field="data-since-popover" class="data-since-popover"></span></span>` +
         `<button class="btn btn-icon data-edit-btn" data-act="data-edit" ` +
         `title="Data settings" aria-label="Data settings">` +
-          `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">` +
-            `<path d="M12 20h9"></path>` +
-            `<path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path>` +
-          `</svg>` +
+          settingsGearIcon +
         `</button>` +
         `<button class="btn btn-icon data-integrity-btn" data-act="data-integrity" ` +
         `title="Verify OHLCV data" aria-label="Verify OHLCV data">` +
@@ -7418,10 +7422,10 @@
       `<td data-label="Last bar" class="muted">${lastBarCell({})}</td>` +
       `<td data-label="Webhook"><span class="cell-inline">` +
         `<input type="checkbox" data-act="webhook">` +
-        `<button class="btn btn-icon" data-act="webhook-settings" title="Webhook URL">&#9881;</button></span></td>` +
+        `<button class="btn btn-icon" data-act="webhook-settings" title="Webhook URL">` + settingsGearIcon + `</button></span></td>` +
       `<td data-label="Telegram"><span class="cell-inline">` +
         `<input type="checkbox" data-act="telegram">` +
-        `<button class="btn btn-icon" data-act="telegram-settings" title="Telegram bot">&#9881;</button></span></td>` +
+        `<button class="btn btn-icon" data-act="telegram-settings" title="Telegram bot">` + settingsGearIcon + `</button></span></td>` +
       `<td data-label="Runner" class="runner-cell" data-field="runner-cell"></td>` +
       `<td data-label="Chart"><a data-field="chart-link" class="btn btn-chart" target="_blank">Open</a></td>` +
       `<td data-label="Remove"><button class="btn btn-danger btn-icon" data-act="delete" title="Delete session">&times;</button></td>`;
