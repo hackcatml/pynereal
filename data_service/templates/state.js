@@ -17,6 +17,8 @@ window.App.config = {
 window.App.state = {
   ws: null,
   runnerConnected: false,
+  runnerPhase: "stopped",
+  nextPrerunAt: null,
   initialLoadInProgress: false,
   initialLoadDone: false,
   // bumped by resetChartState so an in-flight loadInitialWithRetry started

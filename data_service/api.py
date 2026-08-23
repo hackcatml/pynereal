@@ -430,6 +430,8 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
         rt = _rt(session_id)
         if rt is None:
             return JSONResponse([], status_code=404)
+        if rt.runner_phase == "prerun_active":
+            return JSONResponse({"status": "warming_up"}, status_code=409)
         plot_options = rt.plot_options
         plot_path = rt.paths.plot_path
         ohlcv_path = rt.ohlcv_path
@@ -545,6 +547,9 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
             "script_title": script_title,
             "script_source_name": script_source_name,
             "has_script_source": has_script_source,
+            "runner_connected": rt.runner_count > 0,
+            "runner_phase": rt.runner_phase,
+            "next_prerun_at": rt.next_prerun_at,
         })
 
     @r.get("/api/{session_id}/script-source")
@@ -1699,6 +1704,32 @@ def build_control_router(
         except Exception as e:
             return JSONResponse({"error": f"failed to update history_since: {e}"}, status_code=500)
         return JSONResponse({"ok": True, "history_since": value})
+
+    @r.patch("/api/sessions/{session_id}/prerun-schedule")
+    async def update_prerun_schedule(
+        session_id: str,
+        payload: dict = Body(default_factory=dict),
+    ) -> JSONResponse:
+        try:
+            spec = await registry.update_prerun_schedule(
+                session_id,
+                payload.get("mode", "auto"),
+                payload.get("offset_seconds"),
+            )
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except SessionNotFoundError:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        except Exception as e:
+            return JSONResponse(
+                {"error": f"failed to update warm-up schedule: {e}"},
+                status_code=500,
+            )
+        return JSONResponse({
+            "ok": True,
+            "mode": spec.prerun_mode,
+            "offset_seconds": spec.prerun_offset_seconds,
+        })
 
     @r.patch("/api/sessions/{session_id}/script")
     async def update_session_script(

@@ -10,6 +10,7 @@ from typing import Awaitable, Callable, Dict, List, Optional
 from config import MAX_SESSIONS, FeedSpec, SessionSpec, save_sessions
 from collector_loop import fix_missing_bars_loop, watch_trades_loop
 from file_update_loop import _to_thread_cancel_safe, file_update_loop
+from prerun_scheduler import assign_prerun_offsets
 from runner_supervisor import RunnerSupervisor
 from runtime import Feed, Session
 from tv_logos import TradingViewLogoResolver
@@ -84,6 +85,25 @@ class SessionRegistry:
             out.append(snap)
         return out
 
+    def _rebalance_prerun_schedule(self) -> None:
+        assignments = assign_prerun_offsets(
+            session.spec for session in self.sessions.values()
+        )
+        for session_id, assignment in assignments.items():
+            session = self.sessions.get(session_id)
+            if session is not None:
+                session.set_prerun_assignment(
+                    assignment.offset_seconds,
+                    assignment.duplicate,
+                )
+        for feed in self.feeds.values():
+            offsets = [
+                session.prerun_effective_offset_seconds
+                for session in feed.subscribers.values()
+            ]
+            if offsets:
+                feed.prerun_prepare_offset_seconds = min(offsets)
+
     def retry_missing_symbol_logos(self) -> None:
         """Retry logo resolution when a dashboard reconnects after an earlier miss."""
         for session in list(self.sessions.values()):
@@ -148,6 +168,7 @@ class SessionRegistry:
                     toml_path=feed.paths.toml_path,
                     state=feed.state,
                     emit_event=feed.emit_event,
+                    get_prerun_offset_seconds=lambda: feed.prerun_prepare_offset_seconds,
                     history_ready_event=history_ready_event,
                 )
                 return
@@ -280,6 +301,7 @@ class SessionRegistry:
         session.on_ai_instruction = self.ai_instruction_handler
         feed.subscribers[spec.id] = session
         self.sessions[spec.id] = session
+        self._rebalance_prerun_schedule()
         self._schedule_logo_resolution(session)
         if persist:
             self._persist()
@@ -299,6 +321,7 @@ class SessionRegistry:
         feed = session.feed
         feed.subscribers.pop(session_id, None)
         del self.sessions[session_id]
+        self._rebalance_prerun_schedule()
         await self._teardown_feed_if_idle(feed)
         if cleanup_output:
             # Remove this session's output dir (plot.csv / script_hash.csv / runner.log).
@@ -317,10 +340,12 @@ class SessionRegistry:
 
         previous_sessions = self.sessions
         self.sessions = {session_id: previous_sessions[session_id] for session_id in session_ids}
+        self._rebalance_prerun_schedule()
         try:
             self._persist()
         except Exception:
             self.sessions = previous_sessions
+            self._rebalance_prerun_schedule()
             raise
         await self.notify_hub()
         return self.snapshots()
@@ -375,6 +400,31 @@ class SessionRegistry:
         await session.push_webhook_config()
         await self.notify_hub()
         return dict(session.spec.webhook)
+
+    async def update_prerun_schedule(
+        self,
+        session_id: str,
+        mode: object,
+        offset_seconds: object = None,
+    ) -> SessionSpec:
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise SessionNotFoundError(session_id)
+
+        previous_specs = {key: value.spec for key, value in self.sessions.items()}
+        session.spec = session.spec.with_prerun_schedule(mode, offset_seconds)
+        self._rebalance_prerun_schedule()
+        try:
+            self._persist()
+        except Exception:
+            for key, spec in previous_specs.items():
+                current = self.sessions.get(key)
+                if current is not None:
+                    current.spec = spec
+            self._rebalance_prerun_schedule()
+            raise
+        await self.notify_hub()
+        return session.spec
 
     async def update_history_since(self, session_id: str, history_since: str) -> None:
         session = self.sessions.get(session_id)

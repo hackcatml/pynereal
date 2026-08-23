@@ -334,14 +334,24 @@ App.data = {
     const collections = App.collections;
     const chart = App.chart;
     if (!state.runnerConnected || generation !== state.loadGeneration) return;
-    for (let i = 0; i < 30; i++) {
+    const warmupDeadline = Date.now() + 5 * 60 * 1000;
+    let attempts = 0;
+    while (attempts < 30 && Date.now() < warmupDeadline) {
       if (generation !== state.loadGeneration) return;
       try {
         const resp = await fetch(`${App.config.apiBase}/plot?limit=100000`);
+        if (resp.status === 409) {
+          await App.util.sleep(1000);
+          continue;
+        }
         const plots = await resp.json();
+        attempts += 1;
         if (generation !== state.loadGeneration) return;
 
-        if (Array.isArray(plots) && plots.length > 0) {
+        const hasHistoricalData = Array.isArray(plots) && plots.some(
+          plot => Array.isArray(plot && plot.data) && plot.data.length > 0
+        );
+        if (hasHistoricalData) {
           const pendingSeriesData = [];
           plots.forEach(plot => {
             const seriesData = [];
@@ -370,6 +380,7 @@ App.data = {
           return;
         }
       } catch (e) {
+        attempts += 1;
         // Ignore and retry
       }
       await App.util.sleep(1000);
@@ -510,12 +521,17 @@ App.data = {
       if (info.script_source_name != null) {
         state.scriptSourceName = info.script_source_name || "";
       }
-      state.baseInfoTop = `<span class="info-main">${symbol} | ${timeframe} | ${exchange}</span>`;
-      state.baseInfoText = state.baseInfoTop;
+      state.runnerConnected = Boolean(info.runner_connected);
+      state.runnerPhase = info.runner_phase || (state.runnerConnected ? "running" : "stopped");
+      state.nextPrerunAt = Number.isFinite(Number(info.next_prerun_at))
+        ? Number(info.next_prerun_at)
+        : null;
+      state.baseInfoTop = `${symbol} | ${timeframe} | ${exchange}`;
+      state.baseInfoText = "";
       App.ui.setChartInfo();
     } catch (e) {
-      state.baseInfoTop = "<span class=\"info-main\">Unknown | Unknown | Unknown</span>";
-      state.baseInfoText = state.baseInfoTop;
+      state.baseInfoTop = "Unknown | Unknown | Unknown";
+      state.baseInfoText = "";
       App.ui.setChartInfo();
     }
   },
