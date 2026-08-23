@@ -27,6 +27,27 @@ PY
     done | LC_ALL=C sort -u | tail -n 1 | cut -f2-
 }
 
+_setup_ai_cli_tools() {
+  [ "$(uname -s)" = "Linux" ] || return 0
+  command -v apt-get >/dev/null 2>&1 || return 0
+  command -v rg >/dev/null 2>&1 && return 0
+
+  local sudo_cmd=""
+  if [ "$(id -u)" != "0" ]; then
+    if command -v sudo >/dev/null 2>&1; then
+      sudo_cmd="sudo"
+    else
+      echo "[setup] no root access; skipping ripgrep installation" >&2
+      return 0
+    fi
+  fi
+
+  echo "[setup] installing ripgrep for AI source inspection"
+  $sudo_cmd apt-get install -y ripgrep \
+    || { $sudo_cmd apt-get update && $sudo_cmd apt-get install -y ripgrep; } \
+    || echo "[setup] ripgrep install failed; AI will use slower fallback search tools" >&2
+}
+
 # The dashboard AI runs commands through Codex's bubblewrap sandbox. Ubuntu
 # 24.04+ (and 23.10 with the option enabled) blocks unprivileged user
 # namespaces via AppArmor, which fails every AI command with
@@ -201,11 +222,12 @@ _setup_main() {
   python -m pip install -e ".[all]" || return 1
   python -m pip install -r requirements-runtime.txt || return 1
 
+  _setup_ai_cli_tools
   _setup_ai_sandbox
   _setup_ai_chart_capture
 }
 
 _setup_main "$@"
 _setup_status=$?
-unset -f _find_python _setup_main _setup_ai_sandbox _setup_ai_chart_capture 2>/dev/null || true
+unset -f _find_python _setup_main _setup_ai_cli_tools _setup_ai_sandbox _setup_ai_chart_capture 2>/dev/null || true
 return "$_setup_status" 2>/dev/null || exit "$_setup_status"

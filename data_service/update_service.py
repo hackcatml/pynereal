@@ -47,7 +47,12 @@ def write_update_state(path: Path, **values: Any) -> None:
 
 class UpdateService:
     _CONFIRM_TTL_SECONDS = 120
-    _DEPENDENCY_FILES = frozenset({"pyproject.toml", "requirements-runtime.txt"})
+    _PYTHON_DEPENDENCY_FILES = frozenset({
+        "pyproject.toml",
+        "requirements-runtime.txt",
+    })
+    _HOST_TOOL_FILES = frozenset({"setup.sh"})
+    _DEPENDENCY_FILES = _PYTHON_DEPENDENCY_FILES | _HOST_TOOL_FILES
 
     def __init__(
         self,
@@ -279,7 +284,7 @@ class UpdateService:
                     write_update_state(
                         self.state_path,
                         status="updating",
-                        message="Installing Python dependencies",
+                        message="Installing dependencies",
                     )
                     self._install_target_dependencies(str(request["target_sha"]))
                     request["dependencies_synced"] = True
@@ -339,33 +344,44 @@ class UpdateService:
         if not self.pending_restart():
             return False
         request = read_update_state(self.request_path)
+        changed_files = request.get("changed_files", [])
         if request.get("dependencies_synced") or not self._dependency_sync_required(
-            request.get("changed_files", [])
+            changed_files
         ):
             return False
+        python_dependencies_changed = self._python_dependency_sync_required(
+            changed_files
+        )
         try:
             write_update_state(
                 self.state_path,
                 status="restarting",
-                message="Installing Python dependencies",
+                message="Installing dependencies",
             )
-            self._install_current_dependencies()
+            if python_dependencies_changed:
+                self._install_current_dependencies()
+            else:
+                self._install_ai_host_tools()
             request["dependencies_synced"] = True
             _write_json_atomic(self.request_path, request)
             write_update_state(
                 self.state_path,
                 status="restarting",
-                message="Restarting data service",
+                message=(
+                    "Restarting data service"
+                    if python_dependencies_changed
+                    else "Starting data service"
+                ),
             )
         except Exception as exc:
             write_update_state(
                 self.state_path,
                 status="failed",
-                message="Python dependency installation failed.",
+                message="Dependency installation failed.",
                 error=str(exc),
             )
             raise
-        return True
+        return python_dependencies_changed
 
     def restart_after_legacy_dependency_sync(self) -> None:
         request = read_update_state(self.request_path)
@@ -446,6 +462,12 @@ class UpdateService:
     def _dependency_sync_required(cls, changed_files: Any) -> bool:
         return any(str(path) in cls._DEPENDENCY_FILES for path in changed_files)
 
+    @classmethod
+    def _python_dependency_sync_required(cls, changed_files: Any) -> bool:
+        return any(
+            str(path) in cls._PYTHON_DEPENDENCY_FILES for path in changed_files
+        )
+
     @staticmethod
     def _runtime_requirements(text: str) -> list[str]:
         return [
@@ -490,6 +512,48 @@ class UpdateService:
                 or f"Python dependency installation failed with exit code {completed.returncode}"
             )
 
+    def _install_ai_host_tools(self) -> None:
+        if not sys.platform.startswith("linux") or shutil.which("apt-get") is None:
+            return
+        if shutil.which("rg") is not None:
+            return
+
+        prefix: list[str] = []
+        if os.geteuid() != 0:
+            sudo = shutil.which("sudo")
+            if sudo is None:
+                print(
+                    "[update] ripgrep install skipped: root access is unavailable",
+                    file=sys.stderr,
+                )
+                return
+            prefix = [sudo, "-n"]
+
+        def run_apt(*arguments: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [*prefix, "apt-get", *arguments],
+                cwd=self.repo_root,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=300,
+            )
+
+        completed = run_apt("install", "-y", "ripgrep")
+        if completed.returncode != 0:
+            refreshed = run_apt("update")
+            if refreshed.returncode == 0:
+                completed = run_apt("install", "-y", "ripgrep")
+        if completed.returncode != 0:
+            detail = completed.stdout.strip()
+            print(
+                "[update] ripgrep install failed; AI will use fallback search tools"
+                + (f": {detail[-1000:]}" if detail else ""),
+                file=sys.stderr,
+            )
+            return
+        print("[update] installed ripgrep for AI source inspection")
+
     def _install_target_dependencies(self, target_sha: str) -> None:
         requirements = self._project_requirements(
             self._git("show", f"{target_sha}:pyproject.toml")
@@ -500,6 +564,7 @@ class UpdateService:
             )
         )
         self._install_requirements(requirements)
+        self._install_ai_host_tools()
 
     def _install_current_dependencies(self) -> None:
         requirements = self._project_requirements(
@@ -511,6 +576,7 @@ class UpdateService:
             )
         )
         self._install_requirements(requirements)
+        self._install_ai_host_tools()
 
     def _git(self, *args: str, timeout: float = 60) -> str:
         completed = subprocess.run(
