@@ -53,6 +53,7 @@ body.source-open #chart {
 #chart-info-line {
   display: block;
   min-height: 20px;
+  line-height: 20px;
   white-space: normal;
 }
 .chart-info-separator.hidden,
@@ -62,13 +63,43 @@ body.source-open #chart {
 .chart-info-separator {
   color: rgba(0, 0, 0, 0.42);
 }
+#chart-info .info-main,
+#chart-info .info-ohlcv,
+.chart-info-separator {
+  line-height: inherit;
+  vertical-align: middle;
+}
+/* thin vertical rule between coin | tf | exchange | ohlcv — centered on the text
+   optical middle (a text "|" glyph sits slightly low) */
+.chart-info-sep {
+  display: inline-block;
+  width: 1px;
+  height: 0.82em;
+  margin: 0 7px;
+  background: rgba(0, 0, 0, 0.32);
+  vertical-align: middle;
+  transform: translateY(-0.06em);
+}
+/* coin | tf | exchange dividers are bolder, matching the old bold "|" glyph */
+.chart-info-sep-strong {
+  width: 2px;
+  height: 0.75em;   /* 16px context → ~12px, matches the cap height */
+  background: rgba(0, 0, 0, 0.5);
+}
+/* the ohlcv divider is in the smaller 14px line context — grow it to the same
+   ~12px so it also matches the letter height, and nudge it down so its vertical
+   center lines up with the 16px base dividers */
+#chart-info-separator.chart-info-sep {
+  height: 0.86em;
+  transform: translateY(0.02em);
+}
 .chart-runner-status {
   position: relative;
   display: inline-grid;
   place-items: center;
   width: 16px;
   height: 20px;
-  margin: 0 1px;
+  margin: 0 6px 0 1px;
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -77,6 +108,11 @@ body.source-open #chart {
   cursor: pointer;
   touch-action: manipulation;
   vertical-align: middle;
+}
+/* when the ohlcv divider is hidden, the LED sits right after the exchange —
+   give it a left gap (the divider's margin normally provides this) */
+#chart-info-separator.hidden + #chart-runner-status {
+  margin-left: 7px;
 }
 .chart-runner-status:focus-visible {
   outline: 2px solid rgba(0, 122, 255, 0.72);
@@ -90,9 +126,10 @@ body.source-open #chart {
   background: #22a06b;
   box-shadow: 0 0 0 3px rgba(34, 160, 107, 0.14);
   animation: chart-runner-pulse 1.8s ease-in-out infinite;
-  transform: translateY(-1px);
 }
 .chart-runner-status.warming .chart-runner-led {
+  background: #e0a300;
+  box-shadow: 0 0 0 3px rgba(224, 163, 0, 0.18);
   animation-duration: 0.65s;
 }
 @keyframes chart-runner-pulse {
@@ -1367,6 +1404,7 @@ body.source-open .source-panel {
   }
 
   #chart-info-line {
+    line-height: 18px;
     overflow: visible;
   }
 

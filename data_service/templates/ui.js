@@ -73,7 +73,10 @@ App.ui = {
     if (ohlcvText !== null) {
       state.baseInfoText = ohlcvText || "";
     }
-    this.elements.chartInfoBase.textContent = state.baseInfoTop;
+    this.elements.chartInfoBase.innerHTML = String(state.baseInfoTop || "")
+      .split(" | ")
+      .map((part) => this.escapeHtml(part))
+      .join('<span class="chart-info-sep chart-info-sep-strong" aria-hidden="true"></span>');
     this.elements.chartInfoOhlcv.innerHTML = state.baseInfoText || "";
     this.elements.chartInfoSeparator.classList.toggle("hidden", !state.baseInfoText);
     this.updateRunnerStatus();
