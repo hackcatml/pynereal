@@ -32,11 +32,21 @@ App.ws = {
           App.data.loadInitialWithRetry();
         } else if (msg.type === "runner_disconnected") {
           state.runnerConnected = false;
+          state.runnerPhase = "stopped";
+          state.nextPrerunAt = null;
           chart.resetChartState(false);
           App.ui.setChartInfo();
         } else if (msg.type === "runner_connected") {
           state.runnerConnected = true;
+          if (state.runnerPhase === "stopped") state.runnerPhase = "running";
+          App.ui.updateRunnerStatus();
           App.data.loadInitialWithRetry();
+        } else if (msg.type === "runner_phase") {
+          state.runnerPhase = msg.phase || (state.runnerConnected ? "running" : "stopped");
+          state.nextPrerunAt = Number.isFinite(Number(msg.next_prerun_at))
+            ? Number(msg.next_prerun_at)
+            : null;
+          App.ui.updateRunnerStatus();
         } else if (msg.type === "script_info") {
           state.scriptTitle = msg.title || "No title";
           state.scriptTitleVisible = true;

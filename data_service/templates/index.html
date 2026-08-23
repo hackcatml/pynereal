@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Chart</title>
-  <link rel="stylesheet" href="/static/styles.css?v=6" />
+  <link rel="stylesheet" href="/static/styles.css?v=13" />
   <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.9/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
@@ -32,7 +32,20 @@
   <button id="nav-to-start" class="nav-btn nav-btn-left" title="처음으로">&laquo;</button>
   <button id="nav-to-end" class="nav-btn nav-btn-right" title="최신으로">&raquo;</button>
   <div id="chart-info">
-    <div id="chart-info-line">Loading...</div>
+    <div id="chart-info-line">
+      <span id="chart-info-base" class="info-main">Loading...</span>
+      <span id="chart-info-separator" class="chart-info-separator hidden" aria-hidden="true">|</span>
+      <button id="chart-runner-status" class="chart-runner-status hidden" type="button"
+              aria-label="Strategy status" aria-expanded="false">
+        <span class="chart-runner-led" aria-hidden="true"></span>
+        <span id="chart-runner-popover" class="chart-runner-popover" role="status">
+          <strong id="chart-runner-status-text">running</strong>
+          <span>Strategy calculation step:<br>Warm-up &rarr; Confirmed bar calculation</span>
+          <span>Warm-up recalculates the strategy over historical candles before the next confirmed bar is processed.</span>
+        </span>
+      </button>
+      <span id="chart-info-ohlcv" class="info-ohlcv"></span>
+    </div>
     <div id="chart-info-title-row" class="hidden">
       <span id="chart-info-title"></span>
       <div id="toolbar">
@@ -163,13 +176,13 @@
     </div>
   </section>
   <!--RUNTIME_CONFIG-->
-  <script src="/static/state.js?v=2"></script>
-  <script src="/static/ui.js?v=5"></script>
+  <script src="/static/state.js?v=3"></script>
+  <script src="/static/ui.js?v=10"></script>
   <script src="/static/bgcolor.js?v=2"></script>
   <script src="/static/chart.js?v=3"></script>
   <script src="/static/measure.js"></script>
-  <script src="/static/data.js?v=5"></script>
-  <script src="/static/ws.js?v=3"></script>
+  <script src="/static/data.js?v=7"></script>
+  <script src="/static/ws.js?v=4"></script>
   <script src="/static/main.js"></script>
 </body>
 </html>

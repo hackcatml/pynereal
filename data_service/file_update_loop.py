@@ -31,6 +31,7 @@ from ohlcv_cache import (
     export_to_ohlcv_since,
 )
 from ohlcv_paths import make_cache_path
+from prerun_scheduler import default_offset_seconds
 from state import DataState
 from log_utils import log_with_time
 
@@ -74,6 +75,7 @@ async def file_update_loop(
     toml_path: Path,
     state: DataState,
     emit_event: Callable[[dict], Awaitable[None]],
+    get_prerun_offset_seconds: Callable[[], int] | None = None,
     poll_sec: float = 0.1,
     history_ready_event: asyncio.Event | None = None,
 ) -> None:
@@ -285,8 +287,18 @@ async def file_update_loop(
             if file_path.exists():
                 file_path.unlink()
 
-    timeframe_ms = convert_timeframe(timeframe, to_ms=True)
-    pre_run_script_time = timeframe_ms / 2
+    # Prepare each shared feed at the earliest slot assigned to one of its
+    # sessions. The sessions then dispatch prerun_ready at their own offsets.
+    def resolved_prerun_offset_ms() -> int:
+        try:
+            seconds = (
+                get_prerun_offset_seconds()
+                if get_prerun_offset_seconds is not None
+                else default_offset_seconds(timeframe)
+            )
+            return max(0, int(seconds)) * 1000
+        except (TypeError, ValueError):
+            return default_offset_seconds(timeframe) * 1000
     fixed_open_price: float = 0.0
     open_fix_done = False
 
@@ -377,7 +389,10 @@ async def file_update_loop(
                 len(bars) == 2
                 and ohlcv_path.exists()
                 and (not open_fix_done)
-                and (datetime.now().timestamp() * 1000 >= bars[1][0] + pre_run_script_time)
+                and (
+                    datetime.now().timestamp() * 1000
+                    >= bars[1][0] + resolved_prerun_offset_ms()
+                )
             ):
                 # Wait for history download and fix last open if needed.
                 if not history_download_complete:

@@ -4,6 +4,12 @@ App.ui = {
   elements: {
     chartInfo: document.getElementById("chart-info"),
     chartInfoLine: document.getElementById("chart-info-line"),
+    chartInfoBase: document.getElementById("chart-info-base"),
+    chartInfoSeparator: document.getElementById("chart-info-separator"),
+    chartInfoOhlcv: document.getElementById("chart-info-ohlcv"),
+    chartRunnerStatus: document.getElementById("chart-runner-status"),
+    chartRunnerPopover: document.getElementById("chart-runner-popover"),
+    chartRunnerStatusText: document.getElementById("chart-runner-status-text"),
     chartInfoTitleRow: document.getElementById("chart-info-title-row"),
     chartInfoTitle: document.getElementById("chart-info-title"),
     alertsToggle: document.getElementById("alerts-toggle"),
@@ -64,11 +70,13 @@ App.ui = {
   sourceComposing: false,
   setChartInfo(ohlcvText = null) {
     const state = App.state;
-    const baseLine = ohlcvText
-      ? `${state.baseInfoTop} | <span class="info-ohlcv">${ohlcvText}</span>`
-      : state.baseInfoTop;
-    state.baseInfoText = baseLine;
-    this.elements.chartInfoLine.innerHTML = baseLine;
+    if (ohlcvText !== null) {
+      state.baseInfoText = ohlcvText || "";
+    }
+    this.elements.chartInfoBase.textContent = state.baseInfoTop;
+    this.elements.chartInfoOhlcv.innerHTML = state.baseInfoText || "";
+    this.elements.chartInfoSeparator.classList.toggle("hidden", !state.baseInfoText);
+    this.updateRunnerStatus();
     if (state.scriptTitleVisible) {
       this.elements.chartInfoTitle.textContent = state.scriptTitle;
       this.elements.chartInfoTitleRow.classList.remove("hidden");
@@ -76,6 +84,63 @@ App.ui = {
       this.elements.chartInfoTitle.textContent = "";
       this.elements.chartInfoTitleRow.classList.add("hidden");
     }
+  },
+  runnerStatusText(now = Date.now()) {
+    const state = App.state;
+    if (!state.runnerConnected || state.runnerPhase === "stopped") return "stopped";
+    if (state.runnerPhase === "prerun_active") return "warming up";
+    if (state.runnerPhase === "prerun_scheduled" && Number.isFinite(state.nextPrerunAt)) {
+      const remaining = Math.ceil((state.nextPrerunAt - now) / 1000);
+      if (remaining >= 1 && remaining <= 5) return `warming up in ${remaining}s`;
+      if (remaining <= 0) return "warming up";
+    }
+    return "running";
+  },
+  updateRunnerStatus() {
+    const { chartRunnerStatus, chartRunnerStatusText } = this.elements;
+    const state = App.state;
+    const visible = Boolean(state.runnerConnected);
+    chartRunnerStatus.classList.toggle("hidden", !visible);
+    if (!visible) {
+      chartRunnerStatus.classList.remove("open");
+      chartRunnerStatus.setAttribute("aria-expanded", "false");
+      return;
+    }
+    const text = this.runnerStatusText();
+    chartRunnerStatusText.textContent = text;
+    chartRunnerStatus.setAttribute("aria-label", `Strategy status: ${text}`);
+    chartRunnerStatus.classList.toggle("warming", state.runnerPhase === "prerun_active");
+  },
+  positionRunnerStatusPopover() {
+    const { chartRunnerStatus: button, chartRunnerPopover: popover } = this.elements;
+    if (!button || !popover) return;
+    popover.style.left = "0px";
+    const rect = popover.getBoundingClientRect();
+    const viewportPadding = 12;
+    const minOffset = viewportPadding - rect.left;
+    const maxOffset = window.innerWidth - viewportPadding - rect.right;
+    const offset = Math.min(maxOffset, Math.max(minOffset, 0));
+    popover.style.left = `${Math.round(offset)}px`;
+  },
+  initRunnerStatus() {
+    const button = this.elements.chartRunnerStatus;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const open = !button.classList.contains("open");
+      if (open) this.positionRunnerStatusPopover();
+      button.classList.toggle("open", open);
+      button.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    document.addEventListener("pointerdown", (event) => {
+      if (button.contains(event.target)) return;
+      button.classList.remove("open");
+      button.setAttribute("aria-expanded", "false");
+    }, true);
+    window.addEventListener("resize", () => {
+      if (button.classList.contains("open")) this.positionRunnerStatusPopover();
+    });
+    window.setInterval(() => this.updateRunnerStatus(), 1000);
+    this.updateRunnerStatus();
   },
   toggleAlertsMenu(forceOpen = null) {
     const menu = this.elements.alertsMenu;
@@ -1819,6 +1884,8 @@ App.ui = {
 
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
+        this.elements.chartRunnerStatus.classList.remove("open");
+        this.elements.chartRunnerStatus.setAttribute("aria-expanded", "false");
         this.closeManualAlertConfirm();
         this.closeManualAlertMenu();
         this.closeAlertTemplateModal();
@@ -1883,6 +1950,7 @@ App.ui = {
     });
 
     this.attachSourceResize();
+    this.initRunnerStatus();
   }
 };
 

@@ -937,6 +937,8 @@ async def main():
                 )
             finally:
                 SUPPRESS_EXTERNAL_NOTIFICATIONS = False
+            if runner.plot_writer:
+                runner.plot_writer.flush()
             pending_full_reemit = False
 
             # The re-sync plot.csv and historical markers are complete. Reload chart

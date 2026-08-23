@@ -7030,6 +7030,69 @@
     });
   }
 
+  function positionDataSincePopover(wrap) {
+    const popover = wrap && wrap.querySelector(".data-since-popover");
+    if (!popover) return;
+    const carousel = wrap.closest("#sessions > tbody");
+    const carouselRect = carousel ? carousel.getBoundingClientRect() : null;
+    const viewportPadding = 12;
+    const leftBoundary = Math.max(
+      viewportPadding,
+      carouselRect ? carouselRect.left + 2 : viewportPadding,
+    );
+    const rightBoundary = Math.min(
+      window.innerWidth - viewportPadding,
+      carouselRect ? carouselRect.right - 2 : window.innerWidth - viewportPadding,
+    );
+    popover.style.right = "auto";
+    popover.style.left = "0px";
+    popover.style.maxWidth = `${Math.max(120, rightBoundary - leftBoundary)}px`;
+    const rect = popover.getBoundingClientRect();
+    const minOffset = leftBoundary - rect.left;
+    const maxOffset = rightBoundary - rect.right;
+    const offset = Math.min(maxOffset, Math.max(minOffset, 0));
+    popover.style.left = `${Math.round(offset)}px`;
+  }
+
+  function runnerStatusText(session, now = Date.now()) {
+    const runner = String((session && session.runner) || "stopped");
+    const phase = String((session && session.runner_phase) || "");
+    if (runner === "stopped" || runner === "crashed") return runner;
+    if (phase === "prerun_active") return "warming up";
+    if (phase === "prerun_scheduled") {
+      const target = Number(session && session.next_prerun_at);
+      if (Number.isFinite(target) && target > 0) {
+        const remaining = Math.ceil((target - now) / 1000);
+        if (remaining <= 0) return "warming up";
+        if (remaining <= 5) return `warming up in ${remaining}s`;
+      }
+      return "running";
+    }
+    if (runner === "starting") return "warming up";
+    return "running";
+  }
+
+  function closeRunnerStatusTooltips(exceptAnchor = null) {
+    document.querySelectorAll(".runner-status-anchor.show-runner-status").forEach((anchor) => {
+      if (anchor !== exceptAnchor) anchor.classList.remove("show-runner-status");
+    });
+  }
+
+  function updateRunnerStatusTooltips() {
+    const now = Date.now();
+    document.querySelectorAll("#sessions tbody tr[data-session-id]").forEach((tr) => {
+      const session = sessions.find((item) => sessionId(item) === tr.dataset.sessionId);
+      if (!session) return;
+      const anchor = tr.querySelector('[data-act="runner-status"]');
+      const tooltip = tr.querySelector('[data-field="runner-status-tooltip"]');
+      const text = runnerStatusText(session, now);
+      setText(tooltip, text);
+      const led = tr.querySelector('[data-field="runner-led"]');
+      if (led) led.classList.toggle("led-warming", session.runner_phase === "prerun_active");
+      if (anchor) anchor.setAttribute("aria-label", `Runner status: ${text}`);
+    });
+  }
+
   function scriptSelectNodes() {
     return {
       control: el("script-select-control"),
@@ -7292,6 +7355,7 @@
     if (!wrap) return;
     const show = !wrap.classList.contains("show-since");
     closeDataSinceTooltips(wrap);
+    if (show) positionDataSincePopover(wrap);
     wrap.classList.toggle("show-since", show);
   }
 
@@ -7312,7 +7376,11 @@
               `<circle cx="15" cy="19" r="1.5"></circle>` +
             `</svg>` +
           `</button>` +
-          `<span data-field="runner-led" class="led"></span>` +
+          `<button type="button" class="runner-status-anchor" data-act="runner-status" ` +
+          `aria-label="Runner status">` +
+            `<span data-field="runner-led" class="led" aria-hidden="true"></span>` +
+            `<span data-field="runner-status-tooltip" class="runner-status-tooltip" role="status"></span>` +
+          `</button>` +
         `</span></td>` +
       `<td data-label="Symbol" class="mono"><span data-field="symbol-cell" class="symbol-cell"></span></td>` +
       `<td data-label="TF" data-field="timeframe"></td>` +
@@ -7332,7 +7400,7 @@
           `data-act="data-since"></span>` +
           `<span data-field="data-since-popover" class="data-since-popover"></span></span>` +
         `<button class="btn btn-icon data-edit-btn" data-act="data-edit" ` +
-        `title="Edit data start" aria-label="Edit data start">` +
+        `title="Data settings" aria-label="Data settings">` +
           `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">` +
             `<path d="M12 20h9"></path>` +
             `<path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path>` +
@@ -7389,6 +7457,14 @@
         }
       } else if (act === "data-edit") openSettings(id, "data-since");
       else if (act === "data-integrity") openSettings(id, "data-integrity");
+      else if (act === "runner-status") {
+        e.preventDefault();
+        e.stopPropagation();
+        const anchor = target.closest(".runner-status-anchor");
+        const show = anchor && !anchor.classList.contains("show-runner-status");
+        closeRunnerStatusTooltips(anchor);
+        if (anchor) anchor.classList.toggle("show-runner-status", Boolean(show));
+      }
       else if (act === "script-edit") openScriptChange(id);
       else if (act === "delete") openRemoveConfirm(id);
       else if (act === "logs") openLogs(id);
@@ -7408,7 +7484,11 @@
 
     const led = tr.querySelector('[data-field="runner-led"]');
     setClass(led, `led led-${runner}`);
-    if (led && led.title !== runner) led.title = runner;
+    const statusText = runnerStatusText(s);
+    if (led) led.classList.toggle("led-warming", s.runner_phase === "prerun_active");
+    setText(tr.querySelector('[data-field="runner-status-tooltip"]'), statusText);
+    const statusAnchor = tr.querySelector('[data-act="runner-status"]');
+    if (statusAnchor) statusAnchor.setAttribute("aria-label", `Runner status: ${statusText}`);
 
     const symbolKey = JSON.stringify([s.symbol || "", s.tv_symbol || "", s.symbol_logo_url || ""]);
     if (tr.dataset.symbolKey !== symbolKey) {
@@ -9321,6 +9401,8 @@
   let settingsSession = null;
   let settingsMode = null; // "webhook" | "telegram" | "data-since" | "data-integrity"
   let settingsOriginalHistorySince = null;
+  let settingsOriginalPrerunMode = "auto";
+  let settingsOriginalPrerunOffset = null;
   let settingsIntegrityAction = null;
   let settingsIntegrityReport = null;
   let settingsIntegrityRunning = null; // "check" | "repair"
@@ -9353,6 +9435,50 @@
     const value = Number(match[1]);
     const multiplier = match[2] === "m" ? 60 : match[2] === "h" ? 3600 : 86400;
     return value * multiplier;
+  }
+
+  function formatPrerunOffset(value) {
+    const total = Math.max(0, Number(value) || 0);
+    const minutes = Math.floor(total / 60);
+    const seconds = Math.floor(total % 60);
+    return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+
+  function parsePrerunOffset(value) {
+    const match = /^(\d+):([0-5]\d)$/.exec(String(value || "").trim());
+    if (!match) return null;
+    return Number(match[1]) * 60 + Number(match[2]);
+  }
+
+  function prerunScheduleRange(timeframe) {
+    const value = String(timeframe || "").trim();
+    if (value === "1m") return { min: 10, max: 30 };
+    if (value === "5m") return { min: 15, max: 150 };
+    const match = /^(\d+)([smhdwM])$/.exec(value);
+    if (!match) return null;
+    const amount = Number(match[1]);
+    const unit = match[2];
+    const multiplier = unit === "s" ? 1
+      : unit === "m" ? 60
+        : unit === "h" ? 3600
+          : unit === "d" ? 86400
+            : unit === "w" ? 604800
+              : 30 * 86400;
+    const duration = amount * multiplier;
+    return duration > 300 ? { min: 15, max: duration - 300 } : null;
+  }
+
+  function setPrerunSettingsMode(mode) {
+    const normalized = mode === "custom" ? "custom" : "auto";
+    const modeInput = el("settings-prerun-mode");
+    if (modeInput) modeInput.value = normalized;
+    document.querySelectorAll("[data-prerun-mode]").forEach((button) => {
+      const selected = button.dataset.prerunMode === normalized;
+      button.classList.toggle("active", selected);
+      button.setAttribute("aria-pressed", String(selected));
+    });
+    const customRow = el("settings-prerun-custom-row");
+    if (customRow) customRow.hidden = normalized !== "custom";
   }
 
   function renderDataIntegrityIntro(id) {
@@ -9482,6 +9608,8 @@
     settingsSession = id;
     settingsMode = mode;
     settingsOriginalHistorySince = null;
+    settingsOriginalPrerunMode = "auto";
+    settingsOriginalPrerunOffset = null;
     settingsIntegrityAction = null;
     settingsIntegrityReport = null;
     settingsIntegrityRunning = null;
@@ -9497,7 +9625,7 @@
       (mode === "webhook" ? "Webhook URL — "
         : mode === "telegram" ? "Telegram bot — "
         : mode === "data-integrity" ? "Data integrity — "
-        : "Data since — ") + id;
+        : "Data settings — ") + id;
     el("settings-fields").innerHTML = "loading…";
     el("settings-modal").classList.remove("hidden");
     lockBodyScroll();
@@ -9520,8 +9648,19 @@
         initial = String(s.history_since);
       }
       settingsOriginalHistorySince = initial;
+      settingsOriginalPrerunMode = s.prerun_mode === "custom" ? "custom" : "auto";
+      settingsOriginalPrerunOffset = s.prerun_offset_seconds == null
+        ? null
+        : Number(s.prerun_offset_seconds);
+      const effectiveOffset = Number(s.prerun_effective_offset_seconds) || 0;
+      const prerunRange = prerunScheduleRange(s.timeframe);
+      const supportsCustom = Boolean(prerunRange);
+      const customInitial = settingsOriginalPrerunOffset == null
+        ? effectiveOffset
+        : settingsOriginalPrerunOffset;
       el("settings-fields").innerHTML =
-        `<label class="settings-label">Data start (UTC)</label>` +
+        `<div class="settings-section-title">Data start</div>` +
+        `<label class="settings-label" for="settings-history-since">UTC date and time</label>` +
         `<input id="settings-history-since" type="text" ` +
         `placeholder="YYYY-MM-DD or YYYY-MM-DD HH:MM" value="${esc(initial)}">` +
         `<div class="muted">UTC date or datetime, e.g. 2026-05-01 or 2026-06-01 07:30.</div>` +
@@ -9530,10 +9669,35 @@
           ? `<div class="muted">Shares this market's data, so it changes too: ` +
             `<span class="mono">${esc(shared.join(", "))}</span></div>`
           : "") +
+        `<div class="settings-section-title settings-prerun-title">Warm-up schedule</div>` +
+        `<div class="muted">Warm-up recalculates the strategy over historical candles before processing the next confirmed candle.</div>` +
+        (supportsCustom
+          ? `<input id="settings-prerun-mode" type="hidden" value="${esc(settingsOriginalPrerunMode)}">` +
+            `<div class="settings-segmented" role="group" aria-label="Warm-up schedule mode">` +
+              `<button type="button" data-prerun-mode="auto">Auto</button>` +
+              `<button type="button" data-prerun-mode="custom">Custom</button>` +
+            `</div>` +
+            `<div class="settings-prerun-assigned">Assigned time ` +
+              `<strong>${esc(formatPrerunOffset(effectiveOffset))}</strong>` +
+              (s.prerun_duplicate ? `<span>shared slot</span>` : "") +
+            `</div>` +
+            `<label id="settings-prerun-custom-row" class="settings-prerun-custom" hidden>` +
+              `<span>Start after candle open</span>` +
+              `<input id="settings-prerun-offset" type="text" inputmode="numeric" ` +
+              `value="${esc(formatPrerunOffset(customInitial))}" placeholder="MM:SS">` +
+              `<small>${formatPrerunOffset(prerunRange.min)} - ${formatPrerunOffset(prerunRange.max)}</small>` +
+            `</label>`
+          : `<div class="muted">This timeframe uses the default midpoint schedule.</div>`) +
         `<div id="settings-loading" class="settings-loading" hidden>` +
           `<span class="settings-spinner" aria-hidden="true"></span>` +
           `<span class="settings-loading-text">Re-syncing data…</span>` +
         `</div>`;
+      if (supportsCustom) {
+        document.querySelectorAll("[data-prerun-mode]").forEach((button) => {
+          button.addEventListener("click", () => setPrerunSettingsMode(button.dataset.prerunMode));
+        });
+        setPrerunSettingsMode(settingsOriginalPrerunMode);
+      }
       return;
     }
     try {
@@ -9568,13 +9732,15 @@
     settingsSession = null;
     settingsMode = null;
     settingsOriginalHistorySince = null;
+    settingsOriginalPrerunMode = "auto";
+    settingsOriginalPrerunOffset = null;
     settingsIntegrityAction = null;
     settingsIntegrityReport = null;
     settingsIntegrityRunning = null;
     settingsIntegrityCancelRequested = false;
   }
 
-  function setDataSinceLoading(on) {
+  function setDataSettingsLoading(on, reSyncing = false) {
     const saveBtn = el("settings-save");
     const inputEl = el("settings-history-since");
     const status = el("settings-loading");
@@ -9583,6 +9749,13 @@
       saveBtn.textContent = on ? "Applying…" : "Save";
     }
     if (inputEl) inputEl.disabled = on;
+    const offsetInput = el("settings-prerun-offset");
+    if (offsetInput) offsetInput.disabled = on;
+    document.querySelectorAll("[data-prerun-mode]").forEach((button) => {
+      button.disabled = on;
+    });
+    const loadingText = status && status.querySelector(".settings-loading-text");
+    if (loadingText) loadingText.textContent = reSyncing ? "Re-syncing data…" : "Applying settings…";
     if (status) status.hidden = !on;
   }
 
@@ -9633,25 +9806,52 @@
       const inputEl = el("settings-history-since");
       const value = (inputEl ? inputEl.value : "").trim();
       const sid = settingsSession;
-      if (isSameUtcDateInput(value, settingsOriginalHistorySince)) {
+      const session = sessions.find((item) => sessionId(item) === sid) || {};
+      const historyChanged = !isSameUtcDateInput(value, settingsOriginalHistorySince);
+      const modeInput = el("settings-prerun-mode");
+      const prerunMode = modeInput && modeInput.value === "custom" ? "custom" : "auto";
+      let prerunOffset = null;
+      if (prerunMode === "custom") {
+        prerunOffset = parsePrerunOffset(el("settings-prerun-offset")?.value);
+        const range = prerunScheduleRange(session.timeframe);
+        if (!range || prerunOffset == null || prerunOffset < range.min || prerunOffset > range.max) {
+          el("settings-error").textContent =
+            range
+              ? `Warm-up time must be between ${formatPrerunOffset(range.min)} and ${formatPrerunOffset(range.max)}.`
+              : "Custom warm-up timing is not available for this timeframe.";
+          return;
+        }
+      }
+      const scheduleChanged = prerunMode !== settingsOriginalPrerunMode ||
+        (prerunMode === "custom" && prerunOffset !== settingsOriginalPrerunOffset);
+      if (!historyChanged && !scheduleChanged) {
         closeSettings();
         return;
       }
       el("settings-error").textContent = "";
-      setDataSinceLoading(true); // feed + runner restart takes a moment; no double-submit
+      setDataSettingsLoading(true, historyChanged);
       try {
-        await api(`/api/sessions/${encodeURIComponent(sid)}/history-since`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ history_since: value }),
-        });
+        if (scheduleChanged) {
+          await api(`/api/sessions/${encodeURIComponent(sid)}/prerun-schedule`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ mode: prerunMode, offset_seconds: prerunOffset }),
+          });
+        }
+        if (historyChanged) {
+          await api(`/api/sessions/${encodeURIComponent(sid)}/history-since`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ history_since: value }),
+          });
+        }
       } catch (e) {
         el("settings-error").textContent = e.message;
-        setDataSinceLoading(false);
+        setDataSettingsLoading(false);
         return;
       }
       if (settingsSession === sid && settingsMode === "data-since") {
-        setDataSinceLoading(false);
+        setDataSettingsLoading(false);
         closeSettings();
       }
       return;
@@ -9780,10 +9980,15 @@
     if (scriptControl && e.target && !scriptControl.contains(e.target)) {
       closeScriptDropdown();
     }
+    if (!e.target || !e.target.closest || !e.target.closest(".runner-status-anchor")) {
+      closeRunnerStatusTooltips();
+    }
     if (!isTouchTooltipMode()) return;
     if (!e.target || !e.target.closest || e.target.closest(".data-badge-wrap")) return;
     closeDataSinceTooltips();
   });
+
+  setInterval(updateRunnerStatusTooltips, 1000);
 
   // ---- collapsible "Add session" card (collapsed by default) ---------------
   let addCardAnimation = null;

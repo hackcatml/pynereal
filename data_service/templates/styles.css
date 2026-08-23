@@ -52,6 +52,86 @@ body.source-open #chart {
 }
 #chart-info-line {
   display: block;
+  min-height: 20px;
+  white-space: normal;
+}
+.chart-info-separator.hidden,
+.chart-runner-status.hidden {
+  display: none;
+}
+.chart-info-separator {
+  color: rgba(0, 0, 0, 0.42);
+}
+.chart-runner-status {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 20px;
+  margin: 0 1px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+  vertical-align: middle;
+}
+.chart-runner-status:focus-visible {
+  outline: 2px solid rgba(0, 122, 255, 0.72);
+  outline-offset: 2px;
+}
+.chart-runner-led {
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22a06b;
+  box-shadow: 0 0 0 3px rgba(34, 160, 107, 0.14);
+  animation: chart-runner-pulse 1.8s ease-in-out infinite;
+  transform: translateY(-1px);
+}
+.chart-runner-status.warming .chart-runner-led {
+  animation-duration: 0.65s;
+}
+@keyframes chart-runner-pulse {
+  0%, 100% { opacity: 0.72; }
+  50% { opacity: 1; }
+}
+.chart-runner-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 30;
+  display: grid;
+  gap: 4px;
+  width: min(250px, calc(100vw - 32px));
+  padding: 9px 10px;
+  border: 1px solid rgba(17, 24, 39, 0.18);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.98);
+  color: #111827;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
+  font-size: 11px;
+  line-height: 1.35;
+  letter-spacing: 0;
+  text-align: left;
+  white-space: normal;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-4px);
+  visibility: hidden;
+  transition: opacity 140ms ease, transform 140ms ease, visibility 140ms ease;
+}
+.chart-runner-popover strong {
+  font-size: 12px;
+  font-weight: 700;
+}
+.chart-runner-status.open .chart-runner-popover {
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
 }
 #chart-info-title-row {
   display: flex;
@@ -1284,6 +1364,24 @@ body.source-open .source-panel {
 
   #chart-info .info-ohlcv {
     font-size: 12px;
+  }
+
+  #chart-info-line {
+    overflow: visible;
+  }
+
+  .chart-runner-status {
+    width: 14px;
+    height: 18px;
+  }
+
+  .chart-runner-popover {
+    width: min(232px, calc(100vw - 32px));
+    transform: translateY(-4px);
+  }
+
+  .chart-runner-status.open .chart-runner-popover {
+    transform: translateY(0);
   }
 
   .toolbar-btn {
