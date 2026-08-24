@@ -513,46 +513,7 @@ class UpdateService:
             )
 
     def _install_ai_host_tools(self) -> None:
-        if not sys.platform.startswith("linux") or shutil.which("apt-get") is None:
-            return
-        if shutil.which("rg") is not None:
-            return
-
-        prefix: list[str] = []
-        if os.geteuid() != 0:
-            sudo = shutil.which("sudo")
-            if sudo is None:
-                print(
-                    "[update] ripgrep install skipped: root access is unavailable",
-                    file=sys.stderr,
-                )
-                return
-            prefix = [sudo, "-n"]
-
-        def run_apt(*arguments: str) -> subprocess.CompletedProcess[str]:
-            return subprocess.run(
-                [*prefix, "apt-get", *arguments],
-                cwd=self.repo_root,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                timeout=300,
-            )
-
-        completed = run_apt("install", "-y", "ripgrep")
-        if completed.returncode != 0:
-            refreshed = run_apt("update")
-            if refreshed.returncode == 0:
-                completed = run_apt("install", "-y", "ripgrep")
-        if completed.returncode != 0:
-            detail = completed.stdout.strip()
-            print(
-                "[update] ripgrep install failed; AI will use fallback search tools"
-                + (f": {detail[-1000:]}" if detail else ""),
-                file=sys.stderr,
-            )
-            return
-        print("[update] installed ripgrep for AI source inspection")
+        pass
 
     def _install_target_dependencies(self, target_sha: str) -> None:
         requirements = self._project_requirements(
