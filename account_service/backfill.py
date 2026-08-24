@@ -55,6 +55,10 @@ _MANUAL_REFRESH_TIMING: ContextVar[bool] = ContextVar(
     "account_manual_refresh_timing",
     default=False,
 )
+_IMMEDIATE_HISTORY_TIMING: ContextVar[bool] = ContextVar(
+    "account_immediate_history_timing",
+    default=False,
+)
 
 
 @contextmanager
@@ -64,6 +68,15 @@ def manual_history_refresh_timing() -> Iterator[None]:
         yield
     finally:
         _MANUAL_REFRESH_TIMING.reset(token)
+
+
+@contextmanager
+def immediate_history_refresh_timing() -> Iterator[None]:
+    token = _IMMEDIATE_HISTORY_TIMING.set(True)
+    try:
+        yield
+    finally:
+        _IMMEDIATE_HISTORY_TIMING.reset(token)
 
 
 @dataclass(frozen=True)
@@ -566,6 +579,8 @@ def _scope_symbols(
 
 
 async def _wait_for_history_slot(stop: asyncio.Event) -> None:
+    if _IMMEDIATE_HISTORY_TIMING.get():
+        return
     delay = (
         seconds_until_manual_refresh_guard_end()
         if _MANUAL_REFRESH_TIMING.get()
