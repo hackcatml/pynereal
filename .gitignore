@@ -22,6 +22,8 @@ workdir/output/realtime/
 
 # Ignore SQLite cache files but keep the directory
 workdir/data/cache/*.sqlite
+workdir/data/cache/*.sqlite-shm
+workdir/data/cache/*.sqlite-wal
 workdir/data/cache/watchlist_logos/
 
 # Ignore OHLCV and TOML files in workdir/data/

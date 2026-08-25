@@ -10,7 +10,10 @@ _TEMPLATES = Path(__file__).parent / "templates"
 
 _STATIC_FILES = {
     "styles.css": "text/css",
+    "editor.css": "text/css",
     "state.js": "text/javascript",
+    "editor.js": "text/javascript",
+    "scripting.js": "text/javascript",
     "ui.js": "text/javascript",
     "bgcolor.js": "text/javascript",
     "chart.js": "text/javascript",

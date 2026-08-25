@@ -1,0 +1,183 @@
+.editor-find-panel {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  background: #11161d;
+}
+
+.editor-find-row {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 44px 28px 28px 28px;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.editor-replace-row {
+  grid-template-columns: 28px minmax(0, 1fr) 44px 28px 28px 28px;
+}
+
+.editor-replace-row .editor-replace-command:not(.editor-replace-all) {
+  grid-column: 4 / 6;
+  width: 100%;
+}
+
+.editor-replace-all {
+  grid-column: 6;
+  width: 28px;
+  padding: 0;
+}
+
+.editor-find-panel input {
+  min-width: 0;
+  height: 28px;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  border: 1px solid #3a4350;
+  border-radius: 4px;
+  outline: none;
+  background: #0b0f14;
+  color: #e6edf3;
+  font: 11px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.editor-find-panel input:focus { border-color: #388bfd; }
+
+.editor-find-count {
+  overflow: hidden;
+  color: #8b949e;
+  font: 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.editor-find-count.empty { color: #ff9a92; }
+
+.editor-find-action,
+.editor-replace-command {
+  height: 28px;
+  box-sizing: border-box;
+  border: 1px solid #3a4350;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #c9d1d9;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.editor-find-action {
+  width: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.editor-find-action svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.editor-find-action:hover:not(:disabled),
+.editor-find-action:focus-visible,
+.editor-replace-command:hover:not(:disabled),
+.editor-replace-command:focus-visible {
+  border-color: #59636f;
+  outline: none;
+  background: rgba(255, 255, 255, 0.09);
+  color: #ffffff;
+}
+
+.editor-find-action:disabled,
+.editor-replace-command:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.editor-replace-command {
+  padding: 0 8px;
+  font-size: 10px;
+}
+
+.editor-replace-all[aria-pressed="true"] {
+  border-color: #388bfd;
+  background: #1f6feb;
+  color: #ffffff;
+}
+
+.editor-search-match {
+  border-radius: 2px;
+  background: rgba(210, 153, 34, 0.52);
+  color: inherit;
+}
+
+.editor-search-match.current {
+  background: #f2cc60;
+  color: #11161d;
+  box-shadow: 0 0 0 1px rgba(255, 224, 112, 0.7);
+}
+
+.editor-search-match.current * { color: #11161d !important; }
+
+.editor-replace-toggle span {
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor;
+  transform-origin: 40% 50%;
+  transition: transform 150ms ease;
+}
+
+.editor-replace-toggle.expanded span { transform: rotate(90deg); }
+
+@media (min-width: 721px) and (hover: hover) and (pointer: fine) {
+  .editor-find-panel {
+    position: absolute;
+    top: var(--editor-find-top, 0);
+    right: 10px;
+    z-index: 7;
+    width: min(440px, calc(100% - 20px));
+    padding: 6px;
+    border: 1px solid #3a4350;
+    border-radius: 0 0 6px 6px;
+    background: #181d24;
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.38);
+    animation: editor-find-enter 130ms ease-out;
+  }
+
+  .scripting-editor-pane > .editor-find-panel { --editor-find-top: 45px; }
+  .source-panel > .editor-find-panel { --editor-find-top: 62px; }
+}
+
+@keyframes editor-find-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 720px), (hover: none) and (pointer: coarse) {
+  .editor-find-panel {
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .editor-find-panel input { font-size: 16px; }
+  .editor-find-panel input::placeholder { font-size: 10px; }
+}

@@ -24,6 +24,9 @@ from calendar_store import CalendarEventStore
 from config import ensure_provider_config, load_hub_config, load_initial_sessions
 from registry import SessionRegistry
 from api import build_session_api_router, build_control_router, build_validation_router
+from scripting_api import build_scripting_router
+from scripting_history import ScriptingHistoryStore
+from scripting_workspace import ScriptingWorkspace
 from ui import build_ui_router
 from update_service import UpdateService
 from watchlist import WatchlistService
@@ -49,6 +52,12 @@ def build_app(
     update_service: UpdateService,
 ) -> FastAPI:
     app = FastAPI()
+    scripting_workspace = ScriptingWorkspace(
+        _PROJECT_ROOT / "workdir" / "scripts",
+        ScriptingHistoryStore(
+            _PROJECT_ROOT / "workdir" / "data" / "cache" / "scripting_history.sqlite"
+        ),
+    )
 
     @app.exception_handler(StarletteHTTPException)
     async def log_history_import_body_error(
@@ -94,7 +103,8 @@ def build_app(
         )
     )
     app.include_router(build_validation_router())
-    app.include_router(build_session_api_router(registry))
+    app.include_router(build_scripting_router(scripting_workspace))
+    app.include_router(build_session_api_router(registry, scripting_workspace))
 
     @app.websocket("/ws/hub")
     async def hub_ws(ws: WebSocket):

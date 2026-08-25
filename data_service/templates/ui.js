@@ -47,14 +47,45 @@ App.ui = {
     sourceBackdrop: document.getElementById("source-backdrop"),
     sourceClose: document.getElementById("source-close"),
     sourceUndo: document.getElementById("source-undo"),
+    sourceFind: document.getElementById("source-find-toggle"),
+    sourceFindPanel: document.getElementById("source-find-panel"),
+    sourceFindInput: document.getElementById("source-find-input"),
+    sourceFindCount: document.getElementById("source-find-count"),
+    sourceFindPrevious: document.getElementById("source-find-previous"),
+    sourceFindNext: document.getElementById("source-find-next"),
+    sourceFindClose: document.getElementById("source-find-close"),
+    sourceReplaceToggle: document.getElementById("source-replace-toggle"),
+    sourceReplaceRow: document.getElementById("source-replace-row"),
+    sourceReplaceInput: document.getElementById("source-replace-input"),
+    sourceReplaceOne: document.getElementById("source-replace-one"),
+    sourceReplaceAll: document.getElementById("source-replace-all"),
+    sourceNote: document.getElementById("source-note-toggle"),
+    sourceNoteEditor: document.getElementById("source-note-editor"),
+    sourceNoteInput: document.getElementById("source-note-input"),
+    sourceNoteClose: document.getElementById("source-note-close"),
+    sourceNoteSave: document.getElementById("source-note-save"),
+    sourceHistory: document.getElementById("source-history"),
     sourceSave: document.getElementById("source-save"),
     sourceResizeHandle: document.getElementById("source-resize-handle"),
     sourcePanelName: document.getElementById("source-panel-name"),
     sourceStatus: document.getElementById("source-status"),
+    sourceNotice: document.getElementById("source-notice"),
+    sourceNoticeText: document.getElementById("source-notice-text"),
+    sourceReload: document.getElementById("source-reload"),
     sourceHighlight: document.getElementById("source-highlight"),
     sourceDiffGutter: document.getElementById("source-diff-gutter"),
     sourceDiffMarkers: document.getElementById("source-diff-markers"),
-    sourceCode: document.getElementById("source-code")
+    sourceCode: document.getElementById("source-code"),
+    sourceHistoryPanel: document.getElementById("source-history-panel"),
+    sourceHistoryPath: document.getElementById("source-history-path"),
+    sourceHistoryClose: document.getElementById("source-history-close"),
+    sourceHistoryState: document.getElementById("source-history-state"),
+    sourceHistoryContent: document.getElementById("source-history-content"),
+    sourceHistoryList: document.getElementById("source-history-list"),
+    sourceHistoryTitle: document.getElementById("source-history-title"),
+    sourceHistoryMeta: document.getElementById("source-history-meta"),
+    sourceHistoryDiff: document.getElementById("source-history-diff"),
+    sourceHistoryRestore: document.getElementById("source-history-restore")
   },
   manualAlertDragState: null,
   manualAlertPendingSend: null,
@@ -64,10 +95,14 @@ App.ui = {
   activeTemplatePlaceholder: null,
   sourceDiffTimer: null,
   sourceUndoStack: [],
+  sourceEditorController: null,
+  sourceUndoPointerType: "",
   sourceUndoInputType: "",
   sourceUndoCapturedAt: 0,
   sourceApplyingUndo: false,
   sourceComposing: false,
+  sourceHistoryRequestSeq: 0,
+  sourceHistoryDiffRequestSeq: 0,
   setChartInfo(ohlcvText = null) {
     const state = App.state;
     if (ohlcvText !== null) {
@@ -988,12 +1023,25 @@ App.ui = {
     const name = state.scriptSourceName || state.scriptTitle || "No source";
     const source = state.scriptSourceLoaded ? state.scriptSource : "No source loaded.";
     this.elements.sourcePanelName.textContent = name;
+    if (this.elements.sourceNoteInput.value !== state.sourceNote) {
+      this.elements.sourceNoteInput.value = state.sourceNote;
+    }
     if (!state.sourceDirty) {
       this.elements.sourceCode.value = source;
       this.resetSourceUndo();
     }
     this.renderSourceHighlight();
+    if (this.sourceEditorController && this.sourceEditorController.isOpen()) {
+      this.sourceEditorController.refresh();
+    }
+    this.setSourceNotice(state.sourceConflict
+      ? "This file changed outside this editor. Reload before saving again."
+      : "");
     this.updateSourceSaveState();
+  },
+  setSourceNotice(message = "") {
+    this.elements.sourceNoticeText.textContent = String(message || "");
+    this.elements.sourceNotice.classList.toggle("hidden", !message);
   },
   renderSourceHighlight() {
     const source = this.elements.sourceCode.value || "No source loaded.";
@@ -1272,7 +1320,9 @@ App.ui = {
       this.sourceUndoStack.push({
         value: editor.value,
         selectionStart: editor.selectionStart,
-        selectionEnd: editor.selectionEnd
+        selectionEnd: editor.selectionEnd,
+        scrollTop: editor.scrollTop,
+        scrollLeft: editor.scrollLeft
       });
       if (this.sourceUndoStack.length > 100) {
         this.sourceUndoStack.shift();
@@ -1281,7 +1331,7 @@ App.ui = {
     this.sourceUndoInputType = inputType;
     this.sourceUndoCapturedAt = now;
   },
-  undoSourceEdit() {
+  undoSourceEdit({ focusEditor = true } = {}) {
     const editor = this.elements.sourceCode;
     const snapshot = this.sourceUndoStack.pop();
     if (!snapshot) return;
@@ -1290,6 +1340,9 @@ App.ui = {
     editor.value = snapshot.value;
     editor.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
     this.handleSourceInput();
+    editor.scrollTop = snapshot.scrollTop;
+    editor.scrollLeft = snapshot.scrollLeft;
+    this.syncSourceScroll();
     this.sourceApplyingUndo = false;
     this.sourceUndoInputType = "";
     this.sourceUndoCapturedAt = 0;
@@ -1298,42 +1351,109 @@ App.ui = {
     } else {
       this.resetSourceUndo();
     }
-    editor.focus({ preventScroll: true });
+    if (focusEditor) editor.focus({ preventScroll: true });
   },
   updateSourceSaveState() {
     const state = App.state;
-    this.elements.sourceSave.disabled = state.sourceSaving || !state.sourceDirty || !state.scriptSourceLoaded;
+    this.elements.sourceSave.disabled = state.sourceSaving
+      || state.sourceConflict
+      || !state.sourceDirty
+      || !state.scriptSourceLoaded;
     this.elements.sourceSave.classList.toggle("dirty", state.sourceDirty);
     this.elements.sourceSave.classList.toggle("saving", state.sourceSaving);
+    this.elements.sourceNote.disabled = !state.scriptSourceLoaded || state.sourceSaving;
+    this.elements.sourceFind.disabled = !state.scriptSourceLoaded;
+    this.elements.sourceNote.classList.toggle("note-active", Boolean(state.sourceNote.trim()));
+    this.elements.sourceNoteClose.disabled = !state.scriptSourceLoaded
+      || state.sourceSaving
+      || !state.sourceNote;
+    this.elements.sourceNoteSave.disabled = !state.scriptSourceLoaded
+      || state.sourceSaving
+      || state.sourceConflict
+      || !this.sourceNoteChanged();
     this.elements.sourceStatus.textContent = state.sourceSaving ? "Saving..." : (state.sourceSaveStatus || "");
+    this.elements.sourceHistory.disabled = !state.scriptSourceLoaded || !state.scriptSourcePath;
+    if (state.sourceHistoryOpen) {
+      this.elements.sourceHistoryRestore.disabled = state.sourceDirty
+        || this.sourceNoteChanged()
+        || state.sourceSaving
+        || state.sourceConflict
+        || !state.sourceHistoryCanRestore;
+    }
     this.updateSourceUndoState();
+  },
+  setSourceNote(value = "") {
+    const note = String(value || "").slice(0, 240);
+    App.state.sourceNote = note;
+    if (this.sourceNoteChanged()) App.state.sourceSaveStatus = "";
+    if (this.elements.sourceNoteInput.value !== note) {
+      this.elements.sourceNoteInput.value = note;
+    }
+    this.updateSourceSaveState();
+  },
+  normalizeSourceNote(value) {
+    return String(value || "").trim().replace(/\s+/g, " ");
+  },
+  sourceNoteChanged() {
+    const state = App.state;
+    return this.normalizeSourceNote(state.sourceNote)
+      !== this.normalizeSourceNote(state.sourceBaseNote);
+  },
+  sourceHasUnsavedChanges() {
+    return App.state.sourceDirty || this.sourceNoteChanged();
+  },
+  setSourceNoteOpen(open) {
+    const state = App.state;
+    const resolved = Boolean(open) && state.scriptSourceLoaded;
+    state.sourceNoteOpen = resolved;
+    this.elements.sourceNoteEditor.classList.toggle("hidden", !resolved);
+    this.elements.sourceNote.setAttribute("aria-expanded", String(resolved));
+    if (resolved) {
+      requestAnimationFrame(() => this.elements.sourceNoteInput.focus());
+    }
   },
   handleSourceInput() {
     const state = App.state;
     state.sourceDirty = state.scriptSourceLoaded && this.elements.sourceCode.value !== state.scriptSource;
     state.sourceSaveStatus = "";
+    if (!state.sourceDirty && !state.sourceConflict) {
+      this.setSourceNotice();
+    }
     this.renderSourceHighlight();
+    if (this.sourceEditorController && this.sourceEditorController.isOpen()) {
+      this.sourceEditorController.refresh();
+    }
     this.updateSourceSaveState();
   },
   async saveSourcePanel() {
     const state = App.state;
-    if (state.sourceSaving || !state.sourceDirty) return;
+    if (state.sourceSaving || state.sourceConflict || !this.sourceHasUnsavedChanges()) return;
 
     state.sourceSaving = true;
     state.sourceSaveStatus = "";
     this.updateSourceSaveState();
     const source = this.elements.sourceCode.value;
-    const result = await App.data.saveScriptSource(source);
+    const result = await App.data.saveScriptSource(source, state.sourceNote);
     state.sourceSaving = false;
 
     if (result && result.ok) {
-      state.sourceSaveStatus = "Saved";
+      state.sourceSaveStatus = result.data.saved ? "Applies at next warm-up" : "Note saved";
+      state.sourceConflict = false;
+      this.setSourceNotice();
       this.elements.sourceCode.value = state.scriptSource;
+      this.setSourceNote(state.sourceBaseNote);
+      this.setSourceNoteOpen(false);
       this.resetSourceUndo();
       this.renderSourceHighlight();
       this.updateSourceSaveState();
+      if (state.sourceHistoryOpen) {
+        await this.openSourceHistory();
+      }
       setTimeout(() => {
-        if (!state.sourceDirty && state.sourceSaveStatus === "Saved") {
+        if (
+          !this.sourceHasUnsavedChanges()
+          && ["Applies at next warm-up", "Note saved"].includes(state.sourceSaveStatus)
+        ) {
           state.sourceSaveStatus = "";
           this.updateSourceSaveState();
         }
@@ -1341,9 +1461,247 @@ App.ui = {
       return;
     }
 
-    state.sourceDirty = true;
     state.sourceSaveStatus = (result && result.error) || "Save failed";
+    if (result && result.status === 409) {
+      state.sourceConflict = true;
+      this.setSourceNotice("This file changed outside this editor. Reload before saving again.");
+      state.sourceSaveStatus = "Conflict";
+    }
     this.updateSourceSaveState();
+  },
+  async saveSourceNote() {
+    const state = App.state;
+    if (state.sourceSaving || state.sourceConflict || !this.sourceNoteChanged()) return;
+
+    state.sourceSaving = true;
+    state.sourceSaveStatus = "";
+    this.updateSourceSaveState();
+    const result = await App.data.saveScriptNote(state.sourceNote);
+    state.sourceSaving = false;
+
+    if (result && result.ok) {
+      state.sourceSaveStatus = "Note saved";
+      state.sourceConflict = false;
+      this.setSourceNotice();
+      this.setSourceNote(state.sourceBaseNote);
+      this.updateSourceSaveState();
+      if (state.sourceHistoryOpen) {
+        await this.openSourceHistory();
+      }
+      setTimeout(() => {
+        if (!this.sourceNoteChanged() && state.sourceSaveStatus === "Note saved") {
+          state.sourceSaveStatus = "";
+          this.updateSourceSaveState();
+        }
+      }, 1500);
+      return;
+    }
+
+    state.sourceSaveStatus = (result && result.error) || "Save failed";
+    if (result && result.status === 409) {
+      state.sourceConflict = true;
+      this.setSourceNotice("This file changed outside this editor. Reload before saving again.");
+      state.sourceSaveStatus = "Conflict";
+    }
+    this.updateSourceSaveState();
+  },
+  sourceRevisionLabel(source) {
+    return ({
+      baseline: "Baseline",
+      manual: "Manual save",
+      ai: "AI edit",
+      external: "External edit",
+      restore: "Restored version"
+    })[String(source || "")] || "Saved version";
+  },
+  sourceRevisionTime(value) {
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return String(value || "");
+    return date.toLocaleString([], {
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    });
+  },
+  setSourceHistoryState(message = "", error = false) {
+    this.elements.sourceHistoryState.textContent = String(message || "");
+    this.elements.sourceHistoryState.classList.toggle("hidden", !message);
+    this.elements.sourceHistoryState.classList.toggle("error", error);
+    this.elements.sourceHistoryContent.classList.toggle("hidden", Boolean(message));
+  },
+  renderSourceHistoryList({ preserveScroll = true } = {}) {
+    const state = App.state;
+    const scrollTop = preserveScroll ? this.elements.sourceHistoryList.scrollTop : 0;
+    const fragment = document.createDocumentFragment();
+    state.sourceHistoryRows.forEach((revision) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "source-history-item";
+      button.classList.toggle("selected", revision.id === state.sourceHistorySelectedId);
+      button.dataset.revisionId = String(revision.id);
+      const title = document.createElement("strong");
+      title.textContent = this.sourceRevisionLabel(revision.source);
+      const time = document.createElement("time");
+      time.textContent = this.sourceRevisionTime(revision.created_at);
+      const meta = document.createElement("span");
+      meta.textContent = `${String(revision.revision || "").slice(0, 8)} · ${revision.line_count || 0} lines`;
+      button.append(title, time, meta);
+      const note = String(revision.note || "").trim();
+      if (note) {
+        const noteRow = document.createElement("small");
+        noteRow.className = "source-history-item-note";
+        noteRow.textContent = note;
+        noteRow.title = note;
+        button.appendChild(noteRow);
+      }
+      fragment.appendChild(button);
+    });
+    this.elements.sourceHistoryList.replaceChildren(fragment);
+    this.elements.sourceHistoryList.scrollTop = scrollTop;
+  },
+  renderSourceHistoryDiff(diff) {
+    const fragment = document.createDocumentFragment();
+    String(diff || "").split("\n").forEach((line) => {
+      const row = document.createElement("span");
+      row.className = "history-diff-line";
+      if (line.startsWith("@@")) row.classList.add("hunk");
+      else if (line.startsWith("+++ ") || line.startsWith("--- ")) row.classList.add("file");
+      else if (line.startsWith("+")) row.classList.add("added");
+      else if (line.startsWith("-")) row.classList.add("removed");
+      else if (line.startsWith("\\ No newline")) row.classList.add("meta");
+      row.textContent = line;
+      fragment.appendChild(row);
+    });
+    this.elements.sourceHistoryDiff.replaceChildren(fragment);
+  },
+  async openSourceHistory() {
+    const state = App.state;
+    if (!state.scriptSourcePath) return;
+    state.sourceHistoryOpen = true;
+    state.sourceHistorySelectedId = null;
+    state.sourceHistoryCanRestore = false;
+    this.elements.sourceHistoryPath.textContent = state.scriptSourcePath;
+    this.elements.sourceHistoryPanel.classList.remove("hidden");
+    this.elements.sourceHistoryPanel.setAttribute("aria-hidden", "false");
+    this.elements.sourceHistoryTitle.textContent = "Select a version";
+    this.elements.sourceHistoryMeta.textContent = "";
+    this.elements.sourceHistoryDiff.textContent = "Select a version to review its changes.";
+    this.elements.sourceHistoryRestore.disabled = true;
+    this.setSourceHistoryState("Loading history...");
+    const seq = ++this.sourceHistoryRequestSeq;
+    const result = await App.data.loadScriptHistory();
+    if (seq !== this.sourceHistoryRequestSeq || !state.sourceHistoryOpen) return;
+    if (!result || !result.ok) {
+      this.setSourceHistoryState((result && result.error) || "Version history could not be loaded", true);
+      return;
+    }
+    state.sourceHistoryRows = Array.isArray(result.data.revisions) ? result.data.revisions : [];
+    if (
+      state.scriptSourceRevision
+      && result.data.current_revision
+      && result.data.current_revision !== state.scriptSourceRevision
+    ) {
+      state.sourceConflict = true;
+      state.sourceSaveStatus = "Conflict";
+      this.setSourceNotice("This file changed outside this editor. Reload before saving or restoring.");
+    }
+    this.renderSourceHistoryList({ preserveScroll: false });
+    if (!state.sourceHistoryRows.length) {
+      this.setSourceHistoryState("No saved versions.");
+      return;
+    }
+    this.setSourceHistoryState();
+    await this.selectSourceHistoryRevision(state.sourceHistoryRows[0].id);
+  },
+  closeSourceHistory() {
+    const state = App.state;
+    state.sourceHistoryOpen = false;
+    state.sourceHistorySelectedId = null;
+    state.sourceHistoryCanRestore = false;
+    this.sourceHistoryRequestSeq += 1;
+    this.sourceHistoryDiffRequestSeq += 1;
+    this.elements.sourceHistoryPanel.classList.add("hidden");
+    this.elements.sourceHistoryPanel.setAttribute("aria-hidden", "true");
+  },
+  async selectSourceHistoryRevision(revisionId) {
+    const state = App.state;
+    const resolvedId = Number(revisionId);
+    const revision = state.sourceHistoryRows.find((item) => item.id === resolvedId);
+    if (!revision) return;
+    state.sourceHistorySelectedId = resolvedId;
+    state.sourceHistoryCanRestore = false;
+    this.renderSourceHistoryList();
+    this.elements.sourceHistoryTitle.textContent = this.sourceRevisionLabel(revision.source);
+    this.elements.sourceHistoryMeta.textContent = this.sourceRevisionTime(revision.created_at);
+    this.elements.sourceHistoryDiff.textContent = "Loading diff...";
+    this.elements.sourceHistoryRestore.disabled = true;
+    const seq = ++this.sourceHistoryDiffRequestSeq;
+    const result = await App.data.loadScriptDiff(resolvedId);
+    if (seq !== this.sourceHistoryDiffRequestSeq || state.sourceHistorySelectedId !== resolvedId) return;
+    if (!result || !result.ok) {
+      this.elements.sourceHistoryDiff.textContent = (result && result.error) || "Diff could not be loaded";
+      return;
+    }
+    state.sourceHistoryCanRestore = Boolean(result.data.changed) && !state.sourceConflict;
+    if (result.data.changed) {
+      this.renderSourceHistoryDiff(result.data.diff || "No textual changes.");
+    } else {
+      this.elements.sourceHistoryDiff.textContent = "This is the current file content.";
+    }
+    this.updateSourceSaveState();
+  },
+  async restoreSourceHistoryRevision() {
+    const state = App.state;
+    if (
+      this.sourceHasUnsavedChanges()
+      || state.sourceSaving
+      || state.sourceConflict
+      || !state.sourceHistoryCanRestore
+      || state.sourceHistorySelectedId == null
+    ) return;
+    state.sourceSaving = true;
+    state.sourceSaveStatus = "";
+    this.updateSourceSaveState();
+    const result = await App.data.restoreScriptRevision(state.sourceHistorySelectedId);
+    state.sourceSaving = false;
+    if (!result || !result.ok) {
+      if (result && result.status === 409) {
+        state.sourceConflict = true;
+        state.sourceSaveStatus = "Conflict";
+        this.setSourceNotice("This file changed before restore. Reload and review the version again.");
+      } else {
+        state.sourceSaveStatus = (result && result.error) || "Restore failed";
+      }
+      this.updateSourceSaveState();
+      return;
+    }
+    state.sourceSaveStatus = "Applies at next warm-up";
+    this.elements.sourceCode.value = state.scriptSource;
+    this.setSourceNote(state.sourceBaseNote);
+    this.setSourceNoteOpen(false);
+    this.resetSourceUndo();
+    this.renderSourceHighlight();
+    this.setSourceNotice();
+    this.updateSourceSaveState();
+    await App.data.loadInfo();
+    await this.openSourceHistory();
+  },
+  async reloadSourceFromDisk() {
+    const loaded = await App.data.loadScriptSource();
+    if (!loaded) {
+      App.state.sourceSaveStatus = "Reload failed";
+      this.updateSourceSaveState();
+      return;
+    }
+    App.state.sourceConflict = false;
+    this.setSourceNote(App.state.sourceBaseNote);
+    this.setSourceNoteOpen(false);
+    this.setSourceNotice();
+    this.renderSourcePanel();
   },
   insertSourceText(text) {
     const editor = this.elements.sourceCode;
@@ -1562,11 +1920,15 @@ App.ui = {
       this.toggleAlertsMenu(false);
       // 열 때마다 디스크 최신본을 다시 불러와 다른 기기에서 저장한 내용이 즉시 보이게 한다.
       // 단, 저장 안 한 로컬 편집(dirty)이 있으면 덮어쓰지 않는다.
-      if (!state.sourceDirty) {
+      if (!this.sourceHasUnsavedChanges()) {
         await App.data.loadScriptSource();
       }
       this.renderSourcePanel();
     } else if (this.elements.sourceCode) {
+      this.closeSourceHistory();
+      if (this.sourceEditorController) {
+        this.sourceEditorController.close({ focusEditor: false });
+      }
       this.elements.sourceCode.blur();
     }
     if (App.chart && App.chart.resizeToContainer) {
@@ -1694,9 +2056,40 @@ App.ui = {
       sourceBackdrop,
       sourceClose,
       sourceUndo,
+      sourceFind,
+      sourceNote,
+      sourceNoteInput,
+      sourceNoteClose,
+      sourceNoteSave,
+      sourceHistory,
       sourceSave,
-      sourceCode
+      sourceCode,
+      sourceReload,
+      sourceHistoryClose,
+      sourceHistoryList,
+      sourceHistoryRestore
     } = this.elements;
+    this.sourceEditorController = window.PyneEditor.create({
+      editor: sourceCode,
+      panel: this.elements.sourceFindPanel,
+      findInput: this.elements.sourceFindInput,
+      replaceInput: this.elements.sourceReplaceInput,
+      replaceRow: this.elements.sourceReplaceRow,
+      replaceToggle: this.elements.sourceReplaceToggle,
+      count: this.elements.sourceFindCount,
+      previousButton: this.elements.sourceFindPrevious,
+      nextButton: this.elements.sourceFindNext,
+      closeButton: this.elements.sourceFindClose,
+      replaceButton: this.elements.sourceReplaceOne,
+      replaceAllButton: this.elements.sourceReplaceAll,
+      highlightRoot: this.elements.sourceHighlight,
+      beforeReplace: () => this.captureSourceUndo("replaceText"),
+      afterReplace: () => this.handleSourceInput(),
+      onOpen: () => this.setSourceNoteOpen(false),
+    });
+    this.elements.sourcePanel.addEventListener("keydown", (event) => {
+      this.sourceEditorController.handleShortcut(event);
+    });
     alertsToggle.addEventListener("click", (e) => {
       e.stopPropagation();
       this.toggleAlertsMenu();
@@ -1833,12 +2226,78 @@ App.ui = {
       this.toggleSourcePanel(false);
     });
 
+    sourceUndo.addEventListener("pointerdown", (e) => {
+      this.sourceUndoPointerType = e.pointerType || "";
+    });
+
+    sourceUndo.addEventListener("pointercancel", () => {
+      this.sourceUndoPointerType = "";
+    });
+
     sourceUndo.addEventListener("click", () => {
-      this.undoSourceEdit();
+      const focusEditor = this.sourceUndoPointerType !== "touch";
+      this.sourceUndoPointerType = "";
+      this.undoSourceEdit({ focusEditor });
+    });
+
+    sourceFind.addEventListener("click", () => {
+      this.sourceEditorController.toggle();
+    });
+
+    sourceHistory.addEventListener("click", () => {
+      this.openSourceHistory();
+    });
+
+    sourceHistoryClose.addEventListener("click", () => {
+      this.closeSourceHistory();
+    });
+
+    sourceHistoryList.addEventListener("click", (e) => {
+      const item = e.target && e.target.closest
+        ? e.target.closest("[data-revision-id]")
+        : null;
+      if (!item) return;
+      this.selectSourceHistoryRevision(Number(item.dataset.revisionId));
+    });
+
+    sourceHistoryRestore.addEventListener("click", () => {
+      this.restoreSourceHistoryRevision();
+    });
+
+    sourceReload.addEventListener("click", () => {
+      this.reloadSourceFromDisk();
     });
 
     sourceSave.addEventListener("click", () => {
       this.saveSourcePanel();
+    });
+
+    sourceNote.addEventListener("click", () => {
+      const opening = !App.state.sourceNoteOpen;
+      if (opening) this.sourceEditorController.close({ focusEditor: false });
+      if (!opening) this.setSourceNote(App.state.sourceBaseNote);
+      this.setSourceNoteOpen(opening);
+    });
+
+    sourceNoteClose.addEventListener("click", () => {
+      this.setSourceNote("");
+      sourceNoteInput.focus({ preventScroll: true });
+    });
+
+    sourceNoteSave.addEventListener("click", () => {
+      this.saveSourceNote();
+    });
+
+    sourceNoteInput.addEventListener("input", (e) => {
+      this.setSourceNote(e.target.value);
+    });
+
+    sourceNoteInput.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" && e.key !== "Enter") return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.setSourceNoteOpen(false);
+      sourceCode.focus({ preventScroll: true });
     });
 
     sourceCode.addEventListener("beforeinput", (e) => {
@@ -1865,6 +2324,17 @@ App.ui = {
     });
 
     sourceCode.addEventListener("keydown", (e) => {
+      if (this.sourceEditorController.handleShortcut(e)) return;
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey &&
+        !e.shiftKey &&
+        e.key.toLowerCase() === "z"
+      ) {
+        e.preventDefault();
+        this.undoSourceEdit();
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
         this.saveSourcePanel();
@@ -1892,8 +2362,18 @@ App.ui = {
         this.closeManualAlertConfirm();
         this.closeManualAlertMenu();
         this.closeAlertTemplateModal();
-        this.toggleSourcePanel(false);
+        if (App.state.sourceHistoryOpen) {
+          this.closeSourceHistory();
+        } else {
+          this.toggleSourcePanel(false);
+        }
       }
+    });
+
+    window.addEventListener("beforeunload", (e) => {
+      if (!this.sourceHasUnsavedChanges()) return;
+      e.preventDefault();
+      e.returnValue = "";
     });
 
     document.addEventListener("click", (e) => {

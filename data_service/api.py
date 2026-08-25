@@ -42,6 +42,17 @@ from registry import (
 )
 from runtime import Session
 from schedule_utils import seconds_until_bar_boundary_guard_end
+from scripting_workspace import (
+    ScriptingConflictError,
+    ScriptingFileEncodingError,
+    ScriptingFileNotFoundError,
+    ScriptingFileTooLargeError,
+    ScriptingFileTypeError,
+    ScriptingNoteError,
+    ScriptingPathError,
+    ScriptingWorkspace,
+    ScriptingWorkspaceError,
+)
 from config import (
     SessionSpec,
     default_webhook_url,
@@ -405,7 +416,10 @@ def _load_script_source_info(spec: SessionSpec, info: dict) -> tuple[str | None,
 # ----------------------------------------------------------------------
 # Per-session data-plane router:  /api/{session_id}/...
 # ----------------------------------------------------------------------
-def build_session_api_router(registry: SessionRegistry) -> APIRouter:
+def build_session_api_router(
+    registry: SessionRegistry,
+    scripting_workspace: ScriptingWorkspace,
+) -> APIRouter:
     r = APIRouter()
 
     def _rt(session_id: str) -> Optional[Session]:
@@ -558,9 +572,35 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
         if rt is None:
             return JSONResponse({"error": "session not found"}, status_code=404)
         info = rt.chart_info
-        title, name, source, _ = _load_script_source_info(rt.spec, info)
-        title = title or "No title"
-        return JSONResponse({"title": title, "name": name, "source": source})
+        name = _script_source_display_name(rt.spec)
+        try:
+            payload = scripting_workspace.read_file(name)
+        except ScriptingFileNotFoundError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+        except (
+            ScriptingPathError,
+            ScriptingFileTypeError,
+            ScriptingFileEncodingError,
+            ScriptingFileTooLargeError,
+        ) as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except ScriptingWorkspaceError as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+        title = (
+            _extract_script_title_from_source(payload["content"])
+            or info.get("script_title")
+            or name
+            or "No title"
+        )
+        return JSONResponse({
+            "title": title,
+            "name": name,
+            "path": payload["path"],
+            "source": payload["content"],
+            "revision": payload["revision"],
+            "history_revision_id": payload.get("history_revision_id"),
+            "note": payload.get("note"),
+        })
 
     @r.post("/api/{session_id}/script-source")
     def save_script_source(session_id: str, payload: dict = Body(default_factory=dict)) -> JSONResponse:
@@ -570,16 +610,45 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
         source = payload.get("source")
         if not isinstance(source, str):
             return JSONResponse({"error": "source must be string"}, status_code=400)
+        base_revision = payload.get("base_revision")
+        if not isinstance(base_revision, str) or len(base_revision) != 64:
+            return JSONResponse({"error": "base_revision is required"}, status_code=400)
+        note = payload.get("note")
         try:
             script_path = _resolve_script_path(rt.spec)
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         if not script_path.exists():
             return JSONResponse({"error": f"script not found: {script_path.name}"}, status_code=404)
+        name = _script_source_display_name(rt.spec, script_path)
         try:
-            script_path.write_text(source, encoding="utf-8")
-        except Exception as e:
-            return JSONResponse({"error": f"failed to save script: {e}"}, status_code=500)
+            saved_payload = scripting_workspace.save_file(
+                name,
+                source,
+                base_revision,
+                note=note,
+            )
+        except ScriptingConflictError as e:
+            return JSONResponse(
+                {
+                    "error": str(e),
+                    "code": "revision_conflict",
+                    "current_revision": e.current_revision,
+                },
+                status_code=409,
+            )
+        except ScriptingFileNotFoundError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+        except (
+            ScriptingPathError,
+            ScriptingFileTypeError,
+            ScriptingFileEncodingError,
+            ScriptingFileTooLargeError,
+            ScriptingNoteError,
+        ) as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except ScriptingWorkspaceError as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
 
         info = rt.chart_info
         name = _script_source_display_name(rt.spec, script_path)
@@ -587,7 +656,20 @@ def build_session_api_router(registry: SessionRegistry) -> APIRouter:
         info["script_title"] = title
         info["script_source_name"] = name
         info["script_source"] = source
-        return JSONResponse({"ok": True, "title": title, "name": name, "source": source})
+        response = {
+            "ok": True,
+            "title": title,
+            "name": name,
+            "source": source,
+            "path": saved_payload["path"],
+            "revision": saved_payload["revision"],
+            "saved": saved_payload["saved"],
+            "note_saved": saved_payload.get("note_saved", False),
+            "history_revision_id": saved_payload.get("history_revision_id"),
+            "note": saved_payload.get("note"),
+            "apply_state": saved_payload["apply_state"],
+        }
+        return JSONResponse(response)
 
     @r.get("/api/{session_id}/webhook-config")
     def get_webhook_config(session_id: str) -> JSONResponse:

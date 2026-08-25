@@ -7593,7 +7593,13 @@
   async function api(path, opts) {
     const resp = await fetch(path, opts);
     const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    if (!resp.ok) {
+      const error = new Error(data.error || `HTTP ${resp.status}`);
+      error.status = resp.status;
+      error.code = data.code || "";
+      error.currentRevision = data.current_revision || "";
+      throw error;
+    }
     return data;
   }
 
@@ -10417,6 +10423,15 @@
   });
 
   initHubMenuCalendar();
+  window.PyneScripting.init({
+    api,
+    closeAiChat,
+    closeHubMenu,
+    esc,
+    lockBodyScroll,
+    mobileQuery: mobileHubQuery,
+    unlockBodyScroll,
+  });
   initSessionReordering();
   initDesktopCardCarousel();
   initAiChat();

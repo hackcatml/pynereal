@@ -4,7 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=142" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=161" />
+  <link rel="stylesheet" href="/static/editor.css?v=4" />
 </head>
 <body>
   <header class="topbar">
@@ -118,6 +119,17 @@
         </span>
         <span>Watchlist</span>
       </button>
+      <button id="hub-scripting-open" class="hub-menu-item" type="button">
+        <span class="hub-menu-emoji" aria-hidden="true">
+          <svg class="hub-menu-glyph" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+            <polyline points="14 2 14 8 20 8" />
+            <polyline points="10 13 8 15 10 17" />
+            <polyline points="14 13 16 15 14 17" />
+          </svg>
+        </span>
+        <span>Scripting</span>
+      </button>
     </nav>
     <div class="hub-menu-footer">
       <div id="hub-update-message" class="hub-update-message" aria-live="polite"></div>
@@ -198,6 +210,243 @@
     </table>
     <div id="empty" class="muted">No sessions yet. Add one above.</div>
   </section>
+
+  <div id="scripting-modal" class="modal scripting-modal hidden" aria-hidden="true">
+    <div class="modal-box scripting-modal-box" role="dialog" aria-modal="true"
+         aria-labelledby="scripting-title">
+      <div class="modal-header scripting-modal-header">
+        <div class="scripting-title-group">
+          <button id="scripting-back" class="btn btn-icon scripting-back hidden" type="button"
+                  title="Back to project tree" aria-label="Back to project tree">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M19 12H5" />
+              <path d="m12 19-7-7 7-7" />
+            </svg>
+          </button>
+          <span id="scripting-title">Scripting</span>
+          <span id="scripting-mode" class="scripting-mode">Ready</span>
+        </div>
+        <div class="modal-actions">
+          <button id="scripting-refresh" class="btn btn-icon" type="button"
+                  title="Refresh project tree" aria-label="Refresh project tree">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 12a9 9 0 0 1 15.7-6L21 8" />
+              <path d="M21 3v5h-5" />
+              <path d="M21 12a9 9 0 0 1-15.7 6L3 16" />
+              <path d="M3 21v-5h5" />
+            </svg>
+          </button>
+          <button id="scripting-close" class="btn btn-icon" type="button"
+                  title="Close" aria-label="Close">&times;</button>
+        </div>
+      </div>
+      <div id="scripting-workspace" class="scripting-workspace">
+        <aside class="scripting-tree-pane" aria-label="Script project tree">
+          <div class="scripting-tree-header">
+            <div class="scripting-tree-title">
+              <button id="scripting-tree-toggle" class="scripting-tree-toggle" type="button"
+                      title="Collapse project tree" aria-label="Collapse project tree"
+                      aria-expanded="true" aria-controls="scripting-tree">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M3 5h6l2 3h10v11H3Z" />
+                </svg>
+              </button>
+              <span class="mono">workdir/scripts</span>
+            </div>
+            <span id="scripting-file-count">0 files</span>
+          </div>
+          <div id="scripting-tree-loading" class="scripting-state">
+            <span class="assets-spinner" aria-hidden="true"></span>
+            <span>Loading scripts...</span>
+          </div>
+          <div id="scripting-tree-error" class="scripting-state scripting-state-error hidden"
+               role="alert"></div>
+          <div id="scripting-tree-empty" class="scripting-state hidden">No script files.</div>
+          <div id="scripting-tree" class="scripting-tree hidden" role="tree"
+               aria-label="Scripts"></div>
+        </aside>
+        <div id="scripting-tree-resizer" class="scripting-tree-resizer"
+             role="separator" aria-label="Resize project tree" aria-orientation="vertical"
+             aria-valuemin="210" aria-valuemax="520" aria-valuenow="290" tabindex="0"></div>
+        <section class="scripting-editor-pane" aria-label="Script source">
+          <div class="scripting-editor-header">
+            <div class="scripting-editor-identity">
+              <strong id="scripting-file-name">No file selected</strong>
+              <span id="scripting-file-path" class="mono"></span>
+            </div>
+            <div class="scripting-editor-actions">
+              <span id="scripting-file-meta" class="scripting-file-meta"></span>
+              <button id="scripting-undo" class="btn btn-icon" type="button"
+                      title="Undo edit" aria-label="Undo edit" disabled>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M9 14 4 9l5-5" />
+                  <path d="M4 9h11a5 5 0 0 1 0 10h-1" />
+                </svg>
+              </button>
+              <button id="scripting-find-toggle" class="btn btn-icon scripting-find-toggle" type="button"
+                      title="Find" aria-label="Find" disabled>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="11" cy="11" r="7" />
+                  <path d="m20 20-4-4" />
+                </svg>
+              </button>
+              <button id="scripting-note-toggle" class="btn btn-icon" type="button"
+                      title="Version note" aria-label="Version note"
+                      aria-expanded="false" aria-controls="scripting-note-editor" disabled>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M19 17V5a2 2 0 0 0-2-2H4" />
+                  <path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3" />
+                  <path d="M15 8h-5" />
+                  <path d="M15 12h-6" />
+                </svg>
+              </button>
+              <button id="scripting-history" class="btn btn-icon" type="button"
+                      title="Version history" aria-label="Version history" disabled>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+                  <path d="M3 3v5h5" />
+                  <path d="M12 7v5l3 2" />
+                </svg>
+              </button>
+              <button id="scripting-save" class="btn btn-icon" type="button"
+                      title="Save script" aria-label="Save script" disabled>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z" />
+                  <path d="M17 21v-8H7v8M7 3v5h8" />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div id="scripting-note-editor" class="scripting-note-editor hidden">
+            <label for="scripting-note-input">Note</label>
+            <input id="scripting-note-input" type="text" maxlength="240"
+                   placeholder="Optional note for this version" autocomplete="off" />
+            <button id="scripting-note-close" class="btn btn-icon" type="button"
+                    title="Clear note" aria-label="Clear note">&times;</button>
+            <button id="scripting-note-save" class="btn btn-icon scripting-note-save" type="button"
+                    title="Save note" aria-label="Save note" disabled>
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m5 12 4 4L19 6" />
+              </svg>
+            </button>
+          </div>
+          <div id="scripting-find-panel" class="editor-find-panel hidden" role="search"
+               aria-label="Find and replace" aria-hidden="true">
+            <div class="editor-find-row">
+              <button id="scripting-replace-toggle" class="editor-find-action editor-replace-toggle"
+                      type="button" title="Toggle replace" aria-label="Toggle replace"
+                      aria-expanded="false" aria-controls="scripting-replace-row">
+                <span aria-hidden="true"></span>
+              </button>
+              <input id="scripting-find-input" type="text" placeholder="Find"
+                     aria-label="Find" autocomplete="off" spellcheck="false" />
+              <span id="scripting-find-count" class="editor-find-count" aria-live="polite">0/0</span>
+              <button id="scripting-find-previous" class="editor-find-action" type="button"
+                      title="Previous match" aria-label="Previous match" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6" /></svg>
+              </button>
+              <button id="scripting-find-next" class="editor-find-action" type="button"
+                      title="Next match" aria-label="Next match" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+              </button>
+              <button id="scripting-find-close" class="editor-find-action editor-find-close"
+                      type="button" title="Close find" aria-label="Close find">&times;</button>
+            </div>
+            <div id="scripting-replace-row" class="editor-find-row editor-replace-row hidden">
+              <span class="editor-find-spacer" aria-hidden="true"></span>
+              <input id="scripting-replace-input" type="text" placeholder="Replace"
+                     aria-label="Replace" autocomplete="off" spellcheck="false" />
+              <span class="editor-find-count" aria-hidden="true"></span>
+              <button id="scripting-replace-one" class="editor-replace-command" type="button"
+                      title="Replace current match" disabled>Replace</button>
+              <button id="scripting-replace-all"
+                      class="editor-replace-command editor-replace-all" type="button"
+                      title="Toggle replace all" aria-pressed="false">All</button>
+            </div>
+          </div>
+          <div id="scripting-editor-empty" class="scripting-editor-state">
+            Select a file from the project tree.
+          </div>
+          <div id="scripting-editor-loading" class="scripting-editor-state hidden">
+            <span class="assets-spinner" aria-hidden="true"></span>
+            <span>Loading source...</span>
+          </div>
+          <div id="scripting-editor-error"
+               class="scripting-editor-state scripting-state-error hidden" role="alert"></div>
+          <div id="scripting-editor-notice" class="scripting-editor-notice hidden" role="status">
+            <span id="scripting-editor-notice-text"></span>
+            <button id="scripting-editor-reload" class="btn" type="button">Reload</button>
+          </div>
+          <div id="scripting-editor-wrap" class="scripting-editor-wrap hidden">
+            <pre id="scripting-highlight" class="scripting-code" aria-hidden="true" inert></pre>
+            <div id="scripting-diff-gutter" class="scripting-diff-gutter" aria-hidden="true" inert>
+              <div id="scripting-diff-markers" class="scripting-diff-markers"></div>
+            </div>
+            <textarea id="scripting-code" class="scripting-editor" spellcheck="false"
+                      autocapitalize="off" autocomplete="off" autocorrect="off"
+                      wrap="soft" aria-label="Script source"></textarea>
+          </div>
+        </section>
+      </div>
+      <aside id="scripting-history-panel" class="scripting-history-panel hidden"
+             aria-hidden="true" aria-label="Version history">
+        <div class="scripting-history-header">
+          <div>
+            <strong>Version history</strong>
+            <span id="scripting-history-path" class="mono"></span>
+          </div>
+          <button id="scripting-history-close" class="btn btn-icon" type="button"
+                  title="Close history" aria-label="Close history">&times;</button>
+        </div>
+        <div id="scripting-history-loading" class="scripting-history-state hidden">
+          <span class="assets-spinner" aria-hidden="true"></span>
+          <span>Loading history...</span>
+        </div>
+        <div id="scripting-history-error" class="scripting-history-state scripting-state-error hidden"
+             role="alert"></div>
+        <div id="scripting-history-empty" class="scripting-history-state hidden">
+          No saved versions.
+        </div>
+        <div id="scripting-history-content" class="scripting-history-content hidden">
+          <div id="scripting-history-list" class="scripting-history-list"></div>
+          <section class="scripting-history-detail">
+            <div class="scripting-history-detail-header">
+              <div>
+                <strong id="scripting-history-detail-title">Select a version</strong>
+                <span id="scripting-history-detail-meta"></span>
+              </div>
+              <div class="scripting-history-detail-actions">
+                <button id="scripting-restore" class="btn btn-primary" type="button" disabled>
+                  Restore
+                </button>
+              </div>
+            </div>
+            <pre id="scripting-history-diff" class="scripting-history-diff">Select a version to review its changes.</pre>
+          </section>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <div id="scripting-unsaved-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-box modal-box-sm" role="dialog" aria-modal="true"
+         aria-labelledby="scripting-unsaved-title">
+      <div class="modal-header">
+        <span id="scripting-unsaved-title">Unsaved changes</span>
+        <button id="scripting-unsaved-close" class="btn btn-icon" type="button"
+                title="Close" aria-label="Close">&times;</button>
+      </div>
+      <div class="confirm-body">
+        <div class="confirm-message">Save your changes before leaving this file?</div>
+        <div id="scripting-unsaved-path" class="confirm-session mono"></div>
+      </div>
+      <div class="confirm-footer scripting-unsaved-actions">
+        <button id="scripting-unsaved-cancel" class="btn" type="button">Cancel</button>
+        <button id="scripting-unsaved-discard" class="btn btn-danger-primary" type="button">Discard</button>
+        <button id="scripting-unsaved-save" class="btn btn-primary" type="button">Save</button>
+      </div>
+    </div>
+  </div>
 
   <div id="watchlist-modal" class="modal watchlist-modal hidden" aria-hidden="true">
     <div class="modal-box watchlist-modal-box" role="dialog" aria-modal="true" aria-labelledby="watchlist-title">
@@ -1039,6 +1288,8 @@
     </form>
   </div>
 
-  <script src="/static/dashboard.js?v=156"></script>
+  <script src="/static/editor.js?v=4"></script>
+  <script src="/static/scripting.js?v=5"></script>
+  <script src="/static/dashboard.js?v=172"></script>
 </body>
 </html>
