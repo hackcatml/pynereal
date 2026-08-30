@@ -143,6 +143,39 @@ def _ohlcv_float(value: float) -> float:
     return struct.unpack("f", struct.pack("f", value))[0]
 
 
+def _preserve_latest_closed_bar(
+    rest_bars: list,
+    local_closed_bar: OHLCV | None,
+) -> list:
+    """Protect only the latest closed local candle from a stale REST value."""
+    if not rest_bars or local_closed_bar is None:
+        return rest_bars
+
+    local_timestamp = int(local_closed_bar.timestamp)
+    local_volume = _ohlcv_float(float(local_closed_bar.volume))
+    merged: list = []
+    for rest in rest_bars:
+        preserve_local = (
+            isinstance(rest, (list, tuple))
+            and len(rest) >= 6
+            and int(rest[0] / 1000) == local_timestamp
+            and _ohlcv_float(float(rest[5])) < local_volume
+        )
+        if preserve_local:
+            merged.append([
+                local_timestamp * 1000,
+                float(local_closed_bar.open),
+                float(local_closed_bar.high),
+                float(local_closed_bar.low),
+                float(local_closed_bar.close),
+                float(local_closed_bar.volume),
+            ])
+        else:
+            merged.append(rest)
+
+    return merged
+
+
 def _filter_invalid_ccxt_markets(markets: list) -> list:
     """Drop ccxt-normalized markets that have no id/symbol.
 
@@ -251,10 +284,15 @@ def fix_last_open_if_needed(
     symbol: str = "",
     timeframe: str = "",
     market_type: str = "",
-) -> float:
+) -> tuple[float, bool]:
+    """Resolve and persist the forming candle's authoritative open.
+
+    The returned target remains valid even when the file already had that open.
+    A fake candle can be replaced by a later live candle after this function
+    returns, so the caller must retain and reapply the target until run_ready.
+    """
     retry_delays = (1.0, 2.0)
     max_attempts = len(retry_delays) + 1
-    fixed_candle_open_price = 0.0
     open_price, high_price, low_price, close_price, vol, prev_close_price = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     last_timestamp, interval = 0, 0
     with OHLCVReader(ohlcv_path) as reader:
@@ -291,7 +329,7 @@ def fix_last_open_if_needed(
                         f"[fix_last_open_if_needed] Error fetching current open: {e}; "
                         f"failed after {attempt}/{max_attempts}"
                     )
-                    return fixed_candle_open_price
+                    return 0.0, False
                 delay = retry_delays[attempt - 1]
                 log_with_time(
                     f"[fix_last_open_if_needed] Error fetching current open: {e}; "
@@ -309,7 +347,7 @@ def fix_last_open_if_needed(
                 break
 
             if attempt >= max_attempts:
-                return fixed_candle_open_price
+                return 0.0, False
             delay = retry_delays[attempt - 1]
             log_with_time(
                 "[fix_last_open_if_needed] current open not found in fetched OHLCV; "
@@ -318,23 +356,29 @@ def fix_last_open_if_needed(
             time.sleep(delay)
 
         if target_open_price is None:
-            return fixed_candle_open_price
+            return 0.0, False
     else:
-        # BITGET-style continuity: the live-built current candle can start from the
-        # first trade, while the chart expects the previous close as the next open.
+        # Bitget and Bybit use previous-close continuity. Keep the legacy fallback
+        # for any provider not covered by the fetch-current-open policy.
         target_open_price = prev_close_price
 
-    if open_price != target_open_price:
+    corrected_high_price = max(high_price, target_open_price)
+    corrected_low_price = min(low_price, target_open_price)
+    changed = (
+        open_price != target_open_price
+        or high_price != corrected_high_price
+        or low_price != corrected_low_price
+    )
+    if changed:
         with OHLCVWriter(ohlcv_path) as writer:
             writer.overwrite(timestamp=writer.end_timestamp,
                              candle=OHLCV(timestamp=writer.end_timestamp, open=target_open_price,
-                                          high=high_price,
-                                          low=low_price, close=close_price, volume=vol))
-            fixed_candle_open_price = target_open_price
+                                          high=corrected_high_price,
+                                          low=corrected_low_price, close=close_price, volume=vol))
             # print("Candle open price fixing done")
             writer.close()
 
-    return fixed_candle_open_price
+    return target_open_price, changed
 
 
 def update_ohlcv_data(ohlcv_path: str, candle_datas: list) -> int:
@@ -397,6 +441,7 @@ def fetch_and_update_ohlcv_data(
     with OHLCVReader(ohlcv_path) as reader:
         size = reader.size
         last_candle = reader.read(size - 1)
+        previous_candle = reader.read(size - 2) if size >= 2 else None
         last_timestamp_sec = last_candle.timestamp
         interval = reader.interval
         reader.close()
@@ -416,8 +461,9 @@ def fetch_and_update_ohlcv_data(
             print(f"[fetch_and_update_ohlcv_data] No data received from exchange")
             return None
 
-        update_ohlcv_data(ohlcv_path, res)
-        return res
+        merged = _preserve_latest_closed_bar(res, previous_candle)
+        update_ohlcv_data(ohlcv_path, merged)
+        return merged
 
     except Exception as e:
         log_with_time(f"[fetch_and_update_ohlcv_data] Error fetching OHLCV: {e}")
@@ -442,6 +488,7 @@ def fetch_and_update_recent_ohlcv_data(
     with OHLCVReader(ohlcv_path) as reader:
         interval = reader.interval
         last_bar = reader.read(reader.size - 1)
+        previous_bar = reader.read(reader.size - 2) if reader.size >= 2 else None
         reader.close()
 
     if interval is None:
@@ -486,9 +533,10 @@ def fetch_and_update_recent_ohlcv_data(
         if not closed_bars:
             return None
 
-        update_ohlcv_data(ohlcv_path, closed_bars + [current_bar])
+        merged_closed_bars = _preserve_latest_closed_bar(closed_bars, previous_bar)
+        update_ohlcv_data(ohlcv_path, merged_closed_bars + [current_bar])
         # print(f"[fetch_and_update_recent_closed_ohlcv_data] Updated bars:\n{closed_bars}")
-        return closed_bars
+        return merged_closed_bars
 
     except Exception as e:
         log_with_time(f"[fetch_and_update_recent_closed_ohlcv_data] Error fetching OHLCV: {e}")

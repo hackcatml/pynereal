@@ -203,7 +203,16 @@ async def main() -> None:
     ensure_provider_config()
     cfg = load_hub_config()
     specs = load_initial_sessions()
-    registry = SessionRegistry(port=cfg.port)
+    registry = SessionRegistry(
+        port=cfg.port,
+        verification_delivery_path=(
+            _PROJECT_ROOT
+            / "workdir"
+            / "data"
+            / "cache"
+            / "verification_delivery.sqlite"
+        ),
+    )
     calendar_store = CalendarEventStore(
         _PROJECT_ROOT / "workdir" / "config" / "calendar_events.json"
     )

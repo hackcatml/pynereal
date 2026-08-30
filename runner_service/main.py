@@ -20,7 +20,13 @@ import numpy as np
 import websockets
 
 from appendable_iter import AppendableIterable
+from evaluation_intents import EvaluationIntentRecorder
 from strategy_snapshot import build_strategy_snapshot
+from verification import (
+    VerificationContinuityError,
+    VerificationResumeState,
+    calculate_candle as calculate_verification_candle,
+)
 from pynecore.cli.app import app_state
 from pynecore.core.ohlcv_file import OHLCVReader
 from pynecore.core.exchange_policy import normalize_exchange_name, tradingview_hides_zero_volume
@@ -33,6 +39,7 @@ SCRIPT_PATH: Path | None = None
 SCRIPT_HASH_PATH: Path | None = None  # CSV path for persisted script hashes.
 PLOT_PATH: Path | None = None  # per-session plot CSV path (from --plot-path).
 SESSION_ID: str = "default"
+RUNNER_ROLE: str = "primary"
 # Live webhook/telegram toggles for this session (decision 8-1). Updated at
 # startup from args/env and at runtime via the "webhook_config" WS message.
 WEBHOOK_ENABLED: bool = False
@@ -43,6 +50,7 @@ WEBHOOK_URL: str = ""
 TELEGRAM_TOKEN: str = ""
 TELEGRAM_CHAT_ID: str = ""
 SUPPRESS_EXTERNAL_NOTIFICATIONS: bool = False
+ALWAYS_SUPPRESS_EXTERNAL_NOTIFICATIONS: bool = False
 DEFAULT_WEBHOOK_REQUEST_TIMEOUT = (5, 10)
 HYPERLIQUID_WEBHOOK_REQUEST_TIMEOUT = (5, 30)
 TELEGRAM_REQUEST_TIMEOUT = (5, 10)
@@ -55,6 +63,11 @@ trade_event_queue = deque()
 plot_options = {}
 # Event queue for plotchar events
 plotchar_event_queue = deque()
+# Normalized per-candle intents used only for primary/verification comparison.
+evaluation_intents = EvaluationIntentRecorder()
+CURRENT_EVALUATION_TIMESTAMP: int | None = None
+ACTIVE_SOURCE_HASHES: dict[str, str] = {}
+VERIFICATION_RESUME_STATE = VerificationResumeState()
 
 
 def extract_script_title(script_path: Path) -> str:
@@ -235,7 +248,18 @@ def send_webhook_message(webhook_url: str, message: str, *, script_title: str | 
 def clear_local_state() -> None:
     trade_event_queue.clear()
     plotchar_event_queue.clear()
+    evaluation_intents.reset()
     plot_options.clear()
+
+
+def _record_evaluation_intent(event: dict[str, Any]) -> None:
+    if CURRENT_EVALUATION_TIMESTAMP is None:
+        return
+    evaluation_intents.record(
+        event,
+        evaluation_candle_time=CURRENT_EVALUATION_TIMESTAMP,
+        suppress_trade_replays=RUNNER_ROLE == "primary",
+    )
 
 
 def on_entry_event(trade, runner=None):
@@ -259,6 +283,7 @@ def on_entry_event(trade, runner=None):
         "comment": trade.entry_comment if trade.entry_comment else ""
     }
     trade_event_queue.append(event)
+    _record_evaluation_intent(event)
 
 
 def on_close_event(trade, runner=None):
@@ -276,6 +301,16 @@ def on_close_event(trade, runner=None):
         "profit": float(trade.profit)
     }
     trade_event_queue.append(event)
+    _record_evaluation_intent(event)
+
+
+def on_order_signal_event(order_signal: dict[str, Any], runner=None) -> None:
+    """Record one comparison intent for one filled strategy order."""
+    if runner is not None and getattr(runner.script, "pre_run", False):
+        return
+    event = dict(order_signal)
+    event["type"] = "order_signal"
+    _record_evaluation_intent(event)
 
 
 def on_plot_event(plot_data):
@@ -321,10 +356,15 @@ def on_plotchar_event(plotchar_data):
         "size": plotchar_data.get('size')
     }
     plotchar_event_queue.append(event)
+    _record_evaluation_intent(event)
 
 
 def on_alert_event(message: str, runner: ScriptRunner):
     """Callback for alert events - webhook/telegram notifications"""
+    _record_evaluation_intent({
+        "type": "alert",
+        "message": message,
+    })
     if SUPPRESS_EXTERNAL_NOTIFICATIONS:
         return
     script = runner.script
@@ -359,7 +399,7 @@ def on_alert_event(message: str, runner: ScriptRunner):
 
 def on_ai_event(instruction: str, order, bar_time: int, runner: ScriptRunner):
     """Queue one deterministic AI instruction event for a realtime order fill."""
-    if SUPPRESS_EXTERNAL_NOTIFICATIONS:
+    if SUPPRESS_EXTERNAL_NOTIFICATIONS and RUNNER_ROLE == "primary":
         return
     instruction = str(instruction or "").strip()
     if not instruction or getattr(runner.script, "pre_run", False):
@@ -378,7 +418,7 @@ def on_ai_event(instruction: str, order, bar_time: int, runner: ScriptRunner):
     event_id = hashlib.sha256(
         json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()
-    trade_event_queue.append({
+    event = {
         "type": "ai_instruction",
         "event_id": event_id,
         "instruction": instruction,
@@ -387,7 +427,10 @@ def on_ai_event(instruction: str, order, bar_time: int, runner: ScriptRunner):
         "bar_index": identity["bar_index"],
         "order_id": identity["order_id"],
         "comment": str(getattr(order, "comment", "") or ""),
-    })
+    }
+    _record_evaluation_intent(event)
+    if not SUPPRESS_EXTERNAL_NOTIFICATIONS:
+        trade_event_queue.append(event)
 
 
 def hide_zero_volume_bars(exchange: str | None) -> bool:
@@ -493,6 +536,10 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
             # Register trade event callbacks
             runner.script.position.on_entry_callback = partial(on_entry_event, runner=runner)
             runner.script.position.on_close_callback = partial(on_close_event, runner=runner)
+            runner.script.position.on_order_signal_callback = partial(
+                on_order_signal_event,
+                runner=runner,
+            )
             runner.script.position.on_alert_callback = partial(on_alert_event, runner=runner)
             runner.script.position.on_ai_callback = partial(on_ai_event, runner=runner)
             # Register plot event callback
@@ -623,6 +670,53 @@ class RunnerCtx:
     stream: AppendableIterable[OHLCV] | None
     reader: OHLCVReader | None
     last_new_bar_ts_sec: int
+    generation_id: str = ""
+
+
+def build_calculation_result(
+    *,
+    role: str,
+    generation_id: str,
+    confirmed_ohlcv: OHLCV,
+    plot_values: dict[str, float | int | None] | None,
+) -> dict[str, Any]:
+    confirmed_bar = [
+        int(confirmed_ohlcv.timestamp) * 1000,
+        float(confirmed_ohlcv.open),
+        float(confirmed_ohlcv.high),
+        float(confirmed_ohlcv.low),
+        float(confirmed_ohlcv.close),
+        float(confirmed_ohlcv.volume),
+    ]
+    return {
+        "type": f"{role}_result",
+        "generation_id": generation_id,
+        "candle_timestamp_ms": confirmed_bar[0],
+        "confirmed_bar": confirmed_bar,
+        "intents": evaluation_intents.snapshot(),
+        "plot_values": plot_values,
+        "source_hashes": ACTIVE_SOURCE_HASHES,
+        "notification_toggles": {
+            "webhook": bool(WEBHOOK_ENABLED),
+            "telegram": bool(TELEGRAM_ENABLED),
+        },
+    }
+
+
+async def send_calculation_result(
+    ws,
+    *,
+    role: str,
+    generation_id: str,
+    confirmed_ohlcv: OHLCV,
+    plot_values: dict[str, float | int | None] | None,
+) -> None:
+    await ws.send(json.dumps(build_calculation_result(
+        role=role,
+        generation_id=generation_id,
+        confirmed_ohlcv=confirmed_ohlcv,
+        plot_values=plot_values,
+    )))
 
 
 async def ws_loop():
@@ -630,26 +724,41 @@ async def ws_loop():
         try:
             async with websockets.connect(DATA_WS, ping_interval=None) as ws:
                 try:
-                    await ws.send(json.dumps({"type": "client_hello", "role": "runner",
-                                              "session_id": SESSION_ID}))
+                    role = (
+                        "verification_runner"
+                        if RUNNER_ROLE == "verification"
+                        else "runner"
+                    )
+                    hello = {
+                        "type": "client_hello",
+                        "role": role,
+                        "session_id": SESSION_ID,
+                    }
+                    resume = VERIFICATION_RESUME_STATE.payload(
+                        enabled=RUNNER_ROLE == "verification"
+                    )
+                    if resume is not None:
+                        hello["verification_resume"] = resume
+                    await ws.send(json.dumps(hello))
                 except Exception:
                     pass
-                try:
-                    if SCRIPT_PATH and SCRIPT_PATH.exists():
-                        await ws.send(json.dumps(build_script_info_payload(SCRIPT_PATH)))
-                except Exception as e:
-                    print(f"[runner] Failed to send script_info (connect): {e}")
-                try:
-                    if SCRIPT_PATH and SCRIPT_PATH.exists():
-                        current_hashes = compute_script_hashes(SCRIPT_PATH)
-                        previous_hashes = load_script_hashes(SCRIPT_HASH_PATH)
-                        if current_hashes != previous_hashes:
-                            # Only reset when script contents changed.
-                            await ws.send(json.dumps({"type": "reset_history"}))
-                            clear_local_state()
-                            write_script_hashes(SCRIPT_HASH_PATH, current_hashes)
-                except Exception as e:
-                    print(f"[runner] Failed to send reset_history: {e}")
+                if RUNNER_ROLE == "primary":
+                    try:
+                        if SCRIPT_PATH and SCRIPT_PATH.exists():
+                            await ws.send(json.dumps(build_script_info_payload(SCRIPT_PATH)))
+                    except Exception as e:
+                        print(f"[runner] Failed to send script_info (connect): {e}")
+                    try:
+                        if SCRIPT_PATH and SCRIPT_PATH.exists():
+                            current_hashes = compute_script_hashes(SCRIPT_PATH)
+                            previous_hashes = load_script_hashes(SCRIPT_HASH_PATH)
+                            if current_hashes != previous_hashes:
+                                # Only reset when script contents changed.
+                                await ws.send(json.dumps({"type": "reset_history"}))
+                                clear_local_state()
+                                write_script_hashes(SCRIPT_HASH_PATH, current_hashes)
+                    except Exception as e:
+                        print(f"[runner] Failed to send reset_history: {e}")
 
                 async def keepalive():
                     while True:
@@ -684,6 +793,7 @@ def parse_timeframe_to_ms(tf: str) -> int:
 def parse_runner_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="PyneReal runner_service")
     p.add_argument("--session-id")
+    p.add_argument("--role", choices=("primary", "verification"), default="primary")
     p.add_argument("--data-service-ws")
     p.add_argument("--provider")
     p.add_argument("--exchange")
@@ -760,11 +870,15 @@ async def main():
     if not script_path.exists():
         raise RuntimeError(f"script not found: {script_path}")
 
-    global SCRIPT_PATH, SCRIPT_HASH_PATH, DATA_WS, PLOT_PATH, SESSION_ID
+    global SCRIPT_PATH, SCRIPT_HASH_PATH, DATA_WS, PLOT_PATH, SESSION_ID, RUNNER_ROLE
     global WEBHOOK_ENABLED, TELEGRAM_ENABLED, WEBHOOK_URL, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
-    global SUPPRESS_EXTERNAL_NOTIFICATIONS
+    global SUPPRESS_EXTERNAL_NOTIFICATIONS, ALWAYS_SUPPRESS_EXTERNAL_NOTIFICATIONS
+    global CURRENT_EVALUATION_TIMESTAMP, ACTIVE_SOURCE_HASHES
     SCRIPT_PATH = script_path
     SESSION_ID = _resolve(args.session_id, "PYNEREAL_SESSION_ID", None, default="default")
+    RUNNER_ROLE = str(args.role or "primary")
+    ALWAYS_SUPPRESS_EXTERNAL_NOTIFICATIONS = RUNNER_ROLE == "verification"
+    SUPPRESS_EXTERNAL_NOTIFICATIONS = ALWAYS_SUPPRESS_EXTERNAL_NOTIFICATIONS
 
     # Per-session script-hash path (decision: avoid multi-runner contention).
     hash_path = _resolve(args.hash_path, "PYNEREAL_HASH_PATH", None)
@@ -794,7 +908,7 @@ async def main():
 
     from datetime import datetime
     started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{started_at}] [runner] started | session={SESSION_ID} tf={tf} "
+    print(f"[{started_at}] [runner] started | role={RUNNER_ROLE} session={SESSION_ID} tf={tf} "
           f"script={script_name} ws={DATA_WS}")
 
     # Exit if the spawning hub dies, so a killed/crashed hub never leaves an
@@ -826,6 +940,22 @@ async def main():
 
         mtype = msg.get("type")
 
+        if mtype == "verification_result_ack":
+            VERIFICATION_RESUME_STATE.acknowledge(
+                str(msg.get("generation_id") or ""),
+                msg.get("candle_timestamp_ms"),
+            )
+            continue
+
+        if mtype == "verification_resume_accepted":
+            if (
+                RUNNER_ROLE == "verification"
+                and ctx is not None
+                and str(msg.get("generation_id") or "") == ctx.generation_id
+            ):
+                ready_sent = True
+            continue
+
         # -----------------------------
         # Live per-session webhook toggle (decision 8-1)
         # -----------------------------
@@ -844,7 +974,12 @@ async def main():
         # -----------------------------
         # Pre script run stage
         # -----------------------------
-        if (mtype == "prerun_ready") or (mtype == "prerun_ready_after_history_download"):
+        if mtype in {
+            "prerun_ready",
+            "prerun_ready_after_history_download",
+            "verification_warmup",
+        }:
+            verification_warmup = mtype == "verification_warmup"
             # Send ACK immediately for prerun_ready_after_history_download
             if mtype == "prerun_ready_after_history_download":
                 try:
@@ -859,16 +994,28 @@ async def main():
                 print("[runner] prerun_ready received but file missing:", ohlcv_path, toml_path)
                 continue
 
-            # Prevent the duplicate prerun_ready event
+            # A new verification generation replaces the previous in-memory state.
             if ctx is not None:
-                continue
+                if not verification_warmup:
+                    continue
+                try:
+                    ctx.runner.destroy()
+                    if ctx.stream is not None:
+                        ctx.stream.finish()
+                    if ctx.reader is not None:
+                        ctx.reader.close()
+                except Exception:
+                    pass
+                ctx = None
 
             try:
                 current_hashes = compute_script_hashes(SCRIPT_PATH)
+                ACTIVE_SOURCE_HASHES = dict(current_hashes)
                 previous_hashes = load_script_hashes(SCRIPT_HASH_PATH)
                 if current_hashes != previous_hashes:
-                    pending_full_reemit = True
-                    await ws.send(json.dumps({"type": "script_modified"}))
+                    pending_full_reemit = RUNNER_ROLE == "primary"
+                    if RUNNER_ROLE == "primary":
+                        await ws.send(json.dumps({"type": "script_modified"}))
                     clear_local_state()
                     write_script_hashes(SCRIPT_HASH_PATH, current_hashes)
                 elif (
@@ -888,6 +1035,17 @@ async def main():
             if result is None:
                 from datetime import datetime
                 print(f"[{datetime.now().strftime('%y-%m-%d %H:%M:%S')}] [runner] failed to prepare runner")
+                if verification_warmup:
+                    VERIFICATION_RESUME_STATE.reset()
+                    try:
+                        await ws.send(json.dumps({
+                            "type": "verification_calculation_error",
+                            "generation_id": str(msg.get("generation_id") or ""),
+                            "error_type": "VerificationWarmupError",
+                            "error_message": "failed to prepare verification runner",
+                        }))
+                    except Exception as e:
+                        print(f"[runner] Failed to report verification warm-up error: {e}")
                 continue
             else:
                 runner, stream, reader = result
@@ -912,7 +1070,9 @@ async def main():
                 int(confirmed_bar.timestamp) if confirmed_bar is not None else None
             )
             runner.script.pre_run = True
-            if mtype == "prerun_ready_after_history_download":
+            if verification_warmup:
+                runner.script.pre_run = True
+            elif mtype == "prerun_ready_after_history_download":
                 prerun_range = size
                 runner.script.pre_run = False
             elif pending_full_reemit:
@@ -925,8 +1085,11 @@ async def main():
                 # run_ready, so no spurious last-bar alert fires (its fill bar isn't stepped).
                 runner.script.pre_run = False
             SUPPRESS_EXTERNAL_NOTIFICATIONS = bool(
-                mtype == "prerun_ready_after_history_download"
-                and msg.get("history_resync")
+                ALWAYS_SUPPRESS_EXTERNAL_NOTIFICATIONS
+                or (
+                    mtype == "prerun_ready_after_history_download"
+                    and msg.get("history_resync")
+                )
             )
             try:
                 prerun_plot_values = await asyncio.to_thread(
@@ -936,10 +1099,51 @@ async def main():
                     confirmed_bar_time,
                 )
             finally:
-                SUPPRESS_EXTERNAL_NOTIFICATIONS = False
+                SUPPRESS_EXTERNAL_NOTIFICATIONS = ALWAYS_SUPPRESS_EXTERNAL_NOTIFICATIONS
             if runner.plot_writer:
                 runner.plot_writer.flush()
             pending_full_reemit = False
+
+            if verification_warmup:
+                confirmed_bar_and_new_bar = msg.get("confirmed_bar_and_new_bar")
+                if (
+                    isinstance(confirmed_bar_and_new_bar, list)
+                    and len(confirmed_bar_and_new_bar) == 2
+                ):
+                    last_new_ts_sec = int(confirmed_bar_and_new_bar[1][0] / 1000)
+                else:
+                    last_new_ts_sec = int(reader.end_timestamp or 0)
+                ctx = RunnerCtx(
+                    runner=runner,
+                    stream=stream,
+                    reader=reader,
+                    last_new_bar_ts_sec=last_new_ts_sec,
+                    generation_id=str(msg.get("generation_id") or ""),
+                )
+                VERIFICATION_RESUME_STATE.reset(
+                    generation_id=ctx.generation_id,
+                    last_processed_timestamp_ms=(
+                        int(confirmed_bar_time) * 1000
+                        if confirmed_bar_time is not None
+                        else None
+                    ),
+                    pending_bar_timestamp_ms=last_new_ts_sec * 1000,
+                    source_hashes=ACTIVE_SOURCE_HASHES,
+                )
+                trade_event_queue.clear()
+                plotchar_event_queue.clear()
+                try:
+                    await ws.send(json.dumps({
+                        "type": "verification_runner_ready",
+                        "generation_id": str(msg.get("generation_id") or ""),
+                        "calculated_through": confirmed_bar_time,
+                        "pending_bar_timestamp_ms": last_new_ts_sec * 1000,
+                        "source_hashes": ACTIVE_SOURCE_HASHES,
+                    }))
+                    ready_sent = True
+                except Exception as e:
+                    print(f"[runner] Failed to send verification_runner_ready: {e}")
+                continue
 
             # The re-sync plot.csv and historical markers are complete. Reload chart
             # pages now so an earlier runner-connected reload cannot leave stale data.
@@ -1064,6 +1268,9 @@ async def main():
 
             confirmed_ohlcv = bar_list_to_ohlcv(confirmed_bar)
             new_ohlcv = bar_list_to_ohlcv(new_bar)
+            evaluation_intents.begin_candle()
+            CURRENT_EVALUATION_TIMESTAMP = int(confirmed_ohlcv.timestamp)
+            confirmed_plot_values = None
             hide_zero_volume = hide_zero_volume_bars(getattr(ctx.runner.syminfo, "prefix", None))
             # confirmed_visible decides whether this just-closed candle should run one strategy step.
             # new_visible decides whether the newly opened candle should be kept as the next open bar.
@@ -1133,7 +1340,6 @@ async def main():
 
                 # Calculate the last confirmed bar
                 ctx.runner.script.pre_run = False
-                confirmed_plot_values = None
                 while True:
                     step_res = ctx.runner.step()
                     if step_res is None:
@@ -1210,12 +1416,118 @@ async def main():
                         ),
                     )
 
+            verification_generation_id = str(
+                msg.get("verification_generation_id") or ""
+            )
+            if verification_generation_id:
+                try:
+                    await send_calculation_result(
+                        ws,
+                        role="primary",
+                        generation_id=verification_generation_id,
+                        confirmed_ohlcv=confirmed_ohlcv,
+                        plot_values=confirmed_plot_values,
+                    )
+                except Exception as e:
+                    print(f"[runner] Failed to send primary_result: {e}")
+            CURRENT_EVALUATION_TIMESTAMP = None
+
             # Remove the script_module using destroy() (required). If you don't remove it,
             # the ScriptRunner will reuse the previous candle data even when reloading the script.
             ctx.runner.destroy()
             ctx.stream = None
             ctx.reader.close()
             ctx = None
+
+        elif mtype == "verification_run_ready":
+            if RUNNER_ROLE != "verification" or ctx is None:
+                continue
+            generation_id = str(msg.get("generation_id") or "")
+            if generation_id != ctx.generation_id:
+                continue
+
+            confirmed_bar_and_new_bar = msg.get("confirmed_bar_and_new_bar")
+            if (
+                not isinstance(confirmed_bar_and_new_bar, list)
+                or len(confirmed_bar_and_new_bar) != 2
+            ):
+                continue
+            try:
+                evaluation_timestamp = int(
+                    confirmed_bar_and_new_bar[0][0] / 1000
+                )
+            except (IndexError, TypeError, ValueError):
+                continue
+            evaluation_intents.begin_candle()
+            trade_event_queue.clear()
+            plotchar_event_queue.clear()
+            CURRENT_EVALUATION_TIMESTAMP = evaluation_timestamp
+
+            try:
+                result_payload, confirmed_ohlcv, new_ohlcv = (
+                    calculate_verification_candle(
+                        ctx,
+                        confirmed_bar_and_new_bar,
+                        bar_list_to_ohlcv=bar_list_to_ohlcv,
+                        hide_zero_volume_bars=hide_zero_volume_bars,
+                        is_visible_ohlcv=is_visible_ohlcv,
+                        plot_values_from_step=_plot_values_from_step,
+                        build_result=build_calculation_result,
+                        generation_id=generation_id,
+                    )
+                )
+                result_payload["authoritative_source"] = msg.get(
+                    "authoritative_source"
+                )
+                VERIFICATION_RESUME_STATE.remember(
+                    result_payload,
+                    pending_bar_timestamp_ms=int(new_ohlcv.timestamp) * 1000,
+                )
+            except Exception as e:
+                if isinstance(e, VerificationContinuityError):
+                    error_payload = {
+                        "type": "verification_continuity_error",
+                        "generation_id": generation_id,
+                        "expected_timestamp_ms": e.expected_timestamp_ms,
+                        "received_timestamp_ms": e.received_timestamp_ms,
+                    }
+                else:
+                    error_payload = {
+                        "type": "verification_calculation_error",
+                        "generation_id": generation_id,
+                        "candle_timestamp_ms": evaluation_timestamp * 1000,
+                        "error_type": type(e).__name__,
+                        "error_message": str(e)[:500],
+                    }
+                try:
+                    ctx.runner.destroy()
+                    if ctx.stream is not None:
+                        ctx.stream.finish()
+                    if ctx.reader is not None:
+                        ctx.reader.close()
+                except Exception:
+                    pass
+                ctx = None
+                ready_sent = False
+                VERIFICATION_RESUME_STATE.reset()
+                try:
+                    await ws.send(json.dumps(error_payload))
+                except Exception as send_error:
+                    print(
+                        "[runner] Failed to send verification calculation error: "
+                        f"{send_error}"
+                    )
+            else:
+                try:
+                    await ws.send(json.dumps(result_payload))
+                except Exception as e:
+                    # The calculation state and unacknowledged result are retained.
+                    # They are advertised in client_hello after reconnect.
+                    print(f"[runner] Failed to send verification_result: {e}")
+            finally:
+                CURRENT_EVALUATION_TIMESTAMP = None
+                trade_event_queue.clear()
+                plotchar_event_queue.clear()
 
         else:
             continue

@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable, Optional, TypeVar
 from config import FeedSpec
 from pynecore.cli.commands.data import parse_date_or_days
 from pynecore.core.ohlcv_file import OHLCVReader
+from pynecore.core.exchange_policy import previous_close_is_next_open
 from pynecore.cli.app import app_state
 from ohlcv_io import (
     convert_timeframe,
@@ -37,6 +38,14 @@ from log_utils import log_with_time
 
 
 T = TypeVar("T")
+
+
+def _apply_open_target(bar: list, target_open_price: float) -> None:
+    if target_open_price <= 0.0 or len(bar) < 4:
+        return
+    bar[1] = target_open_price
+    bar[2] = max(float(bar[2]), target_open_price)
+    bar[3] = min(float(bar[3]), target_open_price)
 
 
 async def _to_thread_cancel_safe(func: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
@@ -399,7 +408,8 @@ async def file_update_loop(
                     continue
 
                 # Fetch candles via fetch_ohlcv at the first pre_run after history download
-                if not first_fetch_after_download_done:
+                initial_refresh = not first_fetch_after_download_done
+                if initial_refresh:
                     res = await _retry_ohlcv_update(
                         "pre_run initial OHLCV refresh",
                         lambda: fetch_and_update_ohlcv_data(
@@ -443,8 +453,13 @@ async def file_update_loop(
                             for bar in res
                         ]
                         upsert_bars(cache_path, provider, exchange, symbol, timeframe, cache_rows)
-                    # Current candle open price fix if needed
-                    fixed_open_price = await _to_thread_cancel_safe(
+
+                # Fetch-based exchanges already received their authoritative open
+                # during the initial full refresh. Continuity exchanges still need
+                # to retain previous_close so a later live bar cannot replace it.
+                retain_open_target = previous_close_is_next_open(exchange)
+                if (not initial_refresh) or retain_open_target:
+                    resolved_open_price, open_fix_changed = await _to_thread_cancel_safe(
                         fix_last_open_if_needed,
                         str(ohlcv_path),
                         exchange=exchange,
@@ -452,7 +467,15 @@ async def file_update_loop(
                         timeframe=timeframe,
                         market_type=market_type,
                     )
-                    if fixed_open_price > 0.0:
+                    # Bitget/Bybit must retain previous-close continuity even when
+                    # the fake bar already had the target open. Other exchanges
+                    # only reapply an open that actually corrected the file.
+                    fixed_open_price = (
+                        resolved_open_price
+                        if open_fix_changed or retain_open_target
+                        else 0.0
+                    )
+                    if open_fix_changed:
                         # Fix the last bar stored in the ohlcv cache
                         cache_rows = []
                         with OHLCVReader(ohlcv_path) as reader:
@@ -465,8 +488,7 @@ async def file_update_loop(
 
                 # Send pre-run ready signal (confirmed bar and new bar)
                 confirmed_bar_and_new_bar = [bars[0], bars[1]]
-                if fixed_open_price > 0.0:
-                    confirmed_bar_and_new_bar[1][1] = fixed_open_price
+                _apply_open_target(confirmed_bar_and_new_bar[1], fixed_open_price)
 
                 bar_ts = int(confirmed_bar_and_new_bar[1][0])  # new bar timestamp in ms
                 if prerun_sent_for_bar_ts != bar_ts:
@@ -489,8 +511,7 @@ async def file_update_loop(
                 if not history_download_complete:
                     continue
 
-                if fixed_open_price > 0.0:
-                    confirmed_bar_and_new_bar[0][1] = fixed_open_price
+                _apply_open_target(confirmed_bar_and_new_bar[0], fixed_open_price)
 
                 incremented_size = update_ohlcv_data(str(ohlcv_path), confirmed_bar_and_new_bar)
                 if incremented_size > 0:
