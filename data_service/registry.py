@@ -10,6 +10,7 @@ from typing import Awaitable, Callable, Dict, List, Optional
 from config import MAX_SESSIONS, FeedSpec, SessionSpec, save_sessions
 from collector_loop import fix_missing_bars_loop, watch_trades_loop
 from file_update_loop import _to_thread_cancel_safe, file_update_loop
+from verification import FinalizedCandleProbe
 from prerun_scheduler import assign_prerun_offsets
 from runner_supervisor import RunnerSupervisor
 from runtime import Feed, Session
@@ -38,6 +39,10 @@ class SessionOrderError(Exception):
 
 
 class RunnerActiveError(Exception):
+    pass
+
+
+class VerificationRunnerUnavailableError(Exception):
     pass
 
 
@@ -77,11 +82,52 @@ class SessionRegistry:
             return "starting"
         return sup
 
+    def verification_status(self, session: Session) -> dict:
+        enabled = self.supervisor.verification_enabled
+        verification = session.verification
+        if not enabled:
+            return {"enabled": False, "status": "disabled"}
+
+        primary_status = self.runner_status(session.spec.id)
+        process_status = self.supervisor.verification_process_status(session.spec.id)
+        recovery = self.supervisor.verification_recovery_info(session.spec.id)
+        if primary_status in {"stopped", "crashed"}:
+            status = "stopped"
+        elif process_status == "recovering":
+            status = "recovering"
+        elif verification.runner_count > 0 and verification.runner_ready:
+            status = "running"
+        elif verification.runner_count > 0:
+            status = "warming_up"
+        elif verification.connection_lost and process_status == "starting":
+            status = "reconnecting"
+        elif process_status == "crashed":
+            status = "crashed"
+        elif process_status == "starting":
+            status = "starting"
+        else:
+            status = process_status
+
+        next_retry_at = recovery.get("next_retry_at")
+        return {
+            "enabled": True,
+            "status": status,
+            "connected": verification.runner_count > 0,
+            "ready": verification.runner_ready,
+            "reason": recovery.get("reason") or verification.last_error,
+            "attempt": recovery.get("attempt", 0),
+            "next_retry_at": (
+                int(float(next_retry_at) * 1000) if next_retry_at is not None else None
+            ),
+            "updated_at": verification.state_updated_at,
+        }
+
     def snapshots(self) -> List[dict]:
         out = []
         for s in self.sessions.values():
             snap = s.snapshot()
             snap["runner"] = self.runner_status(s.spec.id)
+            snap["verification"] = self.verification_status(s)
             out.append(snap)
         return out
 
@@ -219,6 +265,70 @@ class SessionRegistry:
         }
         self._start_file_update_task(feed)
 
+    @staticmethod
+    def _has_verification_probe_consumer(feed: Feed) -> bool:
+        return any(
+            session.verification.enabled and session.verification.runner_count > 0
+            for session in feed.subscribers.values()
+        )
+
+    def _start_verification_probe(self, feed: Feed) -> None:
+        current = feed.finalized_candle_probe
+        if current is not None:
+            task = feed.tasks.get(current.task_name)
+            if task is not None and not task.done():
+                return
+            feed.tasks.pop(current.task_name, None)
+
+        spec = feed.spec
+        probe = FinalizedCandleProbe(
+            exchange_name=spec.exchange,
+            symbol=spec.symbol,
+            timeframe=spec.timeframe,
+            market_type=spec.market_type,
+            on_event=feed.log_market_data_diagnostic,
+            on_authoritative=feed.queue_verification_candle,
+        )
+        feed.seed_verification_primary_results(probe)
+        feed.finalized_candle_probe = probe
+        probe_name = probe.task_name
+        feed.tasks[probe_name] = asyncio.create_task(
+            self._guard_probe(feed, probe_name, probe.run())
+        )
+
+    async def _stop_verification_probe(self, feed: Feed) -> None:
+        probe = feed.finalized_candle_probe
+        feed.finalized_candle_probe = None
+        feed.clear_verification_primary_results()
+        if probe is None:
+            return
+        task = feed.tasks.pop(probe.task_name, None)
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def _sync_verification_probe(self, feed: Feed) -> None:
+        async with feed._verification_probe_lock:
+            if self._has_verification_probe_consumer(feed):
+                self._start_verification_probe(feed)
+            else:
+                await self._stop_verification_probe(feed)
+
+    async def _guard_probe(self, feed: Feed, name: str, coro) -> None:
+        try:
+            await coro
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            feed.log_market_data_diagnostic({
+                "event": "finalized_candle_probe_crashed",
+                "source": name,
+                "error_type": type(e).__name__,
+                "error_message": str(e)[:500],
+            })
+            print(f"[feed {feed.spec.id}] {name} crashed: {e}")
+
     async def _guard_feed(self, feed: Feed, name: str, coro) -> None:
         try:
             await coro
@@ -295,10 +405,15 @@ class SessionRegistry:
             spec,
             feed,
             strategy_evaluation_enabled=self.strategy_evaluation_enabled,
+            verification_enabled=self.supervisor.verification_enabled,
         )
         session.on_status_change = self.notify_hub
         session.on_spec_change = self._persist_and_notify
         session.on_ai_instruction = self.ai_instruction_handler
+        session.verification.on_recovery = self._request_verification_recovery
+        session.verification.on_connected = self._mark_verification_connected
+        session.verification.on_disconnected = self._mark_verification_disconnected
+        session.verification.on_ready = self._mark_verification_ready
         feed.subscribers[spec.id] = session
         self.sessions[spec.id] = session
         self._rebalance_prerun_schedule()
@@ -320,6 +435,7 @@ class SessionRegistry:
         await self.supervisor.stop(session_id)
         feed = session.feed
         feed.subscribers.pop(session_id, None)
+        await self._sync_verification_probe(feed)
         del self.sessions[session_id]
         self._rebalance_prerun_schedule()
         await self._teardown_feed_if_idle(feed)
@@ -634,6 +750,7 @@ class SessionRegistry:
         if session is None:
             raise SessionNotFoundError(session_id)
         await self.supervisor.stop(session_id)
+        await self._sync_verification_probe(session.feed)
         await self.notify_hub()
 
     async def restart_runner(self, session_id: str) -> None:
@@ -643,6 +760,50 @@ class SessionRegistry:
         if not session.feed.history_ready():
             raise HistoryNotReadyError(session_id)
         await self.supervisor.restart(session.spec, session.paths)
+
+    async def restart_verification_runner(self, session_id: str) -> None:
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise SessionNotFoundError(session_id)
+        if not self.supervisor.verification_enabled:
+            raise VerificationRunnerUnavailableError(
+                "verification runner is disabled"
+            )
+        if not self.supervisor.is_active(session_id):
+            raise VerificationRunnerUnavailableError(
+                "start the strategy runner before restarting verification"
+            )
+        if not session.feed.history_ready():
+            raise HistoryNotReadyError(session_id)
+        await session.verification.prepare_recovery("manual restart")
+        await self.supervisor.restart_verification(
+            session.spec,
+            session.paths,
+            reason="manual restart",
+        )
+        await self.notify_hub()
+
+    async def _request_verification_recovery(
+        self,
+        session: Session,
+        reason: str,
+    ) -> None:
+        self.supervisor.request_verification_recovery(
+            session.spec.id,
+            reason=reason,
+        )
+        await self.notify_hub()
+
+    async def _mark_verification_connected(self, session: Session) -> None:
+        self.supervisor.mark_verification_connected(session.spec.id)
+        await self._sync_verification_probe(session.feed)
+
+    async def _mark_verification_disconnected(self, session: Session) -> None:
+        self.supervisor.mark_verification_disconnected(session.spec.id)
+        await self._sync_verification_probe(session.feed)
+
+    async def _mark_verification_ready(self, session: Session) -> None:
+        self.supervisor.mark_verification_ready(session.spec.id)
 
     # ------------------------------------------------------------------
     # Boot / shutdown

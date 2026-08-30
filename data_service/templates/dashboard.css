@@ -807,6 +807,51 @@ tr:last-child td { border-bottom: none; }
   gap: 6px;
   white-space: nowrap;
 }
+.runner-actions > .btn[data-tooltip],
+.runner-actions > .verification-status-wrap > .btn[data-tooltip],
+.data-controls > .btn[data-tooltip] {
+  position: relative;
+}
+@media (hover: hover) and (pointer: fine) {
+  .runner-actions > .btn[data-tooltip]::after,
+  .runner-actions > .verification-status-wrap > .btn[data-tooltip]::after,
+  .data-controls > .btn[data-tooltip]::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 7px);
+    z-index: 48;
+    width: max-content;
+    max-width: min(220px, calc(100vw - 24px));
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: #11161d;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.38);
+    color: var(--text);
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1.25;
+    letter-spacing: 0;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transform: translate(-50%, 2px);
+    transition: opacity 120ms ease, transform 120ms ease;
+  }
+  .runner-actions > .btn[data-tooltip]:hover::after,
+  .runner-actions > .btn[data-tooltip]:focus-visible::after,
+  .runner-actions > .verification-status-wrap > .btn[data-tooltip]:hover::after,
+  .runner-actions > .verification-status-wrap > .btn[data-tooltip]:focus-visible::after,
+  .data-controls > .btn[data-tooltip]:hover::after,
+  .data-controls > .btn[data-tooltip]:focus-visible::after {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+  .runner-actions > .verification-status-wrap.show-verification-status > .btn[data-tooltip]::after {
+    display: none;
+  }
+}
 
 @media (min-width: 721px) {
   #sessions th:nth-child(10) { width: 1%; }
@@ -814,7 +859,8 @@ tr:last-child td { border-bottom: none; }
     width: 1%;
     padding-right: 36px;
   }
-  .runner-actions { min-width: 190px; }
+  /* Reserve the widest running state: Stop + Restart + Logs + Verification. */
+  .runner-actions { min-width: 130px; }
 }
 
 .symbol-cell,
@@ -990,6 +1036,143 @@ tr:last-child td { border-bottom: none; }
   opacity: 1;
   transform: translate(-50%, 0);
 }
+
+.verification-status-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+}
+.verification-status-wrap[hidden] { display: none; }
+.verification-inspect-button {
+  touch-action: manipulation;
+}
+.verification-inspect-button:hover,
+.verification-inspect-button:focus-visible,
+.verification-status-wrap.show-verification-status .verification-inspect-button {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.verification-led {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 50%;
+  background: #6b7280;
+}
+.verification-led-running {
+  border-color: #42d77d;
+  background: #28a745;
+  box-shadow: 0 0 5px rgba(40, 167, 69, 0.75);
+}
+.verification-led-starting,
+.verification-led-warming_up {
+  border-color: #ffd45e;
+  background: #e0a300;
+  animation: blink-fast 0.7s infinite;
+}
+.verification-led-recovering {
+  border-color: #76a7ff;
+  background: var(--accent);
+  animation: pulse-slow 1s ease-in-out infinite;
+}
+
+.verification-led-reconnecting {
+  background: #f3b33d;
+  box-shadow: 0 0 0 2px rgb(243 179 61 / 18%);
+  animation: pulse-slow 0.8s ease-in-out infinite;
+}
+.verification-led-crashed {
+  border-color: #ff8c96;
+  background: var(--danger);
+  box-shadow: 0 0 5px rgba(220, 53, 69, 0.7);
+}
+.verification-status-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 7px);
+  z-index: 49;
+  display: grid;
+  width: min(280px, calc(100vw - 24px));
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #11161d;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.38);
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1.4;
+  letter-spacing: 0;
+  text-align: left;
+  white-space: normal;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(2px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+.verification-status-wrap.show-verification-status .verification-status-popover {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+.verification-popover-title {
+  color: #f2f5f8;
+  font-size: 11px;
+  font-weight: 600;
+}
+.verification-popover-header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.verification-popover-heading {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+.verification-status-description {
+  color: var(--muted);
+}
+.verification-restart-button {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #1b222c;
+  color: var(--text);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.verification-restart-button:hover,
+.verification-restart-button:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+.verification-restart-button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+.verification-restart-button svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 @media (hover: hover) and (pointer: fine) {
   .runner-status-anchor:hover .runner-status-tooltip {
     opacity: 1;
@@ -1007,6 +1190,10 @@ tr:last-child td { border-bottom: none; }
   .runner-status-anchor.show-runner-status .runner-status-tooltip,
   .runner-status-anchor:focus-visible .runner-status-tooltip {
     transform: translate(0, 0);
+  }
+  .verification-status-popover {
+    right: 0;
+    left: auto;
   }
 }
 
@@ -4330,7 +4517,8 @@ tr:last-child td { border-bottom: none; }
   width: 13px;
   height: 13px;
 }
-.data-integrity-btn .icon {
+.data-integrity-btn .icon,
+.verification-inspect-button .icon {
   width: 13px;
   height: 13px;
 }
@@ -5707,15 +5895,6 @@ tr:last-child td { border-bottom: none; }
   /* re-assert the square (this block's .btn padding would otherwise distort the
      icon buttons) and enlarge them to a comfortable touch size */
   .btn-icon { width: 34px; height: 34px; padding: 0; }
-  /* uniform width for the Chart "Open" link and runner Start/Stop/Restart/Logs
-     buttons — mobile only. On desktop the runner column is a fixed 190px and a
-     forced per-button min-width would overflow it in the running state and
-     shake the column, so this stays scoped to the mobile card layout. */
-  .btn-chart,
-  .runner-actions .btn {
-    min-width: 72px;
-    text-align: center;
-  }
   input[type="checkbox"] { width: 18px; height: 18px; }
 
   @media (hover: hover) and (pointer: fine) {

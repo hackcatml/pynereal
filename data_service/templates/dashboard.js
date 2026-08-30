@@ -6978,16 +6978,82 @@
     if (isCalendarOpen() && calendarSelectedDate) renderCalendarAddControls();
   }
 
+  // Lucide line-art icons for the runner/chart action buttons (viewBox 0 0 24 24,
+  // stroke-width 2 via .btn-icon .icon). Defined before runnerButtons so they are
+  // initialized before any render-time call.
+  const runnerPlayIcon =
+    `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">`
+    + `<polygon points="6 3 20 12 6 21 6 3"></polygon>`
+    + `</svg>`;
+  const runnerStopIcon =
+    `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">`
+    + `<rect x="3" y="3" width="18" height="18" rx="2"></rect>`
+    + `</svg>`;
+  const runnerRestartIcon =
+    `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">`
+    + `<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"></path>`
+    + `<path d="M21 3v5h-5"></path>`
+    + `</svg>`;
+  const runnerLogsIcon =
+    `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">`
+    + `<polyline points="4 17 10 11 4 5"></polyline>`
+    + `<line x1="12" y1="19" x2="20" y2="19"></line>`
+    + `</svg>`;
+  const magnifierIcon =
+    `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">`
+    + `<circle cx="11" cy="11" r="8"></circle>`
+    + `<path d="m21 21-4.3-4.3"></path>`
+    + `</svg>`;
+  const runnerOpenIcon =
+    `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">`
+    + `<path d="M15 3h6v6"></path>`
+    + `<path d="M10 14 21 3"></path>`
+    + `<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h6"></path>`
+    + `</svg>`;
+
   function runnerButtons(s) {
     const r = s.runner || "stopped";
     const dataReady = !!s.history_ready;
     if (r === "running" || r === "starting") {
-      return `<button class="btn" data-runner="stop">Stop</button>` +
-             `<button class="btn" data-runner="restart"${dataReady ? "" : " disabled"}>Restart</button>`;
+      return `<button class="btn btn-icon" data-runner="stop" data-tooltip="Stop" aria-label="Stop">${runnerStopIcon}</button>` +
+             `<button class="btn btn-icon" data-runner="restart" data-tooltip="Restart"${dataReady ? "" : " disabled"} aria-label="Restart">${runnerRestartIcon}</button>`;
     }
     const canStart = dataReady && Boolean(s.script_name);
-    const title = s.script_name ? "" : ' title="Select a script first"';
-    return `<button class="btn btn-primary" data-runner="start"${canStart ? "" : " disabled"}${title}>Start</button>`;
+    return `<button class="btn btn-icon" data-runner="start" data-tooltip="Start"${canStart ? "" : " disabled"} aria-label="Start">${runnerPlayIcon}</button>`;
+  }
+
+  function verificationControls(s) {
+    const verification = s && s.verification && typeof s.verification === "object"
+      ? s.verification
+      : {};
+    const runner = String((s && s.runner) || "stopped");
+    if (!verification.enabled || (runner !== "running" && runner !== "starting")) return "";
+    return (
+        `<span data-field="verification-status-wrap" class="verification-status-wrap">` +
+        `<button type="button" class="btn btn-icon verification-inspect-button" ` +
+        `data-act="verification-status" data-tooltip="Verification runner" ` +
+        `aria-label="Verification runner" aria-expanded="false">` +
+          magnifierIcon +
+        `</button>` +
+        `<span class="verification-status-popover" role="dialog" ` +
+        `aria-label="Verification runner status">` +
+          `<span class="verification-popover-header">` +
+            `<span class="verification-popover-heading">` +
+              `<span data-field="verification-led" class="verification-led" aria-hidden="true"></span>` +
+              `<span class="verification-popover-title">Verification runner</span>` +
+            `</span>` +
+            `<button type="button" class="verification-restart-button" ` +
+            `data-act="verification-restart" title="Restart verification runner" ` +
+            `aria-label="Restart verification runner">` +
+              runnerRestartIcon +
+            `</button>` +
+          `</span>` +
+          `<span class="verification-status-description">` +
+            `Independently recalculates finalized candles to detect missed or false signals.` +
+          `</span>` +
+        `</span>` +
+      `</span>`
+    );
   }
 
   function esc(s) {
@@ -7072,9 +7138,40 @@
     return "running";
   }
 
+  function verificationStatusText(session, now = Date.now()) {
+    const verification = session && session.verification && typeof session.verification === "object"
+      ? session.verification
+      : {};
+    const status = String(verification.status || "stopped");
+    if (status === "recovering") {
+      const retryAt = Number(verification.next_retry_at);
+      const attempt = Number(verification.attempt || 0);
+      if (Number.isFinite(retryAt) && retryAt > now) {
+        const remaining = Math.max(1, Math.ceil((retryAt - now) / 1000));
+        return `Verification: recovering in ${remaining}s${attempt > 0 ? ` (attempt ${attempt})` : ""}`;
+      }
+      return `Verification: recovering${attempt > 0 ? ` (attempt ${attempt})` : ""}`;
+    }
+    if (status === "reconnecting") return "Verification: reconnecting";
+    if (status === "warming_up") return "Verification: warming up";
+    if (status === "starting") return "Verification: starting";
+    if (status === "running") return "Verification: running";
+    if (status === "crashed") return "Verification: crashed";
+    return "Verification: stopped";
+  }
+
   function closeRunnerStatusTooltips(exceptAnchor = null) {
     document.querySelectorAll(".runner-status-anchor.show-runner-status").forEach((anchor) => {
       if (anchor !== exceptAnchor) anchor.classList.remove("show-runner-status");
+    });
+  }
+
+  function closeVerificationStatusPopovers(exceptWrap = null) {
+    document.querySelectorAll(".verification-status-wrap.show-verification-status").forEach((wrap) => {
+      if (wrap === exceptWrap) return;
+      wrap.classList.remove("show-verification-status");
+      const button = wrap.querySelector('[data-act="verification-status"]');
+      if (button) button.setAttribute("aria-expanded", "false");
     });
   }
 
@@ -7090,6 +7187,12 @@
       const led = tr.querySelector('[data-field="runner-led"]');
       if (led) led.classList.toggle("led-warming", session.runner_phase === "prerun_active");
       if (anchor) anchor.setAttribute("aria-label", `Runner status: ${text}`);
+      const verification = session.verification || {};
+      const verificationWrap = tr.querySelector('[data-field="verification-status-wrap"]');
+      const verificationText = verificationStatusText(session, now);
+      if (verificationWrap) verificationWrap.hidden = !verification.enabled;
+      const verificationAnchor = tr.querySelector('[data-act="verification-status"]');
+      if (verificationAnchor) verificationAnchor.setAttribute("aria-label", verificationText);
     });
   }
 
@@ -7407,15 +7510,12 @@
           `data-act="data-since"></span>` +
           `<span data-field="data-since-popover" class="data-since-popover"></span></span>` +
         `<button class="btn btn-icon data-edit-btn" data-act="data-edit" ` +
-        `title="Data settings" aria-label="Data settings">` +
+        `data-tooltip="Data settings" aria-label="Data settings">` +
           settingsGearIcon +
         `</button>` +
         `<button class="btn btn-icon data-integrity-btn" data-act="data-integrity" ` +
-        `title="Verify OHLCV data" aria-label="Verify OHLCV data">` +
-          `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">` +
-            `<circle cx="11" cy="11" r="8"></circle>` +
-            `<path d="m21 21-4.3-4.3"></path>` +
-          `</svg>` +
+        `data-tooltip="Verify OHLCV data" aria-label="Verify OHLCV data">` +
+          magnifierIcon +
         `</button>` +
         `<span data-field="history-loading" class="muted">loading</span>` +
         `</span></td>` +
@@ -7427,7 +7527,7 @@
         `<input type="checkbox" data-act="telegram">` +
         `<button class="btn btn-icon" data-act="telegram-settings" title="Telegram bot">` + settingsGearIcon + `</button></span></td>` +
       `<td data-label="Runner" class="runner-cell" data-field="runner-cell"></td>` +
-      `<td data-label="Chart"><a data-field="chart-link" class="btn btn-chart" target="_blank">Open</a></td>` +
+      `<td data-label="Chart"><a data-field="chart-link" class="btn btn-chart btn-icon" target="_blank" title="Open chart" aria-label="Open chart">${runnerOpenIcon}</a></td>` +
       `<td data-label="Remove"><button class="btn btn-danger btn-icon" data-act="delete" title="Delete session">&times;</button></td>`;
 
     tr.addEventListener("change", (e) => {
@@ -7467,7 +7567,24 @@
         const anchor = target.closest(".runner-status-anchor");
         const show = anchor && !anchor.classList.contains("show-runner-status");
         closeRunnerStatusTooltips(anchor);
+        closeVerificationStatusPopovers();
         if (anchor) anchor.classList.toggle("show-runner-status", Boolean(show));
+      }
+      else if (act === "verification-status") {
+        e.preventDefault();
+        e.stopPropagation();
+        const wrap = target.closest(".verification-status-wrap");
+        const show = wrap && !wrap.classList.contains("show-verification-status");
+        closeRunnerStatusTooltips();
+        closeVerificationStatusPopovers(wrap);
+        if (wrap) wrap.classList.toggle("show-verification-status", Boolean(show));
+        target.setAttribute("aria-expanded", String(Boolean(show)));
+      }
+      else if (act === "verification-restart") {
+        e.preventDefault();
+        e.stopPropagation();
+        closeVerificationStatusPopovers();
+        restartVerificationRunner(id);
       }
       else if (act === "script-edit") openScriptChange(id);
       else if (act === "delete") openRemoveConfirm(id);
@@ -7481,7 +7598,8 @@
   function patchSessionRow(tr, s) {
     const id = sessionId(s);
     const runner = s.runner || "stopped";
-    const runnerControlsKey = `${runner}:${s.history_ready ? "ready" : "preparing"}:${s.script_name ? "script" : "no-script"}`;
+    const verificationEnabled = Boolean(s.verification && s.verification.enabled);
+    const runnerControlsKey = `${runner}:${s.history_ready ? "ready" : "preparing"}:${s.script_name ? "script" : "no-script"}:${verificationEnabled ? "verification" : "no-verification"}`;
     const collector = s.collector || "stopped";
     const wh = s.webhook || {};
     const exchange = (s.exchange || "").toUpperCase();
@@ -7493,6 +7611,34 @@
     setText(tr.querySelector('[data-field="runner-status-tooltip"]'), statusText);
     const statusAnchor = tr.querySelector('[data-act="runner-status"]');
     if (statusAnchor) statusAnchor.setAttribute("aria-label", `Runner status: ${statusText}`);
+
+    if (tr.dataset.runnerControlsKey !== runnerControlsKey) {
+      setHTML(
+        tr.querySelector('[data-field="runner-cell"]'),
+        `<span class="runner-actions">${runnerButtons(s)}` +
+          `<button class="btn btn-icon" data-act="logs" data-tooltip="Logs" aria-label="Logs">${runnerLogsIcon}</button>` +
+          `${verificationControls(s)}</span>`,
+      );
+      tr.dataset.runnerControlsKey = runnerControlsKey;
+    }
+
+    const verification = s.verification && typeof s.verification === "object"
+      ? s.verification
+      : {};
+    const verificationStatus = String(verification.status || "stopped");
+    const verificationWrap = tr.querySelector('[data-field="verification-status-wrap"]');
+    if (verificationWrap) verificationWrap.hidden = !verification.enabled;
+    setClass(
+      tr.querySelector('[data-field="verification-led"]'),
+      `verification-led verification-led-${verificationStatus}`,
+    );
+    const verificationText = verificationStatusText(s);
+    const verificationAnchor = tr.querySelector('[data-act="verification-status"]');
+    if (verificationAnchor) verificationAnchor.setAttribute("aria-label", `Verification runner: ${verificationText}`);
+    const verificationRestart = tr.querySelector('[data-act="verification-restart"]');
+    if (verificationRestart) {
+      verificationRestart.disabled = !(runner === "running" || runner === "starting");
+    }
 
     const symbolKey = JSON.stringify([s.symbol || "", s.tv_symbol || "", s.symbol_logo_url || ""]);
     if (tr.dataset.symbolKey !== symbolKey) {
@@ -7547,14 +7693,6 @@
 
     setChecked(tr.querySelector('[data-act="webhook"]'), !!wh.enabled);
     setChecked(tr.querySelector('[data-act="telegram"]'), !!wh.telegram_notification);
-
-    if (tr.dataset.runnerControlsKey !== runnerControlsKey) {
-      setHTML(
-        tr.querySelector('[data-field="runner-cell"]'),
-        `<span class="runner-actions">${runnerButtons(s)}<button class="btn" data-act="logs">Logs</button></span>`,
-      );
-      tr.dataset.runnerControlsKey = runnerControlsKey;
-    }
 
     const chart = tr.querySelector('[data-field="chart-link"]');
     const href = `/s/${encodeURIComponent(id)}`;
@@ -9104,6 +9242,27 @@
     }
   }
 
+  async function restartVerificationRunner(id) {
+    const session = sessions.find((item) => sessionId(item) === id);
+    if (session && session.verification) {
+      session.verification = {
+        ...session.verification,
+        status: "recovering",
+        reason: "manual restart",
+        next_retry_at: Date.now(),
+      };
+      render();
+    }
+    try {
+      await api(`/api/sessions/${encodeURIComponent(id)}/verification/restart`, {
+        method: "POST",
+      });
+    } catch (e) {
+      alert(`verification restart failed: ${e.message}`);
+      await refresh();
+    }
+  }
+
   async function toggleWebhook(id, payload) {
     try {
       await api(`/api/${encodeURIComponent(id)}/webhook-config`, {
@@ -9986,6 +10145,9 @@
     }
     if (!e.target || !e.target.closest || !e.target.closest(".runner-status-anchor")) {
       closeRunnerStatusTooltips();
+    }
+    if (!e.target || !e.target.closest || !e.target.closest(".verification-status-wrap")) {
+      closeVerificationStatusPopovers();
     }
     if (!isTouchTooltipMode()) return;
     if (!e.target || !e.target.closest || e.target.closest(".data-badge-wrap")) return;
