@@ -130,6 +130,11 @@ class SessionRegistry:
             "next_retry_at": (
                 int(float(next_retry_at) * 1000) if next_retry_at is not None else None
             ),
+            "latest_finding": (
+                dict(verification.latest_finding)
+                if verification.latest_finding is not None
+                else None
+            ),
             "updated_at": verification.state_updated_at,
         }
 

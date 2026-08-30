@@ -41,6 +41,7 @@ class VerificationCoordinator:
         self.connection_lost = False
         self.source_hashes: dict[str, str] = {}
         self.last_error: str | None = None
+        self.latest_finding: dict[str, Any] | None = None
         self.state_updated_at = datetime.now(UTC).isoformat()
 
         self._primary_results: dict[int, dict[str, Any]] = {}
@@ -98,6 +99,7 @@ class VerificationCoordinator:
         self.source_hashes.clear()
         self._rewarm_pending = False
         self.last_error = None
+        self.latest_finding = None
         self.state_updated_at = datetime.now(UTC).isoformat()
 
     def _cancel_warmup_timeout(self) -> None:
@@ -593,12 +595,73 @@ class VerificationCoordinator:
         self._comparison_fingerprints.add(fingerprint)
         comparison["supplemental_delivery_enabled"] = self.delivery is not None
         self._log(comparison)
+        self._record_latest_finding(
+            finalized,
+            comparison,
+            timestamp_ms,
+        )
         self._enqueue_supplemental_delivery(
             primary,
             finalized,
             comparison,
             timestamp_ms,
         )
+
+    def _comparison_is_reliable(
+        self,
+        finalized: dict[str, Any],
+        comparison: dict[str, Any],
+    ) -> bool:
+        return bool(
+            comparison.get("primary_result_available")
+            and comparison.get("source_hashes_matched")
+            and not self._rewarm_pending
+            and not self.connection_lost
+            and self.initialized
+            and self.runner_ready
+            and str(finalized.get("authoritative_source") or "").strip()
+        )
+
+    def _record_latest_finding(
+        self,
+        finalized: dict[str, Any],
+        comparison: dict[str, Any],
+        timestamp_ms: int,
+    ) -> None:
+        if not self._comparison_is_reliable(finalized, comparison):
+            return
+
+        discrepancy = ""
+        signal: dict[str, Any] | None = None
+        missing = comparison.get("missing_order_signals") or []
+        primary_only = comparison.get("primary_only_order_signals") or []
+        if missing:
+            discrepancy = "missing"
+            signal = dict(missing[-1])
+        elif primary_only:
+            discrepancy = "primary_only"
+            signal = dict(primary_only[-1])
+        if signal is None:
+            return
+
+        now = datetime.now(UTC).isoformat()
+        self.latest_finding = {
+            "discrepancy": discrepancy,
+            "candle_timestamp_ms": timestamp_ms,
+            "detected_at": now,
+            "action": str(signal.get("action") or ""),
+            "order_id": str(signal.get("order_id") or ""),
+            "exit_id": str(signal.get("exit_id") or ""),
+            "occurrence_index": int(signal.get("occurrence_index") or 0),
+        }
+        self.state_updated_at = now
+        self._notify_status_soon()
+
+    def _notify_status_soon(self) -> None:
+        try:
+            asyncio.get_running_loop().create_task(self.session._notify_status())
+        except RuntimeError:
+            pass
 
     def _enqueue_supplemental_delivery(
         self,

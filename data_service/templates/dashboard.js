@@ -7051,6 +7051,16 @@
           `<span class="verification-status-description">` +
             `Independently recalculates finalized candles to detect missed or false signals.` +
           `</span>` +
+          `<span class="verification-latest-finding">` +
+            `<span class="verification-finding-heading">Latest finding</span>` +
+            `<span data-field="verification-finding-empty" class="verification-finding-empty">None detected</span>` +
+            `<span data-field="verification-finding-details" class="verification-finding-details" hidden>` +
+              `<span data-field="verification-finding-kind" class="verification-finding-kind"></span>` +
+              `<span data-field="verification-finding-order" class="verification-finding-order"></span>` +
+              `<span data-field="verification-finding-candle" class="verification-finding-meta"></span>` +
+              `<span data-field="verification-finding-detected" class="verification-finding-meta"></span>` +
+            `</span>` +
+          `</span>` +
         `</span>` +
       `</span>`
     );
@@ -7158,6 +7168,54 @@
     if (status === "running") return "Verification: running";
     if (status === "crashed") return "Verification: crashed";
     return "Verification: stopped";
+  }
+
+  function verificationFindingTime(value) {
+    const timestamp = typeof value === "number" ? value : Date.parse(String(value || ""));
+    const date = new Date(timestamp);
+    if (!Number.isFinite(timestamp) || Number.isNaN(date.getTime())) return "Unknown";
+    return date.toLocaleString("en-US", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    });
+  }
+
+  function updateVerificationFinding(tr, finding) {
+    const empty = tr.querySelector('[data-field="verification-finding-empty"]');
+    const details = tr.querySelector('[data-field="verification-finding-details"]');
+    const available = finding && typeof finding === "object";
+    if (empty) empty.hidden = Boolean(available);
+    if (details) details.hidden = !available;
+    if (!available) return;
+
+    const discrepancy = String(finding.discrepancy || "");
+    const kind = discrepancy === "missing" ? "Missed signal" : "Possible false signal";
+    const kindNode = tr.querySelector('[data-field="verification-finding-kind"]');
+    setText(kindNode, kind);
+    if (kindNode) {
+      setClass(kindNode, `verification-finding-kind verification-finding-kind-${discrepancy || "unknown"}`);
+    }
+
+    const action = String(finding.action || "signal").toUpperCase();
+    const orderId = String(finding.exit_id || finding.order_id || "-");
+    const occurrence = Number(finding.occurrence_index || 0);
+    setText(
+      tr.querySelector('[data-field="verification-finding-order"]'),
+      `${action} · ${orderId}${occurrence > 0 ? ` · #${occurrence + 1}` : ""}`,
+    );
+    setText(
+      tr.querySelector('[data-field="verification-finding-candle"]'),
+      `Candle ${verificationFindingTime(Number(finding.candle_timestamp_ms))}`,
+    );
+    setText(
+      tr.querySelector('[data-field="verification-finding-detected"]'),
+      `Detected ${verificationFindingTime(finding.detected_at)}`,
+    );
   }
 
   function closeRunnerStatusTooltips(exceptAnchor = null) {
@@ -7635,6 +7693,7 @@
     const verificationText = verificationStatusText(s);
     const verificationAnchor = tr.querySelector('[data-act="verification-status"]');
     if (verificationAnchor) verificationAnchor.setAttribute("aria-label", `Verification runner: ${verificationText}`);
+    updateVerificationFinding(tr, verification.latest_finding);
     const verificationRestart = tr.querySelector('[data-act="verification-restart"]');
     if (verificationRestart) {
       verificationRestart.disabled = !(runner === "running" || runner === "starting");

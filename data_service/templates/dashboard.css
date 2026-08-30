@@ -1140,6 +1140,46 @@ tr:last-child td { border-bottom: none; }
 .verification-status-description {
   color: var(--muted);
 }
+.verification-latest-finding {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+}
+.verification-finding-heading {
+  color: #f2f5f8;
+  font-weight: 600;
+}
+.verification-finding-empty,
+.verification-finding-meta {
+  color: var(--muted);
+}
+.verification-finding-details {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.verification-finding-details[hidden] {
+  display: none;
+}
+.verification-finding-kind {
+  font-weight: 600;
+}
+.verification-finding-kind-missing {
+  color: #ff8c96;
+}
+.verification-finding-kind-primary_only {
+  color: #ffd45e;
+}
+.verification-finding-order,
+.verification-finding-meta {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.verification-finding-order {
+  color: var(--text);
+}
 .verification-restart-button {
   display: inline-flex;
   width: 24px;
