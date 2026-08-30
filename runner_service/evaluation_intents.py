@@ -7,10 +7,21 @@ from typing import Any
 
 _MAX_RECORDED_TRADE_IDENTITIES = 4096
 _TRADE_INTENT_TYPES = {"trade_entry", "trade_close"}
+_ORDER_SIGNAL_TYPE = "order_signal"
 
 
 def trade_intent_identity(intent: dict[str, Any]) -> str | None:
-    if intent.get("type") not in _TRADE_INTENT_TYPES:
+    intent_type = intent.get("type")
+    if intent_type == _ORDER_SIGNAL_TYPE:
+        identity = {
+            "type": intent_type,
+            "evaluation_candle_time": intent.get("evaluation_candle_time"),
+            "action": intent.get("action") or "",
+            "order_id": intent.get("order_id") or "",
+            "exit_id": intent.get("exit_id") or "",
+        }
+        return json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str)
+    if intent_type not in _TRADE_INTENT_TYPES:
         return None
     identity = {
         "type": intent.get("type"),

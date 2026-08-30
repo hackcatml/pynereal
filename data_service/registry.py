@@ -5,12 +5,13 @@ import sqlite3
 import shutil
 import traceback
 from dataclasses import replace
+from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional
 
 from config import MAX_SESSIONS, FeedSpec, SessionSpec, save_sessions
 from collector_loop import fix_missing_bars_loop, watch_trades_loop
 from file_update_loop import _to_thread_cancel_safe, file_update_loop
-from verification import FinalizedCandleProbe
+from verification import FinalizedCandleProbe, VerificationDeliveryService
 from prerun_scheduler import assign_prerun_offsets
 from runner_supervisor import RunnerSupervisor
 from runtime import Feed, Session
@@ -53,7 +54,12 @@ class SessionRegistry:
     Multiple Sessions on the same (provider, exchange, symbol, timeframe) share a
     single Feed, so the same market is only collected/downloaded once."""
 
-    def __init__(self, port: int) -> None:
+    def __init__(
+        self,
+        port: int,
+        *,
+        verification_delivery_path: Path | None = None,
+    ) -> None:
         self.feeds: Dict[str, Feed] = {}
         self.sessions: Dict[str, Session] = {}
         self.hub_ws = WSManager()  # dashboard clients on /ws/hub
@@ -64,6 +70,11 @@ class SessionRegistry:
             Callable[[Session, dict], Awaitable[None]]
         ] = None
         self.strategy_evaluation_enabled = False
+        self.verification_delivery = (
+            VerificationDeliveryService(verification_delivery_path)
+            if verification_delivery_path is not None
+            else None
+        )
 
     # ------------------------------------------------------------------
     # Queries
@@ -406,6 +417,7 @@ class SessionRegistry:
             feed,
             strategy_evaluation_enabled=self.strategy_evaluation_enabled,
             verification_enabled=self.supervisor.verification_enabled,
+            verification_delivery=self.verification_delivery,
         )
         session.on_status_change = self.notify_hub
         session.on_spec_change = self._persist_and_notify
@@ -822,6 +834,8 @@ class SessionRegistry:
 
     async def shutdown(self) -> None:
         await self.supervisor.shutdown()
+        if self.verification_delivery is not None:
+            await self.verification_delivery.close()
         logo_tasks = list(self.logo_tasks.values())
         self.logo_tasks.clear()
         for t in logo_tasks:

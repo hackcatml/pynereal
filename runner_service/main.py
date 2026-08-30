@@ -304,6 +304,15 @@ def on_close_event(trade, runner=None):
     _record_evaluation_intent(event)
 
 
+def on_order_signal_event(order_signal: dict[str, Any], runner=None) -> None:
+    """Record one comparison intent for one filled strategy order."""
+    if runner is not None and getattr(runner.script, "pre_run", False):
+        return
+    event = dict(order_signal)
+    event["type"] = "order_signal"
+    _record_evaluation_intent(event)
+
+
 def on_plot_event(plot_data):
     """Callback for plot events - stores/updates plot options"""
     title = plot_data['title']
@@ -527,6 +536,10 @@ AppendableIterable[OHLCV], OHLCVReader] | None:
             # Register trade event callbacks
             runner.script.position.on_entry_callback = partial(on_entry_event, runner=runner)
             runner.script.position.on_close_callback = partial(on_close_event, runner=runner)
+            runner.script.position.on_order_signal_callback = partial(
+                on_order_signal_event,
+                runner=runner,
+            )
             runner.script.position.on_alert_callback = partial(on_alert_event, runner=runner)
             runner.script.position.on_ai_callback = partial(on_ai_event, runner=runner)
             # Register plot event callback
@@ -683,6 +696,10 @@ def build_calculation_result(
         "intents": evaluation_intents.snapshot(),
         "plot_values": plot_values,
         "source_hashes": ACTIVE_SOURCE_HASHES,
+        "notification_toggles": {
+            "webhook": bool(WEBHOOK_ENABLED),
+            "telegram": bool(TELEGRAM_ENABLED),
+        },
     }
 
 
@@ -1458,6 +1475,9 @@ async def main():
                         build_result=build_calculation_result,
                         generation_id=generation_id,
                     )
+                )
+                result_payload["authoritative_source"] = msg.get(
+                    "authoritative_source"
                 )
                 VERIFICATION_RESUME_STATE.remember(
                     result_payload,

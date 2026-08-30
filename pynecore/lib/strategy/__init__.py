@@ -385,6 +385,7 @@ class Position:
         'risk_cons_loss_days', 'risk_last_day_index', 'risk_last_day_equity',
         'risk_intraday_filled_orders', 'risk_intraday_start_equity', 'risk_halt_trading',
         'on_entry_callback', 'on_close_callback', 'on_alert_callback', 'on_ai_callback',
+        'on_order_signal_callback',
         '_entry_open_ledger'
     )
 
@@ -465,6 +466,7 @@ class Position:
         self.on_close_callback = None
         self.on_alert_callback = None
         self.on_ai_callback = None
+        self.on_order_signal_callback = None
 
     @property
     def equity(self) -> float | NA[float]:
@@ -584,6 +586,7 @@ class Position:
         :param h: The high price
         :param l: The low price
         """
+        position_size_before = float(self.size)
         # Save the original order size before any modifications
         filled_size = abs(order.size)
 
@@ -886,9 +889,42 @@ class Position:
                 # Use the saved original filled_size from the beginning of this method
                 self._reduce_oca_group(order.oca_name, filled_size)
 
-        self._dispatch_order_notifications(order)
+        self._dispatch_order_notifications(
+            order,
+            filled_size=filled_size,
+            fill_price=price,
+            position_size_before=position_size_before,
+            position_size_after=float(self.size),
+        )
 
-    def _dispatch_order_notifications(self, order: Order) -> None:
+    @staticmethod
+    def _order_signal_action(
+            order: Order,
+            position_size_before: float,
+            position_size_after: float,
+    ) -> str:
+        if order.order_type == _order_type_close:
+            return "close"
+        if order.order_type == _order_type_entry:
+            return "entry"
+        if position_size_before != 0.0:
+            same_direction = position_size_before * position_size_after > 0.0
+            if position_size_after == 0.0 or (
+                    same_direction
+                    and abs(position_size_after) < abs(position_size_before)
+            ):
+                return "close"
+        return "entry"
+
+    def _dispatch_order_notifications(
+            self,
+            order: Order,
+            *,
+            filled_size: float,
+            fill_price: float,
+            position_size_before: float,
+            position_size_after: float,
+    ) -> None:
         if not realtime_trade() and order.alert_message:
             alert(order.alert_message, _dispatch_callback=False)
         elif realtime_trade() and not pre_run():
@@ -896,6 +932,32 @@ class Position:
             # Real time trade 에서는 최종 봉이 확정되고 새로운 봉이 생길때에만
             # alert 및 AI instruction을 전달함.
             if order.bar_index == last_bar_index() - 1:
+                if self.on_order_signal_callback:
+                    try:
+                        self.on_order_signal_callback({
+                            "action": self._order_signal_action(
+                                order,
+                                position_size_before,
+                                position_size_after,
+                            ),
+                            "time": int(lib._time / 1000),
+                            "order_id": order.order_id or "",
+                            "exit_id": order.exit_id or "",
+                            "size": float(filled_size),
+                            "direction": (
+                                "buy" if order.sign > 0.0
+                                else "sell" if order.sign < 0.0
+                                else ""
+                            ),
+                            "comment": order.comment or "",
+                            "alert_message": order.alert_message or "",
+                            "fill_price": float(fill_price),
+                            "order_bar_index": int(order.bar_index),
+                            "position_size_before": position_size_before,
+                            "position_size_after": position_size_after,
+                        })
+                    except Exception as e:
+                        print(f"Error in on_order_signal_callback: {e}")
                 if order.alert_message:
                     alert(order.alert_message, _dispatch_callback=False)
                 if order.alert_message and self.on_alert_callback:

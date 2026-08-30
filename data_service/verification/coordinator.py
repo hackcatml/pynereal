@@ -9,6 +9,7 @@ from fastapi import WebSocket
 
 from market_data_diagnostics import log_session_diagnostic
 
+from .delivery import VerificationDeliveryRequest, VerificationDeliveryService
 from .protocol import compare_results
 
 if TYPE_CHECKING:
@@ -23,9 +24,16 @@ _MAX_RESULTS = 128
 class VerificationCoordinator:
     """Own one session's verification protocol and comparison state."""
 
-    def __init__(self, session: Session, *, enabled: bool) -> None:
+    def __init__(
+        self,
+        session: Session,
+        *,
+        enabled: bool,
+        delivery: VerificationDeliveryService | None = None,
+    ) -> None:
         self.session = session
         self.enabled = enabled
+        self.delivery = delivery
         self.runner_count = 0
         self.runner_ready = False
         self.generation_id = uuid.uuid4().hex
@@ -37,6 +45,7 @@ class VerificationCoordinator:
 
         self._primary_results: dict[int, dict[str, Any]] = {}
         self._finalized_results: dict[int, dict[str, Any]] = {}
+        self._primary_delivery_context: dict[int, dict[str, Any]] = {}
         self._comparison_fingerprints: set[tuple[Any, ...]] = set()
         self._candle_backlog: dict[int, dict[str, Any]] = {}
         self._protocol_lock = asyncio.Lock()
@@ -69,6 +78,7 @@ class VerificationCoordinator:
         self._candle_backlog.clear()
         self._primary_results.clear()
         self._finalized_results.clear()
+        self._primary_delivery_context.clear()
         self._comparison_fingerprints.clear()
 
     def reset_for_reconfigure(self) -> None:
@@ -78,6 +88,7 @@ class VerificationCoordinator:
         self.runner_ready = False
         self._primary_results.clear()
         self._finalized_results.clear()
+        self._primary_delivery_context.clear()
         self._comparison_fingerprints.clear()
         self._candle_backlog.clear()
         self._last_dispatched_timestamp_ms = None
@@ -541,8 +552,17 @@ class VerificationCoordinator:
         )
         target[timestamp_ms] = dict(event)
         while len(target) > _MAX_RESULTS:
-            target.pop(next(iter(target)))
+            expired_timestamp = next(iter(target))
+            target.pop(expired_timestamp)
+            if target is self._primary_results:
+                self._primary_delivery_context.pop(expired_timestamp, None)
         if event.get("type") == "primary_result":
+            self._primary_delivery_context[timestamp_ms] = {
+                "webhook_config": dict(self.session.spec.webhook),
+                "script_title": str(
+                    self.session.chart_info.get("script_title") or ""
+                ),
+            }
             self.session.feed.record_verification_primary_result(event)
         self._log({
             "event": event.get("type"),
@@ -554,6 +574,7 @@ class VerificationCoordinator:
             "source_hashes": event.get("source_hashes") or {},
             "result_status": event.get("result_status"),
             "reason": event.get("reason"),
+            "authoritative_source": event.get("authoritative_source"),
         })
 
     def _compare_timestamp(self, timestamp_ms: int, generation_id: str) -> None:
@@ -570,7 +591,79 @@ class VerificationCoordinator:
         if fingerprint in self._comparison_fingerprints:
             return
         self._comparison_fingerprints.add(fingerprint)
+        comparison["supplemental_delivery_enabled"] = self.delivery is not None
         self._log(comparison)
+        self._enqueue_supplemental_delivery(
+            primary,
+            finalized,
+            comparison,
+            timestamp_ms,
+        )
+
+    def _enqueue_supplemental_delivery(
+        self,
+        primary: dict[str, Any],
+        finalized: dict[str, Any],
+        comparison: dict[str, Any],
+        timestamp_ms: int,
+    ) -> None:
+        if (
+            self.delivery is None
+            or not comparison.get("primary_result_available")
+            or not comparison.get("source_hashes_matched")
+            or self._rewarm_pending
+            or self.connection_lost
+            or not self.initialized
+            or not self.runner_ready
+        ):
+            return
+        authoritative_source = str(
+            finalized.get("authoritative_source") or ""
+        ).strip()
+        if not authoritative_source:
+            return
+
+        context = self._primary_delivery_context.get(timestamp_ms) or {}
+        toggles = primary.get("notification_toggles") or {}
+        common = {
+            "session_id": self.session.spec.id,
+            "script_title": str(context.get("script_title") or ""),
+            "exchange": self.session.spec.exchange,
+            "symbol": self.session.spec.symbol,
+            "timeframe": self.session.spec.timeframe,
+            "candle_timestamp_ms": timestamp_ms,
+            "primary_bar": comparison.get("primary_confirmed_bar"),
+            "finalized_bar": comparison.get("finalized_confirmed_bar"),
+            "bar_difference": dict(
+                comparison.get("confirmed_bar_difference") or {}
+            ),
+            "authoritative_source": authoritative_source,
+            "notification_toggles": {
+                "webhook": bool(toggles.get("webhook")),
+                "telegram": bool(toggles.get("telegram")),
+            },
+            "webhook_config": dict(context.get("webhook_config") or {}),
+            "on_result": self._log,
+        }
+        for discrepancy, key in (
+            ("missing", "missing_order_signals"),
+            ("primary_only", "primary_only_order_signals"),
+        ):
+            if discrepancy == "missing":
+                enabled = bool(
+                    common["notification_toggles"]["webhook"]
+                    or common["notification_toggles"]["telegram"]
+                )
+            else:
+                enabled = bool(common["notification_toggles"]["telegram"])
+            if not enabled:
+                continue
+            for signal in comparison.get(key) or []:
+                self.delivery.enqueue(VerificationDeliveryRequest(
+                    discrepancy=discrepancy,
+                    order_signal=dict(signal),
+                    **common,
+                ))
 
     def _resolve_initial_primary_pending(
         self,

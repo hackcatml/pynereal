@@ -21,7 +21,7 @@ from prerun_scheduler import default_offset_seconds
 from market_data_diagnostics import log_session_diagnostic
 from state import DataState
 from tv_logos import static_logo_info
-from verification import VerificationCoordinator
+from verification import VerificationCoordinator, VerificationDeliveryService
 from ws_manager import WSManager
 
 
@@ -323,6 +323,7 @@ class Session:
         *,
         strategy_evaluation_enabled: bool = False,
         verification_enabled: bool = False,
+        verification_delivery: VerificationDeliveryService | None = None,
     ) -> None:
         self.spec = spec
         self.feed = feed
@@ -338,6 +339,7 @@ class Session:
         self.verification = VerificationCoordinator(
             self,
             enabled=verification_enabled,
+            delivery=verification_delivery,
         )
         # True only after the runner finishes its first pre_run (chart plots ready).
         # Drives the dashboard LED: connected-but-prerunning = "starting" (amber),

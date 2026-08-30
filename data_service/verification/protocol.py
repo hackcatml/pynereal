@@ -6,6 +6,7 @@ from typing import Any
 
 
 _TRADE_INTENT_TYPES = {"trade_entry", "trade_close"}
+_ORDER_SIGNAL_TYPE = "order_signal"
 
 
 def intent_key(intent: Any) -> str:
@@ -19,7 +20,17 @@ def intent_key(intent: Any) -> str:
 
 
 def intent_identity(intent: Any) -> Any:
-    if not isinstance(intent, dict) or intent.get("type") not in _TRADE_INTENT_TYPES:
+    if not isinstance(intent, dict):
+        return intent
+    if intent.get("type") == _ORDER_SIGNAL_TYPE:
+        return {
+            "type": _ORDER_SIGNAL_TYPE,
+            "action": intent.get("action") or "",
+            "order_id": intent.get("order_id") or "",
+            "exit_id": intent.get("exit_id") or "",
+            "occurrence_index": intent.get("occurrence_index", 0),
+        }
+    if intent.get("type") not in _TRADE_INTENT_TYPES:
         return intent
     return {
         "type": intent.get("type"),
@@ -154,6 +165,11 @@ def compare_results(
     )
     missing_from_primary = finalized_counter - primary_counter
     primary_only = primary_counter - finalized_counter
+    missing_intents = expand_intent_difference(
+        missing_from_primary,
+        finalized_index,
+    )
+    primary_only_intents = expand_intent_difference(primary_only, primary_index)
     primary_result_available = primary.get("result_status") != "not_calculated"
     comparison = {
         "event": "verification_result_comparison",
@@ -168,11 +184,16 @@ def compare_results(
             and primary_hashes == finalized_hashes
             and not bar_difference
         ),
-        "missing_from_primary": expand_intent_difference(
-            missing_from_primary,
-            finalized_index,
-        ),
-        "primary_only": expand_intent_difference(primary_only, primary_index),
+        "missing_from_primary": missing_intents,
+        "primary_only": primary_only_intents,
+        "missing_order_signals": [
+            item for item in missing_intents
+            if item.get("type") == _ORDER_SIGNAL_TYPE
+        ],
+        "primary_only_order_signals": [
+            item for item in primary_only_intents
+            if item.get("type") == _ORDER_SIGNAL_TYPE
+        ],
         "signal_intents_matched": not missing_from_primary and not primary_only,
         "intent_details_matched": not detail_differences,
         "intent_detail_differences": detail_differences,
