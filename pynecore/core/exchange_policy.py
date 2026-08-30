@@ -20,6 +20,11 @@ _FETCH_CURRENT_OPEN_EXCHANGES = {
     "HYPERLIQUID",
 }
 
+_PREVIOUS_CLOSE_OPEN_EXCHANGES = {
+    "BITGET",
+    "BYBIT",
+}
+
 
 def normalize_exchange_name(exchange: str | None) -> str:
     return (exchange or "").upper()
@@ -31,3 +36,7 @@ def tradingview_hides_zero_volume(exchange: str | None) -> bool:
 
 def fetch_current_open_from_exchange(exchange: str | None) -> bool:
     return normalize_exchange_name(exchange) in _FETCH_CURRENT_OPEN_EXCHANGES
+
+
+def previous_close_is_next_open(exchange: str | None) -> bool:
+    return normalize_exchange_name(exchange) in _PREVIOUS_CLOSE_OPEN_EXCHANGES

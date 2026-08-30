@@ -18,16 +18,16 @@ from log_utils import log_with_time
 from manual_alerts import build_manual_alert_payload, send_manual_alert_payload
 from ohlcv_paths import make_ohlcv_paths, runtime_output_dir
 from prerun_scheduler import default_offset_seconds
+from market_data_diagnostics import log_session_diagnostic
 from state import DataState
 from tv_logos import static_logo_info
+from verification import VerificationCoordinator, VerificationDeliveryService
 from ws_manager import WSManager
 
 
 _MAX_AI_INSTRUCTION_CHARS = 4_000
 _MAX_PROCESSED_AI_INSTRUCTION_EVENTS = 500
 _MAX_RECENT_RAW_TRADE_KEYS = 10_000
-
-
 def _plot_wire_value(value: Any, kind: str) -> float | int | None:
     if value is None or str(value) == "":
         return None
@@ -77,6 +77,7 @@ class Feed:
         self.paths = FeedPaths.build(spec)
         self.state = DataState()
         self.tasks: Dict[str, Any] = {}
+        self.finalized_candle_probe: Any | None = None
         self.history_ready_event = asyncio.Event()
         self.data_integrity_lock = asyncio.Lock()
         self.collector_error: Optional[str] = None
@@ -89,6 +90,9 @@ class Feed:
         self.prerun_prepare_offset_seconds = default_offset_seconds(spec.timeframe)
         self._recent_raw_trade_keys: deque[tuple[Any, ...]] = deque()
         self._recent_raw_trade_key_set: set[tuple[Any, ...]] = set()
+        self._verification_dispatch_sequence = 0
+        self._verification_primary_results: dict[int, dict[str, Any]] = {}
+        self._verification_probe_lock = asyncio.Lock()
         # session_id -> Session
         self.subscribers: Dict[str, "Session"] = {}
 
@@ -189,6 +193,78 @@ class Feed:
                 continue
             await session.handle_feed_event(dict(payload))
 
+    def queue_verification_candle(self, payload: dict[str, Any]) -> None:
+        self._verification_dispatch_sequence += 1
+        key = f"verification_dispatch:{self._verification_dispatch_sequence}"
+        task = asyncio.create_task(self._dispatch_verification_candle(payload))
+        self.tasks[key] = task
+
+        def discard(_task: asyncio.Task) -> None:
+            self.tasks.pop(key, None)
+
+        task.add_done_callback(discard)
+
+    async def _dispatch_verification_candle(self, payload: dict[str, Any]) -> None:
+        for session in list(self.subscribers.values()):
+            if session.runner_count <= 0 or not session.verification.enabled:
+                continue
+            await session.verification.handle_candle(dict(payload))
+
+    def record_verification_primary_result(self, payload: dict[str, Any]) -> None:
+        try:
+            timestamp_ms = int(payload["candle_timestamp_ms"])
+        except (KeyError, TypeError, ValueError):
+            return
+        existing = self._verification_primary_results.get(timestamp_ms)
+        confirmed_bar = payload.get("confirmed_bar")
+        has_bar = (
+            isinstance(confirmed_bar, (list, tuple))
+            and len(confirmed_bar) >= 6
+        )
+        existing_bar = existing.get("confirmed_bar") if existing else None
+        existing_has_bar = (
+            isinstance(existing_bar, (list, tuple)) and len(existing_bar) >= 6
+        )
+        replace = existing is None or (has_bar and not existing_has_bar)
+        if has_bar and existing_has_bar:
+            try:
+                replace = float(confirmed_bar[5]) >= float(existing_bar[5])
+            except (TypeError, ValueError, OverflowError):
+                replace = False
+        if replace:
+            self._verification_primary_results[timestamp_ms] = dict(payload)
+        while len(self._verification_primary_results) > 128:
+            self._verification_primary_results.pop(
+                min(self._verification_primary_results)
+            )
+        probe = self.finalized_candle_probe
+        if probe is not None:
+            probe.record_primary_result(payload)
+
+    def seed_verification_primary_results(self, probe: Any) -> None:
+        for payload in self._verification_primary_results.values():
+            probe.record_primary_result(payload)
+
+    def clear_verification_primary_results(self) -> None:
+        self._verification_primary_results.clear()
+
+    def log_market_data_diagnostic(self, event: dict[str, Any]) -> None:
+        feed_data = {
+            "id": self.spec.id,
+            "provider": self.spec.provider,
+            "exchange": self.spec.exchange,
+            "symbol": self.spec.symbol,
+            "timeframe": self.spec.timeframe,
+            "market_type": self.spec.market_type,
+        }
+        for session in list(self.subscribers.values()):
+            log_session_diagnostic(
+                session.paths.plot_path.parent,
+                session.spec.id,
+                event,
+                feed=feed_data,
+            )
+
     def history_ready(self) -> bool:
         return self.history_ready_event.is_set()
 
@@ -246,6 +322,8 @@ class Session:
         feed: Feed,
         *,
         strategy_evaluation_enabled: bool = False,
+        verification_enabled: bool = False,
+        verification_delivery: VerificationDeliveryService | None = None,
     ) -> None:
         self.spec = spec
         self.feed = feed
@@ -258,6 +336,11 @@ class Session:
         self.plotchar_history: List[Dict[str, Any]] = []
         self.client_roles: Dict[WebSocket, Optional[str]] = {}
         self.runner_count = 0
+        self.verification = VerificationCoordinator(
+            self,
+            enabled=verification_enabled,
+            delivery=verification_delivery,
+        )
         # True only after the runner finishes its first pre_run (chart plots ready).
         # Drives the dashboard LED: connected-but-prerunning = "starting" (amber),
         # ready = "running" (green).
@@ -343,6 +426,13 @@ class Session:
 
     async def _send_runner_event(self, payload: dict[str, Any]) -> None:
         session_payload = dict(payload)
+        if (
+            session_payload.get("type") == "run_ready"
+            and self.verification.enabled
+        ):
+            session_payload["verification_generation_id"] = (
+                self.verification.generation_id
+            )
         if (
             self.strategy_evaluation_enabled
             and session_payload.get("type") in {
@@ -433,6 +523,7 @@ class Session:
         self.chart_info["script_source"] = ""
         self._processed_ai_instruction_ids.clear()
         self._processed_ai_instruction_order.clear()
+        self.verification.reset_for_reconfigure()
 
     @property
     def ohlcv_path(self) -> Path:
@@ -592,6 +683,8 @@ class Session:
                 await self.set_calculation_stopped()
                 await self.send_to_charts({"type": "runner_disconnected"})
             await self._notify_status()
+        elif role == "verification_runner":
+            await self.verification.handle_disconnect()
 
     async def handle_text(self, ws: WebSocket, msg_text: str) -> None:
         try:
@@ -608,9 +701,14 @@ class Session:
         ohlcv_path = self.feed.paths.ohlcv_path
         plot_path = self.paths.plot_path
 
+        if await self.verification.handle_message(ws, event):
+            return
+
         if msg_type == "client_hello":
             role = event.get("role")
             if role == "runner":
+                if self.runner_count <= 0:
+                    self.verification.reset_generation()
                 self.runner_ready = False  # fresh runner: pre_run not done yet (amber)
                 if self.strategy_evaluation_enabled:
                     await self.begin_calculation({"type": "runner_start"})
@@ -650,10 +748,13 @@ class Session:
                 self.client_roles[ws] = None
 
         elif msg_type == "runner_ready":
+            if self.client_roles.get(ws) != "runner":
+                return
             # Runner finished its first pre_run -> flip the LED to green.
             self.runner_ready = True
             self.history_resync_pending = False
             await self._set_runner_phase("running")
+            await self.verification.on_primary_ready()
 
         elif msg_type == "strategy_snapshot":
             if self.client_roles.get(ws) != "runner":
@@ -794,8 +895,12 @@ class Session:
                 "source_name": self.chart_info.get("script_source_name"),
                 "source": self.chart_info.get("script_source") or "",
             })
+            if self.client_roles.get(ws) == "runner":
+                await self.verification.on_script_info()
 
         elif (msg_type == "reset_history") or (msg_type == "script_modified"):
+            if self.client_roles.get(ws) == "runner":
+                self.verification.on_primary_reset()
             self.trades_history.clear()
             self.plot_options.clear()
             self.plotchar_history.clear()

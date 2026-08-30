@@ -39,6 +39,7 @@ from registry import (
     SessionNotFoundError,
     SessionOrderError,
     SessionRegistry,
+    VerificationRunnerUnavailableError,
 )
 from runtime import Session
 from schedule_utils import seconds_until_bar_boundary_guard_end
@@ -564,6 +565,7 @@ def build_session_api_router(
             "runner_connected": rt.runner_count > 0,
             "runner_phase": rt.runner_phase,
             "next_prerun_at": rt.next_prerun_at,
+            "verification": registry.verification_status(rt),
         })
 
     @r.get("/api/{session_id}/script-source")
@@ -1966,6 +1968,21 @@ def build_control_router(
             return JSONResponse({"error": "session not found"}, status_code=404)
         except HistoryNotReadyError:
             return JSONResponse({"error": "market data is still preparing"}, status_code=409)
+        return JSONResponse({"ok": True})
+
+    @r.post("/api/sessions/{session_id}/verification/restart")
+    async def verification_runner_restart(session_id: str) -> JSONResponse:
+        try:
+            await registry.restart_verification_runner(session_id)
+        except SessionNotFoundError:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        except HistoryNotReadyError:
+            return JSONResponse(
+                {"error": "market data is still preparing"},
+                status_code=409,
+            )
+        except VerificationRunnerUnavailableError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
         return JSONResponse({"ok": True})
 
     @r.get("/api/sessions/{session_id}/runner/logs")
