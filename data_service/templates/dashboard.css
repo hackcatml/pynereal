@@ -1010,10 +1010,11 @@ tr:last-child td { border-bottom: none; }
 }
 .runner-status-tooltip {
   position: absolute;
-  left: 50%;
+  left: 0;
   bottom: calc(100% + 7px);
   z-index: 48;
-  min-width: max-content;
+  width: max-content;
+  min-width: 0;
   max-width: min(220px, calc(100vw - 24px));
   padding: 6px 8px;
   border: 1px solid var(--border);
@@ -1025,16 +1026,24 @@ tr:last-child td { border-bottom: none; }
   font-weight: 500;
   line-height: 1.25;
   letter-spacing: 0;
-  white-space: nowrap;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
   opacity: 0;
   pointer-events: none;
-  transform: translate(-50%, 2px);
+  transform: translate(0, 2px);
   transition: opacity 120ms ease, transform 120ms ease;
+}
+.runner-status-tooltip-path {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 .runner-status-anchor.show-runner-status .runner-status-tooltip,
 .runner-status-anchor:focus-visible .runner-status-tooltip {
   opacity: 1;
-  transform: translate(-50%, 0);
+  transform: translate(0, 0);
 }
 
 .verification-status-wrap {
@@ -1205,8 +1214,8 @@ tr:last-child td { border-bottom: none; }
   opacity: 0.42;
 }
 .verification-restart-button svg {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   fill: none;
   stroke: currentColor;
   stroke-width: 2;
@@ -1216,15 +1225,15 @@ tr:last-child td { border-bottom: none; }
 @media (hover: hover) and (pointer: fine) {
   .runner-status-anchor:hover .runner-status-tooltip {
     opacity: 1;
-    transform: translate(-50%, 0);
+    transform: translate(0, 0);
   }
 }
 @media (max-width: 720px), (hover: none) and (pointer: coarse) {
   .runner-status-tooltip {
     top: calc(100% + 7px);
-    right: 0;
+    right: auto;
     bottom: auto;
-    left: auto;
+    left: 0;
     transform: translate(0, -2px);
   }
   .runner-status-anchor.show-runner-status .runner-status-tooltip,
@@ -1554,6 +1563,10 @@ tr:last-child td { border-bottom: none; }
   background: #2a323d;
   color: #ffffff;
 }
+.scripting-tree-menu button:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
 .scripting-tree-menu button.danger { color: #ff9a92; }
 .scripting-workspace.scripting-tree-collapsed .scripting-tree-tools {
   display: none;
@@ -1610,7 +1623,7 @@ tr:last-child td { border-bottom: none; }
   min-width: 0;
 }
 .scripting-tree-row-action {
-  display: inline-flex;
+  display: none;
   flex: 0 0 30px;
   width: 30px;
   height: 30px;
@@ -2145,6 +2158,19 @@ tr:last-child td { border-bottom: none; }
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+.scripting-operation-path-list {
+  max-height: 160px;
+  overflow: auto;
+  padding: 8px 9px;
+  border: 1px solid #3a4350;
+  border-radius: 5px;
+  background: #0f141a;
+  color: #c9d1d9;
+  font-size: 10.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .scripting-operation-field {
   display: flex;
@@ -2986,7 +3012,9 @@ tr:last-child td { border-bottom: none; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.session-script-edit-icon {
+.session-script-button.missing .session-script-label { color: #ffb4ad; }
+.session-script-edit-icon,
+.session-script-missing-icon {
   flex: none;
   width: 12px;
   height: 12px;
@@ -2997,6 +3025,14 @@ tr:last-child td { border-bottom: none; }
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+.session-script-missing-icon {
+  display: none;
+  width: 14px;
+  height: 14px;
+  color: #ff7b72;
+}
+.session-script-button.missing .session-script-edit-icon { display: none; }
+.session-script-button.missing .session-script-missing-icon { display: block; }
 .session-script-button:disabled .session-script-edit-icon { display: none; }
 .calendar-toolbar {
   position: relative;
@@ -6435,6 +6471,8 @@ tr:last-child td { border-bottom: none; }
   .scripting-tree { padding: 7px 4px calc(16px + env(safe-area-inset-bottom)); }
   .scripting-tree-tools { gap: 4px; }
   .scripting-tree-tool { width: 28px; height: 28px; }
+  #scripting-actions-menu-toggle { display: none; }
+  .scripting-tree-row-action { display: inline-flex; }
   .scripting-tree-menu {
     top: 39px;
     right: 7px;
@@ -7213,6 +7251,13 @@ tr:last-child td { border-bottom: none; }
     flex-shrink: 0;
   }
   #sessions td.mono { word-break: break-all; }
+  #sessions td.script-cell { min-width: 0; overflow: hidden; }
+  #sessions td.script-cell .session-script-button {
+    flex: 1 1 0;
+    width: 0;
+    max-width: none;
+    justify-content: flex-end;
+  }
   /* keep the "Runner" label left-aligned like other rows; push buttons right */
   #sessions td.runner-cell { justify-content: flex-start; gap: 6px; }
   #sessions td.runner-cell::before { margin-right: auto; }

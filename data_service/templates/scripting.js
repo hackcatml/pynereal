@@ -5,6 +5,7 @@
   const SCRIPTING_TREE_MAX_WIDTH = 520;
   const SCRIPTING_TREE_DEFAULT_WIDTH = 290;
   let initialized = false;
+  let assignedFileHandler = null;
 
   function init(options = {}) {
     if (initialized) return;
@@ -35,6 +36,7 @@
     let scriptingSelectedPath = "";
     let scriptingTreeSelectedPath = "";
     let scriptingTreeSelectedType = "";
+    let scriptingTreeSelectionAnchorPath = "";
     let scriptingTreeRequestSeq = 0;
     let scriptingFileRequestSeq = 0;
     let scriptingOpenTimer = null;
@@ -65,20 +67,34 @@
     let scriptingTreeCollapsed = false;
     let scriptingOperationAction = "";
     let scriptingOperationUsage = null;
+    let scriptingOperationPaths = [];
+    let scriptingOperationCopyTargets = [];
     let scriptingOperationTemplate = "empty";
     let scriptingOperationBusy = false;
     let scriptingOperationCloseTimer = null;
     let scriptingApplyTimer = null;
     let scriptingRestartBusy = false;
     let scriptingRestartPath = "";
+    let scriptingPendingAssignedPath = "";
     const scriptingApplyRefreshes = new Set();
     const scriptingPendingApplies = new Map();
     const scriptingExpandedDirectories = new Set();
+    const scriptingTreeSelectedPaths = new Set();
     const el = (id) => document.getElementById(id);
 
     function isScriptingOpen() {
       return !el("scripting-modal").classList.contains("hidden");
     }
+
+    function selectAssignedFile(path) {
+      const normalizedPath = String(path || "").trim();
+      if (!normalizedPath || scriptingSelectedPath) return;
+      scriptingPendingAssignedPath = normalizedPath;
+      scriptingEntries = null;
+      if (isScriptingOpen()) void loadScriptingTree();
+    }
+
+    assignedFileHandler = selectAssignedFile;
 
     function setScriptingStatus(message, state = "", options = {}) {
       if (scriptingStatusTimer !== null) {
@@ -460,7 +476,37 @@
     function setScriptingTreeSelection(path = "", type = "") {
       scriptingTreeSelectedPath = String(path || "");
       scriptingTreeSelectedType = scriptingTreeSelectedPath ? String(type || "file") : "";
-      renderScriptingTree();
+      scriptingTreeSelectionAnchorPath = scriptingTreeSelectedType === "file"
+        ? scriptingTreeSelectedPath
+        : "";
+      scriptingTreeSelectedPaths.clear();
+      if (scriptingTreeSelectedPath) scriptingTreeSelectedPaths.add(scriptingTreeSelectedPath);
+      updateScriptingTreeSelectionView();
+    }
+
+    function updateScriptingTreeSelectionView() {
+      const tree = el("scripting-tree");
+      tree.querySelectorAll("[data-scripting-path]").forEach((item) => {
+        const selected = scriptingTreeSelectedPaths.has(
+          String(item.dataset.scriptingPath || ""),
+        );
+        item.classList.toggle("selected", selected);
+        item.setAttribute("aria-selected", String(selected));
+      });
+      updateScriptingActionsToggle();
+    }
+
+    function updateScriptingActionsToggle() {
+      const toggle = el("scripting-actions-menu-toggle");
+      const selectedCount = scriptingTreeSelectedPaths.size;
+      if (toggle) toggle.disabled = selectedCount === 0;
+      const actionsMenu = el("scripting-actions-menu");
+      if (!actionsMenu) return;
+      const rename = actionsMenu.querySelector('[data-scripting-operation="rename"]');
+      if (rename) {
+        rename.disabled = selectedCount !== 1;
+        rename.title = selectedCount > 1 ? "Rename is available for one path at a time" : "";
+      }
     }
 
     function scriptingIconMarkup(type, language = "") {
@@ -491,12 +537,13 @@
         button.type = "button";
         button.className = "scripting-tree-item " + (directory ? "directory" : "file");
         button.classList.toggle("expanded", expanded);
-        button.classList.toggle("selected", entry.path === scriptingTreeSelectedPath);
+        button.classList.toggle("selected", scriptingTreeSelectedPaths.has(entry.path));
         button.style.setProperty("--scripting-depth", String(depth));
         button.dataset.scriptingPath = entry.path;
         button.dataset.scriptingType = directory ? "directory" : "file";
         button.setAttribute("role", "treeitem");
         button.setAttribute("aria-level", String(depth + 1));
+        button.setAttribute("aria-selected", String(scriptingTreeSelectedPaths.has(entry.path)));
         if (directory) button.setAttribute("aria-expanded", String(expanded));
 
         const chevron = document.createElement("span");
@@ -549,6 +596,7 @@
       tree.replaceChildren();
       appendScriptingTreeEntries(tree, scriptingEntries || []);
       tree.scrollTop = scrollTop;
+      updateScriptingActionsToggle();
     }
 
     function setScriptingTreeState(state, message = "") {
@@ -567,7 +615,7 @@
       });
     }
 
-    function toggleScriptingTreeMenu(name, anchor = null) {
+    function toggleScriptingTreeMenu(name, anchor = null, point = null) {
       const menu = el(`scripting-${name}-menu`);
       const opening = menu.classList.contains("hidden");
       closeScriptingTreeMenus();
@@ -575,22 +623,33 @@
       menu.classList.remove("hidden");
       const toggle = el(`scripting-${name}-menu-toggle`);
       if (toggle) toggle.setAttribute("aria-expanded", "true");
-      if (anchor) {
-        const pane = anchor.closest(".scripting-tree-pane");
+      if (anchor || point) {
+        const pane = anchor
+          ? anchor.closest(".scripting-tree-pane")
+          : menu.closest(".scripting-tree-pane");
         if (pane) {
           const paneRect = pane.getBoundingClientRect();
-          const anchorRect = anchor.getBoundingClientRect();
           const menuRect = menu.getBoundingClientRect();
           const maximumTop = Math.max(6, paneRect.height - menuRect.height - 6);
-          const preferredTop = anchorRect.bottom - paneRect.top + 2;
-          const fallbackTop = anchorRect.top - paneRect.top - menuRect.height - 2;
-          menu.style.top = `${Math.max(6, Math.min(maximumTop,
-            preferredTop + menuRect.height <= paneRect.height - 6 ? preferredTop : fallbackTop))}px`;
-          menu.style.right = `${Math.max(6, paneRect.right - anchorRect.right)}px`;
+          if (point) {
+            const maximumLeft = Math.max(6, paneRect.width - menuRect.width - 6);
+            menu.style.top = `${Math.max(6, Math.min(maximumTop, point.clientY - paneRect.top))}px`;
+            menu.style.left = `${Math.max(6, Math.min(maximumLeft, point.clientX - paneRect.left))}px`;
+            menu.style.removeProperty("right");
+          } else {
+            const anchorRect = anchor.getBoundingClientRect();
+            const preferredTop = anchorRect.bottom - paneRect.top + 2;
+            const fallbackTop = anchorRect.top - paneRect.top - menuRect.height - 2;
+            menu.style.top = `${Math.max(6, Math.min(maximumTop,
+              preferredTop + menuRect.height <= paneRect.height - 6 ? preferredTop : fallbackTop))}px`;
+            menu.style.right = `${Math.max(6, paneRect.right - anchorRect.right)}px`;
+            menu.style.removeProperty("left");
+          }
         }
       } else {
         menu.style.removeProperty("top");
         menu.style.removeProperty("right");
+        menu.style.removeProperty("left");
       }
       const first = menu.querySelector('button:not(.hidden):not(:disabled)');
       if (first) window.requestAnimationFrame(() => first.focus({ preventScroll: true }));
@@ -617,12 +676,44 @@
       return normalizedParent ? `${normalizedParent}/${normalizedName}` : normalizedName;
     }
 
-    function scriptingCopyName(path) {
+    function scriptingCopyName(path, sequence = 1) {
       const name = scriptingBaseName(path);
       const dot = name.lastIndexOf(".");
+      const suffix = sequence > 1 ? `_copy${sequence}` : "_copy";
       return dot > 0
-        ? `${name.slice(0, dot)}_copy${name.slice(dot)}`
-        : `${name}_copy`;
+        ? `${name.slice(0, dot)}${suffix}${name.slice(dot)}`
+        : `${name}${suffix}`;
+    }
+
+    function scriptingWorkspacePaths(entries, paths = new Set()) {
+      for (const entry of Array.isArray(entries) ? entries : []) {
+        if (!entry || !entry.path) continue;
+        paths.add(String(entry.path));
+        if (entry.type === "directory") scriptingWorkspacePaths(entry.children, paths);
+      }
+      return paths;
+    }
+
+    function scriptingCopyTargets(paths) {
+      const reserved = scriptingWorkspacePaths(scriptingEntries || []);
+      return paths.map((sourcePath) => {
+        const parent = scriptingParentPath(sourcePath);
+        let sequence = 1;
+        let targetPath = "";
+        do {
+          targetPath = scriptingJoinPath(parent, scriptingCopyName(sourcePath, sequence));
+          sequence += 1;
+        } while (reserved.has(targetPath));
+        reserved.add(targetPath);
+        return { sourcePath, targetPath };
+      });
+    }
+
+    function appendScriptingOperationPathList(paths) {
+      const list = document.createElement("div");
+      list.className = "scripting-operation-path-list mono";
+      list.textContent = paths.join("\n");
+      el("scripting-operation-fields").appendChild(list);
     }
 
     function appendScriptingOperationField({
@@ -849,6 +940,10 @@
       submit.disabled = false;
       const parent = scriptingSelectedDirectory();
       const selectedPath = scriptingTreeSelectedPath;
+      const selectedPaths = scriptingOperationPaths.length
+        ? scriptingOperationPaths
+        : (selectedPath ? [selectedPath] : []);
+      const multiple = selectedPaths.length > 1;
 
       if (action === "new_strategy") {
         title.textContent = "New strategy";
@@ -882,6 +977,16 @@
         appendScriptingDirectoryField({ id: "scripting-operation-parent", label: "Parent directory", value: "" });
         appendScriptingOperationField({ id: "scripting-operation-name", label: "Directory name", value: "new_strategy", required: true });
       } else if (action === "duplicate") {
+        if (multiple) {
+          title.textContent = `Duplicate ${selectedPaths.length} files`;
+          message.textContent = "Create one copy beside each selected file.";
+          submit.textContent = "Duplicate all";
+          appendScriptingOperationPathList(
+            scriptingOperationCopyTargets.map((item) => `${item.sourcePath}  ->  ${item.targetPath}`),
+          );
+          renderScriptingOperationUsage();
+          return;
+        }
         const directory = scriptingTreeSelectedType === "directory";
         title.textContent = directory ? "Duplicate directory" : "Duplicate file";
         message.textContent = directory
@@ -900,6 +1005,15 @@
         submit.textContent = "Rename";
         appendScriptingOperationField({ id: "scripting-operation-path", label: "New path", value: selectedPath, required: true });
       } else {
+        if (multiple) {
+          title.textContent = `Delete ${selectedPaths.length} files`;
+          message.textContent = "Delete every selected file. Version history is retained internally.";
+          submit.textContent = "Delete all";
+          submit.className = "btn btn-danger-primary";
+          appendScriptingOperationPathList(selectedPaths);
+          renderScriptingOperationUsage();
+          return;
+        }
         const directory = scriptingTreeSelectedType === "directory";
         title.textContent = directory ? "Delete directory" : "Delete file";
         message.textContent = directory
@@ -929,6 +1043,8 @@
       modal.setAttribute("aria-hidden", "true");
       scriptingOperationAction = "";
       scriptingOperationUsage = null;
+      scriptingOperationPaths = [];
+      scriptingOperationCopyTargets = [];
     }
 
     function closeScriptingOperation(options = {}) {
@@ -1056,6 +1172,14 @@
       closeScriptingTreeMenus();
       if (["duplicate", "rename", "delete"].includes(action) && !scriptingTreeSelectedPath) return;
       if (scriptingOperationCloseTimer !== null) finishScriptingOperationClose();
+      const selectedPaths = Array.from(scriptingTreeSelectedPaths);
+      if (action === "rename" && selectedPaths.length !== 1) return;
+      scriptingOperationPaths = selectedPaths.length
+        ? selectedPaths
+        : (scriptingTreeSelectedPath ? [scriptingTreeSelectedPath] : []);
+      scriptingOperationCopyTargets = action === "duplicate" && scriptingOperationPaths.length > 1
+        ? scriptingCopyTargets(scriptingOperationPaths)
+        : [];
       renderScriptingOperation(action);
       const modal = el("scripting-operation-modal");
       const box = modal.querySelector(".scripting-operation-box");
@@ -1070,11 +1194,21 @@
       if (!["rename", "delete"].includes(action)) return;
       el("scripting-operation-submit").disabled = true;
       try {
-        scriptingOperationUsage = await api(
-          `/api/scripting/usage?path=${encodeURIComponent(scriptingTreeSelectedPath)}`,
+        const usageRows = await Promise.all(scriptingOperationPaths.map((path) => api(
+          `/api/scripting/usage?path=${encodeURIComponent(path)}`,
           { cache: "no-store" },
-        );
+        )));
         if (scriptingOperationAction !== action) return;
+        const sessions = new Map();
+        usageRows.forEach((usage) => {
+          (usage.sessions || []).forEach((session) => sessions.set(session.id, session));
+        });
+        const sessionRows = Array.from(sessions.values());
+        scriptingOperationUsage = {
+          session_count: sessionRows.length,
+          active_count: sessionRows.filter((session) => session.active).length,
+          sessions: sessionRows,
+        };
         el("scripting-operation-submit").disabled = false;
         renderScriptingOperationUsage();
       } catch (error) {
@@ -1101,6 +1235,16 @@
         ));
         scriptingTreeSelectedPath = remapScriptingPath(
           scriptingTreeSelectedPath,
+          previousPath,
+          nextPath,
+        );
+        const selectedPaths = Array.from(scriptingTreeSelectedPaths);
+        scriptingTreeSelectedPaths.clear();
+        selectedPaths.forEach((path) => scriptingTreeSelectedPaths.add(
+          remapScriptingPath(path, previousPath, nextPath),
+        ));
+        scriptingTreeSelectionAnchorPath = remapScriptingPath(
+          scriptingTreeSelectionAnchorPath,
           previousPath,
           nextPath,
         );
@@ -1143,11 +1287,38 @@
       }
     }
 
+    async function finishScriptingBatchOperation(results, action, previousPaths) {
+      closeScriptingOperation();
+      if (action === "delete") {
+        const removedLoadedFile = previousPaths.includes(scriptingSelectedPath);
+        setScriptingTreeSelection();
+        if (removedLoadedFile) resetScriptingEditor();
+        await loadScriptingTree();
+        setScriptingStatus(`Deleted ${previousPaths.length} files`, "saved");
+        return;
+      }
+
+      const nextPaths = results.map((result) => String(result.path || "")).filter(Boolean);
+      await loadScriptingTree();
+      scriptingTreeSelectedPaths.clear();
+      nextPaths.forEach((path) => scriptingTreeSelectedPaths.add(path));
+      scriptingTreeSelectedPath = nextPaths[nextPaths.length - 1] || "";
+      scriptingTreeSelectedType = scriptingTreeSelectedPath ? "file" : "";
+      scriptingTreeSelectionAnchorPath = nextPaths[0] || "";
+      updateScriptingTreeSelectionView();
+      setScriptingStatus(`Duplicated ${nextPaths.length} files`, "saved");
+    }
+
     async function submitScriptingOperation(event) {
       event.preventDefault();
       if (!scriptingOperationAction || scriptingOperationBusy) return;
       const action = scriptingOperationAction;
       const previousPath = scriptingTreeSelectedPath;
+      const previousPaths = scriptingOperationPaths.length
+        ? Array.from(scriptingOperationPaths)
+        : (previousPath ? [previousPath] : []);
+      const batch = previousPaths.length > 1 && ["duplicate", "delete"].includes(action);
+      const copyTargets = Array.from(scriptingOperationCopyTargets);
       const value = (id) => {
         const input = el(id);
         return input ? String(input.value || "").trim() : "";
@@ -1158,6 +1329,7 @@
       submit.disabled = true;
       const originalLabel = submit.textContent;
       submit.textContent = action === "delete" ? "Deleting..." : "Working...";
+      let completedCount = 0;
       try {
         let result;
         if (action === "new_directory") {
@@ -1201,15 +1373,31 @@
             }),
           });
         } else if (action === "duplicate") {
-          result = await api("/api/scripting/files", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              path: value("scripting-operation-path"),
-              kind: "copy",
-              source_path: previousPath,
-            }),
-          });
+          if (batch) {
+            result = [];
+            for (const item of copyTargets) {
+              result.push(await api("/api/scripting/files", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  path: item.targetPath,
+                  kind: "copy",
+                  source_path: item.sourcePath,
+                }),
+              }));
+              completedCount += 1;
+            }
+          } else {
+            result = await api("/api/scripting/files", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                path: value("scripting-operation-path"),
+                kind: "copy",
+                source_path: previousPath,
+              }),
+            });
+          }
         } else if (action === "rename") {
           result = await api("/api/scripting/rename", {
             method: "POST",
@@ -1221,28 +1409,44 @@
             }),
           });
         } else {
-          result = await api(
-            `/api/scripting/file?path=${encodeURIComponent(previousPath)}&acknowledge_stopped_sessions=true`,
-            { method: "DELETE" },
-          );
+          if (batch) {
+            result = [];
+            for (const path of previousPaths) {
+              result.push(await api(
+                `/api/scripting/file?path=${encodeURIComponent(path)}&acknowledge_stopped_sessions=true`,
+                { method: "DELETE" },
+              ));
+              completedCount += 1;
+            }
+          } else {
+            result = await api(
+              `/api/scripting/file?path=${encodeURIComponent(previousPath)}&acknowledge_stopped_sessions=true`,
+              { method: "DELETE" },
+            );
+          }
         }
         scriptingOperationBusy = false;
-        await finishScriptingOperation(result, action, previousPath);
+        if (batch) await finishScriptingBatchOperation(result, action, previousPaths);
+        else await finishScriptingOperation(result, action, previousPath);
       } catch (error) {
         scriptingOperationBusy = false;
-        submit.disabled = Boolean(scriptingOperationUsage && Number(scriptingOperationUsage.active_count));
+        submit.disabled = completedCount > 0
+          || Boolean(scriptingOperationUsage && Number(scriptingOperationUsage.active_count));
         submit.textContent = originalLabel;
-        setScriptingOperationError(error && error.message ? error.message : "File operation failed.");
+        if (completedCount > 0) await loadScriptingTree();
+        const message = error && error.message ? error.message : "File operation failed.";
+        setScriptingOperationError(completedCount > 0
+          ? `${completedCount} of ${previousPaths.length} files completed before the error: ${message}`
+          : message);
       }
     }
 
     function requestScriptingOperation(action) {
       const affectsLoadedFile = ["duplicate", "rename", "delete"].includes(action)
         && scriptingSelectedPath
-        && (
-          scriptingSelectedPath === scriptingTreeSelectedPath
-          || scriptingSelectedPath.startsWith(`${scriptingTreeSelectedPath}/`)
-        );
+        && Array.from(scriptingTreeSelectedPaths).some((path) => (
+          scriptingSelectedPath === path || scriptingSelectedPath.startsWith(`${path}/`)
+        ));
       if (affectsLoadedFile) {
         runScriptingNavigation(() => openScriptingOperation(action));
       } else {
@@ -1341,7 +1545,7 @@
       el("scripting-editor-wrap").classList.add("hidden");
       resetScriptingUndo();
       setScriptingStatus("No file");
-      renderScriptingTree();
+      updateScriptingTreeSelectionView();
     }
 
     function setScriptingEditorState(state, message = "") {
@@ -1729,7 +1933,7 @@
       setScriptingEditorState("ready");
       updateScriptingEditState();
       if (!options.preserveStatus && !renderScriptingApplyStatus()) setScriptingStatus("Ready");
-      renderScriptingTree();
+      updateScriptingTreeSelectionView();
     }
 
     async function saveScriptingFile() {
@@ -2082,14 +2286,13 @@
       el("scripting-file-meta").textContent = "";
       setScriptingEditorState("loading");
       if (options.showEditor !== false) setScriptingMobileView("editor");
-      renderScriptingTree();
       try {
-        const payload = await api(
-          `/api/scripting/file?path=${encodeURIComponent(normalizedPath)}`,
-          { cache: "no-store" },
-        );
+        const result = options.request
+          ? await options.request
+          : await requestScriptingFile(normalizedPath);
+        if (result.error) throw result.error;
         if (seq !== scriptingFileRequestSeq || !isScriptingOpen()) return;
-        renderScriptingFile(payload);
+        renderScriptingFile(result.payload);
       } catch (error) {
         if (seq !== scriptingFileRequestSeq || !isScriptingOpen()) return;
         setScriptingEditorState(
@@ -2100,10 +2303,27 @@
       }
     }
 
-    async function loadScriptingTree() {
+    function requestScriptingFile(path) {
+      return api(
+        `/api/scripting/file?path=${encodeURIComponent(path)}`,
+        { cache: "no-store" },
+      ).then(
+        (payload) => ({ payload, error: null }),
+        (error) => ({ payload: null, error }),
+      );
+    }
+
+    async function loadScriptingTree(options = {}) {
       const seq = ++scriptingTreeRequestSeq;
-      const refreshSelectedFile = !mobileHubQuery.matches
+      const refreshSelectedFile = options.refreshSelectedFile === true
+        || !mobileHubQuery.matches
         || el("scripting-modal").classList.contains("scripting-show-editor");
+      const selectedPathAtStart = refreshSelectedFile && !scriptingPendingAssignedPath
+        ? String(scriptingSelectedPath || "")
+        : "";
+      const selectedFileRequest = selectedPathAtStart
+        ? requestScriptingFile(selectedPathAtStart)
+        : null;
       const refresh = el("scripting-refresh");
       refresh.classList.add("assets-refreshing");
       refresh.disabled = true;
@@ -2125,12 +2345,23 @@
         }
         renderScriptingTree();
         setScriptingTreeState(scriptingEntries.length ? "ready" : "empty");
+        if (scriptingPendingAssignedPath) {
+          const assignedPath = scriptingPendingAssignedPath;
+          scriptingPendingAssignedPath = "";
+          if (scriptingContainsPath(scriptingEntries, assignedPath)) {
+            await openScriptingFile(assignedPath, { showEditor: false });
+            return;
+          }
+        }
         if (
           refreshSelectedFile
           && scriptingSelectedPath
           && scriptingContainsPath(scriptingEntries, scriptingSelectedPath)
         ) {
-          await openScriptingFile(scriptingSelectedPath, { showEditor: false });
+          const request = selectedFileRequest && scriptingSelectedPath === selectedPathAtStart
+            ? selectedFileRequest
+            : null;
+          await openScriptingFile(scriptingSelectedPath, { showEditor: false, request });
         }
       } catch (error) {
         if (seq !== scriptingTreeRequestSeq || !isScriptingOpen()) return;
@@ -2175,14 +2406,7 @@
       window.requestAnimationFrame(renderScriptingTreeLayout);
       lockBodyScroll();
       scriptingOpenTimer = window.setTimeout(finishScriptingOpening, 230);
-      if (scriptingEntries === null) loadScriptingTree();
-      else {
-        renderScriptingTree();
-        setScriptingTreeState(scriptingEntries.length ? "ready" : "empty");
-        if (scriptingSelectedPath && !scriptingHasUnsavedChanges()) {
-          openScriptingFile(scriptingSelectedPath, { showEditor: false });
-        }
-      }
+      loadScriptingTree({ refreshSelectedFile: true });
       window.requestAnimationFrame(() => el("scripting-close").focus());
     }
 
@@ -2539,6 +2763,10 @@
       el("scripting-new-menu-toggle").addEventListener("click", () => {
         toggleScriptingTreeMenu("new");
       });
+      el("scripting-actions-menu-toggle").addEventListener("click", (event) => {
+        if (!scriptingTreeSelectedPath) return;
+        toggleScriptingTreeMenu("actions", event.currentTarget);
+      });
       [el("scripting-new-menu"), el("scripting-actions-menu")].forEach((menu) => {
         menu.addEventListener("click", (event) => {
           const button = event.target && event.target.closest
@@ -2591,9 +2819,6 @@
         discardScriptingChanges();
         openScriptingFile(path, { showEditor: false });
       });
-      modal.addEventListener("click", (event) => {
-        if (event.target === modal) closeScripting();
-      });
       tree.addEventListener("click", (event) => {
         const rowAction = event.target && event.target.closest
           ? event.target.closest("[data-scripting-action-path]")
@@ -2624,13 +2849,47 @@
           : null;
         if (!item || !tree.contains(item)) return;
         const path = String(item.dataset.scriptingPath || "");
+        if (
+          !mobileHubQuery.matches
+          && event.shiftKey
+          && item.dataset.scriptingType === "file"
+          && scriptingTreeSelectionAnchorPath
+        ) {
+          const visibleFiles = Array.from(tree.querySelectorAll(".scripting-tree-item.file"))
+            .filter((candidate) => {
+              let parent = candidate.parentElement;
+              while (parent && parent !== tree) {
+                if (
+                  parent.classList.contains("scripting-tree-children")
+                  && !parent.classList.contains("expanded")
+                ) return false;
+                parent = parent.parentElement;
+              }
+              return true;
+            });
+          const paths = visibleFiles.map((candidate) => String(candidate.dataset.scriptingPath || ""));
+          const anchorIndex = paths.indexOf(scriptingTreeSelectionAnchorPath);
+          const targetIndex = paths.indexOf(path);
+          if (anchorIndex >= 0 && targetIndex >= 0) {
+            scriptingTreeSelectedPaths.clear();
+            const start = Math.min(anchorIndex, targetIndex);
+            const end = Math.max(anchorIndex, targetIndex);
+            paths.slice(start, end + 1).forEach((selectedPath) => {
+              scriptingTreeSelectedPaths.add(selectedPath);
+            });
+            scriptingTreeSelectedPath = path;
+            scriptingTreeSelectedType = "file";
+            updateScriptingTreeSelectionView();
+            return;
+          }
+        }
         if (item.dataset.scriptingType === "directory") {
           scriptingTreeSelectedPath = path;
           scriptingTreeSelectedType = "directory";
-          tree.querySelectorAll(".scripting-tree-item.selected").forEach((selected) => {
-            selected.classList.remove("selected");
-          });
-          item.classList.add("selected");
+          scriptingTreeSelectionAnchorPath = "";
+          scriptingTreeSelectedPaths.clear();
+          scriptingTreeSelectedPaths.add(path);
+          updateScriptingTreeSelectionView();
           const expanded = !scriptingExpandedDirectories.has(path);
           if (expanded) scriptingExpandedDirectories.add(path);
           else scriptingExpandedDirectories.delete(path);
@@ -2651,6 +2910,29 @@
           return;
         }
         runScriptingNavigation(() => openScriptingFile(path));
+      });
+      tree.addEventListener("contextmenu", (event) => {
+        if (mobileHubQuery.matches) return;
+        const item = event.target && event.target.closest
+          ? event.target.closest("[data-scripting-path]")
+          : null;
+        if (!item || !tree.contains(item)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const path = String(item.dataset.scriptingPath || "");
+        const type = String(item.dataset.scriptingType || "file");
+        closeScriptingTreeMenus();
+        if (scriptingTreeSelectedPaths.has(path)) {
+          scriptingTreeSelectedPath = path;
+          scriptingTreeSelectedType = type;
+          updateScriptingTreeSelectionView();
+        } else {
+          setScriptingTreeSelection(path, type);
+        }
+        toggleScriptingTreeMenu("actions", null, {
+          clientX: event.clientX,
+          clientY: event.clientY,
+        });
       });
       el("scripting-history-list").addEventListener("click", (event) => {
         const item = event.target && event.target.closest
@@ -2749,6 +3031,7 @@
           el("scripting-new-menu"),
           el("scripting-actions-menu"),
           el("scripting-new-menu-toggle"),
+          el("scripting-actions-menu-toggle"),
         ].some((node) => node && node.contains(event.target))
           || Boolean(event.target.closest && event.target.closest(".scripting-tree-row-action"));
         if (!inTreeMenu) closeScriptingTreeMenus();
@@ -2766,6 +3049,28 @@
         const unsavedOpen = !el("scripting-unsaved-modal").classList.contains("hidden");
         const operationOpen = !el("scripting-operation-modal").classList.contains("hidden");
         const restartOpen = !el("scripting-restart-modal").classList.contains("hidden");
+        const eventTarget = event.target instanceof Element ? event.target : null;
+        const editableTarget = Boolean(eventTarget && (
+          eventTarget.matches("input, textarea, select")
+          || eventTarget.isContentEditable
+          || eventTarget.closest('[contenteditable="true"]')
+        ));
+        if (
+          event.key === "Delete"
+          && !mobileHubQuery.matches
+          && isScriptingOpen()
+          && !unsavedOpen
+          && !operationOpen
+          && !restartOpen
+          && !isScriptingHistoryOpen()
+          && !editableTarget
+          && scriptingTreeSelectedPaths.size > 0
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          requestScriptingOperation("delete");
+          return;
+        }
         if (
           isScriptingOpen()
           && !unsavedOpen
@@ -2803,5 +3108,10 @@
     initialized = true;
   }
 
-  window.PyneScripting = { init };
+  window.PyneScripting = {
+    init,
+    selectAssignedFile(path) {
+      if (assignedFileHandler) assignedFileHandler(path);
+    },
+  };
 })();

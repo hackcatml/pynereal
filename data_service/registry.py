@@ -19,6 +19,21 @@ from tv_logos import TradingViewLogoResolver
 from ws_manager import WSManager
 
 
+_SCRIPTS_ROOT = (Path(__file__).resolve().parent.parent / "workdir" / "scripts").resolve()
+
+
+def _script_path_missing(script_name: str) -> bool:
+    normalized = str(script_name or "").strip()
+    if not normalized:
+        return False
+    try:
+        path = (_SCRIPTS_ROOT / normalized).resolve()
+        path.relative_to(_SCRIPTS_ROOT)
+    except (OSError, ValueError):
+        return True
+    return path.suffix.lower() != ".py" or not path.is_file()
+
+
 class SessionLimitError(Exception):
     pass
 
@@ -140,8 +155,13 @@ class SessionRegistry:
 
     def snapshots(self) -> List[dict]:
         out = []
+        missing_by_script: dict[str, bool] = {}
         for s in self.sessions.values():
             snap = s.snapshot()
+            script_name = str(s.spec.script_name or "")
+            if script_name not in missing_by_script:
+                missing_by_script[script_name] = _script_path_missing(script_name)
+            snap["script_missing"] = missing_by_script[script_name]
             snap["runner"] = self.runner_status(s.spec.id)
             snap["verification"] = self.verification_status(s)
             out.append(snap)

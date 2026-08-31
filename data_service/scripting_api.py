@@ -3,6 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from typing import Any, Callable
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -25,6 +29,35 @@ from scripting_workspace import (
 
 
 _STRATEGY_TEMPLATES = {"empty", "long_short", "indicator"}
+
+
+class ScriptingExecutor:
+    def __init__(self, max_workers: int = 2) -> None:
+        self._executor = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="pynereal-scripting",
+        )
+        self._closed = False
+
+    async def run(
+        self,
+        function: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        if self._closed:
+            raise RuntimeError("scripting executor is closed")
+        callback = partial(function, *args, **kwargs)
+        return await asyncio.get_running_loop().run_in_executor(
+            self._executor,
+            callback,
+        )
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._executor.shutdown(wait=True, cancel_futures=True)
 
 
 def _strategy_source(template: str, title: str, description: str) -> str:
@@ -57,7 +90,7 @@ def main():{description_block}
 from pynecore.types import Series
 
 
-@script.strategy({title_literal}, overlay=True)
+@script.indicator({title_literal}, overlay=True)
 def main():{description_block}
     value: Series[float] = ta.ema(close, 20)
     plot(value, title="EMA 20", color=color.blue)
@@ -80,8 +113,20 @@ def main():{description_block}
 def build_scripting_router(
     workspace: ScriptingWorkspace,
     registry: SessionRegistry | None = None,
+    executor: ScriptingExecutor | None = None,
 ) -> APIRouter:
-    router = APIRouter()
+    task_runner = executor or ScriptingExecutor()
+    if executor is None:
+        @asynccontextmanager
+        async def executor_lifespan(_app: Any):
+            try:
+                yield
+            finally:
+                task_runner.close()
+
+        router = APIRouter(lifespan=executor_lifespan)
+    else:
+        router = APIRouter()
 
     def next_warmup_at(session: object) -> int | None:
         now_ms = int(time.time() * 1000)
@@ -228,7 +273,7 @@ def build_scripting_router(
     @router.get("/api/scripting/tree")
     async def get_scripting_tree() -> JSONResponse:
         try:
-            payload = await asyncio.to_thread(workspace.tree_payload)
+            payload = await task_runner.run(workspace.tree_payload)
         except ScriptingWorkspaceError as exc:
             return JSONResponse(
                 {"error": str(exc), "code": "workspace_unavailable"},
@@ -239,7 +284,7 @@ def build_scripting_router(
     @router.get("/api/scripting/usage")
     async def get_scripting_usage(path: str) -> JSONResponse:
         try:
-            kind = await asyncio.to_thread(workspace.path_kind, path)
+            kind = await task_runner.run(workspace.path_kind, path)
         except ScriptingWorkspaceError as exc:
             return error_response(exc)
         return JSONResponse(
@@ -256,7 +301,7 @@ def build_scripting_router(
                 status_code=400,
             )
         try:
-            result = await asyncio.to_thread(workspace.create_directory, path)
+            result = await task_runner.run(workspace.create_directory, path)
         except ScriptingWorkspaceError as exc:
             return error_response(exc)
         return JSONResponse(result, headers={"Cache-Control": "no-store"})
@@ -278,7 +323,7 @@ def build_scripting_router(
                         {"error": "source_path is required", "code": "invalid_request"},
                         status_code=400,
                     )
-                result = await asyncio.to_thread(
+                result = await task_runner.run(
                     workspace.duplicate_path,
                     source_path,
                     path,
@@ -294,7 +339,7 @@ def build_scripting_router(
                 content = f"# {title}\n"
                 if description:
                     content += f"\n{description}\n"
-                result = await asyncio.to_thread(workspace.create_file, path, content)
+                result = await task_runner.run(workspace.create_file, path, content)
             elif kind == "strategy":
                 template = str(payload.get("template") or "empty").strip()
                 title = str(payload.get("title") or "").strip()
@@ -314,7 +359,7 @@ def build_scripting_router(
                         {"error": "unknown strategy template", "code": "invalid_request"},
                         status_code=400,
                     )
-                result = await asyncio.to_thread(
+                result = await task_runner.run(
                     workspace.create_file,
                     path,
                     _strategy_source(template, title, description),
@@ -339,7 +384,7 @@ def build_scripting_router(
                 status_code=400,
             )
         try:
-            kind = await asyncio.to_thread(workspace.path_kind, path)
+            kind = await task_runner.run(workspace.path_kind, path)
         except ScriptingWorkspaceError as exc:
             return error_response(exc)
         usage = usage_payload(path, directory=kind == "directory")
@@ -347,7 +392,7 @@ def build_scripting_router(
         if blocked is not None:
             return blocked
         try:
-            result = await asyncio.to_thread(workspace.rename_path, path, next_path)
+            result = await task_runner.run(workspace.rename_path, path, next_path)
         except ScriptingWorkspaceError as exc:
             return error_response(exc)
         result["affected_sessions"] = usage["sessions"]
@@ -359,7 +404,7 @@ def build_scripting_router(
         acknowledge_stopped_sessions: bool = False,
     ) -> JSONResponse:
         try:
-            kind = await asyncio.to_thread(workspace.path_kind, path)
+            kind = await task_runner.run(workspace.path_kind, path)
         except ScriptingWorkspaceError as exc:
             return error_response(exc)
         usage = usage_payload(path, directory=kind == "directory")
@@ -396,7 +441,7 @@ def build_scripting_router(
                     status_code=409,
                 )
         try:
-            result = await asyncio.to_thread(workspace.delete_path, path)
+            result = await task_runner.run(workspace.delete_path, path)
         except ScriptingWorkspaceError as exc:
             if registry is not None:
                 for session_id, previous_script in reversed(cleared_assignments):
@@ -414,7 +459,7 @@ def build_scripting_router(
     @router.get("/api/scripting/file")
     async def get_scripting_file(path: str) -> JSONResponse:
         try:
-            payload = await asyncio.to_thread(workspace.read_file, path)
+            payload = await task_runner.run(workspace.read_file, path)
         except ScriptingWorkspaceError as exc:
             return error_response(exc)
         return JSONResponse(payload, headers={"Cache-Control": "no-store"})
@@ -441,7 +486,7 @@ def build_scripting_router(
                 status_code=400,
             )
         try:
-            result = await asyncio.to_thread(
+            result = await task_runner.run(
                 workspace.save_file,
                 path,
                 content,
@@ -455,7 +500,7 @@ def build_scripting_router(
     @router.get("/api/scripting/history")
     async def get_scripting_history(path: str, limit: int = 100) -> JSONResponse:
         try:
-            result = await asyncio.to_thread(workspace.history_payload, path, limit)
+            result = await task_runner.run(workspace.history_payload, path, limit)
         except ScriptingWorkspaceError as exc:
             return error_response(exc)
         return JSONResponse(result, headers={"Cache-Control": "no-store"})
@@ -463,7 +508,7 @@ def build_scripting_router(
     @router.get("/api/scripting/history/{revision_id}")
     async def get_scripting_revision(revision_id: int, path: str) -> JSONResponse:
         try:
-            result = await asyncio.to_thread(
+            result = await task_runner.run(
                 workspace.revision_payload,
                 path,
                 revision_id,
@@ -480,7 +525,7 @@ def build_scripting_router(
     @router.get("/api/scripting/diff")
     async def get_scripting_diff(path: str, revision_id: int) -> JSONResponse:
         try:
-            result = await asyncio.to_thread(
+            result = await task_runner.run(
                 workspace.diff_payload,
                 path,
                 revision_id,
@@ -515,7 +560,7 @@ def build_scripting_router(
                 status_code=400,
             )
         try:
-            result = await asyncio.to_thread(
+            result = await task_runner.run(
                 workspace.restore_file,
                 path,
                 revision_id,

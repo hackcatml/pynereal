@@ -7018,7 +7018,7 @@
       return `<button class="btn btn-icon" data-runner="stop" data-tooltip="Stop" aria-label="Stop">${runnerStopIcon}</button>` +
              `<button class="btn btn-icon" data-runner="restart" data-tooltip="Restart"${dataReady ? "" : " disabled"} aria-label="Restart">${runnerRestartIcon}</button>`;
     }
-    const canStart = dataReady && Boolean(s.script_name);
+    const canStart = dataReady && Boolean(s.script_name) && !s.script_missing;
     return `<button class="btn btn-icon" data-runner="start" data-tooltip="Start"${canStart ? "" : " disabled"} aria-label="Start">${runnerPlayIcon}</button>`;
   }
 
@@ -7133,6 +7133,9 @@
   function runnerStatusText(session, now = Date.now()) {
     const runner = String((session && session.runner) || "stopped");
     const phase = String((session && session.runner_phase) || "");
+    if (session && session.script_missing) {
+      return "script missing";
+    }
     if (runner === "stopped" || runner === "crashed") return runner;
     if (phase === "prerun_active") return "warming up";
     if (phase === "prerun_scheduled") {
@@ -7146,6 +7149,49 @@
     }
     if (runner === "starting") return "warming up";
     return "running";
+  }
+
+  function renderRunnerStatusTooltip(tooltip, session, now = Date.now()) {
+    const text = runnerStatusText(session, now);
+    if (session && session.script_missing) {
+      const path = String(session.script_name || "unknown");
+      setHTML(
+        tooltip,
+        `<span>${esc(text)}</span><span class="runner-status-tooltip-path">${esc(path)}</span>`,
+      );
+    } else {
+      setText(tooltip, text);
+    }
+    return text;
+  }
+
+  function positionRunnerStatusTooltip(anchor) {
+    const tooltip = anchor && anchor.querySelector(".runner-status-tooltip");
+    if (!tooltip) return;
+    tooltip.style.removeProperty("left");
+    tooltip.style.removeProperty("right");
+    tooltip.style.removeProperty("max-width");
+    if (!mobileHubQuery.matches && !isTouchTooltipMode()) return;
+
+    const card = anchor.closest("#sessions > tbody > tr");
+    const cardRect = card ? card.getBoundingClientRect() : null;
+    const viewportPadding = 12;
+    const leftBoundary = Math.max(
+      viewportPadding,
+      cardRect ? cardRect.left + 2 : viewportPadding,
+    );
+    const rightBoundary = Math.min(
+      window.innerWidth - viewportPadding,
+      cardRect ? cardRect.right - 2 : window.innerWidth - viewportPadding,
+    );
+    tooltip.style.right = "auto";
+    tooltip.style.left = "0px";
+    tooltip.style.maxWidth = `${Math.max(120, rightBoundary - leftBoundary)}px`;
+    const rect = tooltip.getBoundingClientRect();
+    const minOffset = leftBoundary - rect.left;
+    const maxOffset = rightBoundary - rect.right;
+    const offset = Math.min(maxOffset, Math.max(minOffset, 0));
+    tooltip.style.left = `${Math.round(offset)}px`;
   }
 
   function verificationStatusText(session, now = Date.now()) {
@@ -7240,11 +7286,13 @@
       if (!session) return;
       const anchor = tr.querySelector('[data-act="runner-status"]');
       const tooltip = tr.querySelector('[data-field="runner-status-tooltip"]');
-      const text = runnerStatusText(session, now);
-      setText(tooltip, text);
+      const text = renderRunnerStatusTooltip(tooltip, session, now);
       const led = tr.querySelector('[data-field="runner-led"]');
       if (led) led.classList.toggle("led-warming", session.runner_phase === "prerun_active");
       if (anchor) anchor.setAttribute("aria-label", `Runner status: ${text}`);
+      if (anchor && anchor.classList.contains("show-runner-status")) {
+        positionRunnerStatusTooltip(anchor);
+      }
       const verification = session.verification || {};
       const verificationWrap = tr.querySelector('[data-field="verification-status-wrap"]');
       const verificationText = verificationStatusText(session, now);
@@ -7491,6 +7539,7 @@
   async function saveScriptChange() {
     if (!scriptChangeSessionId || !scriptChangeSelected || scriptChangePending) return;
     const id = scriptChangeSessionId;
+    const assignedScript = scriptChangeSelected;
     setScriptChangePending(true);
     closeScriptChangeOptions();
     el("script-change-error").textContent = "";
@@ -7500,6 +7549,9 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ script_name: scriptChangeSelected }),
       });
+      if (window.PyneScripting && typeof window.PyneScripting.selectAssignedFile === "function") {
+        window.PyneScripting.selectAssignedFile(assignedScript);
+      }
       setScriptChangePending(false);
       closeScriptChange();
       await refresh();
@@ -7559,6 +7611,11 @@
           `<svg class="session-script-edit-icon" viewBox="0 0 24 24" aria-hidden="true">` +
             `<path d="M12 20h9"></path>` +
             `<path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path>` +
+          `</svg>` +
+          `<svg class="session-script-missing-icon" viewBox="0 0 24 24" aria-hidden="true">` +
+            `<circle cx="12" cy="12" r="9"></circle>` +
+            `<path d="M12 7v6"></path>` +
+            `<path d="M12 17h.01"></path>` +
           `</svg>` +
         `</button>` +
       `</td>` +
@@ -7626,7 +7683,10 @@
         const show = anchor && !anchor.classList.contains("show-runner-status");
         closeRunnerStatusTooltips(anchor);
         closeVerificationStatusPopovers();
-        if (anchor) anchor.classList.toggle("show-runner-status", Boolean(show));
+        if (anchor) {
+          anchor.classList.toggle("show-runner-status", Boolean(show));
+          if (show) positionRunnerStatusTooltip(anchor);
+        }
       }
       else if (act === "verification-status") {
         e.preventDefault();
@@ -7657,16 +7717,18 @@
     const id = sessionId(s);
     const runner = s.runner || "stopped";
     const verificationEnabled = Boolean(s.verification && s.verification.enabled);
-    const runnerControlsKey = `${runner}:${s.history_ready ? "ready" : "preparing"}:${s.script_name ? "script" : "no-script"}:${verificationEnabled ? "verification" : "no-verification"}`;
+    const runnerControlsKey = `${runner}:${s.history_ready ? "ready" : "preparing"}:${s.script_name ? "script" : "no-script"}:${s.script_missing ? "missing" : "present"}:${verificationEnabled ? "verification" : "no-verification"}`;
     const collector = s.collector || "stopped";
     const wh = s.webhook || {};
     const exchange = (s.exchange || "").toUpperCase();
 
     const led = tr.querySelector('[data-field="runner-led"]');
     setClass(led, `led led-${runner}`);
-    const statusText = runnerStatusText(s);
+    const statusText = renderRunnerStatusTooltip(
+      tr.querySelector('[data-field="runner-status-tooltip"]'),
+      s,
+    );
     if (led) led.classList.toggle("led-warming", s.runner_phase === "prerun_active");
-    setText(tr.querySelector('[data-field="runner-status-tooltip"]'), statusText);
     const statusAnchor = tr.querySelector('[data-act="runner-status"]');
     if (statusAnchor) statusAnchor.setAttribute("aria-label", `Runner status: ${statusText}`);
 
@@ -7723,16 +7785,24 @@
     const scriptButton = tr.querySelector('[data-act="script-edit"]');
     const scriptEditable = runner !== "running" && runner !== "starting";
     const scriptName = String(s.script_name || "");
-    setText(tr.querySelector('[data-field="script-name"]'), scriptName || "Select script");
+    const scriptMissing = Boolean(s.script_missing);
+    setText(
+      tr.querySelector('[data-field="script-name"]'),
+      scriptName || "Select script",
+    );
     if (scriptButton) {
       setClass(
         scriptButton,
-        `session-script-button${scriptName ? "" : " empty"}`,
+        `session-script-button${scriptName ? "" : " empty"}${scriptMissing ? " missing" : ""}`,
       );
       scriptButton.disabled = !scriptEditable;
-      scriptButton.title = scriptEditable
-        ? (scriptName ? "Change script" : "Select script")
-        : "Stop runner to change script";
+      scriptButton.title = scriptMissing
+        ? (scriptEditable
+          ? `Script file not found: ${scriptName}. Select another script.`
+          : `Script file not found: ${scriptName}. Stop runner to change script.`)
+        : (scriptEditable
+          ? (scriptName ? "Change script" : "Select script")
+          : "Stop runner to change script");
       scriptButton.setAttribute("aria-label", scriptButton.title);
     }
 
