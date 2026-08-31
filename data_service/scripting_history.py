@@ -402,3 +402,94 @@ class ScriptingHistoryStore:
                 "size": int(row["size"]),
                 "line_count": int(row["line_count"]),
             }
+
+    def rename_path(
+        self,
+        current_path: str,
+        next_path: str,
+        *,
+        directory: bool = False,
+    ) -> None:
+        """Move tracked file identities without breaking their revision history."""
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, current_path
+                FROM scripting_files
+                WHERE deleted_at IS NULL
+                """
+            ).fetchall()
+            prefix = f"{current_path}/"
+            moving = [
+                row
+                for row in rows
+                if str(row["current_path"]) == current_path
+                or (directory and str(row["current_path"]).startswith(prefix))
+            ]
+            if not moving:
+                return
+
+            targets: dict[int, str] = {}
+            for row in moving:
+                source = str(row["current_path"])
+                suffix = source[len(current_path):]
+                targets[int(row["id"])] = f"{next_path}{suffix}"
+
+            moving_ids = {int(row["id"]) for row in moving}
+            target_paths = set(targets.values())
+            conflict = next(
+                (
+                    str(row["current_path"])
+                    for row in rows
+                    if int(row["id"]) not in moving_ids
+                    and str(row["current_path"]) in target_paths
+                ),
+                None,
+            )
+            if conflict is not None:
+                raise ScriptingHistoryError(
+                    f"script history already tracks the destination: {conflict}"
+                )
+
+            for file_id in moving_ids:
+                connection.execute(
+                    "UPDATE scripting_files SET current_path = ? WHERE id = ?",
+                    (f".scripting-history-move/{file_id}", file_id),
+                )
+            for file_id, target in targets.items():
+                connection.execute(
+                    """
+                    UPDATE scripting_files
+                    SET current_path = ?, deleted_at = NULL
+                    WHERE id = ?
+                    """,
+                    (target, file_id),
+                )
+
+    def mark_path_deleted(self, relative_path: str, *, directory: bool = False) -> None:
+        """Retire current paths while retaining immutable revision rows."""
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, current_path
+                FROM scripting_files
+                WHERE deleted_at IS NULL
+                """
+            ).fetchall()
+            prefix = f"{relative_path}/"
+            deleted_at = _utc_now()
+            for row in rows:
+                current = str(row["current_path"])
+                if current != relative_path and not (
+                    directory and current.startswith(prefix)
+                ):
+                    continue
+                file_id = int(row["id"])
+                connection.execute(
+                    """
+                    UPDATE scripting_files
+                    SET current_path = ?, deleted_at = ?
+                    WHERE id = ?
+                    """,
+                    (f".scripting-history-deleted/{file_id}/{current}", deleted_at, file_id),
+                )

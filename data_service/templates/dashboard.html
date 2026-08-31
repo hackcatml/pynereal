@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=162" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=171" />
   <link rel="stylesheet" href="/static/editor.css?v=4" />
 </head>
 <body>
@@ -224,7 +224,21 @@
             </svg>
           </button>
           <span id="scripting-title">Scripting</span>
-          <span id="scripting-mode" class="scripting-mode">Ready</span>
+          <button id="scripting-mode" class="scripting-mode" type="button" disabled
+                  aria-controls="scripting-restart-modal" aria-expanded="false">Ready</button>
+          <div id="scripting-restart-modal" class="scripting-restart-popover hidden"
+               role="dialog" aria-modal="false" aria-labelledby="scripting-restart-title"
+               aria-hidden="true">
+            <strong id="scripting-restart-title">Restart Runners now?</strong>
+            <span>Apply the saved script immediately.</span>
+            <div id="scripting-restart-sessions" class="scripting-restart-sessions"></div>
+            <div id="scripting-restart-error" class="scripting-operation-error hidden"
+                 role="alert"></div>
+            <div class="scripting-restart-actions">
+              <button id="scripting-restart-cancel" class="btn" type="button">Cancel</button>
+              <button id="scripting-restart-submit" class="btn btn-primary" type="button">Restart</button>
+            </div>
+          </div>
         </div>
         <div class="modal-actions">
           <button id="scripting-refresh" class="btn btn-icon" type="button"
@@ -253,7 +267,63 @@
               </button>
               <span class="mono">workdir/scripts</span>
             </div>
-            <span id="scripting-file-count">0 files</span>
+            <div class="scripting-tree-tools">
+              <span id="scripting-file-count">0 files</span>
+              <button id="scripting-new-menu-toggle" class="scripting-tree-tool" type="button"
+                      title="New" aria-label="New file or directory" aria-expanded="false"
+                      aria-controls="scripting-new-menu">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div id="scripting-new-menu" class="scripting-tree-menu hidden" role="menu"
+               aria-label="Create in scripting workspace">
+            <button type="button" role="menuitem" data-scripting-operation="new_strategy">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <path d="M14 2v6h6M12 11v7M8.5 14.5h7" />
+              </svg>
+              <span>New strategy</span>
+            </button>
+            <button type="button" role="menuitem" data-scripting-operation="new_markdown">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <path d="M14 2v6h6M8 13v5m0-5 2 2 2-2v5m2-5v5m0 0 2-2m-2 2-2-2" />
+              </svg>
+              <span>New Markdown</span>
+            </button>
+            <button type="button" role="menuitem" data-scripting-operation="new_directory">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 5h6l2 3h10v11H3Z" />
+                <path d="M12 11v5M9.5 13.5h5" />
+              </svg>
+              <span>New directory</span>
+            </button>
+          </div>
+          <div id="scripting-actions-menu" class="scripting-tree-menu hidden" role="menu"
+               aria-label="Selected path actions">
+            <button type="button" role="menuitem" data-scripting-operation="duplicate">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="8" y="8" width="12" height="12" rx="1" />
+                <path d="M16 8V4H4v12h4" />
+              </svg>
+              <span>Duplicate</span>
+            </button>
+            <button type="button" role="menuitem" data-scripting-operation="rename">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m4 16-1 5 5-1L19 9l-4-4Z" />
+                <path d="m13.5 6.5 4 4" />
+              </svg>
+              <span>Rename</span>
+            </button>
+            <button class="danger" type="button" role="menuitem" data-scripting-operation="delete">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 6h18M8 6V3h8v3M6 6l1 15h10l1-15M10 10v7M14 10v7" />
+              </svg>
+              <span>Delete</span>
+            </button>
           </div>
           <div id="scripting-tree-loading" class="scripting-state">
             <span class="assets-spinner" aria-hidden="true"></span>
@@ -445,6 +515,32 @@
         <button id="scripting-unsaved-discard" class="btn btn-danger-primary" type="button">Discard</button>
         <button id="scripting-unsaved-save" class="btn btn-primary" type="button">Save</button>
       </div>
+    </div>
+  </div>
+
+  <div id="scripting-operation-modal" class="modal scripting-operation-modal hidden"
+       aria-hidden="true">
+    <div class="modal-box modal-box-sm scripting-operation-box" role="dialog" aria-modal="true"
+         aria-labelledby="scripting-operation-title">
+      <div class="scripting-operation-handle" aria-hidden="true"></div>
+      <div class="modal-header">
+        <span id="scripting-operation-title">File management</span>
+        <button id="scripting-operation-close" class="btn btn-icon" type="button"
+                title="Close" aria-label="Close">&times;</button>
+      </div>
+      <form id="scripting-operation-form">
+        <div class="scripting-operation-body">
+          <p id="scripting-operation-message" class="scripting-operation-message"></p>
+          <div id="scripting-operation-fields" class="scripting-operation-fields"></div>
+          <div id="scripting-operation-usage" class="scripting-operation-usage hidden"></div>
+          <div id="scripting-operation-error" class="scripting-operation-error hidden"
+               role="alert"></div>
+        </div>
+        <div class="confirm-footer">
+          <button id="scripting-operation-cancel" class="btn" type="button">Cancel</button>
+          <button id="scripting-operation-submit" class="btn btn-primary" type="submit">Create</button>
+        </div>
+      </form>
     </div>
   </div>
 
@@ -1289,7 +1385,7 @@
   </div>
 
   <script src="/static/editor.js?v=4"></script>
-  <script src="/static/scripting.js?v=5"></script>
+  <script src="/static/scripting.js?v=16"></script>
   <script src="/static/dashboard.js?v=173"></script>
 </body>
 </html>

@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import os
+import shutil
 import tempfile
 import threading
 from pathlib import Path
@@ -40,6 +41,10 @@ class ScriptingFileTooLargeError(ScriptingWorkspaceError):
 
 
 class ScriptingNoteError(ScriptingWorkspaceError):
+    pass
+
+
+class ScriptingPathExistsError(ScriptingWorkspaceError):
     pass
 
 
@@ -288,6 +293,243 @@ class ScriptingWorkspace:
             restored_from_id=int(revision_id),
         )
 
+    def path_kind(self, relative_path: str) -> str:
+        path, normalized = self._resolve_workspace_path(relative_path)
+        if not path.exists():
+            raise ScriptingFileNotFoundError(f"workspace path not found: {normalized}")
+        if path.is_dir():
+            return "directory"
+        if path.is_file() and path.suffix.lower() in self._SUPPORTED_TYPES:
+            return "file"
+        raise ScriptingFileTypeError("only directories, .py, and .md files are supported")
+
+    def create_directory(self, relative_path: str) -> dict[str, Any]:
+        with self._write_lock:
+            path, normalized = self._resolve_directory_path(relative_path)
+            self._require_parent_directory(path)
+            if path.exists():
+                raise ScriptingPathExistsError(f"workspace path already exists: {normalized}")
+            try:
+                path.mkdir()
+            except FileExistsError as exc:
+                raise ScriptingPathExistsError(
+                    f"workspace path already exists: {normalized}"
+                ) from exc
+            except OSError as exc:
+                raise ScriptingWorkspaceError(
+                    f"failed to create directory: {normalized}"
+                ) from exc
+            return {"ok": True, "type": "directory", "path": normalized}
+
+    def create_file(self, relative_path: str, content: str) -> dict[str, Any]:
+        if not isinstance(content, str):
+            raise ScriptingFileEncodingError("script content must be a UTF-8 string")
+        content_bytes = content.encode("utf-8")
+        if len(content_bytes) > self._MAX_FILE_BYTES:
+            raise ScriptingFileTooLargeError("script file exceeds the 2 MB limit")
+        if self.history_store is None:
+            raise ScriptingWorkspaceError("script history is not configured")
+
+        with self._write_lock:
+            path, normalized = self._resolve_file_path(relative_path)
+            self._require_parent_directory(path)
+            if path.exists():
+                raise ScriptingPathExistsError(f"workspace path already exists: {normalized}")
+            try:
+                self._atomic_create(path, content_bytes)
+            except ScriptingPathExistsError:
+                raise
+            except OSError as exc:
+                raise ScriptingWorkspaceError(
+                    f"failed to create script file: {normalized}"
+                ) from exc
+            try:
+                history_revision = self.history_store.observe(normalized, content_bytes)
+            except ScriptingHistoryError as exc:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise ScriptingWorkspaceError("failed to initialize script history") from exc
+            return self.read_file(normalized) | {
+                "ok": True,
+                "created": True,
+                "apply_state": "next_warmup",
+                "revision_id": int(history_revision["id"]),
+            }
+
+    def duplicate_path(self, source_path: str, target_path: str) -> dict[str, Any]:
+        if self.history_store is None:
+            raise ScriptingWorkspaceError("script history is not configured")
+        with self._write_lock:
+            source, source_normalized = self._resolve_workspace_path(source_path)
+            if not source.exists():
+                raise ScriptingFileNotFoundError(
+                    f"workspace path not found: {source_normalized}"
+                )
+            if source.is_file():
+                if source.suffix.lower() not in self._SUPPORTED_TYPES:
+                    raise ScriptingFileTypeError("only .py and .md files are supported")
+                _, content = self._read_content(source, source_normalized)
+                return self.create_file(target_path, content)
+            if not source.is_dir():
+                raise ScriptingFileTypeError(
+                    "only directories, .py, and .md files are supported"
+                )
+
+            target, target_normalized = self._resolve_directory_path(target_path)
+            try:
+                target.relative_to(source)
+            except ValueError:
+                pass
+            else:
+                raise ScriptingPathError("a directory cannot be copied inside itself")
+            self._require_parent_directory(target)
+            if target.exists():
+                raise ScriptingPathExistsError(
+                    f"workspace path already exists: {target_normalized}"
+                )
+            self._copy_directory(source, target, target_normalized)
+            return {
+                "ok": True,
+                "created": True,
+                "type": "directory",
+                "path": target_normalized,
+                "apply_state": "next_warmup",
+            }
+
+    def duplicate_file(self, source_path: str, target_path: str) -> dict[str, Any]:
+        return self.duplicate_path(source_path, target_path)
+
+    def rename_path(self, current_path: str, next_path: str) -> dict[str, Any]:
+        if self.history_store is None:
+            raise ScriptingWorkspaceError("script history is not configured")
+        with self._write_lock:
+            source, source_normalized = self._resolve_workspace_path(current_path)
+            if not source.exists():
+                raise ScriptingFileNotFoundError(
+                    f"workspace path not found: {source_normalized}"
+                )
+            directory = source.is_dir()
+            if not directory and not source.is_file():
+                raise ScriptingFileTypeError(
+                    "only directories, .py, and .md files are supported"
+                )
+            if directory:
+                target, target_normalized = self._resolve_directory_path(next_path)
+                try:
+                    target.relative_to(source)
+                except ValueError:
+                    pass
+                else:
+                    raise ScriptingPathError("a directory cannot be moved inside itself")
+            else:
+                if source.suffix.lower() not in self._SUPPORTED_TYPES:
+                    raise ScriptingFileTypeError("only .py and .md files are supported")
+                target, target_normalized = self._resolve_file_path(next_path)
+                content_bytes, _ = self._read_content(source, source_normalized)
+                try:
+                    self.history_store.observe(source_normalized, content_bytes)
+                except ScriptingHistoryError as exc:
+                    raise ScriptingWorkspaceError(
+                        "failed to reconcile script history before rename"
+                    ) from exc
+
+            if target_normalized == source_normalized:
+                return {
+                    "ok": True,
+                    "renamed": False,
+                    "type": "directory" if directory else "file",
+                    "path": source_normalized,
+                }
+            self._require_parent_directory(target)
+            if target.exists():
+                raise ScriptingPathExistsError(
+                    f"workspace path already exists: {target_normalized}"
+                )
+
+            try:
+                os.replace(source, target)
+                try:
+                    self.history_store.rename_path(
+                        source_normalized,
+                        target_normalized,
+                        directory=directory,
+                    )
+                except ScriptingHistoryError:
+                    os.replace(target, source)
+                    raise
+            except ScriptingHistoryError as exc:
+                raise ScriptingWorkspaceError("failed to move script history") from exc
+            except OSError as exc:
+                raise ScriptingWorkspaceError(
+                    f"failed to rename workspace path: {source_normalized}"
+                ) from exc
+            return {
+                "ok": True,
+                "renamed": True,
+                "type": "directory" if directory else "file",
+                "old_path": source_normalized,
+                "path": target_normalized,
+            }
+
+    def delete_path(self, relative_path: str) -> dict[str, Any]:
+        if self.history_store is None:
+            raise ScriptingWorkspaceError("script history is not configured")
+        with self._write_lock:
+            path, normalized = self._resolve_workspace_path(relative_path)
+            if not path.exists():
+                raise ScriptingFileNotFoundError(f"workspace path not found: {normalized}")
+            directory = path.is_dir()
+            if directory:
+                pass
+            elif path.is_file() and path.suffix.lower() in self._SUPPORTED_TYPES:
+                content_bytes, _ = self._read_content(path, normalized)
+                try:
+                    self.history_store.observe(normalized, content_bytes)
+                except ScriptingHistoryError as exc:
+                    raise ScriptingWorkspaceError(
+                        "failed to reconcile script history before delete"
+                    ) from exc
+            else:
+                raise ScriptingFileTypeError(
+                    "only directories, .py, and .md files are supported"
+                )
+
+            temporary = self._deletion_staging_path(path)
+            try:
+                os.replace(path, temporary)
+                try:
+                    self.history_store.mark_path_deleted(
+                        normalized,
+                        directory=directory,
+                    )
+                except ScriptingHistoryError:
+                    os.replace(temporary, path)
+                    raise
+            except ScriptingHistoryError as exc:
+                raise ScriptingWorkspaceError("failed to retain deleted script history") from exc
+            except OSError as exc:
+                raise ScriptingWorkspaceError(
+                    f"failed to delete workspace path: {normalized}"
+                ) from exc
+
+            try:
+                if directory:
+                    shutil.rmtree(temporary)
+                else:
+                    temporary.unlink()
+            except OSError:
+                # The hidden staging path remains outside the managed tree. A later
+                # manual cleanup can remove it without losing source history.
+                pass
+            return {
+                "ok": True,
+                "deleted": True,
+                "type": "directory" if directory else "file",
+                "path": normalized,
+            }
+
     def _read_content(self, path: Path, normalized: str) -> tuple[bytes, str]:
         try:
             content_bytes = path.read_bytes()
@@ -346,7 +588,116 @@ class ScriptingWorkspace:
             if temporary_path.exists():
                 temporary_path.unlink()
 
+    @staticmethod
+    def _atomic_create(path: Path, content: bytes) -> None:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+        )
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as temporary_file:
+                temporary_file.write(content)
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+            try:
+                os.link(temporary_path, path)
+            except FileExistsError as exc:
+                raise ScriptingPathExistsError(
+                    f"workspace path already exists: {path.name}"
+                ) from exc
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _deletion_staging_path(path: Path) -> Path:
+        base = f".{path.name}.{os.getpid()}.{threading.get_ident()}.delete"
+        candidate = path.with_name(base)
+        index = 1
+        while candidate.exists():
+            candidate = path.with_name(f"{base}.{index}")
+            index += 1
+        return candidate
+
+    def _copy_directory(self, source: Path, target: Path, target_normalized: str) -> None:
+        temporary = Path(tempfile.mkdtemp(
+            prefix=f".{target.name}.",
+            suffix=".copy",
+            dir=target.parent,
+        ))
+        moved = False
+        try:
+            shutil.copytree(
+                source,
+                temporary,
+                copy_function=shutil.copy2,
+                dirs_exist_ok=True,
+                ignore=self._copy_ignored_names,
+            )
+            os.replace(temporary, target)
+            moved = True
+            if self.history_store is not None:
+                for copied in target.rglob("*"):
+                    if not copied.is_file() or copied.suffix.lower() not in self._SUPPORTED_TYPES:
+                        continue
+                    relative = copied.relative_to(self.root).as_posix()
+                    self.history_store.observe(relative, copied.read_bytes())
+        except ScriptingHistoryError as exc:
+            if moved:
+                try:
+                    self.history_store.mark_path_deleted(
+                        target_normalized,
+                        directory=True,
+                    )
+                except ScriptingHistoryError:
+                    pass
+            shutil.rmtree(target if moved else temporary, ignore_errors=True)
+            raise ScriptingWorkspaceError(
+                "directory was copied but its script history could not be initialized"
+            ) from exc
+        except OSError as exc:
+            if moved and self.history_store is not None:
+                try:
+                    self.history_store.mark_path_deleted(
+                        target_normalized,
+                        directory=True,
+                    )
+                except ScriptingHistoryError:
+                    pass
+            shutil.rmtree(target if moved else temporary, ignore_errors=True)
+            raise ScriptingWorkspaceError(
+                f"failed to duplicate directory: {target_normalized}"
+            ) from exc
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary, ignore_errors=True)
+
+    def _copy_ignored_names(self, directory: str, names: list[str]) -> set[str]:
+        root = Path(directory)
+        return {
+            name
+            for name in names
+            if self._is_excluded_name(name) or (root / name).is_symlink()
+        }
+
+    @staticmethod
+    def _require_parent_directory(path: Path) -> None:
+        if not path.parent.exists() or not path.parent.is_dir():
+            raise ScriptingFileNotFoundError(
+                f"parent directory not found: {path.parent.name}"
+            )
+
     def _resolve_file_path(self, relative_path: str) -> tuple[Path, str]:
+        resolved, normalized = self._resolve_workspace_path(relative_path)
+        if resolved.suffix.lower() not in self._SUPPORTED_TYPES:
+            raise ScriptingFileTypeError("only .py and .md files are supported")
+        return resolved, normalized
+
+    def _resolve_directory_path(self, relative_path: str) -> tuple[Path, str]:
+        return self._resolve_workspace_path(relative_path)
+
+    def _resolve_workspace_path(self, relative_path: str) -> tuple[Path, str]:
         parts = self._validate_relative_path(relative_path)
         candidate = self.root
         for part in parts:
@@ -364,8 +715,6 @@ class ScriptingWorkspace:
                 "script path must be inside workdir/scripts"
             ) from exc
 
-        if resolved.suffix.lower() not in self._SUPPORTED_TYPES:
-            raise ScriptingFileTypeError("only .py and .md files are supported")
         return resolved, "/".join(parts)
 
     def _validate_relative_path(self, relative_path: str) -> tuple[str, ...]:

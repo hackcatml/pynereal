@@ -33,6 +33,8 @@
 
     let scriptingEntries = null;
     let scriptingSelectedPath = "";
+    let scriptingTreeSelectedPath = "";
+    let scriptingTreeSelectedType = "";
     let scriptingTreeRequestSeq = 0;
     let scriptingFileRequestSeq = 0;
     let scriptingOpenTimer = null;
@@ -61,6 +63,16 @@
     let scriptingEditorController = null;
     let scriptingTreeWidth = SCRIPTING_TREE_DEFAULT_WIDTH;
     let scriptingTreeCollapsed = false;
+    let scriptingOperationAction = "";
+    let scriptingOperationUsage = null;
+    let scriptingOperationTemplate = "empty";
+    let scriptingOperationBusy = false;
+    let scriptingOperationCloseTimer = null;
+    let scriptingApplyTimer = null;
+    let scriptingRestartBusy = false;
+    let scriptingRestartPath = "";
+    const scriptingApplyRefreshes = new Set();
+    const scriptingPendingApplies = new Map();
     const scriptingExpandedDirectories = new Set();
     const el = (id) => document.getElementById(id);
 
@@ -68,7 +80,7 @@
       return !el("scripting-modal").classList.contains("hidden");
     }
 
-    function setScriptingStatus(message, state = "") {
+    function setScriptingStatus(message, state = "", options = {}) {
       if (scriptingStatusTimer !== null) {
         clearTimeout(scriptingStatusTimer);
         scriptingStatusTimer = null;
@@ -76,11 +88,198 @@
       const mode = el("scripting-mode");
       mode.textContent = String(message || (scriptingSelectedPath ? "Ready" : "No file"));
       mode.dataset.state = state;
+      mode.disabled = options.actionable !== true;
+      mode.setAttribute("aria-haspopup", options.actionable === true ? "dialog" : "false");
+      if (options.actionable !== true && scriptingRestartPath && !scriptingRestartBusy) {
+        closeScriptingRestart();
+      }
       if (state === "saved") {
         scriptingStatusTimer = window.setTimeout(() => {
           scriptingStatusTimer = null;
-          if (!scriptingHasUnsavedChanges() && !scriptingSaving) setScriptingStatus("Ready");
+          if (!scriptingHasUnsavedChanges() && !scriptingSaving) {
+            if (!renderScriptingApplyStatus()) setScriptingStatus("Ready");
+          }
         }, 3000);
+      }
+    }
+
+    function scriptingUsageSessionLabel(session) {
+      return `${session.exchange} ${session.symbol} ${session.timeframe}`;
+    }
+
+    function scriptingWarmupTarget(session) {
+      const target = Number(
+        session && (session.next_warmup_at || session.next_prerun_at),
+      );
+      return Number.isFinite(target) && target > 0 ? target : null;
+    }
+
+    function formatScriptingRemaining(milliseconds) {
+      const totalSeconds = Math.max(1, Math.ceil(milliseconds / 1000));
+      if (totalSeconds < 60) return `${totalSeconds}s`;
+      const minutes = Math.floor(totalSeconds / 60);
+      const seconds = totalSeconds % 60;
+      if (minutes < 60) return seconds ? `${minutes}m ${seconds}s` : `${minutes}m`;
+      const hours = Math.floor(minutes / 60);
+      const remainingMinutes = minutes % 60;
+      return remainingMinutes ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+    }
+
+    function renderScriptingApplyStatus(now = Date.now()) {
+      const state = scriptingPendingApplies.get(scriptingSelectedPath);
+      if (
+        !state
+        || !state.sessions.size
+        || scriptingHasUnsavedChanges()
+        || scriptingSaving
+        || scriptingConflict
+      ) return false;
+      const sessions = Array.from(state.sessions.values());
+      const applying = sessions.some((session) => session.observedWarmup);
+      const futureTargets = sessions
+        .map((session) => session.target)
+        .filter((target) => Number.isFinite(target) && target > now)
+        .sort((left, right) => left - right);
+      let label = "Applies at next warm-up";
+      if (applying) label = "Applying at warm-up";
+      else if (futureTargets.length) {
+        label += ` (${formatScriptingRemaining(futureTargets[0] - now)})`;
+      }
+      setScriptingStatus(label, "pending", { actionable: true });
+      return true;
+    }
+
+    function stopScriptingApplyTimerIfIdle() {
+      if (scriptingPendingApplies.size || scriptingApplyTimer === null) return;
+      clearInterval(scriptingApplyTimer);
+      scriptingApplyTimer = null;
+    }
+
+    async function refreshScriptingApplyState(path) {
+      const state = scriptingPendingApplies.get(path);
+      if (!state || scriptingApplyRefreshes.has(path)) return;
+      scriptingApplyRefreshes.add(path);
+      state.lastRefreshAt = Date.now();
+      try {
+        const usage = await api(
+          `/api/scripting/usage?path=${encodeURIComponent(path)}`,
+          { cache: "no-store" },
+        );
+        if (scriptingPendingApplies.get(path) !== state) return;
+        const now = Date.now();
+        const currentSessions = new Map(
+          (usage.sessions || []).filter((session) => session.active).map((session) => [session.id, session]),
+        );
+        state.sessions.forEach((tracked, id) => {
+          const current = currentSessions.get(id);
+          if (!current) {
+            state.sessions.delete(id);
+            return;
+          }
+          const currentTarget = scriptingWarmupTarget(current);
+          const currentPhase = String(current.runner_phase || "");
+          tracked.exchange = current.exchange;
+          tracked.symbol = current.symbol;
+          tracked.timeframe = current.timeframe;
+          tracked.runner_phase = currentPhase;
+          if (currentPhase === "prerun_active") {
+            if (tracked.ignoreActiveUntilExit) return;
+            tracked.observedWarmup = true;
+            if (tracked.target === null) tracked.target = now;
+            return;
+          }
+          if (tracked.ignoreActiveUntilExit) {
+            tracked.ignoreActiveUntilExit = false;
+            tracked.target = currentTarget;
+            return;
+          }
+          if (tracked.observedWarmup) {
+            state.sessions.delete(id);
+            return;
+          }
+          if (tracked.target === null) {
+            tracked.target = currentTarget;
+            return;
+          }
+          if (now < tracked.target) {
+            if (currentTarget !== null) tracked.target = currentTarget;
+            return;
+          }
+          if (
+            (currentTarget !== null && currentTarget > tracked.target)
+            || (currentPhase === "running" && currentTarget === null)
+          ) {
+            state.sessions.delete(id);
+          }
+        });
+        if (!state.sessions.size) {
+          scriptingPendingApplies.delete(path);
+          if (scriptingSelectedPath === path && !scriptingHasUnsavedChanges()) {
+            setScriptingStatus("Ready");
+          }
+          stopScriptingApplyTimerIfIdle();
+          return;
+        }
+        if (scriptingSelectedPath === path) renderScriptingApplyStatus(now);
+      } catch (_error) {
+        if (scriptingSelectedPath === path) renderScriptingApplyStatus();
+      } finally {
+        scriptingApplyRefreshes.delete(path);
+      }
+    }
+
+    function tickScriptingApplyState() {
+      const now = Date.now();
+      scriptingPendingApplies.forEach((state, path) => {
+        const sessions = Array.from(state.sessions.values());
+        const due = sessions.some((session) => (
+          session.observedWarmup
+          || session.target === null
+          || session.target <= now
+        ));
+        const refreshInterval = sessions.some((session) => (
+          session.observedWarmup || (session.target !== null && session.target <= now)
+        )) ? 1000 : 5000;
+        if (due && now - state.lastRefreshAt >= refreshInterval) {
+          void refreshScriptingApplyState(path);
+        }
+      });
+      renderScriptingApplyStatus(now);
+    }
+
+    function ensureScriptingApplyTimer() {
+      if (scriptingApplyTimer !== null) return;
+      scriptingApplyTimer = window.setInterval(tickScriptingApplyState, 1000);
+    }
+
+    async function trackScriptingApply(path) {
+      try {
+        const usage = await api(
+          `/api/scripting/usage?path=${encodeURIComponent(path)}`,
+          { cache: "no-store" },
+        );
+        const activeSessions = (usage.sessions || []).filter((session) => session.active);
+        if (!activeSessions.length) {
+          scriptingPendingApplies.delete(path);
+          stopScriptingApplyTimerIfIdle();
+          if (scriptingSelectedPath === path) setScriptingStatus("Saved", "saved");
+          return;
+        }
+        scriptingPendingApplies.set(path, {
+          lastRefreshAt: Date.now(),
+          sessions: new Map(activeSessions.map((session) => [session.id, {
+            ...session,
+            target: scriptingWarmupTarget(session),
+            observedWarmup: false,
+            ignoreActiveUntilExit: session.runner_phase === "prerun_active",
+          }])),
+        });
+        ensureScriptingApplyTimer();
+        if (scriptingSelectedPath === path) renderScriptingApplyStatus();
+      } catch (_error) {
+        if (scriptingSelectedPath === path) {
+          setScriptingStatus("Applies at next warm-up", "pending");
+        }
       }
     }
 
@@ -142,7 +341,7 @@
       if (scriptingSaving) setScriptingStatus("Saving...", "saving");
       else if (scriptingConflict) setScriptingStatus("Conflict", "conflict");
       else if (modified) setScriptingStatus("Modified", "dirty");
-      else if (loaded) setScriptingStatus("Ready");
+      else if (loaded && !renderScriptingApplyStatus()) setScriptingStatus("Ready");
     }
 
     function resetScriptingUndo() {
@@ -247,6 +446,23 @@
       return false;
     }
 
+    function scriptingEntryForPath(entries, path) {
+      for (const entry of Array.isArray(entries) ? entries : []) {
+        if (entry && entry.path === path) return entry;
+        if (entry && entry.type === "directory") {
+          const nested = scriptingEntryForPath(entry.children, path);
+          if (nested) return nested;
+        }
+      }
+      return null;
+    }
+
+    function setScriptingTreeSelection(path = "", type = "") {
+      scriptingTreeSelectedPath = String(path || "");
+      scriptingTreeSelectedType = scriptingTreeSelectedPath ? String(type || "file") : "";
+      renderScriptingTree();
+    }
+
     function scriptingIconMarkup(type, language = "") {
       if (type === "directory") {
         return '<svg viewBox="0 0 24 24" aria-hidden="true">'
@@ -275,7 +491,7 @@
         button.type = "button";
         button.className = "scripting-tree-item " + (directory ? "directory" : "file");
         button.classList.toggle("expanded", expanded);
-        button.classList.toggle("selected", !directory && entry.path === scriptingSelectedPath);
+        button.classList.toggle("selected", entry.path === scriptingTreeSelectedPath);
         button.style.setProperty("--scripting-depth", String(depth));
         button.dataset.scriptingPath = entry.path;
         button.dataset.scriptingType = directory ? "directory" : "file";
@@ -294,7 +510,21 @@
         label.className = "scripting-tree-label";
         label.textContent = entry.name;
         button.append(chevron, icon, label);
-        container.appendChild(button);
+        const row = document.createElement("div");
+        row.className = "scripting-tree-row";
+        row.appendChild(button);
+        const actions = document.createElement("button");
+        actions.type = "button";
+        actions.className = "scripting-tree-row-action";
+        actions.dataset.scriptingActionPath = entry.path;
+        actions.dataset.scriptingActionType = directory ? "directory" : "file";
+        actions.setAttribute("aria-label", `Actions for ${entry.name}`);
+        actions.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">'
+          + '<circle cx="5" cy="12" r="1.5" />'
+          + '<circle cx="12" cy="12" r="1.5" />'
+          + '<circle cx="19" cy="12" r="1.5" /></svg>';
+        row.appendChild(actions);
+        container.appendChild(row);
 
         if (directory) {
           const children = document.createElement("div");
@@ -327,6 +557,697 @@
       el("scripting-tree-empty").classList.toggle("hidden", state !== "empty");
       el("scripting-tree").classList.toggle("hidden", state !== "ready");
       el("scripting-tree-error").textContent = state === "error" ? message : "";
+    }
+
+    function closeScriptingTreeMenus() {
+      ["new", "actions"].forEach((name) => {
+        el(`scripting-${name}-menu`).classList.add("hidden");
+        const toggle = el(`scripting-${name}-menu-toggle`);
+        if (toggle) toggle.setAttribute("aria-expanded", "false");
+      });
+    }
+
+    function toggleScriptingTreeMenu(name, anchor = null) {
+      const menu = el(`scripting-${name}-menu`);
+      const opening = menu.classList.contains("hidden");
+      closeScriptingTreeMenus();
+      if (!opening) return;
+      menu.classList.remove("hidden");
+      const toggle = el(`scripting-${name}-menu-toggle`);
+      if (toggle) toggle.setAttribute("aria-expanded", "true");
+      if (anchor) {
+        const pane = anchor.closest(".scripting-tree-pane");
+        if (pane) {
+          const paneRect = pane.getBoundingClientRect();
+          const anchorRect = anchor.getBoundingClientRect();
+          const menuRect = menu.getBoundingClientRect();
+          const maximumTop = Math.max(6, paneRect.height - menuRect.height - 6);
+          const preferredTop = anchorRect.bottom - paneRect.top + 2;
+          const fallbackTop = anchorRect.top - paneRect.top - menuRect.height - 2;
+          menu.style.top = `${Math.max(6, Math.min(maximumTop,
+            preferredTop + menuRect.height <= paneRect.height - 6 ? preferredTop : fallbackTop))}px`;
+          menu.style.right = `${Math.max(6, paneRect.right - anchorRect.right)}px`;
+        }
+      } else {
+        menu.style.removeProperty("top");
+        menu.style.removeProperty("right");
+      }
+      const first = menu.querySelector('button:not(.hidden):not(:disabled)');
+      if (first) window.requestAnimationFrame(() => first.focus({ preventScroll: true }));
+    }
+
+    function scriptingParentPath(path) {
+      const normalized = String(path || "");
+      const index = normalized.lastIndexOf("/");
+      return index >= 0 ? normalized.slice(0, index) : "";
+    }
+
+    function scriptingBaseName(path) {
+      return String(path || "").split("/").pop() || "";
+    }
+
+    function scriptingSelectedDirectory() {
+      if (scriptingTreeSelectedType === "directory") return scriptingTreeSelectedPath;
+      return scriptingParentPath(scriptingTreeSelectedPath || scriptingSelectedPath);
+    }
+
+    function scriptingJoinPath(parent, name) {
+      const normalizedParent = String(parent || "").trim().replace(/^\/+|\/+$/g, "");
+      const normalizedName = String(name || "").trim().replace(/^\/+|\/+$/g, "");
+      return normalizedParent ? `${normalizedParent}/${normalizedName}` : normalizedName;
+    }
+
+    function scriptingCopyName(path) {
+      const name = scriptingBaseName(path);
+      const dot = name.lastIndexOf(".");
+      return dot > 0
+        ? `${name.slice(0, dot)}_copy${name.slice(dot)}`
+        : `${name}_copy`;
+    }
+
+    function appendScriptingOperationField({
+      id,
+      label,
+      value = "",
+      placeholder = "",
+      textarea = false,
+      required = false,
+      wrapperId = "",
+    }) {
+      const wrapper = document.createElement("label");
+      wrapper.className = "scripting-operation-field";
+      if (wrapperId) wrapper.id = wrapperId;
+      const title = document.createElement("span");
+      title.textContent = label;
+      const input = document.createElement(textarea ? "textarea" : "input");
+      input.id = id;
+      input.value = value;
+      input.placeholder = placeholder;
+      input.required = required;
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      wrapper.append(title, input);
+      el("scripting-operation-fields").appendChild(wrapper);
+      return input;
+    }
+
+    function scriptingDirectoryOptions(entries, depth = 0, options = []) {
+      for (const entry of Array.isArray(entries) ? entries : []) {
+        if (!entry || entry.type !== "directory" || !entry.path) continue;
+        options.push({ path: entry.path, depth });
+        scriptingDirectoryOptions(entry.children, depth + 1, options);
+      }
+      return options;
+    }
+
+    function closeScriptingDirectoryMenus(except = null) {
+      el("scripting-operation-fields")
+        .querySelectorAll(".scripting-directory-select.open")
+        .forEach((select) => {
+          if (select === except) return;
+          select.classList.remove("open");
+          select.querySelector(".scripting-directory-trigger")
+            ?.setAttribute("aria-expanded", "false");
+          select.querySelector(".scripting-directory-menu")
+            ?.setAttribute("aria-hidden", "true");
+        });
+    }
+
+    function appendScriptingDirectoryField({ id, label, value = "" }) {
+      const wrapper = document.createElement("div");
+      wrapper.className = "scripting-operation-field";
+      const title = document.createElement("span");
+      title.textContent = label;
+      const input = document.createElement("input");
+      input.type = "hidden";
+      input.id = id;
+      const select = document.createElement("div");
+      select.className = "scripting-directory-select";
+      const trigger = document.createElement("button");
+      trigger.type = "button";
+      trigger.className = "scripting-directory-trigger";
+      trigger.setAttribute("aria-haspopup", "listbox");
+      trigger.setAttribute("aria-expanded", "false");
+      const icon = document.createElement("span");
+      icon.className = "scripting-directory-icon";
+      icon.innerHTML = scriptingIconMarkup("directory");
+      const selectedLabel = document.createElement("span");
+      selectedLabel.className = "scripting-directory-label";
+      const chevron = document.createElement("span");
+      chevron.className = "scripting-directory-chevron";
+      chevron.setAttribute("aria-hidden", "true");
+      trigger.append(icon, selectedLabel, chevron);
+      const menu = document.createElement("div");
+      menu.id = `${id}-menu`;
+      menu.className = "scripting-directory-menu";
+      menu.setAttribute("role", "listbox");
+      menu.setAttribute("aria-hidden", "true");
+      trigger.setAttribute("aria-controls", menu.id);
+      const directories = [
+        { path: "", depth: 0 },
+        ...scriptingDirectoryOptions(scriptingEntries || [], 1),
+      ];
+      const availablePaths = new Set(directories.map((directory) => directory.path));
+      let selectedPath = availablePaths.has(value) ? value : "";
+
+      function setSelected(path) {
+        selectedPath = availablePaths.has(path) ? path : "";
+        input.value = selectedPath;
+        selectedLabel.textContent = selectedPath
+          ? `workdir/scripts/${selectedPath}`
+          : "workdir/scripts";
+        menu.querySelectorAll("[data-scripting-directory]").forEach((option) => {
+          const selected = option.dataset.scriptingDirectory === selectedPath;
+          option.classList.toggle("selected", selected);
+          option.setAttribute("aria-selected", String(selected));
+        });
+      }
+
+      directories.forEach((directory) => {
+        const option = document.createElement("button");
+        option.type = "button";
+        option.dataset.scriptingDirectory = directory.path;
+        option.style.setProperty("--scripting-directory-depth", String(directory.depth));
+        option.setAttribute("role", "option");
+        option.textContent = directory.path
+          ? `workdir/scripts/${directory.path}`
+          : "workdir/scripts";
+        option.addEventListener("click", () => {
+          setSelected(directory.path);
+          closeScriptingDirectoryMenus();
+          trigger.focus({ preventScroll: true });
+        });
+        menu.appendChild(option);
+      });
+      trigger.addEventListener("click", () => {
+        const opening = !select.classList.contains("open");
+        closeScriptingDirectoryMenus(select);
+        select.classList.toggle("open", opening);
+        trigger.setAttribute("aria-expanded", String(opening));
+        menu.setAttribute("aria-hidden", String(!opening));
+        if (opening) {
+          window.requestAnimationFrame(() => {
+            menu.querySelector(".selected")?.scrollIntoView({ block: "nearest" });
+          });
+        }
+      });
+      select.append(trigger, menu);
+      wrapper.append(title, input, select);
+      el("scripting-operation-fields").appendChild(wrapper);
+      setSelected(selectedPath);
+      return input;
+    }
+
+    function appendScriptingTemplateOptions() {
+      const wrapper = document.createElement("div");
+      wrapper.className = "scripting-operation-field";
+      const title = document.createElement("span");
+      title.textContent = "Template";
+      const options = document.createElement("div");
+      options.className = "scripting-template-options";
+      [
+        ["empty", "Empty strategy"],
+        ["long_short", "Long / short"],
+        ["indicator", "Indicator"],
+        ["copy", "Copy existing"],
+      ].forEach(([value, label]) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "scripting-template-option";
+        button.classList.toggle("selected", value === scriptingOperationTemplate);
+        button.dataset.scriptingTemplate = value;
+        button.textContent = label;
+        button.setAttribute("aria-pressed", String(value === scriptingOperationTemplate));
+        options.appendChild(button);
+      });
+      wrapper.append(title, options);
+      el("scripting-operation-fields").appendChild(wrapper);
+    }
+
+    function setScriptingOperationTemplate(template) {
+      scriptingOperationTemplate = String(template || "empty");
+      el("scripting-operation-fields").querySelectorAll("[data-scripting-template]").forEach((button) => {
+        const selected = button.dataset.scriptingTemplate === scriptingOperationTemplate;
+        button.classList.toggle("selected", selected);
+        button.setAttribute("aria-pressed", String(selected));
+      });
+      const source = el("scripting-operation-source-field");
+      if (source) source.classList.toggle("hidden", scriptingOperationTemplate !== "copy");
+      ["scripting-operation-title-field", "scripting-operation-description-field"].forEach((id) => {
+        const field = el(id);
+        if (field) field.classList.toggle("hidden", scriptingOperationTemplate === "copy");
+      });
+    }
+
+    function setScriptingOperationError(message = "") {
+      const error = el("scripting-operation-error");
+      error.textContent = String(message || "");
+      error.classList.toggle("hidden", !message);
+    }
+
+    function renderScriptingOperationUsage() {
+      const box = el("scripting-operation-usage");
+      box.replaceChildren();
+      const usage = scriptingOperationUsage;
+      if (!usage || !Number(usage.session_count)) {
+        box.classList.add("hidden");
+        box.classList.remove("blocked");
+        return;
+      }
+      const blocked = Number(usage.active_count) > 0;
+      box.classList.remove("hidden");
+      box.classList.toggle("blocked", blocked);
+      const message = document.createElement("div");
+      message.textContent = blocked
+        ? "Stop the active Runner before changing this path."
+        : (
+          scriptingOperationAction === "delete"
+            ? "Stopped sessions will have their script selection cleared."
+            : "Stopped sessions will keep the old script path and must be updated manually."
+        );
+      const sessions = document.createElement("div");
+      sessions.className = "scripting-operation-session-list";
+      sessions.textContent = (usage.sessions || []).map((item) => (
+        `${item.exchange} ${item.symbol} ${item.timeframe} · ${item.active ? "running" : "stopped"}`
+      )).join("\n");
+      box.append(message, sessions);
+      el("scripting-operation-submit").disabled = blocked || scriptingOperationBusy;
+    }
+
+    function renderScriptingOperation(action) {
+      scriptingOperationAction = action;
+      scriptingOperationUsage = null;
+      scriptingOperationTemplate = "empty";
+      scriptingOperationBusy = false;
+      const fields = el("scripting-operation-fields");
+      fields.replaceChildren();
+      setScriptingOperationError();
+      const title = el("scripting-operation-title");
+      const message = el("scripting-operation-message");
+      const submit = el("scripting-operation-submit");
+      submit.className = "btn btn-primary";
+      submit.disabled = false;
+      const parent = scriptingSelectedDirectory();
+      const selectedPath = scriptingTreeSelectedPath;
+
+      if (action === "new_strategy") {
+        title.textContent = "New strategy";
+        message.textContent = "Create a PyneCore strategy draft in workdir/scripts.";
+        submit.textContent = "Create";
+        appendScriptingDirectoryField({ id: "scripting-operation-parent", label: "Directory", value: parent });
+        appendScriptingOperationField({ id: "scripting-operation-name", label: "Filename", value: "strategy.py", required: true });
+        appendScriptingOperationField({ id: "scripting-operation-title-input", label: "Strategy title", value: "New Strategy", required: true, wrapperId: "scripting-operation-title-field" });
+        appendScriptingOperationField({ id: "scripting-operation-description", label: "Description", textarea: true, wrapperId: "scripting-operation-description-field" });
+        appendScriptingTemplateOptions();
+        appendScriptingOperationField({
+          id: "scripting-operation-source",
+          label: "Source strategy path",
+          value: scriptingTreeSelectedType === "file" && selectedPath.endsWith(".py") ? selectedPath : "",
+          placeholder: "example/strategy.py",
+          wrapperId: "scripting-operation-source-field",
+        });
+        setScriptingOperationTemplate("empty");
+      } else if (action === "new_markdown") {
+        title.textContent = "New Markdown";
+        message.textContent = "Create local strategy notes alongside source files.";
+        submit.textContent = "Create";
+        appendScriptingDirectoryField({ id: "scripting-operation-parent", label: "Directory", value: parent });
+        appendScriptingOperationField({ id: "scripting-operation-name", label: "Filename", value: "notes.md", required: true });
+        appendScriptingOperationField({ id: "scripting-operation-title-input", label: "Title", value: "Strategy Notes", required: true });
+        appendScriptingOperationField({ id: "scripting-operation-description", label: "Description", textarea: true });
+      } else if (action === "new_directory") {
+        title.textContent = "New directory";
+        message.textContent = "Create an empty directory in workdir/scripts.";
+        submit.textContent = "Create";
+        appendScriptingDirectoryField({ id: "scripting-operation-parent", label: "Parent directory", value: "" });
+        appendScriptingOperationField({ id: "scripting-operation-name", label: "Directory name", value: "new_strategy", required: true });
+      } else if (action === "duplicate") {
+        const directory = scriptingTreeSelectedType === "directory";
+        title.textContent = directory ? "Duplicate directory" : "Duplicate file";
+        message.textContent = directory
+          ? `Copy ${selectedPath} and its contents. Generated cache files are excluded.`
+          : `Create a separate copy of ${selectedPath}.`;
+        submit.textContent = "Duplicate";
+        appendScriptingOperationField({
+          id: "scripting-operation-path",
+          label: "New path",
+          value: scriptingJoinPath(scriptingParentPath(selectedPath), scriptingCopyName(selectedPath)),
+          required: true,
+        });
+      } else if (action === "rename") {
+        title.textContent = "Rename path";
+        message.textContent = `Rename ${selectedPath}. Existing version history follows the new path.`;
+        submit.textContent = "Rename";
+        appendScriptingOperationField({ id: "scripting-operation-path", label: "New path", value: selectedPath, required: true });
+      } else {
+        const directory = scriptingTreeSelectedType === "directory";
+        title.textContent = directory ? "Delete directory" : "Delete file";
+        message.textContent = directory
+          ? `Delete ${selectedPath} and every file and directory inside it. Script version history is retained internally.`
+          : `Delete ${selectedPath}. Version history is retained internally.`;
+        submit.textContent = "Delete";
+        submit.className = "btn btn-danger-primary";
+      }
+      renderScriptingOperationUsage();
+    }
+
+    function finishScriptingOperationClose() {
+      if (scriptingOperationCloseTimer !== null) {
+        clearTimeout(scriptingOperationCloseTimer);
+        scriptingOperationCloseTimer = null;
+      }
+      const modal = el("scripting-operation-modal");
+      const box = modal.querySelector(".scripting-operation-box");
+      modal.classList.remove(
+        "scripting-operation-closing",
+        "scripting-operation-dragging",
+        "scripting-operation-swipe-closing",
+      );
+      box.style.transition = "";
+      box.style.transform = "";
+      modal.classList.add("hidden");
+      modal.setAttribute("aria-hidden", "true");
+      scriptingOperationAction = "";
+      scriptingOperationUsage = null;
+    }
+
+    function closeScriptingOperation(options = {}) {
+      if (scriptingOperationBusy) return;
+      const modal = el("scripting-operation-modal");
+      if (modal.classList.contains("hidden")) return;
+      closeScriptingDirectoryMenus();
+      if (options.immediate === true || !mobileHubQuery.matches) {
+        finishScriptingOperationClose();
+        return;
+      }
+      if (modal.classList.contains("scripting-operation-closing")) return;
+      const box = modal.querySelector(".scripting-operation-box");
+      modal.classList.remove("scripting-operation-dragging");
+      if (options.fromDrag === true) {
+        modal.classList.add("scripting-operation-swipe-closing");
+        box.style.transition = "transform 220ms cubic-bezier(0.55, 0, 1, 0.45)";
+        window.requestAnimationFrame(() => {
+          box.style.transform = "translateY(100dvh)";
+        });
+      } else {
+        box.style.transition = "";
+        box.style.transform = "";
+      }
+      modal.classList.add("scripting-operation-closing");
+      scriptingOperationCloseTimer = window.setTimeout(
+        finishScriptingOperationClose,
+        220,
+      );
+    }
+
+    function setScriptingRestartError(message = "") {
+      const error = el("scripting-restart-error");
+      error.textContent = String(message || "");
+      error.classList.toggle("hidden", !message);
+    }
+
+    function renderScriptingRestartSessions() {
+      const state = scriptingPendingApplies.get(scriptingRestartPath);
+      const sessions = state ? Array.from(state.sessions.values()) : [];
+      el("scripting-restart-sessions").textContent = sessions
+        .map(scriptingUsageSessionLabel)
+        .join("\n");
+      el("scripting-restart-submit").disabled = scriptingRestartBusy || !sessions.length;
+    }
+
+    function closeScriptingRestart() {
+      if (scriptingRestartBusy) return;
+      const modal = el("scripting-restart-modal");
+      modal.classList.add("hidden");
+      modal.setAttribute("aria-hidden", "true");
+      el("scripting-mode").setAttribute("aria-expanded", "false");
+      scriptingRestartPath = "";
+      setScriptingRestartError();
+    }
+
+    function openScriptingRestart() {
+      if (!el("scripting-restart-modal").classList.contains("hidden")) {
+        closeScriptingRestart();
+        return;
+      }
+      const state = scriptingPendingApplies.get(scriptingSelectedPath);
+      if (!state || !state.sessions.size) return;
+      scriptingRestartPath = scriptingSelectedPath;
+      scriptingRestartBusy = false;
+      setScriptingRestartError();
+      renderScriptingRestartSessions();
+      const modal = el("scripting-restart-modal");
+      modal.classList.remove("hidden");
+      modal.setAttribute("aria-hidden", "false");
+      el("scripting-mode").setAttribute("aria-expanded", "true");
+      window.requestAnimationFrame(() => el("scripting-restart-cancel").focus());
+    }
+
+    async function restartScriptingRunners() {
+      const path = scriptingRestartPath;
+      const state = scriptingPendingApplies.get(path);
+      if (!path || !state || scriptingRestartBusy) return;
+      scriptingRestartBusy = true;
+      setScriptingRestartError();
+      const submit = el("scripting-restart-submit");
+      submit.disabled = true;
+      submit.textContent = "Restarting...";
+      try {
+        const usage = await api(
+          `/api/scripting/usage?path=${encodeURIComponent(path)}`,
+          { cache: "no-store" },
+        );
+        const pendingIds = new Set(state.sessions.keys());
+        const activeSessions = (usage.sessions || []).filter((session) => (
+          session.active && pendingIds.has(session.id)
+        ));
+        state.sessions.clear();
+        activeSessions.forEach((session) => {
+          state.sessions.set(session.id, {
+            ...session,
+            target: scriptingWarmupTarget(session),
+            observedWarmup: false,
+            ignoreActiveUntilExit: false,
+          });
+        });
+        for (const session of activeSessions) {
+          await api(
+            `/api/sessions/${encodeURIComponent(session.id)}/runner/restart`,
+            { method: "POST" },
+          );
+          state.sessions.delete(session.id);
+        }
+        scriptingPendingApplies.delete(path);
+        stopScriptingApplyTimerIfIdle();
+        scriptingRestartBusy = false;
+        closeScriptingRestart();
+        if (scriptingSelectedPath === path) setScriptingStatus("Runners restarting", "saved");
+      } catch (error) {
+        scriptingRestartBusy = false;
+        submit.textContent = "Restart";
+        renderScriptingRestartSessions();
+        setScriptingRestartError(
+          error && error.message ? error.message : "Runners could not be restarted.",
+        );
+      }
+    }
+
+    async function openScriptingOperation(action) {
+      closeScriptingTreeMenus();
+      if (["duplicate", "rename", "delete"].includes(action) && !scriptingTreeSelectedPath) return;
+      if (scriptingOperationCloseTimer !== null) finishScriptingOperationClose();
+      renderScriptingOperation(action);
+      const modal = el("scripting-operation-modal");
+      const box = modal.querySelector(".scripting-operation-box");
+      box.style.transition = "";
+      box.style.transform = "";
+      modal.classList.remove("hidden");
+      modal.setAttribute("aria-hidden", "false");
+      const firstInput = el("scripting-operation-fields").querySelector(
+        ".scripting-directory-trigger, input:not([type=hidden]), textarea",
+      );
+      if (firstInput) window.requestAnimationFrame(() => firstInput.focus({ preventScroll: true }));
+      if (!["rename", "delete"].includes(action)) return;
+      el("scripting-operation-submit").disabled = true;
+      try {
+        scriptingOperationUsage = await api(
+          `/api/scripting/usage?path=${encodeURIComponent(scriptingTreeSelectedPath)}`,
+          { cache: "no-store" },
+        );
+        if (scriptingOperationAction !== action) return;
+        el("scripting-operation-submit").disabled = false;
+        renderScriptingOperationUsage();
+      } catch (error) {
+        if (scriptingOperationAction !== action) return;
+        setScriptingOperationError(error && error.message ? error.message : "Session usage could not be checked.");
+      }
+    }
+
+    function remapScriptingPath(path, currentPath, nextPath) {
+      if (path === currentPath) return nextPath;
+      return path.startsWith(`${currentPath}/`)
+        ? `${nextPath}${path.slice(currentPath.length)}`
+        : path;
+    }
+
+    async function finishScriptingOperation(result, action, previousPath) {
+      closeScriptingOperation();
+      const nextPath = String(result.path || "");
+      if (action === "rename") {
+        const expanded = Array.from(scriptingExpandedDirectories);
+        scriptingExpandedDirectories.clear();
+        expanded.forEach((path) => scriptingExpandedDirectories.add(
+          remapScriptingPath(path, previousPath, nextPath),
+        ));
+        scriptingTreeSelectedPath = remapScriptingPath(
+          scriptingTreeSelectedPath,
+          previousPath,
+          nextPath,
+        );
+        scriptingSelectedPath = remapScriptingPath(
+          scriptingSelectedPath,
+          previousPath,
+          nextPath,
+        );
+        await loadScriptingTree();
+        setScriptingStatus("Renamed", "saved");
+        return;
+      }
+      if (action === "delete") {
+        const removedLoadedFile = scriptingSelectedPath === previousPath
+          || scriptingSelectedPath.startsWith(`${previousPath}/`);
+        Array.from(scriptingExpandedDirectories).forEach((path) => {
+          if (path === previousPath || path.startsWith(`${previousPath}/`)) {
+            scriptingExpandedDirectories.delete(path);
+          }
+        });
+        setScriptingTreeSelection();
+        if (removedLoadedFile) resetScriptingEditor();
+        await loadScriptingTree();
+        setScriptingStatus("Deleted", "saved");
+        return;
+      }
+      const directory = action === "new_directory" || result.type === "directory";
+      const parent = directory ? nextPath : scriptingParentPath(nextPath);
+      if (parent) scriptingExpandedDirectories.add(parent);
+      await loadScriptingTree();
+      if (directory) {
+        setScriptingTreeSelection(nextPath, "directory");
+        scriptingExpandedDirectories.add(nextPath);
+        renderScriptingTree();
+        setScriptingStatus("Directory created", "saved");
+      } else {
+        setScriptingTreeSelection(nextPath, "file");
+        await openScriptingFile(nextPath);
+        setScriptingStatus(action === "duplicate" ? "Duplicated" : "Created", "saved");
+      }
+    }
+
+    async function submitScriptingOperation(event) {
+      event.preventDefault();
+      if (!scriptingOperationAction || scriptingOperationBusy) return;
+      const action = scriptingOperationAction;
+      const previousPath = scriptingTreeSelectedPath;
+      const value = (id) => {
+        const input = el(id);
+        return input ? String(input.value || "").trim() : "";
+      };
+      scriptingOperationBusy = true;
+      setScriptingOperationError();
+      const submit = el("scripting-operation-submit");
+      submit.disabled = true;
+      const originalLabel = submit.textContent;
+      submit.textContent = action === "delete" ? "Deleting..." : "Working...";
+      try {
+        let result;
+        if (action === "new_directory") {
+          result = await api("/api/scripting/directories", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              path: scriptingJoinPath(value("scripting-operation-parent"), value("scripting-operation-name")),
+            }),
+          });
+        } else if (action === "new_strategy") {
+          let name = value("scripting-operation-name");
+          if (name && !name.toLowerCase().endsWith(".py")) name += ".py";
+          const path = scriptingJoinPath(value("scripting-operation-parent"), name);
+          result = await api("/api/scripting/files", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(scriptingOperationTemplate === "copy" ? {
+              path,
+              kind: "copy",
+              source_path: value("scripting-operation-source"),
+            } : {
+              path,
+              kind: "strategy",
+              template: scriptingOperationTemplate,
+              title: value("scripting-operation-title-input"),
+              description: value("scripting-operation-description"),
+            }),
+          });
+        } else if (action === "new_markdown") {
+          let name = value("scripting-operation-name");
+          if (name && !name.toLowerCase().endsWith(".md")) name += ".md";
+          result = await api("/api/scripting/files", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              path: scriptingJoinPath(value("scripting-operation-parent"), name),
+              kind: "markdown",
+              title: value("scripting-operation-title-input"),
+              description: value("scripting-operation-description"),
+            }),
+          });
+        } else if (action === "duplicate") {
+          result = await api("/api/scripting/files", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              path: value("scripting-operation-path"),
+              kind: "copy",
+              source_path: previousPath,
+            }),
+          });
+        } else if (action === "rename") {
+          result = await api("/api/scripting/rename", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              path: previousPath,
+              next_path: value("scripting-operation-path"),
+              acknowledge_stopped_sessions: true,
+            }),
+          });
+        } else {
+          result = await api(
+            `/api/scripting/file?path=${encodeURIComponent(previousPath)}&acknowledge_stopped_sessions=true`,
+            { method: "DELETE" },
+          );
+        }
+        scriptingOperationBusy = false;
+        await finishScriptingOperation(result, action, previousPath);
+      } catch (error) {
+        scriptingOperationBusy = false;
+        submit.disabled = Boolean(scriptingOperationUsage && Number(scriptingOperationUsage.active_count));
+        submit.textContent = originalLabel;
+        setScriptingOperationError(error && error.message ? error.message : "File operation failed.");
+      }
+    }
+
+    function requestScriptingOperation(action) {
+      const affectsLoadedFile = ["duplicate", "rename", "delete"].includes(action)
+        && scriptingSelectedPath
+        && (
+          scriptingSelectedPath === scriptingTreeSelectedPath
+          || scriptingSelectedPath.startsWith(`${scriptingTreeSelectedPath}/`)
+        );
+      if (affectsLoadedFile) {
+        runScriptingNavigation(() => openScriptingOperation(action));
+      } else {
+        openScriptingOperation(action);
+      }
     }
 
     function setScriptingMobileView(view) {
@@ -807,7 +1728,7 @@
       renderScriptingHighlight();
       setScriptingEditorState("ready");
       updateScriptingEditState();
-      if (!options.preserveStatus) setScriptingStatus("Ready");
+      if (!options.preserveStatus && !renderScriptingApplyStatus()) setScriptingStatus("Ready");
       renderScriptingTree();
     }
 
@@ -831,8 +1752,10 @@
             note: scriptingNote,
           }),
         });
+        const savedPath = scriptingSelectedPath;
         renderScriptingFile(payload, { preserveStatus: true });
-        setScriptingStatus(payload.saved ? "Applies at next warm-up" : "Note saved", "saved");
+        if (payload.saved) await trackScriptingApply(savedPath);
+        else setScriptingStatus("Note saved", "saved");
         if (isScriptingHistoryOpen()) await loadScriptingHistory();
         return true;
       } catch (error) {
@@ -1111,8 +2034,9 @@
             base_revision: scriptingBaseRevision,
           }),
         });
+        const restoredPath = scriptingSelectedPath;
         renderScriptingFile(payload, { preserveStatus: true });
-        setScriptingStatus("Applies at next warm-up", "saved");
+        await trackScriptingApply(restoredPath);
         await loadScriptingHistory();
         return true;
       } catch (error) {
@@ -1138,6 +2062,7 @@
       if (!normalizedPath) return;
       const seq = ++scriptingFileRequestSeq;
       scriptingSelectedPath = normalizedPath;
+      setScriptingTreeSelection(normalizedPath, "file");
       scriptingBaseContent = "";
       scriptingBaseRevision = "";
       scriptingBaseNote = "";
@@ -1189,11 +2114,17 @@
         scriptingEntries = Array.isArray(payload.entries) ? payload.entries : [];
         const count = scriptingFileCount(scriptingEntries);
         el("scripting-file-count").textContent = `${count} ${count === 1 ? "file" : "files"}`;
+        if (
+          scriptingTreeSelectedPath
+          && !scriptingEntryForPath(scriptingEntries, scriptingTreeSelectedPath)
+        ) {
+          setScriptingTreeSelection();
+        }
         if (scriptingSelectedPath && !scriptingContainsPath(scriptingEntries, scriptingSelectedPath)) {
           resetScriptingEditor();
         }
         renderScriptingTree();
-        setScriptingTreeState(count ? "ready" : "empty");
+        setScriptingTreeState(scriptingEntries.length ? "ready" : "empty");
         if (
           refreshSelectedFile
           && scriptingSelectedPath
@@ -1247,7 +2178,7 @@
       if (scriptingEntries === null) loadScriptingTree();
       else {
         renderScriptingTree();
-        setScriptingTreeState(scriptingFileCount(scriptingEntries) ? "ready" : "empty");
+        setScriptingTreeState(scriptingEntries.length ? "ready" : "empty");
         if (scriptingSelectedPath && !scriptingHasUnsavedChanges()) {
           openScriptingFile(scriptingSelectedPath, { showEditor: false });
         }
@@ -1281,6 +2212,9 @@
       el("scripting-refresh").disabled = false;
       if (scriptingEditorController) scriptingEditorController.close({ focusEditor: false });
       closeScriptingHistory();
+      closeScriptingTreeMenus();
+      closeScriptingOperation({ immediate: true });
+      closeScriptingRestart();
       scriptingOpenTimer = null;
       scriptingCloseTimer = null;
       unlockBodyScroll();
@@ -1436,6 +2370,81 @@
       header.addEventListener("pointercancel", (event) => finish(event, true));
     }
 
+    function initMobileScriptingOperationGestures() {
+      const modal = el("scripting-operation-modal");
+      const box = modal.querySelector(".scripting-operation-box");
+      const handles = [
+        modal.querySelector(".scripting-operation-handle"),
+        modal.querySelector(".modal-header"),
+      ];
+      let drag = null;
+
+      function start(event, handle) {
+        if (
+          !mobileHubQuery.matches
+          || !event.isPrimary
+          || scriptingOperationBusy
+          || modal.classList.contains("hidden")
+        ) return;
+        if (event.target && event.target.closest && event.target.closest("button")) return;
+        closeScriptingDirectoryMenus();
+        drag = {
+          id: event.pointerId,
+          handle,
+          startX: event.clientX,
+          startY: event.clientY,
+          dy: 0,
+          active: false,
+        };
+        try { handle.setPointerCapture(event.pointerId); } catch {}
+      }
+
+      function move(event) {
+        if (!drag || event.pointerId !== drag.id) return;
+        const dx = event.clientX - drag.startX;
+        const dy = event.clientY - drag.startY;
+        if (!drag.active) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) < 8) return;
+          if (dy <= 0 || Math.abs(dy) <= Math.abs(dx)) {
+            drag = null;
+            return;
+          }
+          drag.active = true;
+          modal.classList.add("scripting-operation-dragging");
+        }
+        event.preventDefault();
+        drag.dy = Math.max(0, dy);
+        box.style.transform = `translateY(${drag.dy}px)`;
+      }
+
+      function finish(event, cancelled = false) {
+        if (!drag || (event && event.pointerId !== drag.id)) return;
+        const current = drag;
+        drag = null;
+        try { current.handle.releasePointerCapture(current.id); } catch {}
+        modal.classList.remove("scripting-operation-dragging");
+        if (!cancelled && current.active && current.dy > 90) {
+          closeScriptingOperation({ fromDrag: true });
+          return;
+        }
+        if (!current.active) return;
+        box.style.transition = "transform 180ms ease";
+        box.style.transform = "translateY(0)";
+        window.setTimeout(() => {
+          if (modal.classList.contains("hidden")) return;
+          box.style.transition = "";
+          box.style.transform = "";
+        }, 190);
+      }
+
+      handles.forEach((handle) => {
+        handle.addEventListener("pointerdown", (event) => start(event, handle));
+        handle.addEventListener("pointermove", move, { passive: false });
+        handle.addEventListener("pointerup", (event) => finish(event));
+        handle.addEventListener("pointercancel", (event) => finish(event, true));
+      });
+    }
+
     function initScriptingTreeLayout() {
       const workspace = el("scripting-workspace");
       const pane = workspace.querySelector(".scripting-tree-pane");
@@ -1520,11 +2529,24 @@
       });
       el("hub-scripting-open").addEventListener("click", openScripting);
       el("scripting-close").addEventListener("click", closeScripting);
+      el("scripting-mode").addEventListener("click", openScriptingRestart);
       el("scripting-back").addEventListener("click", () => {
         runScriptingNavigation(() => setScriptingMobileView("tree"));
       });
       el("scripting-refresh").addEventListener("click", () => {
         runScriptingNavigation(loadScriptingTree);
+      });
+      el("scripting-new-menu-toggle").addEventListener("click", () => {
+        toggleScriptingTreeMenu("new");
+      });
+      [el("scripting-new-menu"), el("scripting-actions-menu")].forEach((menu) => {
+        menu.addEventListener("click", (event) => {
+          const button = event.target && event.target.closest
+            ? event.target.closest("[data-scripting-operation]")
+            : null;
+          if (!button || !menu.contains(button)) return;
+          requestScriptingOperation(String(button.dataset.scriptingOperation || ""));
+        });
       });
       el("scripting-save").addEventListener("click", saveScriptingFile);
       el("scripting-find-toggle").addEventListener("click", () => {
@@ -1573,18 +2595,49 @@
         if (event.target === modal) closeScripting();
       });
       tree.addEventListener("click", (event) => {
+        const rowAction = event.target && event.target.closest
+          ? event.target.closest("[data-scripting-action-path]")
+          : null;
+        if (rowAction && tree.contains(rowAction)) {
+          const path = String(rowAction.dataset.scriptingActionPath || "");
+          const actionsMenu = el("scripting-actions-menu");
+          if (
+            !actionsMenu.classList.contains("hidden")
+            && scriptingTreeSelectedPath === path
+          ) {
+            closeScriptingTreeMenus();
+            return;
+          }
+          closeScriptingTreeMenus();
+          setScriptingTreeSelection(
+            path,
+            String(rowAction.dataset.scriptingActionType || "file"),
+          );
+          const currentAnchor = Array.from(
+            tree.querySelectorAll("[data-scripting-action-path]"),
+          ).find((button) => button.dataset.scriptingActionPath === path);
+          toggleScriptingTreeMenu("actions", currentAnchor || rowAction);
+          return;
+        }
         const item = event.target && event.target.closest
           ? event.target.closest("[data-scripting-path]")
           : null;
         if (!item || !tree.contains(item)) return;
         const path = String(item.dataset.scriptingPath || "");
         if (item.dataset.scriptingType === "directory") {
+          scriptingTreeSelectedPath = path;
+          scriptingTreeSelectedType = "directory";
+          tree.querySelectorAll(".scripting-tree-item.selected").forEach((selected) => {
+            selected.classList.remove("selected");
+          });
+          item.classList.add("selected");
           const expanded = !scriptingExpandedDirectories.has(path);
           if (expanded) scriptingExpandedDirectories.add(path);
           else scriptingExpandedDirectories.delete(path);
           item.classList.toggle("expanded", expanded);
           item.setAttribute("aria-expanded", String(expanded));
-          const children = item.nextElementSibling;
+          const row = item.closest(".scripting-tree-row");
+          const children = row ? row.nextElementSibling : item.nextElementSibling;
           if (children && children.dataset.scriptingChildren === path) {
             children.inert = !expanded;
             children.setAttribute("aria-hidden", String(!expanded));
@@ -1592,6 +2645,7 @@
           }
           return;
         }
+        setScriptingTreeSelection(path, "file");
         if (path === scriptingSelectedPath) {
           if (mobileHubQuery.matches) setScriptingMobileView("editor");
           return;
@@ -1666,7 +2720,38 @@
       el("scripting-unsaved-modal").addEventListener("click", (event) => {
         if (event.target === el("scripting-unsaved-modal")) closeScriptingUnsaved();
       });
+      el("scripting-operation-close").addEventListener("click", closeScriptingOperation);
+      el("scripting-operation-cancel").addEventListener("click", closeScriptingOperation);
+      el("scripting-operation-form").addEventListener("submit", submitScriptingOperation);
+      el("scripting-operation-fields").addEventListener("click", (event) => {
+        const button = event.target && event.target.closest
+          ? event.target.closest("[data-scripting-template]")
+          : null;
+        if (!button) return;
+        setScriptingOperationTemplate(button.dataset.scriptingTemplate);
+      });
+      el("scripting-operation-modal").addEventListener("click", (event) => {
+        if (event.target === el("scripting-operation-modal")) closeScriptingOperation();
+      });
+      el("scripting-restart-cancel").addEventListener("click", closeScriptingRestart);
+      el("scripting-restart-submit").addEventListener("click", restartScriptingRunners);
       document.addEventListener("pointerdown", (event) => {
+        if (!event.target.closest?.(".scripting-directory-select")) {
+          closeScriptingDirectoryMenus();
+        }
+        const restartPopover = el("scripting-restart-modal");
+        if (
+          !restartPopover.classList.contains("hidden")
+          && !restartPopover.contains(event.target)
+          && !el("scripting-mode").contains(event.target)
+        ) closeScriptingRestart();
+        const inTreeMenu = [
+          el("scripting-new-menu"),
+          el("scripting-actions-menu"),
+          el("scripting-new-menu-toggle"),
+        ].some((node) => node && node.contains(event.target))
+          || Boolean(event.target.closest && event.target.closest(".scripting-tree-row-action"));
+        if (!inTreeMenu) closeScriptingTreeMenus();
         if (!isScriptingHistoryOpen()) return;
         const panel = el("scripting-history-panel");
         if (panel.contains(event.target) || el("scripting-history").contains(event.target)) return;
@@ -1679,14 +2764,29 @@
       }, { passive: true });
       document.addEventListener("keydown", (event) => {
         const unsavedOpen = !el("scripting-unsaved-modal").classList.contains("hidden");
+        const operationOpen = !el("scripting-operation-modal").classList.contains("hidden");
+        const restartOpen = !el("scripting-restart-modal").classList.contains("hidden");
         if (
           isScriptingOpen()
           && !unsavedOpen
+          && !operationOpen
+          && !restartOpen
           && !isScriptingHistoryOpen()
           && scriptingEditorController.handleShortcut(event)
         ) return;
         if (event.key !== "Escape") return;
-        if (unsavedOpen) {
+        const directoryMenuOpen = Boolean(
+          el("scripting-operation-fields").querySelector(".scripting-directory-select.open"),
+        );
+        if (directoryMenuOpen) {
+          closeScriptingDirectoryMenus();
+          return;
+        }
+        if (restartOpen) {
+          closeScriptingRestart();
+        } else if (operationOpen) {
+          closeScriptingOperation();
+        } else if (unsavedOpen) {
           closeScriptingUnsaved();
         } else if (isScriptingHistoryOpen()) {
           closeScriptingHistory();
@@ -1696,6 +2796,7 @@
       });
       initMobileScriptingGestures();
       initMobileScriptingHistoryGestures();
+      initMobileScriptingOperationGestures();
     }
 
     initScriptingWorkspace();

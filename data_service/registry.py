@@ -492,11 +492,12 @@ class SessionRegistry:
         if session.spec.script_name == script_name:
             return session.spec
 
-        for other in self.sessions.values():
-            if other is session:
-                continue
-            if other.spec.feed_id == session.spec.feed_id and other.spec.script_name == script_name:
-                raise SessionExistsError(other.spec.id)
+        if script_name:
+            for other in self.sessions.values():
+                if other is session:
+                    continue
+                if other.spec.feed_id == session.spec.feed_id and other.spec.script_name == script_name:
+                    raise SessionExistsError(other.spec.id)
 
         previous_spec = session.spec
         next_spec = replace(previous_spec, script_name=script_name)

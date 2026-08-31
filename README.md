@@ -24,6 +24,8 @@ Run your crypto trading strategy in real time without TradingView.
   CSV history import, and reviewed internal transfers
 - 👁️ **Futures Watchlist** — live prices, 24-hour moves, turnover, favorites,
   and direct session setup across supported exchanges
+- 📝 **Scripting workspace** — manage, edit, compare, and restore strategy
+  files from the dashboard
 - 📱 Full mobile dashboard
 
 ## 🤖 AI Copilot
@@ -165,6 +167,24 @@ workdir/scripts/okx_mu/my_strategy_5m.py  -> okx_mu/my_strategy_5m.py
 Only Python files that declare `script.strategy(...)` are shown in the script
 selector. Helper modules, `lib`, hidden directories, and `__pycache__` are
 excluded.
+
+## Scripting Workspace
+
+Open **Scripting** from the Hub menu to manage files under `workdir/scripts`.
+The workspace supports creating strategy templates, Markdown files, and
+directories, as well as duplicating, renaming, and deleting files or directory
+trees. Directory copies exclude hidden files, symbolic links, and
+`__pycache__`.
+
+The built-in editor provides undo, comment toggling, find and replace, change
+markers, optional revision notes, color-coded diffs, and restoration of earlier
+versions. Revision history is stored locally in
+`workdir/data/cache/scripting_history.sqlite`.
+
+Files used by a running Runner cannot be renamed or deleted. Saving an active
+strategy shows when it will be picked up by the next warm-up; select that status
+to restart the affected Runner immediately instead. Deleting a script used only
+by stopped sessions clears those sessions' script selection after confirmation.
 
 ## Session Configuration
 

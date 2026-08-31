@@ -103,7 +103,7 @@ def build_app(
         )
     )
     app.include_router(build_validation_router())
-    app.include_router(build_scripting_router(scripting_workspace))
+    app.include_router(build_scripting_router(scripting_workspace, registry))
     app.include_router(build_session_api_router(registry, scripting_workspace))
 
     @app.websocket("/ws/hub")
