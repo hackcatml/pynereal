@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import threading
 import zlib
@@ -94,6 +95,21 @@ class ScriptingHistoryStore:
 
                 CREATE INDEX IF NOT EXISTS idx_scripting_revisions_file_state_id
                 ON scripting_revisions(file_id, state, id DESC);
+
+                CREATE TABLE IF NOT EXISTS scripting_validations (
+                    path TEXT NOT NULL,
+                    revision TEXT NOT NULL,
+                    validator_version INTEGER NOT NULL,
+                    checked_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    script_kind TEXT NOT NULL,
+                    runnable INTEGER NOT NULL,
+                    diagnostics TEXT NOT NULL,
+                    error_count INTEGER NOT NULL,
+                    warning_count INTEGER NOT NULL,
+                    PRIMARY KEY (path, revision, validator_version),
+                    FOREIGN KEY (revision) REFERENCES scripting_blobs(revision)
+                );
                 """
             )
             columns = {
@@ -106,6 +122,108 @@ class ScriptingHistoryStore:
                 connection.execute(
                     "ALTER TABLE scripting_revisions ADD COLUMN note TEXT"
                 )
+
+    @staticmethod
+    def _validation_payload(row: sqlite3.Row, *, cached: bool) -> dict[str, Any]:
+        try:
+            diagnostics = json.loads(str(row["diagnostics"]))
+        except (TypeError, ValueError) as exc:
+            raise ScriptingHistoryError("stored static validation is invalid") from exc
+        if not isinstance(diagnostics, list):
+            raise ScriptingHistoryError("stored static validation is invalid")
+        return {
+            "path": str(row["path"]),
+            "revision": str(row["revision"]),
+            "validator_version": int(row["validator_version"]),
+            "checked_at": str(row["checked_at"]),
+            "status": str(row["status"]),
+            "script_kind": str(row["script_kind"]),
+            "runnable": bool(row["runnable"]),
+            "summary": {
+                "errors": int(row["error_count"]),
+                "warnings": int(row["warning_count"]),
+            },
+            "diagnostics": diagnostics,
+            "cached": cached,
+        }
+
+    def get_validation(
+        self,
+        relative_path: str,
+        revision: str,
+        validator_version: int,
+    ) -> dict[str, Any] | None:
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT path, revision, validator_version, checked_at, status,
+                       script_kind, runnable, diagnostics, error_count, warning_count
+                FROM scripting_validations
+                WHERE path = ? AND revision = ? AND validator_version = ?
+                """,
+                (relative_path, revision, int(validator_version)),
+            ).fetchone()
+            return self._validation_payload(row, cached=True) if row is not None else None
+
+    def store_validation(
+        self,
+        relative_path: str,
+        revision: str,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        validator_version = int(result["validator_version"])
+        checked_at = _utc_now()
+        summary = result.get("summary") or {}
+        diagnostics = result.get("diagnostics") or []
+        try:
+            serialized = json.dumps(
+                diagnostics,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ScriptingHistoryError("static validation result is invalid") from exc
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO scripting_validations
+                    (path, revision, validator_version, checked_at, status,
+                     script_kind, runnable, diagnostics, error_count, warning_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(path, revision, validator_version) DO UPDATE SET
+                    checked_at = excluded.checked_at,
+                    status = excluded.status,
+                    script_kind = excluded.script_kind,
+                    runnable = excluded.runnable,
+                    diagnostics = excluded.diagnostics,
+                    error_count = excluded.error_count,
+                    warning_count = excluded.warning_count
+                """,
+                (
+                    relative_path,
+                    revision,
+                    validator_version,
+                    checked_at,
+                    str(result["status"]),
+                    str(result["script_kind"]),
+                    int(bool(result["runnable"])),
+                    serialized,
+                    int(summary.get("errors", 0)),
+                    int(summary.get("warnings", 0)),
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT path, revision, validator_version, checked_at, status,
+                       script_kind, runnable, diagnostics, error_count, warning_count
+                FROM scripting_validations
+                WHERE path = ? AND revision = ? AND validator_version = ?
+                """,
+                (relative_path, revision, validator_version),
+            ).fetchone()
+            if row is None:
+                raise ScriptingHistoryError("failed to store static validation")
+            return self._validation_payload(row, cached=False)
 
     @staticmethod
     def _store_blob(connection: sqlite3.Connection, content: bytes) -> str:

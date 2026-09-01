@@ -14,6 +14,7 @@ from scripting_history import (
     ScriptingHistoryStore,
     ScriptingRevisionNotFoundError,
 )
+from scripting_validation import VALIDATOR_VERSION, ScriptingValidator
 
 
 class ScriptingWorkspaceError(Exception):
@@ -73,6 +74,7 @@ class ScriptingWorkspace:
             raise ScriptingPathError("scripts root must not be a symbolic link")
         self.root = root.resolve(strict=False)
         self.history_store = history_store
+        self.validator = ScriptingValidator(self.root, self.root.parent.parent)
         self._write_lock = threading.RLock()
 
     def tree_payload(self) -> dict[str, Any]:
@@ -114,7 +116,54 @@ class ScriptingWorkspace:
                 payload["note"] = history_revision.get("note")
             except ScriptingHistoryError as exc:
                 raise ScriptingWorkspaceError("failed to record script history") from exc
+        if payload["language"] == "python":
+            payload["validation"] = self._validation_payload(
+                normalized,
+                content,
+                str(payload["revision"]),
+            )
+        else:
+            payload["validation"] = None
         return payload
+
+    def _validation_payload(
+        self,
+        relative_path: str,
+        content: str,
+        revision: str,
+    ) -> dict[str, Any]:
+        if self.history_store is not None:
+            try:
+                cached = self.history_store.get_validation(
+                    relative_path,
+                    revision,
+                    VALIDATOR_VERSION,
+                )
+            except ScriptingHistoryError:
+                cached = None
+            if cached is not None:
+                return cached
+
+        result = self.validator.validate(relative_path, content)
+        if self.history_store is None:
+            return result | {
+                "revision": revision,
+                "checked_at": None,
+                "cached": False,
+            }
+        try:
+            return self.history_store.store_validation(
+                relative_path,
+                revision,
+                result,
+            )
+        except ScriptingHistoryError:
+            # Validation remains useful when its disposable cache is unavailable.
+            return result | {
+                "revision": revision,
+                "checked_at": None,
+                "cached": False,
+            }
 
     def save_file(
         self,

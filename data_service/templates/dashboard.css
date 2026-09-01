@@ -1305,7 +1305,11 @@ tr:last-child td { border-bottom: none; }
 }
 
 /* ---- scripting workspace ---- */
-.scripting-modal { z-index: 80; }
+.scripting-modal {
+  z-index: 80;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
 .scripting-modal-box {
   position: relative;
   width: min(1180px, 100%);
@@ -1771,7 +1775,8 @@ tr:last-child td { border-bottom: none; }
 #scripting-undo,
 #scripting-find-toggle,
 #scripting-note-toggle,
-#scripting-history {
+#scripting-history,
+#scripting-validation-toggle {
   touch-action: manipulation;
 }
 .scripting-editor-actions .icon {
@@ -1782,6 +1787,130 @@ tr:last-child td { border-bottom: none; }
   border-color: rgba(121, 192, 255, 0.55);
   background: rgba(31, 111, 235, 0.16);
   color: #79c0ff;
+}
+.scripting-validation-toggle {
+  position: relative;
+}
+.scripting-validation-toggle.validation-error {
+  border-color: rgba(248, 81, 73, 0.58);
+  background: rgba(248, 81, 73, 0.13);
+  color: #ff7b72;
+}
+.scripting-validation-count {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 14px;
+  height: 14px;
+  box-sizing: border-box;
+  padding: 0 3px;
+  border: 1px solid #161b22;
+  border-radius: 7px;
+  background: #da3633;
+  color: #fff;
+  font: 600 8px/12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  text-align: center;
+}
+.scripting-validation-panel {
+  --scripting-validation-max-height: min(34vh, 260px);
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: var(--scripting-validation-max-height);
+  overflow: hidden;
+  border-bottom: 1px solid var(--border);
+  background: #11161d;
+}
+.scripting-validation-header {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 10px 5px 12px;
+  border-bottom: 1px solid #30363d;
+}
+.scripting-validation-header > div {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.scripting-validation-header strong {
+  flex: 0 0 auto;
+  color: #f0f3f6;
+  font-size: 11px;
+}
+.scripting-validation-header span {
+  min-width: 0;
+  overflow: hidden;
+  color: #8b949e;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.scripting-validation-header .btn-icon {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+}
+.scripting-validation-list {
+  min-height: 0;
+  max-height: calc(var(--scripting-validation-max-height) - 39px);
+  flex: 0 1 auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  scrollbar-color: #4b5563 transparent;
+  scrollbar-width: thin;
+}
+.scripting-validation-empty {
+  padding: 12px;
+  color: #56d364;
+  font-size: 11px;
+}
+.scripting-validation-diagnostic {
+  width: 100%;
+  min-height: 36px;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 7px;
+  padding: 7px 12px;
+  border: 0;
+  border-bottom: 1px solid rgba(48, 54, 61, 0.8);
+  outline: none;
+  background: transparent;
+  color: #c9d1d9;
+  font: 11px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  text-align: left;
+  cursor: pointer;
+}
+.scripting-validation-diagnostic:hover,
+.scripting-validation-diagnostic:focus-visible {
+  background: #1b222c;
+}
+.scripting-validation-location {
+  color: #79c0ff;
+  font: 10px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: nowrap;
+}
+.scripting-validation-code {
+  color: #8b949e;
+  font: 9px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: nowrap;
+}
+.scripting-validation-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.scripting-validation-diagnostic.error .scripting-validation-message { color: #ff7b72; }
+.scripting-validation-error-mark {
+  padding-bottom: 1px;
+  border-bottom: 1px dashed #f85149;
 }
 .scripting-note-editor {
   flex: 0 0 auto;
@@ -1853,11 +1982,10 @@ tr:last-child td { border-bottom: none; }
 .scripting-code,
 .scripting-editor {
   position: absolute;
-  inset: 0;
+  inset: 0 0 var(--scripting-keyboard-overlap, 0px);
   box-sizing: border-box;
   margin: 0;
   padding: 14px 16px 24px;
-  overflow: auto;
   scrollbar-gutter: stable;
   white-space: pre-wrap;
   overflow-wrap: break-word;
@@ -1865,11 +1993,16 @@ tr:last-child td { border-bottom: none; }
   tab-size: 4;
 }
 .scripting-code {
+  overflow: hidden;
   pointer-events: none;
   color: #d4d4d4;
 }
 .scripting-editor {
   z-index: 1;
+  overflow: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
   border: 0;
   outline: 0;
   resize: none;
@@ -1882,7 +2015,7 @@ tr:last-child td { border-bottom: none; }
 .scripting-editor::selection { background: rgba(86, 156, 214, 0.32); }
 .scripting-diff-gutter {
   position: absolute;
-  inset: 0 auto 0 0;
+  inset: 0 auto var(--scripting-keyboard-overlap, 0px) 0;
   z-index: 2;
   width: 6px;
   overflow: hidden;
@@ -6490,15 +6623,18 @@ tr:last-child td { border-bottom: none; }
     flex-direction: column;
     align-items: flex-start;
     gap: 1px;
+    max-width: min(44vw, 220px);
   }
   .scripting-editor-identity strong {
-    max-width: min(55vw, 260px);
+    max-width: 100%;
+    width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .scripting-editor-identity .mono {
-    max-width: min(58vw, 300px);
+    max-width: 100%;
+    width: 100%;
     font-size: 9px;
   }
   .scripting-editor-actions { gap: 3px; }
@@ -6510,6 +6646,16 @@ tr:last-child td { border-bottom: none; }
   }
   .scripting-note-editor { padding-right: 8px; padding-left: 10px; }
   .scripting-note-editor input { font-size: 16px; }
+  .scripting-validation-panel {
+    --scripting-validation-max-height: min(38dvh, 300px);
+  }
+  .scripting-validation-diagnostic {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 4px 7px;
+    padding-right: 10px;
+    padding-left: 10px;
+  }
+  .scripting-validation-code { display: none; }
   .scripting-code,
   .scripting-editor {
     padding: 12px 12px calc(24px + env(safe-area-inset-bottom));

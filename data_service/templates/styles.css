@@ -1084,8 +1084,8 @@ body.source-open .source-panel {
 }
 .source-find { display: none; }
 .source-undo svg {
-  width: 18px;
-  height: 18px;
+  width: 14px;
+  height: 14px;
   display: block;
 }
 .source-history {
@@ -1095,9 +1095,10 @@ body.source-open .source-panel {
 }
 .source-history svg,
 .source-find svg,
-.source-note svg {
-  width: 17px;
-  height: 17px;
+.source-note svg,
+.source-save svg {
+  width: 14px;
+  height: 14px;
   display: block;
 }
 .source-note {
@@ -1291,7 +1292,6 @@ body.source-open .source-panel {
   box-sizing: border-box;
   margin: 0;
   padding: 14px 16px 24px;
-  overflow: auto;
   /* 두 레이어가 항상 동일한 스크롤바 거터를 예약해 content width(=줄바꿈 폭)를 일치시킨다 */
   scrollbar-gutter: stable;
   white-space: pre-wrap;
@@ -1302,12 +1302,14 @@ body.source-open .source-panel {
 }
 
 .source-code {
+  overflow: hidden;
   pointer-events: none;
   color: #d4d4d4;
 }
 
 .source-editor {
   z-index: 1;
+  overflow: auto;
   border: 0;
   outline: 0;
   resize: none;
@@ -1319,6 +1321,21 @@ body.source-open .source-panel {
 
 .source-editor::selection {
   background: rgba(86, 156, 214, 0.32);
+}
+
+@media (min-width: 721px) {
+  .source-editor {
+    scrollbar-color: #3a4350 #0b0f14;
+    scrollbar-width: thin;
+  }
+  .source-editor::-webkit-scrollbar { width: 10px; height: 10px; }
+  .source-editor::-webkit-scrollbar-track { background: #0b0f14; }
+  .source-editor::-webkit-scrollbar-thumb {
+    border: 2px solid #0b0f14;
+    border-radius: 999px;
+    background: #3a4350;
+  }
+  .source-editor::-webkit-scrollbar-thumb:hover { background: #4a5565; }
 }
 
 .source-history-panel {
@@ -1540,8 +1557,32 @@ body.source-open .source-panel {
   }
 
   .source-panel-header {
+    gap: 8px;
     padding: 12px 14px;
     border-radius: 12px 12px 0 0;
+  }
+
+  .source-panel-header > div:first-child {
+    flex: 1 1 auto;
+    overflow: hidden;
+  }
+
+  .source-panel-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    word-break: normal;
+  }
+
+  .source-panel-actions { gap: 4px; }
+
+  .source-action {
+    width: 30px;
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
   }
 
   .source-history-panel {
@@ -1557,6 +1598,7 @@ body.source-open .source-panel {
   .source-find { display: inline-flex; }
 
   .source-code {
+    overflow: auto;
     padding: 12px 14px 18px;
     font-size: 11px;
     line-height: 1.5;

@@ -48,6 +48,8 @@
     let scriptingDirty = false;
     let scriptingSaving = false;
     let scriptingConflict = false;
+    let scriptingValidation = null;
+    let scriptingValidationOpen = false;
     let scriptingNote = "";
     let scriptingStatusTimer = null;
     let scriptingPendingNavigation = null;
@@ -73,6 +75,7 @@
     let scriptingOperationBusy = false;
     let scriptingOperationCloseTimer = null;
     let scriptingApplyTimer = null;
+    let scriptingKeyboardTimer = null;
     let scriptingRestartBusy = false;
     let scriptingRestartPath = "";
     let scriptingPendingAssignedPath = "";
@@ -84,6 +87,60 @@
 
     function isScriptingOpen() {
       return !el("scripting-modal").classList.contains("hidden");
+    }
+
+    function resetScriptingKeyboardViewport() {
+      if (scriptingKeyboardTimer !== null) {
+        clearTimeout(scriptingKeyboardTimer);
+        scriptingKeyboardTimer = null;
+      }
+      el("scripting-editor-wrap").style.removeProperty("--scripting-keyboard-overlap");
+    }
+
+    function updateScriptingKeyboardViewport() {
+      const modal = el("scripting-modal");
+      const active = document.activeElement;
+      const editorPane = modal.querySelector(".scripting-editor-pane");
+      const editing = Boolean(
+        active
+        && editorPane.contains(active)
+        && (
+          active.matches("input, textarea")
+          || active.isContentEditable
+        )
+      );
+      if (
+        !mobileHubQuery.matches
+        || !isScriptingOpen()
+        || !editing
+      ) {
+        el("scripting-editor-wrap").style.removeProperty("--scripting-keyboard-overlap");
+        return;
+      }
+
+      if (window.scrollY || window.pageYOffset) window.scrollTo(0, 0);
+      const viewport = window.visualViewport;
+      const editorWrap = el("scripting-editor-wrap");
+      const keyboardOverlap = viewport
+        ? Math.max(
+            0,
+            editorWrap.getBoundingClientRect().bottom
+              - (viewport.offsetTop + viewport.height),
+          )
+        : 0;
+      editorWrap.style.setProperty(
+        "--scripting-keyboard-overlap",
+        keyboardOverlap > 50 ? `${keyboardOverlap}px` : "0px",
+      );
+    }
+
+    function scheduleScriptingKeyboardViewport() {
+      if (scriptingKeyboardTimer !== null) clearTimeout(scriptingKeyboardTimer);
+      updateScriptingKeyboardViewport();
+      scriptingKeyboardTimer = window.setTimeout(() => {
+        scriptingKeyboardTimer = null;
+        updateScriptingKeyboardViewport();
+      }, 400);
     }
 
     function selectAssignedFile(path) {
@@ -305,6 +362,145 @@
       notice.classList.toggle("hidden", !message);
     }
 
+    function scriptingValidationErrors() {
+      return scriptingValidation && Array.isArray(scriptingValidation.diagnostics)
+        ? scriptingValidation.diagnostics.filter((item) => item.severity === "error")
+        : [];
+    }
+
+    function setScriptingValidationOpen(open) {
+      const errors = scriptingValidationErrors().length;
+      const available = scriptingLanguage === "python" && errors > 0;
+      scriptingValidationOpen = Boolean(open) && available;
+      el("scripting-validation-panel").classList.toggle("hidden", !scriptingValidationOpen);
+      el("scripting-validation-panel").setAttribute(
+        "aria-hidden",
+        String(!scriptingValidationOpen),
+      );
+      el("scripting-validation-toggle").setAttribute(
+        "aria-expanded",
+        String(scriptingValidationOpen),
+      );
+    }
+
+    function scriptingValidationSummary() {
+      if (!scriptingValidation) return "";
+      const summary = scriptingValidation.summary || {};
+      const errors = Number(summary.errors || 0);
+      const warnings = Number(summary.warnings || 0);
+      const kind = String(scriptingValidation.script_kind || "module");
+      const kindLabel = kind === "module"
+        ? "Python module"
+        : `${kind.charAt(0).toUpperCase()}${kind.slice(1)}`;
+      if (errors) return `${kindLabel} · ${errors} error${errors === 1 ? "" : "s"}`;
+      if (warnings) return `${kindLabel} · ${warnings} warning${warnings === 1 ? "" : "s"}`;
+      return `${kindLabel} · Passed`;
+    }
+
+    function updateScriptingValidationState() {
+      const toggle = el("scripting-validation-toggle");
+      const errors = scriptingValidationErrors().length;
+      const available = scriptingLanguage === "python" && errors > 0;
+      toggle.classList.toggle("hidden", !available);
+      toggle.disabled = !available;
+      toggle.classList.remove("validation-error");
+      if (!available) {
+        setScriptingValidationOpen(false);
+        return;
+      }
+
+      toggle.classList.add("validation-error");
+      const summary = scriptingValidationSummary();
+      toggle.title = `Static validation: ${summary}`;
+      toggle.setAttribute("aria-label", toggle.title);
+      el("scripting-validation-summary").textContent = summary;
+
+      const count = el("scripting-validation-count");
+      count.textContent = errors > 99 ? "99+" : String(errors);
+      count.classList.toggle("hidden", errors === 0);
+    }
+
+    function renderScriptingValidation(validation) {
+      scriptingValidation = validation && typeof validation === "object" ? validation : null;
+      const list = el("scripting-validation-list");
+      list.replaceChildren();
+      const diagnostics = scriptingValidationErrors();
+      if (scriptingValidation && diagnostics.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "scripting-validation-empty";
+        empty.textContent = "No issues found in the saved revision.";
+        list.appendChild(empty);
+      } else {
+        diagnostics.forEach((diagnostic, index) => {
+          const row = document.createElement("button");
+          row.type = "button";
+          row.className = "scripting-validation-diagnostic error";
+          row.dataset.diagnosticIndex = String(index);
+          row.title = "Go to source";
+
+          const location = document.createElement("span");
+          location.className = "scripting-validation-location";
+          location.textContent = `Ln ${Number(diagnostic.line || 1)}, Col ${Number(diagnostic.column || 1)}`;
+          const code = document.createElement("span");
+          code.className = "scripting-validation-code";
+          code.textContent = String(diagnostic.code || "validation");
+          const message = document.createElement("span");
+          message.className = "scripting-validation-message";
+          message.textContent = String(diagnostic.message || "Validation issue");
+          row.append(location, code, message);
+          list.appendChild(row);
+        });
+      }
+      updateScriptingValidationState();
+    }
+
+    function goToScriptingDiagnostic(index) {
+      let diagnostic = scriptingValidationErrors()[index];
+      if (!diagnostic) return;
+      const editor = el("scripting-code");
+      const mobile = mobileHubQuery.matches;
+      if (mobile) {
+        const active = document.activeElement;
+        if (active && typeof active.blur === "function") active.blur();
+        editor.blur();
+      }
+      const originalLine = Math.max(Number(diagnostic.line || 1) - 1, 0);
+      const currentLine = scriptingValidationUnchangedLineMap(
+        scriptingBaseContent,
+        editor.value,
+      ).get(originalLine);
+      if (Number.isInteger(currentLine)) {
+        diagnostic = { ...diagnostic, line: currentLine + 1 };
+      }
+      const source = editor.value;
+      const targetLine = Math.max(Number(diagnostic.line || 1) - 1, 0);
+      const targetColumn = Math.max(Number(diagnostic.column || 1) - 1, 0);
+      const lines = source.split("\n");
+      const resolvedLine = Math.min(targetLine, Math.max(lines.length - 1, 0));
+      let offset = 0;
+      for (let line = 0; line < resolvedLine; line += 1) {
+        offset += lines[line].length + 1;
+      }
+      offset += Math.min(targetColumn, (lines[resolvedLine] || "").length);
+      // On mobile, setting the selection makes iOS Safari briefly focus the
+      // textarea and flash the soft keyboard (which reflows the visual viewport
+      // and the bottom address bar). We blur the editor on mobile anyway, so the
+      // caret would be invisible — skip it and just scroll to the line.
+      if (!mobile) {
+        editor.setSelectionRange(offset, offset);
+      }
+      const lineHeight = parseFloat(getComputedStyle(editor).lineHeight) || 18;
+      editor.scrollTop = Math.max(0, (resolvedLine - 3) * lineHeight);
+      if (!mobile) {
+        editor.focus({ preventScroll: true });
+      } else {
+        window.requestAnimationFrame(() => {
+          editor.blur();
+          updateScriptingKeyboardViewport();
+        });
+      }
+    }
+
     function setScriptingNote(value = "") {
       scriptingNote = String(value || "").slice(0, 240);
       const input = el("scripting-note-input");
@@ -354,6 +550,7 @@
         || scriptingConflict
         || !scriptingNoteChanged();
       el("scripting-history").disabled = !loaded;
+      updateScriptingValidationState();
       if (scriptingSaving) setScriptingStatus("Saving...", "saving");
       else if (scriptingConflict) setScriptingStatus("Conflict", "conflict");
       else if (modified) setScriptingStatus("Modified", "dirty");
@@ -1655,6 +1852,95 @@
       return html;
     }
 
+    function scriptingHighlightTextBoundary(root, offset) {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      let remaining = Math.max(0, Number(offset) || 0);
+      let node = walker.nextNode();
+      let last = null;
+      while (node) {
+        last = node;
+        if (remaining <= node.data.length) return { node, offset: remaining };
+        remaining -= node.data.length;
+        node = walker.nextNode();
+      }
+      return last ? { node: last, offset: last.data.length } : null;
+    }
+
+    function scriptingDiagnosticOffsets(source, diagnostic) {
+      const lines = source.split("\n");
+      const requestedLine = Math.max(Number(diagnostic.line || 1) - 1, 0);
+      const line = Math.min(requestedLine, Math.max(lines.length - 1, 0));
+      const lineText = lines[line] || "";
+      if (!lineText.length) return null;
+      let lineStart = 0;
+      for (let index = 0; index < line; index += 1) {
+        lineStart += lines[index].length + 1;
+      }
+      let column = Math.min(
+        Math.max(Number(diagnostic.column || 1) - 1, 0),
+        lineText.length - 1,
+      );
+      if (/\s/.test(lineText[column])) {
+        const next = lineText.slice(column).search(/\S/);
+        if (next >= 0) column += next;
+        else {
+          const previous = lineText.slice(0, column).search(/\S\s*$/);
+          if (previous >= 0) column = previous;
+        }
+      }
+      let start = lineStart + column;
+      let end = start + 1;
+      if (/[A-Za-z0-9_]/.test(source[start])) {
+        while (start > lineStart && /[A-Za-z0-9_]/.test(source[start - 1])) start -= 1;
+        const lineEnd = lineStart + lineText.length;
+        while (end < lineEnd && /[A-Za-z0-9_]/.test(source[end])) end += 1;
+      }
+      return { start, end };
+    }
+
+    function renderScriptingValidationMarks(source, highlight) {
+      if (
+        !scriptingValidation
+        || (
+          scriptingValidation.revision
+          && scriptingValidation.revision !== scriptingBaseRevision
+        )
+      ) return;
+      const lineMap = scriptingValidationUnchangedLineMap(
+        scriptingBaseContent,
+        source,
+      );
+      const ranges = scriptingValidationErrors()
+        .map((diagnostic) => {
+          const originalLine = Math.max(Number(diagnostic.line || 1) - 1, 0);
+          const currentLine = lineMap.get(originalLine);
+          if (!Number.isInteger(currentLine)) return null;
+          return scriptingDiagnosticOffsets(
+            source,
+            { ...diagnostic, line: currentLine + 1 },
+          );
+        })
+        .filter(Boolean)
+        .sort((left, right) => right.start - left.start);
+      const seen = new Set();
+      ranges.forEach(({ start, end }) => {
+        const key = `${start}:${end}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        const startBoundary = scriptingHighlightTextBoundary(highlight, start);
+        const endBoundary = scriptingHighlightTextBoundary(highlight, end);
+        if (!startBoundary || !endBoundary) return;
+        const range = document.createRange();
+        range.setStart(startBoundary.node, startBoundary.offset);
+        range.setEnd(endBoundary.node, endBoundary.offset);
+        if (range.collapsed) return;
+        const mark = document.createElement("span");
+        mark.className = "scripting-validation-error-mark";
+        mark.appendChild(range.extractContents());
+        range.insertNode(mark);
+      });
+    }
+
     function renderScriptingHighlight() {
       const code = el("scripting-code");
       const highlight = el("scripting-highlight");
@@ -1668,6 +1954,7 @@
         return `\n<span class="scripting-line-anchor" data-line="${lineIndex}"></span>`;
       });
       highlight.innerHTML = `<span class="scripting-line-anchor" data-line="0"></span>${withAnchors}`;
+      renderScriptingValidationMarks(source, highlight);
       highlight.scrollTop = code.scrollTop;
       highlight.scrollLeft = code.scrollLeft;
       scheduleScriptingDiff();
@@ -1715,6 +2002,25 @@
       ));
       operations.push(...Array(suffix).fill("equal"));
       return { operations, lineCount: newLines.length };
+    }
+
+    function scriptingValidationUnchangedLineMap(before, after) {
+      const { operations } = scriptingLineDiffOperations(before, after);
+      const mapping = new Map();
+      let oldLine = 0;
+      let newLine = 0;
+      operations.forEach((operation) => {
+        if (operation === "equal") {
+          mapping.set(oldLine, newLine);
+          oldLine += 1;
+          newLine += 1;
+        } else if (operation === "delete") {
+          oldLine += 1;
+        } else {
+          newLine += 1;
+        }
+      });
+      return mapping;
     }
 
     function scriptingLineMyersDiff(oldLines, newLines) {
@@ -1914,6 +2220,7 @@
       scriptingDirty = false;
       scriptingSaving = false;
       scriptingConflict = false;
+      renderScriptingValidation(payload.validation);
       setScriptingNote(scriptingBaseNote);
       setScriptingNoteOpen(false);
       el("scripting-file-name").textContent = String(payload.name || path.split("/").pop() || "Source");
@@ -2274,6 +2581,9 @@
       scriptingDirty = false;
       scriptingSaving = false;
       scriptingConflict = false;
+      scriptingValidation = null;
+      setScriptingValidationOpen(false);
+      renderScriptingValidation(null);
       if (scriptingEditorController) scriptingEditorController.close({ focusEditor: false });
       setScriptingNote("");
       setScriptingNoteOpen(false);
@@ -2419,6 +2729,7 @@
     function finishScriptingClose() {
       const modal = el("scripting-modal");
       const box = modal.querySelector(".scripting-modal-box");
+      resetScriptingKeyboardViewport();
       modal.classList.remove(
         "scripting-closing",
         "scripting-dragging",
@@ -2745,12 +3056,37 @@
         highlightRoot: highlight,
         beforeReplace: () => captureScriptingUndo("replaceText"),
         afterReplace: handleScriptingInput,
-        onOpen: () => setScriptingNoteOpen(false),
+        onOpen: () => {
+          setScriptingNoteOpen(false);
+          setScriptingValidationOpen(false);
+        },
       });
       modal.addEventListener("keydown", (event) => {
         if (!event.target.closest(".scripting-editor-pane")) return;
         scriptingEditorController.handleShortcut(event);
       });
+      modal.addEventListener("focusin", scheduleScriptingKeyboardViewport);
+      modal.addEventListener("focusout", scheduleScriptingKeyboardViewport);
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener(
+          "resize",
+          updateScriptingKeyboardViewport,
+          { passive: true },
+        );
+        window.visualViewport.addEventListener(
+          "scroll",
+          updateScriptingKeyboardViewport,
+          { passive: true },
+        );
+      }
+      window.addEventListener(
+        "scroll",
+        updateScriptingKeyboardViewport,
+        { passive: true },
+      );
+      if (mobileHubQuery.addEventListener) {
+        mobileHubQuery.addEventListener("change", updateScriptingKeyboardViewport);
+      }
       el("hub-scripting-open").addEventListener("click", openScripting);
       el("scripting-close").addEventListener("click", closeScripting);
       el("scripting-mode").addEventListener("click", openScriptingRestart);
@@ -2783,6 +3119,7 @@
       el("scripting-note-toggle").addEventListener("click", () => {
         const opening = el("scripting-note-editor").classList.contains("hidden");
         if (opening) scriptingEditorController.close({ focusEditor: false });
+        if (opening) setScriptingValidationOpen(false);
         if (!opening) setScriptingNote(scriptingBaseNote);
         setScriptingNoteOpen(opening);
       });
@@ -2813,6 +3150,22 @@
         undoScriptingEdit({ focusEditor });
       });
       el("scripting-history").addEventListener("click", openScriptingHistory);
+      el("scripting-validation-toggle").addEventListener("click", () => {
+        const opening = !scriptingValidationOpen;
+        if (opening) scriptingEditorController.close({ focusEditor: false });
+        if (opening) setScriptingNoteOpen(false);
+        setScriptingValidationOpen(opening);
+      });
+      el("scripting-validation-close").addEventListener("click", () => {
+        setScriptingValidationOpen(false);
+      });
+      el("scripting-validation-list").addEventListener("click", (event) => {
+        const row = event.target && event.target.closest
+          ? event.target.closest("[data-diagnostic-index]")
+          : null;
+        if (!row || !el("scripting-validation-list").contains(row)) return;
+        goToScriptingDiagnostic(Number(row.dataset.diagnosticIndex));
+      });
       el("scripting-history-close").addEventListener("click", closeScriptingHistory);
       el("scripting-editor-reload").addEventListener("click", () => {
         const path = scriptingSelectedPath;
