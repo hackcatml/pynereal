@@ -28,6 +28,7 @@
       || !mobileHubQuery
       || typeof unlockBodyScroll !== "function"
       || !window.PyneEditor
+      || !window.PyneScriptingBacktest
     ) {
       throw new Error("PyneScripting initialization dependencies are unavailable");
     }
@@ -501,6 +502,13 @@
       el("scripting-save").classList.toggle("dirty", scriptingDirty);
       el("scripting-undo").disabled = !scriptingDirty || scriptingUndoStack.length === 0;
       el("scripting-find-toggle").disabled = !loaded;
+      el("scripting-backtest").disabled = !loaded
+        || scriptingDirty
+        || scriptingSaving
+        || scriptingConflict
+        || !scriptingValidation
+        || !["strategy", "indicator"].includes(scriptingValidation.script_kind)
+        || !scriptingValidation.runnable;
       el("scripting-note-toggle").disabled = !loaded || scriptingSaving;
       el("scripting-note-close").disabled = !loaded || scriptingSaving || !scriptingNote;
       el("scripting-note-save").disabled = !loaded
@@ -661,6 +669,14 @@
       if (rename) {
         rename.disabled = selectedCount !== 1;
         rename.title = selectedCount > 1 ? "Rename is available for one path at a time" : "";
+      }
+      const backtest = actionsMenu.querySelector('[data-scripting-operation="backtest"]');
+      if (backtest) {
+        const available = selectedCount === 1
+          && scriptingTreeSelectedType === "file"
+          && scriptingTreeSelectedPath.endsWith(".py");
+        backtest.disabled = !available;
+        backtest.title = available ? "" : "Backtest is available for one Python script";
       }
     }
 
@@ -1596,7 +1612,47 @@
       }
     }
 
+    async function openScriptingBacktest(path = scriptingSelectedPath) {
+      const normalizedPath = String(path || "");
+      if (!normalizedPath.endsWith(".py")) return;
+      if (normalizedPath === scriptingSelectedPath && scriptingBaseRevision) {
+        window.PyneScriptingBacktest.open({
+          path: normalizedPath,
+          revision: scriptingBaseRevision,
+          dirty: scriptingDirty,
+          validation: scriptingValidation,
+        });
+        return;
+      }
+      try {
+        const payload = await api(
+          `/api/scripting/file?path=${encodeURIComponent(normalizedPath)}`,
+          { cache: "no-store" },
+        );
+        window.PyneScriptingBacktest.open({
+          path: normalizedPath,
+          revision: String(payload.revision || ""),
+          dirty: false,
+          validation: payload.validation || null,
+        });
+      } catch (error) {
+        window.PyneScriptingBacktest.open({
+          path: normalizedPath,
+          revision: "",
+          dirty: true,
+          validation: null,
+          error: error && error.message ? error.message : "Script could not be loaded.",
+        });
+      }
+    }
+
     function requestScriptingOperation(action) {
+      if (action === "backtest") {
+        const paths = Array.from(scriptingTreeSelectedPaths);
+        if (paths.length === 1) void openScriptingBacktest(paths[0]);
+        closeScriptingTreeMenus();
+        return;
+      }
       const affectsLoadedFile = ["duplicate", "rename", "delete"].includes(action)
         && scriptingSelectedPath
         && Array.from(scriptingTreeSelectedPaths).some((path) => (
@@ -2710,6 +2766,7 @@
       closeScriptingTreeMenus();
       closeScriptingOperation({ immediate: true });
       closeScriptingRestart();
+      window.PyneScriptingBacktest.close();
       scriptingOpenTimer = null;
       scriptingCloseTimer = null;
       unlockBodyScroll();
@@ -2999,6 +3056,7 @@
       const code = el("scripting-code");
       const highlight = el("scripting-highlight");
 
+      window.PyneScriptingBacktest.init({ api, mobileQuery: mobileHubQuery });
       initScriptingTreeLayout();
       scriptingEditorController = window.PyneEditor.create({
         editor: code,
@@ -3053,6 +3111,9 @@
       el("scripting-save").addEventListener("click", saveScriptingFile);
       el("scripting-find-toggle").addEventListener("click", () => {
         scriptingEditorController.toggle();
+      });
+      el("scripting-backtest").addEventListener("click", () => {
+        void openScriptingBacktest();
       });
       el("scripting-note-toggle").addEventListener("click", () => {
         const opening = el("scripting-note-editor").classList.contains("hidden");

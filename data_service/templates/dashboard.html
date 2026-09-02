@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
   <link rel="stylesheet" href="/static/dashboard.css?v=194" />
+  <link rel="stylesheet" href="/static/scripting_backtest.css?v=15" />
   <link rel="stylesheet" href="/static/editor.css?v=4" />
 </head>
 <body>
@@ -313,6 +314,13 @@
           </div>
           <div id="scripting-actions-menu" class="scripting-tree-menu hidden" role="menu"
                aria-label="Selected path actions">
+            <button type="button" role="menuitem" data-scripting-operation="backtest">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <polygon points="11 19 2 12 11 5 11 19" />
+                <polygon points="22 19 13 12 22 5 22 19" />
+              </svg>
+              <span>Backtest</span>
+            </button>
             <button type="button" role="menuitem" data-scripting-operation="duplicate">
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <rect x="8" y="8" width="12" height="12" rx="1" />
@@ -367,6 +375,13 @@
                 <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
                   <circle cx="11" cy="11" r="7" />
                   <path d="m20 20-4-4" />
+                </svg>
+              </button>
+              <button id="scripting-backtest" class="btn btn-icon" type="button"
+                      title="Backtest" aria-label="Backtest" disabled>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <polygon points="11 19 2 12 11 5 11 19" />
+                  <polygon points="22 19 13 12 22 5 22 19" />
                 </svg>
               </button>
               <button id="scripting-note-toggle" class="btn btn-icon" type="button"
@@ -594,6 +609,258 @@
           <button id="scripting-operation-submit" class="btn btn-primary" type="submit">Create</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <div id="scripting-backtest-modal" class="modal scripting-backtest-modal hidden"
+       aria-hidden="true">
+    <div class="modal-box scripting-backtest-box" role="dialog" aria-modal="true"
+         aria-labelledby="scripting-backtest-title">
+      <div class="scripting-backtest-handle" aria-hidden="true"></div>
+      <div class="modal-header scripting-backtest-header">
+        <div class="scripting-backtest-heading">
+          <span id="scripting-backtest-title">Backtest</span>
+          <span id="scripting-backtest-path" class="mono"></span>
+        </div>
+        <div class="modal-actions">
+          <button id="scripting-backtest-close" class="btn btn-icon" type="button"
+                  title="Close" aria-label="Close">&times;</button>
+        </div>
+      </div>
+      <div class="scripting-backtest-body">
+        <div class="scripting-backtest-settings">
+          <div class="scripting-backtest-field scripting-backtest-data-field">
+            <span>OHLCV data</span>
+            <div class="scripting-backtest-data-row">
+              <div id="scripting-backtest-data-control"
+                   class="script-select script-select-animated scripting-backtest-data-select">
+                <button id="scripting-backtest-data-button" class="script-select-button" type="button"
+                        aria-haspopup="listbox" aria-expanded="false" disabled>
+                  <span id="scripting-backtest-data-label" class="script-select-label">No OHLCV data available</span>
+                  <span class="script-select-toggle-chevron" aria-hidden="true"></span>
+                </button>
+                <div id="scripting-backtest-data-options" class="script-select-options hidden"
+                     role="listbox" aria-label="OHLCV data"></div>
+              </div>
+              <button id="scripting-backtest-data-manage" class="btn btn-icon scripting-backtest-data-manage"
+                      type="button" title="Download or update OHLCV data"
+                      aria-label="Download or update OHLCV data">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 3v12" />
+                  <path d="m7 10 5 5 5-5" />
+                  <path d="M5 17v4h14v-4" />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div class="scripting-backtest-range">
+            <div class="scripting-backtest-field">
+              <span>Date from <small>UTC</small></span>
+              <div id="scripting-backtest-from-date-picker" class="scripting-backtest-date-picker">
+                <button id="scripting-backtest-from-date" class="scripting-backtest-date" type="button"
+                        aria-haspopup="dialog" aria-expanded="false">
+                  <span></span>
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M8 2v4M16 2v4M3 9h18" />
+                    <rect x="3" y="4" width="18" height="17" rx="2" />
+                  </svg>
+                </button>
+                <div id="scripting-backtest-from-calendar"
+                     class="scripting-backtest-calendar hidden" role="dialog"></div>
+              </div>
+              <input id="scripting-backtest-from-time" class="scripting-backtest-time" type="text"
+                     value="00:00" maxlength="5" inputmode="numeric" autocomplete="off"
+                     aria-label="Backtest start time in UTC" />
+            </div>
+            <div class="scripting-backtest-field">
+              <span>Date to <small>UTC</small></span>
+              <div id="scripting-backtest-to-date-picker" class="scripting-backtest-date-picker">
+                <button id="scripting-backtest-to-date" class="scripting-backtest-date" type="button"
+                        aria-haspopup="dialog" aria-expanded="false">
+                  <span></span>
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M8 2v4M16 2v4M3 9h18" />
+                    <rect x="3" y="4" width="18" height="17" rx="2" />
+                  </svg>
+                </button>
+                <div id="scripting-backtest-to-calendar"
+                     class="scripting-backtest-calendar hidden" role="dialog"></div>
+              </div>
+              <input id="scripting-backtest-to-time" class="scripting-backtest-time" type="text"
+                     value="00:00" maxlength="5" inputmode="numeric" autocomplete="off"
+                     aria-label="Backtest end time in UTC" />
+            </div>
+          </div>
+        </div>
+        <div class="scripting-backtest-status-row">
+          <span id="scripting-backtest-status" class="scripting-backtest-status">Ready</span>
+          <span id="scripting-backtest-summary"></span>
+          <div class="scripting-backtest-status-actions">
+            <button id="scripting-backtest-delete" class="btn btn-icon hidden" type="button"
+                    data-tooltip="Clear" aria-label="Clear backtest results">
+              <svg class="icon scripting-backtest-broom-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 4 13 11" />
+                <path d="M11 9 15 13" />
+                <path d="M11 9 4.5 14.5 10 20 15 13" />
+                <path d="M13 11 7 17" />
+              </svg>
+            </button>
+            <button id="scripting-backtest-find-toggle" class="btn btn-icon" type="button"
+                    data-tooltip="Find" aria-label="Find in log" disabled>
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" />
+                <path d="m20 20-4-4" />
+              </svg>
+            </button>
+            <button id="scripting-backtest-run" class="btn btn-icon btn-primary" type="button"
+                    data-tooltip="Run" aria-label="Run" disabled>
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <polygon points="6 3 20 12 6 21 6 3"></polygon>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div id="scripting-backtest-error" class="scripting-backtest-error hidden"
+             role="alert"></div>
+        <div class="scripting-backtest-log-shell">
+          <div id="scripting-backtest-find" class="scripting-backtest-find hidden" role="search">
+            <input id="scripting-backtest-find-input" type="text" placeholder="Find"
+                   autocomplete="off" spellcheck="false" aria-label="Find in backtest log" />
+            <span id="scripting-backtest-find-count">0/0</span>
+            <button id="scripting-backtest-find-previous" type="button"
+                    title="Previous match" aria-label="Previous match" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6" /></svg>
+            </button>
+            <button id="scripting-backtest-find-next" type="button"
+                    title="Next match" aria-label="Next match" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+            </button>
+            <button id="scripting-backtest-find-close" type="button"
+                    title="Close find" aria-label="Close find">&times;</button>
+          </div>
+          <div id="scripting-backtest-log" class="scripting-backtest-log" tabindex="0"
+               aria-label="Backtest log"><span class="scripting-backtest-log-empty">Run a backtest to view its log.</span></div>
+          <button id="scripting-backtest-log-jump"
+                  class="btn btn-icon scripting-backtest-log-jump hidden" type="button"
+                  data-tooltip="Jump to end" aria-label="Jump to end">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3v14" />
+              <path d="m6 11 6 6 6-6" />
+              <path d="M5 21h14" />
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="scripting-backtest-data-modal" class="modal scripting-backtest-data-modal hidden"
+       aria-hidden="true">
+    <div class="modal-box modal-box-sm scripting-backtest-data-box" role="dialog" aria-modal="true"
+         aria-labelledby="scripting-backtest-data-title">
+      <div class="modal-header">
+        <span id="scripting-backtest-data-title">OHLCV data</span>
+        <button id="scripting-backtest-data-close" class="btn btn-icon" type="button"
+                title="Close" aria-label="Close">&times;</button>
+      </div>
+      <div class="scripting-backtest-data-body">
+        <section class="scripting-backtest-data-current">
+          <div>
+            <span>Selected data</span>
+            <strong id="scripting-backtest-data-current-path" class="mono">None</strong>
+          </div>
+          <button id="scripting-backtest-data-update" class="btn" type="button">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+              <path d="M21 3v5h-5" />
+              <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+              <path d="M3 21v-5h5" />
+            </svg>
+            <span>Update to now</span>
+          </button>
+        </section>
+        <form id="scripting-backtest-data-download-form" autocomplete="off" novalidate>
+          <span class="scripting-backtest-data-section-title">Download new data</span>
+          <div class="scripting-backtest-data-fields">
+            <div class="scripting-backtest-data-field">
+              <span>Exchange</span>
+              <div id="scripting-backtest-data-exchange-control"
+                   class="script-select script-select-animated scripting-backtest-exchange-select">
+                <input id="scripting-backtest-data-exchange" type="hidden" value="" />
+                <button id="scripting-backtest-data-exchange-button" class="script-select-button"
+                        type="button" aria-haspopup="listbox" aria-expanded="false"
+                        aria-controls="scripting-backtest-data-exchange-options">
+                  <span id="scripting-backtest-data-exchange-label" class="script-select-label">Select exchange</span>
+                  <span class="script-select-toggle-chevron" aria-hidden="true"></span>
+                </button>
+                <div id="scripting-backtest-data-exchange-options"
+                     class="script-select-options hidden" role="listbox"></div>
+              </div>
+            </div>
+            <label>
+              <span>Timeframe</span>
+              <input id="scripting-backtest-data-timeframe" type="text" placeholder="5m"
+                     autocapitalize="none" spellcheck="false" required />
+            </label>
+            <label class="scripting-backtest-data-symbol-field">
+              <span>Symbol</span>
+              <input id="scripting-backtest-data-symbol" type="text" placeholder="BTC/USDT:USDT"
+                     autocapitalize="characters" spellcheck="false" required />
+              <small id="scripting-backtest-data-symbol-error" class="field-error"></small>
+            </label>
+            <label>
+              <span>History since <small>UTC</small></span>
+              <input id="scripting-backtest-data-history-since" type="text" placeholder="Earliest available"
+                     inputmode="numeric" spellcheck="false" />
+            </label>
+            <label>
+              <span>File name <small>optional</small></span>
+              <input id="scripting-backtest-data-file-name" type="text" placeholder="Custom name"
+                     autocapitalize="none" autocomplete="off" spellcheck="false" />
+            </label>
+          </div>
+          <div class="scripting-backtest-data-actions">
+            <div id="scripting-backtest-data-message" class="scripting-backtest-data-message hidden"
+                 role="status"></div>
+            <button id="scripting-backtest-data-download" class="btn btn-primary" type="submit">
+              <svg class="icon scripting-backtest-download-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3v12" />
+                <path d="m7 10 5 5 5-5" />
+                <path d="M5 17v4h14v-4" />
+              </svg>
+              <svg class="icon scripting-backtest-hourglass-icon hidden" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M6 2h12M6 22h12" />
+                <path d="M8 2v5l4 5-4 5v5M16 2v5l-4 5 4 5v5" />
+              </svg>
+              <span>Download</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div id="scripting-backtest-data-tooltip" class="scripting-backtest-data-tooltip hidden"
+       role="tooltip"></div>
+
+  <div id="scripting-backtest-data-delete-modal"
+       class="modal scripting-backtest-data-delete-modal hidden" aria-hidden="true">
+    <div class="modal-box modal-box-sm" role="dialog" aria-modal="true"
+         aria-labelledby="scripting-backtest-data-delete-title">
+      <div class="modal-header">
+        <span id="scripting-backtest-data-delete-title">Delete OHLCV data?</span>
+        <button id="scripting-backtest-data-delete-close" class="btn btn-icon" type="button"
+                title="Close" aria-label="Close">&times;</button>
+      </div>
+      <div class="confirm-body">
+        <div class="confirm-message">This permanently deletes the OHLCV file and its symbol metadata.</div>
+        <div id="scripting-backtest-data-delete-path" class="confirm-session mono"></div>
+        <div id="scripting-backtest-data-delete-error" class="error" role="alert"></div>
+      </div>
+      <div class="confirm-footer">
+        <button id="scripting-backtest-data-delete-cancel" class="btn" type="button">Cancel</button>
+        <button id="scripting-backtest-data-delete-confirm" class="btn btn-danger-primary" type="button">Delete</button>
+      </div>
     </div>
   </div>
 
@@ -1438,7 +1705,8 @@
   </div>
 
   <script src="/static/editor.js?v=4"></script>
-  <script src="/static/scripting.js?v=40"></script>
+  <script src="/static/scripting_backtest.js?v=19"></script>
+  <script src="/static/scripting.js?v=42"></script>
   <script src="/static/dashboard.js?v=178"></script>
 </body>
 </html>

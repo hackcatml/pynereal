@@ -19,6 +19,7 @@ workdir/config/watchlist_favorites.json
 workdir/config/update_request.json
 workdir/config/update_state.json
 workdir/output/realtime/
+workdir/output/backtests/
 
 # Ignore SQLite cache files but keep the directory
 workdir/data/cache/*.sqlite

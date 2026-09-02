@@ -25,6 +25,8 @@ from config import ensure_provider_config, load_hub_config, load_initial_session
 from registry import SessionRegistry
 from api import build_session_api_router, build_control_router, build_validation_router
 from scripting_api import ScriptingExecutor, build_scripting_router
+from scripting_backtest import ScriptingBacktestManager
+from scripting_backtest_api import build_scripting_backtest_router
 from scripting_history import ScriptingHistoryStore
 from scripting_workspace import ScriptingWorkspace
 from ui import build_ui_router
@@ -60,6 +62,11 @@ def build_app(
             _PROJECT_ROOT / "workdir" / "data" / "cache" / "scripting_history.sqlite"
         ),
     )
+    scripting_backtest_manager = ScriptingBacktestManager(
+        _PROJECT_ROOT,
+        registry=registry,
+    )
+    app.state.scripting_backtest_manager = scripting_backtest_manager
 
     @app.exception_handler(StarletteHTTPException)
     async def log_history_import_body_error(
@@ -112,6 +119,7 @@ def build_app(
             executor=scripting_executor,
         )
     )
+    app.include_router(build_scripting_backtest_router(scripting_backtest_manager))
     app.include_router(build_session_api_router(registry, scripting_workspace))
 
     @app.websocket("/ws/hub")
@@ -347,7 +355,10 @@ async def main() -> None:
                         try:
                             await codex_service.close()
                         finally:
-                            app.state.scripting_executor.close()
+                            try:
+                                await app.state.scripting_backtest_manager.close()
+                            finally:
+                                app.state.scripting_executor.close()
     if update_shutdown.is_set():
         update_service.apply_and_restart()
 
