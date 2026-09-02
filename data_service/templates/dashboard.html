@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=191" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=194" />
   <link rel="stylesheet" href="/static/editor.css?v=4" />
 </head>
 <body>
@@ -457,15 +457,35 @@
           </div>
           <section id="scripting-validation-panel" class="scripting-validation-panel hidden"
                    aria-label="Static validation results" aria-hidden="true">
-            <header class="scripting-validation-header">
-              <div>
-                <strong>Static validation</strong>
-                <span id="scripting-validation-summary"></span>
+            <div id="scripting-validation-list" class="scripting-validation-list">
+              <button id="scripting-validation-diagnostic"
+                      class="scripting-validation-diagnostic error" type="button"
+                      title="Go to source">
+                <span id="scripting-validation-location"
+                      class="scripting-validation-location"></span>
+                <span id="scripting-validation-code" class="scripting-validation-code"></span>
+                <span id="scripting-validation-message"
+                      class="scripting-validation-message"></span>
+              </button>
+              <div class="scripting-validation-controls">
+                <span id="scripting-validation-position"
+                      class="scripting-validation-position hidden" aria-live="polite"></span>
+                <button id="scripting-validation-previous"
+                        class="btn btn-icon scripting-validation-nav hidden" type="button"
+                        title="Previous error" aria-label="Previous error">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m6 15 6-6 6 6" />
+                  </svg>
+                </button>
+                <button id="scripting-validation-next"
+                        class="btn btn-icon scripting-validation-nav hidden" type="button"
+                        title="Next error" aria-label="Next error">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m6 9 6 6 6-6" />
+                  </svg>
+                </button>
               </div>
-              <button id="scripting-validation-close" class="btn btn-icon" type="button"
-                      title="Close validation" aria-label="Close validation">&times;</button>
-            </header>
-            <div id="scripting-validation-list" class="scripting-validation-list"></div>
+            </div>
           </section>
           <div id="scripting-editor-empty" class="scripting-editor-state">
             Select a file from the project tree.
@@ -1418,7 +1438,7 @@
   </div>
 
   <script src="/static/editor.js?v=4"></script>
-  <script src="/static/scripting.js?v=36"></script>
+  <script src="/static/scripting.js?v=40"></script>
   <script src="/static/dashboard.js?v=178"></script>
 </body>
 </html>

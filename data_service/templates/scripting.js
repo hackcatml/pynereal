@@ -50,6 +50,7 @@
     let scriptingConflict = false;
     let scriptingValidation = null;
     let scriptingValidationOpen = false;
+    let scriptingValidationIndex = 0;
     let scriptingNote = "";
     let scriptingStatusTimer = null;
     let scriptingPendingNavigation = null;
@@ -75,7 +76,6 @@
     let scriptingOperationBusy = false;
     let scriptingOperationCloseTimer = null;
     let scriptingApplyTimer = null;
-    let scriptingKeyboardTimer = null;
     let scriptingRestartBusy = false;
     let scriptingRestartPath = "";
     let scriptingPendingAssignedPath = "";
@@ -87,60 +87,6 @@
 
     function isScriptingOpen() {
       return !el("scripting-modal").classList.contains("hidden");
-    }
-
-    function resetScriptingKeyboardViewport() {
-      if (scriptingKeyboardTimer !== null) {
-        clearTimeout(scriptingKeyboardTimer);
-        scriptingKeyboardTimer = null;
-      }
-      el("scripting-editor-wrap").style.removeProperty("--scripting-keyboard-overlap");
-    }
-
-    function updateScriptingKeyboardViewport() {
-      const modal = el("scripting-modal");
-      const active = document.activeElement;
-      const editorPane = modal.querySelector(".scripting-editor-pane");
-      const editing = Boolean(
-        active
-        && editorPane.contains(active)
-        && (
-          active.matches("input, textarea")
-          || active.isContentEditable
-        )
-      );
-      if (
-        !mobileHubQuery.matches
-        || !isScriptingOpen()
-        || !editing
-      ) {
-        el("scripting-editor-wrap").style.removeProperty("--scripting-keyboard-overlap");
-        return;
-      }
-
-      if (window.scrollY || window.pageYOffset) window.scrollTo(0, 0);
-      const viewport = window.visualViewport;
-      const editorWrap = el("scripting-editor-wrap");
-      const keyboardOverlap = viewport
-        ? Math.max(
-            0,
-            editorWrap.getBoundingClientRect().bottom
-              - (viewport.offsetTop + viewport.height),
-          )
-        : 0;
-      editorWrap.style.setProperty(
-        "--scripting-keyboard-overlap",
-        keyboardOverlap > 50 ? `${keyboardOverlap}px` : "0px",
-      );
-    }
-
-    function scheduleScriptingKeyboardViewport() {
-      if (scriptingKeyboardTimer !== null) clearTimeout(scriptingKeyboardTimer);
-      updateScriptingKeyboardViewport();
-      scriptingKeyboardTimer = window.setTimeout(() => {
-        scriptingKeyboardTimer = null;
-        updateScriptingKeyboardViewport();
-      }, 400);
     }
 
     function selectAssignedFile(path) {
@@ -413,7 +359,6 @@
       const summary = scriptingValidationSummary();
       toggle.title = `Static validation: ${summary}`;
       toggle.setAttribute("aria-label", toggle.title);
-      el("scripting-validation-summary").textContent = summary;
 
       const count = el("scripting-validation-count");
       count.textContent = errors > 99 ? "99+" : String(errors);
@@ -422,36 +367,50 @@
 
     function renderScriptingValidation(validation) {
       scriptingValidation = validation && typeof validation === "object" ? validation : null;
-      const list = el("scripting-validation-list");
-      list.replaceChildren();
-      const diagnostics = scriptingValidationErrors();
-      if (scriptingValidation && diagnostics.length === 0) {
-        const empty = document.createElement("div");
-        empty.className = "scripting-validation-empty";
-        empty.textContent = "No issues found in the saved revision.";
-        list.appendChild(empty);
-      } else {
-        diagnostics.forEach((diagnostic, index) => {
-          const row = document.createElement("button");
-          row.type = "button";
-          row.className = "scripting-validation-diagnostic error";
-          row.dataset.diagnosticIndex = String(index);
-          row.title = "Go to source";
-
-          const location = document.createElement("span");
-          location.className = "scripting-validation-location";
-          location.textContent = `Ln ${Number(diagnostic.line || 1)}, Col ${Number(diagnostic.column || 1)}`;
-          const code = document.createElement("span");
-          code.className = "scripting-validation-code";
-          code.textContent = String(diagnostic.code || "validation");
-          const message = document.createElement("span");
-          message.className = "scripting-validation-message";
-          message.textContent = String(diagnostic.message || "Validation issue");
-          row.append(location, code, message);
-          list.appendChild(row);
-        });
-      }
+      scriptingValidationIndex = 0;
+      renderCurrentScriptingDiagnostic();
       updateScriptingValidationState();
+    }
+
+    function renderCurrentScriptingDiagnostic() {
+      const diagnostics = scriptingValidationErrors();
+      const diagnostic = diagnostics[scriptingValidationIndex];
+      const row = el("scripting-validation-diagnostic");
+      row.disabled = !diagnostic;
+      if (diagnostic) {
+        const location = `Ln ${Number(diagnostic.line || 1)}, Col ${Number(diagnostic.column || 1)}`;
+        const code = String(diagnostic.code || "validation");
+        const message = String(diagnostic.message || "Validation issue");
+        el("scripting-validation-location").textContent = location;
+        el("scripting-validation-code").textContent = code;
+        el("scripting-validation-message").textContent = message;
+        row.title = `${location} · ${code} · ${message}`;
+      } else {
+        el("scripting-validation-location").textContent = "";
+        el("scripting-validation-code").textContent = "";
+        el("scripting-validation-message").textContent = "";
+        row.title = "";
+      }
+
+      const multiple = diagnostics.length > 1;
+      el("scripting-validation-position").textContent = diagnostic
+        ? `${scriptingValidationIndex + 1}/${diagnostics.length}`
+        : "";
+      [
+        "scripting-validation-position",
+        "scripting-validation-previous",
+        "scripting-validation-next",
+      ].forEach((id) => el(id).classList.toggle("hidden", !multiple));
+    }
+
+    function moveScriptingDiagnostic(offset) {
+      const diagnostics = scriptingValidationErrors();
+      if (diagnostics.length < 2) return;
+      scriptingValidationIndex = (
+        scriptingValidationIndex + offset + diagnostics.length
+      ) % diagnostics.length;
+      renderCurrentScriptingDiagnostic();
+      goToScriptingDiagnostic(scriptingValidationIndex);
     }
 
     function goToScriptingDiagnostic(index) {
@@ -496,7 +455,6 @@
       } else {
         window.requestAnimationFrame(() => {
           editor.blur();
-          updateScriptingKeyboardViewport();
         });
       }
     }
@@ -2122,7 +2080,7 @@
           lines.push({ line, type: insertedIndex < modifiedCount ? "modified" : "added" });
         });
         if (deletedCount > modifiedCount) {
-          deletionLines.push(Math.max(0, Math.min(currentLine, lineCount - 1)));
+          deletionLines.push(Math.max(0, Math.min(currentLine, lineCount)));
         }
       }
       return {
@@ -2161,8 +2119,11 @@
       });
       changes.deletionLines.forEach((line) => {
         const marker = document.createElement("span");
+        const boundaryTop = line < anchors.length
+          ? lineTop(line)
+          : lineTop(anchors.length - 1) + lineHeight;
         marker.className = "scripting-diff-marker deleted";
-        marker.style.top = `${lineTop(line)}px`;
+        marker.style.top = `${Math.max(0, boundaryTop - 4)}px`;
         fragment.appendChild(marker);
       });
       markers.replaceChildren(fragment);
@@ -2729,7 +2690,6 @@
     function finishScriptingClose() {
       const modal = el("scripting-modal");
       const box = modal.querySelector(".scripting-modal-box");
-      resetScriptingKeyboardViewport();
       modal.classList.remove(
         "scripting-closing",
         "scripting-dragging",
@@ -3065,28 +3025,6 @@
         if (!event.target.closest(".scripting-editor-pane")) return;
         scriptingEditorController.handleShortcut(event);
       });
-      modal.addEventListener("focusin", scheduleScriptingKeyboardViewport);
-      modal.addEventListener("focusout", scheduleScriptingKeyboardViewport);
-      if (window.visualViewport) {
-        window.visualViewport.addEventListener(
-          "resize",
-          updateScriptingKeyboardViewport,
-          { passive: true },
-        );
-        window.visualViewport.addEventListener(
-          "scroll",
-          updateScriptingKeyboardViewport,
-          { passive: true },
-        );
-      }
-      window.addEventListener(
-        "scroll",
-        updateScriptingKeyboardViewport,
-        { passive: true },
-      );
-      if (mobileHubQuery.addEventListener) {
-        mobileHubQuery.addEventListener("change", updateScriptingKeyboardViewport);
-      }
       el("hub-scripting-open").addEventListener("click", openScripting);
       el("scripting-close").addEventListener("click", closeScripting);
       el("scripting-mode").addEventListener("click", openScriptingRestart);
@@ -3156,15 +3094,19 @@
         if (opening) setScriptingNoteOpen(false);
         setScriptingValidationOpen(opening);
       });
-      el("scripting-validation-close").addEventListener("click", () => {
-        setScriptingValidationOpen(false);
+      el("scripting-validation-diagnostic").addEventListener("click", () => {
+        goToScriptingDiagnostic(scriptingValidationIndex);
       });
-      el("scripting-validation-list").addEventListener("click", (event) => {
-        const row = event.target && event.target.closest
-          ? event.target.closest("[data-diagnostic-index]")
-          : null;
-        if (!row || !el("scripting-validation-list").contains(row)) return;
-        goToScriptingDiagnostic(Number(row.dataset.diagnosticIndex));
+      el("scripting-validation-previous").addEventListener("click", () => {
+        moveScriptingDiagnostic(-1);
+      });
+      el("scripting-validation-next").addEventListener("click", () => {
+        moveScriptingDiagnostic(1);
+      });
+      ["scripting-validation-previous", "scripting-validation-next"].forEach((id) => {
+        el(id).addEventListener("dblclick", (event) => {
+          event.preventDefault();
+        });
       });
       el("scripting-history-close").addEventListener("click", closeScriptingHistory);
       el("scripting-editor-reload").addEventListener("click", () => {
