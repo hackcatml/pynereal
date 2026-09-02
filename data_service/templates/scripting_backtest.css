@@ -496,6 +496,7 @@
   bottom: 12px;
   width: 32px;
   height: 32px;
+  border-radius: 50%;
   border-color: #46515e;
   background: rgb(27 33 41 / 92%);
   box-shadow: 0 3px 12px rgb(0 0 0 / 35%);
@@ -644,6 +645,10 @@
   width: 16px;
   height: 16px;
   stroke-width: 2;
+}
+
+#scripting-backtest-data-update.syncing .icon {
+  animation: scripting-backtest-spin 750ms linear infinite;
 }
 
 #scripting-backtest-data-download-form {

@@ -600,7 +600,10 @@
     const selected = selectedData();
     const canUpdate = Boolean(selected && selected.download_source);
     el("scripting-backtest-data-close").disabled = dataBusy;
-    el("scripting-backtest-data-update").disabled = dataBusy || !canUpdate;
+    const updateButton = el("scripting-backtest-data-update");
+    const updating = dataBusy && action === "update";
+    updateButton.disabled = dataBusy || !canUpdate;
+    updateButton.classList.toggle("syncing", updating);
     const downloadButton = el("scripting-backtest-data-download");
     const downloading = dataBusy && action === "download";
     downloadButton.disabled = dataBusy;
@@ -610,8 +613,7 @@
     ["symbol", "timeframe", "history-since", "file-name"].forEach((name) => {
       el(`scripting-backtest-data-${name}`).disabled = dataBusy;
     });
-    el("scripting-backtest-data-update").querySelector("span").textContent =
-      dataBusy && action === "update" ? "Updating..." : "Update to now";
+    updateButton.querySelector("span").textContent = updating ? "Updating..." : "Update to now";
     downloadButton.querySelector("span").textContent = downloading ? "Downloading..." : "Download";
     el("scripting-backtest-data-manage").classList.toggle("syncing", dataBusy);
     updateActionState();
