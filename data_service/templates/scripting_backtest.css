@@ -12,9 +12,77 @@
 }
 
 .scripting-backtest-handle { display: none; }
+.scripting-backtest-resize { display: none; }
 
 .scripting-backtest-header {
   min-height: 52px;
+}
+
+@media (min-width: 721px) {
+  .scripting-backtest-modal {
+    display: block;
+    padding: 0;
+    background: transparent;
+    pointer-events: none;
+  }
+
+  .scripting-backtest-box {
+    position: fixed;
+    right: 24px;
+    bottom: 24px;
+    pointer-events: auto;
+    box-shadow: 0 14px 38px rgb(0 0 0 / 52%);
+  }
+
+  .scripting-backtest-header {
+    cursor: move;
+    user-select: none;
+  }
+
+  .scripting-backtest-modal.window-dragging .scripting-backtest-box {
+    user-select: none;
+  }
+
+  .scripting-backtest-modal.window-resizing .scripting-backtest-box {
+    user-select: none;
+  }
+
+  .scripting-backtest-resize {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    z-index: 15;
+    width: 18px;
+    height: 18px;
+    display: block;
+    color: #66717f;
+    cursor: nwse-resize;
+    touch-action: none;
+  }
+
+  .scripting-backtest-resize svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.4;
+    stroke-linecap: round;
+  }
+
+  .scripting-backtest-box.compact .scripting-backtest-body {
+    gap: 7px;
+    padding: 10px;
+  }
+
+  .scripting-backtest-box.compact .scripting-backtest-settings {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 7px;
+    align-items: stretch;
+  }
+
+  .scripting-backtest-box.compact .scripting-backtest-log-shell {
+    min-height: 60px;
+  }
 }
 
 .scripting-backtest-heading {
@@ -57,6 +125,250 @@
   align-items: end;
 }
 
+.scripting-backtest-inputs-section {
+  flex: 0 0 auto;
+  min-height: 0;
+  border-top: 1px solid #242c36;
+  border-bottom: 1px solid #242c36;
+}
+
+.scripting-backtest-inputs-header {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 1px;
+  color: #f0f3f6;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.scripting-backtest-inputs-toggle {
+  min-width: 0;
+  min-height: 28px;
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.scripting-backtest-inputs-toggle .icon {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 180ms ease;
+}
+
+.scripting-backtest-inputs-section:not(.inputs-collapsed)
+  .scripting-backtest-inputs-toggle .icon { transform: rotate(90deg); }
+
+.scripting-backtest-combinations {
+  min-width: 0;
+  overflow: hidden;
+  color: #8b949e;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scripting-backtest-inputs-reset {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  margin-left: auto;
+  touch-action: manipulation;
+}
+
+.scripting-backtest-inputs-reset .icon {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.scripting-backtest-inputs {
+  max-height: 132px;
+  overflow: auto;
+  opacity: 1;
+  scrollbar-color: #3a4350 transparent;
+  scrollbar-width: thin;
+  transition: max-height 180ms ease, opacity 140ms ease;
+}
+
+.scripting-backtest-inputs-section.inputs-collapsed .scripting-backtest-inputs {
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.scripting-backtest-inputs::-webkit-scrollbar { width: 7px; }
+.scripting-backtest-inputs::-webkit-scrollbar-track { background: transparent; }
+.scripting-backtest-inputs::-webkit-scrollbar-thumb {
+  border-radius: 7px;
+  background: #3a4350;
+}
+
+.scripting-backtest-input-group + .scripting-backtest-input-group {
+  border-top: 1px solid #1f2630;
+}
+
+.scripting-backtest-input-group-title {
+  padding: 6px 0 2px;
+  color: #8b949e;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.scripting-backtest-input-row {
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: minmax(120px, 0.7fr) minmax(180px, 1.3fr);
+  align-items: center;
+  gap: 10px;
+  padding: 4px 1px;
+}
+
+.scripting-backtest-input-label {
+  min-width: 0;
+  overflow: hidden;
+  color: #c9d1d9;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scripting-backtest-input-label small {
+  display: block;
+  overflow: hidden;
+  color: #6e7781;
+  font-size: 8px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scripting-backtest-input-values {
+  width: 100%;
+  min-width: 0;
+  min-height: 30px;
+  padding: 5px 8px;
+  border: 1px solid #303843;
+  border-radius: 5px;
+  background: #11161d;
+  color: #d7dde5;
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0;
+}
+
+.scripting-backtest-input-values:focus {
+  border-color: #388bfd;
+  outline: none;
+}
+
+.scripting-backtest-input-options {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.scripting-backtest-input-option {
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid #303843;
+  border-radius: 4px;
+  background: #11161d;
+  color: #9da7b3;
+  font-size: 10px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.scripting-backtest-input-option.selected {
+  border-color: #315c8a;
+  background: #16263a;
+  color: #79c0ff;
+}
+
+.scripting-backtest-jobs {
+  flex: 0 0 auto;
+  min-height: 31px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-color: #3a4350 transparent;
+  scrollbar-width: thin;
+}
+
+.scripting-backtest-jobs::-webkit-scrollbar { height: 5px; }
+.scripting-backtest-jobs::-webkit-scrollbar-track { background: transparent; }
+.scripting-backtest-jobs::-webkit-scrollbar-thumb { border-radius: 5px; background: #3a4350; }
+
+.scripting-backtest-job {
+  flex: 0 0 auto;
+  max-width: 240px;
+  min-height: 25px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 7px;
+  border: 1px solid #303843;
+  border-radius: 4px;
+  background: #11161d;
+  color: #8b949e;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.scripting-backtest-job.selected {
+  border-color: #315c8a;
+  background: #16202d;
+  color: #d7dde5;
+}
+
+.scripting-backtest-job-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scripting-backtest-job-status {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: #6e7781;
+}
+
+.scripting-backtest-job[data-status="queued"] .scripting-backtest-job-status,
+.scripting-backtest-job[data-status="preparing"] .scripting-backtest-job-status,
+.scripting-backtest-job[data-status="running"] .scripting-backtest-job-status { background: #58a6ff; }
+.scripting-backtest-job[data-status="completed"] .scripting-backtest-job-status { background: #56d364; }
+.scripting-backtest-job[data-status="failed"] .scripting-backtest-job-status { background: #ff7b72; }
+.scripting-backtest-job[data-status="cancelled"] .scripting-backtest-job-status,
+.scripting-backtest-job[data-status="interrupted"] .scripting-backtest-job-status { background: #d29922; }
+
 .scripting-backtest-range {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -84,6 +396,8 @@
 
 .scripting-backtest-data-field { display: flex; flex-direction: column; }
 
+.scripting-backtest-data-filename-wrap { display: none; }
+
 .scripting-backtest-data-row {
   display: flex;
   align-items: stretch;
@@ -97,9 +411,9 @@
 }
 
 .scripting-backtest-data-manage {
-  flex: 0 0 34px;
-  width: 34px;
-  height: 34px;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
   align-self: stretch;
   touch-action: manipulation;
   -webkit-user-select: none;
@@ -112,21 +426,21 @@
 
 .scripting-backtest-data-select .script-select-button {
   min-width: 0;
-  min-height: 34px;
+  min-height: 28px;
   height: auto;
-  padding: 7px 9px;
+  padding: 4px 8px;
   border-color: #303843;
   border-radius: 5px;
   background: #11161d;
   color: #d7dde5;
   font: inherit;
-  font-size: 11px;
+  font-size: 10px;
   letter-spacing: 0;
   touch-action: manipulation;
 }
 
 .scripting-backtest-data-select .script-select-options { z-index: 12; }
-.scripting-backtest-data-select .script-select-option { font-size: 11px; }
+.scripting-backtest-data-select .script-select-option { min-height: 28px; font-size: 10px; }
 
 .scripting-backtest-data-option-row {
   min-width: 0;
@@ -212,14 +526,14 @@
 .scripting-backtest-field input,
 .scripting-backtest-date {
   min-width: 0;
-  min-height: 34px;
-  padding: 7px 9px;
+  min-height: 28px;
+  padding: 4px 8px;
   border: 1px solid #303843;
   border-radius: 5px;
   background: #11161d;
   color: #d7dde5;
   font: inherit;
-  font-size: 11px;
+  font-size: 10px;
   letter-spacing: 0;
 }
 
@@ -263,8 +577,8 @@
 
 .scripting-backtest-date .icon {
   flex: none;
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
   fill: none;
   stroke: #8b949e;
   stroke-width: 1.7;
@@ -362,7 +676,10 @@
   font-size: 10px;
 }
 
-.scripting-backtest-status-row > #scripting-backtest-summary {
+.scripting-backtest-status-row > :is(
+  #scripting-backtest-summary,
+  [data-backtest-element="scripting-backtest-summary"]
+) {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -383,10 +700,12 @@
   user-select: none;
 }
 
-.scripting-backtest-status-actions > .btn[data-tooltip] { position: relative; }
+.scripting-backtest-status-actions > .btn[data-tooltip],
+.scripting-backtest-clear-wrap > .btn[data-tooltip] { position: relative; }
 
 @media (hover: hover) and (pointer: fine) {
-  .scripting-backtest-status-actions > .btn[data-tooltip]::after {
+  .scripting-backtest-status-actions > .btn[data-tooltip]::after,
+  .scripting-backtest-clear-wrap > .btn[data-tooltip]::after {
     content: attr(data-tooltip);
     position: absolute;
     left: 50%;
@@ -412,7 +731,9 @@
   }
 
   .scripting-backtest-status-actions > .btn[data-tooltip]:hover::after,
-  .scripting-backtest-status-actions > .btn[data-tooltip]:focus-visible::after {
+  .scripting-backtest-status-actions > .btn[data-tooltip]:focus-visible::after,
+  .scripting-backtest-clear-wrap > .btn[data-tooltip]:hover::after,
+  .scripting-backtest-clear-wrap > .btn[data-tooltip]:focus-visible::after {
     opacity: 1;
     transform: translate(-50%, 0);
   }
@@ -428,6 +749,51 @@
   height: 14px;
 }
 
+.scripting-backtest-clear-wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.scripting-backtest-clear-popover {
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 0;
+  z-index: 50;
+  width: min(270px, calc(100vw - 24px));
+  display: grid;
+  gap: 7px;
+  box-sizing: border-box;
+  padding: 10px;
+  border: 1px solid #3a4350;
+  border-radius: 6px;
+  background: #151b22;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+  color: #f2f5f8;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.scripting-backtest-clear-popover > strong { font-size: 11px; }
+.scripting-backtest-clear-popover > span { color: #9da7b3; }
+
+.scripting-backtest-clear-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.scripting-backtest-clear-actions .btn {
+  min-height: 28px;
+  padding: 4px 10px;
+}
+
+.scripting-backtest-summary-toggle.active {
+  border-color: #315c8a;
+  background: #16263a;
+  color: #79c0ff;
+}
+
 .scripting-backtest-status {
   padding: 2px 6px;
   border: 1px solid #3a4350;
@@ -436,6 +802,7 @@
   white-space: nowrap;
 }
 
+.scripting-backtest-status[data-status="queued"],
 .scripting-backtest-status[data-status="preparing"],
 .scripting-backtest-status[data-status="running"],
 .scripting-backtest-status[data-status="stopping"] { border-color: #315c8a; color: #79c0ff; }
@@ -463,6 +830,97 @@
   border: 1px solid #303843;
   border-radius: 5px;
   background: #0d1117;
+}
+
+.scripting-backtest-summary-panel {
+  width: 100%;
+  height: 100%;
+  padding: 12px 14px;
+  overflow: auto;
+  scrollbar-color: #3a4350 #0d1117;
+  scrollbar-width: thin;
+}
+
+.scripting-backtest-summary-panel::-webkit-scrollbar { width: 8px; }
+.scripting-backtest-summary-panel::-webkit-scrollbar-track { background: #0d1117; }
+.scripting-backtest-summary-panel::-webkit-scrollbar-thumb {
+  border-radius: 8px;
+  background: #3a4350;
+}
+
+.scripting-backtest-summary-page { min-height: 100%; }
+
+.scripting-backtest-summary-title {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 5px;
+  color: #f0f3f6;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.scripting-backtest-summary-title > span {
+  min-width: 0;
+  overflow: hidden;
+  color: #8b949e;
+  font-size: 9px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scripting-backtest-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 22px;
+}
+
+.scripting-backtest-summary-metric {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding: 11px 2px;
+  border-bottom: 1px solid #242c36;
+}
+
+.scripting-backtest-summary-metric dt {
+  min-width: 0;
+  color: #8b949e;
+  font-size: 10px;
+}
+
+.scripting-backtest-summary-metric dd {
+  min-width: 0;
+  margin: 0;
+  color: #e6edf3;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.scripting-backtest-summary-metric small {
+  grid-column: 2;
+  color: #6e7781;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.scripting-backtest-summary-metric dd.positive { color: #56d364; }
+.scripting-backtest-summary-metric dd.negative { color: #ff7b72; }
+
+.scripting-backtest-summary-empty {
+  display: grid;
+  height: 100%;
+  place-items: center;
+  color: #6e7781;
+  font-size: 11px;
+  text-align: center;
 }
 
 .scripting-backtest-log {
@@ -620,7 +1078,10 @@
 }
 
 .scripting-backtest-data-current .btn,
-#scripting-backtest-data-download {
+:is(
+  #scripting-backtest-data-download,
+  [data-backtest-element="scripting-backtest-data-download"]
+) {
   flex: none;
   display: inline-flex;
   align-items: center;
@@ -629,7 +1090,10 @@
 }
 
 .scripting-backtest-data-current .icon,
-#scripting-backtest-data-download .icon {
+:is(
+  #scripting-backtest-data-download,
+  [data-backtest-element="scripting-backtest-data-download"]
+) .icon {
   width: 14px;
   height: 14px;
   fill: none;
@@ -641,17 +1105,26 @@
 
 /* the "Update to now" refresh glyph reads faint at 14px/1.8 — size it up a
    touch and thicken the stroke so it stands out next to the label */
-#scripting-backtest-data-update .icon {
+:is(
+  #scripting-backtest-data-update,
+  [data-backtest-element="scripting-backtest-data-update"]
+) .icon {
   width: 16px;
   height: 16px;
   stroke-width: 2;
 }
 
-#scripting-backtest-data-update.syncing .icon {
+:is(
+  #scripting-backtest-data-update,
+  [data-backtest-element="scripting-backtest-data-update"]
+).syncing .icon {
   animation: scripting-backtest-spin 750ms linear infinite;
 }
 
-#scripting-backtest-data-download-form {
+:is(
+  #scripting-backtest-data-download-form,
+  [data-backtest-element="scripting-backtest-data-download-form"]
+) {
   display: flex;
   flex: 0 0 auto;
   flex-direction: column;
@@ -813,26 +1286,77 @@
   .scripting-backtest-heading .mono { max-width: 64vw; }
   .scripting-backtest-body { padding: 11px; }
   .scripting-backtest-settings { display: flex; flex-direction: column; align-items: stretch; gap: 9px; }
+  .scripting-backtest-inputs { max-height: 112px; }
+  .scripting-backtest-input-row {
+    grid-template-columns: minmax(90px, 0.72fr) minmax(0, 1.28fr);
+    gap: 7px;
+  }
+  .scripting-backtest-input-label { font-size: 11px; }
+  .scripting-backtest-input-values {
+    min-height: 34px;
+    font-size: 13px;
+    touch-action: manipulation;
+  }
+  .scripting-backtest-inputs-header > .scripting-backtest-inputs-reset.btn-icon {
+    width: 28px;
+    min-width: 28px;
+    max-width: 28px;
+    height: 28px;
+    min-height: 28px;
+    max-height: 28px;
+    flex-basis: 28px;
+    padding: 0;
+  }
+  .scripting-backtest-inputs-header > .scripting-backtest-inputs-reset.btn-icon .icon {
+    width: 14px;
+    height: 14px;
+  }
+  .scripting-backtest-input-options { justify-content: flex-end; }
+  .scripting-backtest-input-option { min-height: 32px; font-size: 11px; }
+  .scripting-backtest-job { max-width: min(230px, 72vw); min-height: 28px; font-size: 10px; }
   .scripting-backtest-range { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .scripting-backtest-field { grid-template-columns: minmax(0, 1fr) 58px; }
+  .scripting-backtest-data-caption {
+    min-width: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 0.3em;
+  }
+  .scripting-backtest-data-caption > span:first-child { flex: 0 0 auto; }
+  .scripting-backtest-data-filename-wrap.has-value {
+    min-width: 0;
+    display: flex;
+    flex: 1;
+    align-items: baseline;
+  }
+  .scripting-backtest-data-filename {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .scripting-backtest-data-select .script-select-button,
   .scripting-backtest-field input,
   .scripting-backtest-date {
     font-family: inherit;
-    font-size: 13px;
+    font-size: 11px;
     font-weight: 400;
   }
-  .scripting-backtest-data-select .script-select-button { min-height: 38px; }
-  .scripting-backtest-data-select .script-select-option { min-height: 38px; font-size: 14px; }
+  .scripting-backtest-data-select .script-select-button { min-height: 30px; padding: 5px 8px; }
+  .scripting-backtest-data-select .script-select-option { min-height: 30px; font-size: 11px; }
   .scripting-backtest-data-manage {
-    flex-basis: 38px;
-    width: 38px;
-    height: 38px;
+    flex-basis: 30px;
+    width: 30px;
+    height: 30px;
+  }
+  .scripting-backtest-data-manage .icon {
+    width: 14px;
+    height: 14px;
   }
   .scripting-backtest-date,
   .scripting-backtest-field input {
-    min-height: 36px;
-    padding: 6px 8px;
+    min-height: 30px;
+    padding: 5px 7px;
     touch-action: manipulation;
   }
   .scripting-backtest-calendar { width: min(220px, calc(100vw - 24px)); }
@@ -841,6 +1365,33 @@
     left: auto;
   }
   .scripting-backtest-log { padding: 10px; font-size: 10.5px; }
+  .scripting-backtest-summary-panel { padding: 9px 11px; }
+  .scripting-backtest-summary-panel.summary-pager {
+    display: flex;
+    padding: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-snap-type: x mandatory;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
+  }
+  .scripting-backtest-summary-panel.summary-pager::-webkit-scrollbar { display: none; }
+  .scripting-backtest-summary-panel.summary-pager .scripting-backtest-summary-page {
+    width: 100%;
+    min-width: 100%;
+    height: 100%;
+    flex: 0 0 100%;
+    padding: 9px 11px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scroll-snap-align: start;
+    overscroll-behavior-x: auto;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
+  }
+  .scripting-backtest-summary-grid { grid-template-columns: minmax(0, 1fr); }
   .scripting-backtest-find {
     right: 5px;
     left: 5px;
@@ -850,17 +1401,28 @@
   .scripting-backtest-data-modal { padding: 12px; }
   .scripting-backtest-data-box { max-height: calc(100dvh - 24px); }
   .scripting-backtest-data-fields input {
-    min-height: 36px;
-    font-size: 13px;
+    min-height: 30px;
+    padding: 5px 8px;
+    font-size: 11px;
     touch-action: manipulation;
   }
   .scripting-backtest-exchange-select .script-select-button {
-    min-height: 36px;
-    font-size: 13px;
+    min-height: 30px;
+    padding: 5px 8px;
+    font-size: 11px;
   }
   .scripting-backtest-exchange-select .script-select-option {
-    min-height: 36px;
-    font-size: 13px;
+    min-height: 30px;
+    font-size: 11px;
+  }
+  .scripting-backtest-data-current .btn,
+  :is(
+    #scripting-backtest-data-download,
+    [data-backtest-element="scripting-backtest-data-download"]
+  ) {
+    min-height: 30px;
+    padding: 5px 8px;
+    font-size: 11px;
   }
   .scripting-backtest-modal.closing { animation: scripting-backtest-backdrop-out 220ms ease-in forwards; }
   .scripting-backtest-modal.closing .scripting-backtest-box {

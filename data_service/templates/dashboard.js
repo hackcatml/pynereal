@@ -8369,6 +8369,7 @@
     if (aiEnabled && reclampAiFab) reclampAiFab();
     if (aiEnabled) loadAiModels();
     if (!aiEnabled && isAiChatOpen()) closeAiChat();
+    if (window.PyneScriptingAi) window.PyneScriptingAi.setAvailable(aiEnabled);
     if (isCalendarOpen() && calendarSelectedDate) renderCalendarDetails();
   }
 
@@ -10721,6 +10722,7 @@
     esc,
     lockBodyScroll,
     mobileQuery: mobileHubQuery,
+    streamSse,
     unlockBodyScroll,
   });
   initSessionReordering();

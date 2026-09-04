@@ -48,6 +48,22 @@ def build_scripting_backtest_router(
             return _error_response(exc)
         return JSONResponse(payload)
 
+    @router.get("/api/scripting/backtest/inputs")
+    async def backtest_inputs(
+        script_path: str,
+        base_revision: str,
+        data_path: str,
+    ) -> JSONResponse:
+        try:
+            payload = await manager.input_payload(
+                script_path=script_path,
+                base_revision=base_revision,
+                data_path=data_path,
+            )
+        except ScriptingBacktestError as exc:
+            return _error_response(exc)
+        return JSONResponse(payload)
+
     @router.post("/api/scripting/backtest/data/sync")
     async def sync_backtest_data(payload: dict) -> JSONResponse:
         try:
@@ -80,16 +96,34 @@ def build_scripting_backtest_router(
             return _error_response(exc)
         return JSONResponse({"job": payload})
 
+    @router.get("/api/scripting/backtests")
+    async def list_backtests(script_path: str | None = None) -> JSONResponse:
+        try:
+            jobs = await manager.jobs(script_path)
+        except ScriptingBacktestError as exc:
+            return _error_response(exc)
+        return JSONResponse({"jobs": jobs})
+
     @router.post("/api/scripting/backtests")
     async def start_backtest(payload: dict) -> JSONResponse:
         try:
-            result = await manager.start(
-                script_path=str(payload.get("script_path") or ""),
-                base_revision=str(payload.get("base_revision") or ""),
-                data_path=str(payload.get("data_path") or ""),
-                time_from=_timestamp(payload.get("time_from"), "time_from"),
-                time_to=_timestamp(payload.get("time_to"), "time_to"),
-            )
+            arguments = {
+                "script_path": str(payload.get("script_path") or ""),
+                "base_revision": str(payload.get("base_revision") or ""),
+                "data_path": str(payload.get("data_path") or ""),
+                "time_from": _timestamp(payload.get("time_from"), "time_from"),
+                "time_to": _timestamp(payload.get("time_to"), "time_to"),
+            }
+            if "input_values" in payload:
+                jobs = await manager.start_variants(
+                    **arguments,
+                    input_values=payload.get("input_values"),
+                )
+                return JSONResponse(
+                    {"jobs": jobs, "max_concurrent": 10},
+                    status_code=202,
+                )
+            result = await manager.start(**arguments)
         except ScriptingBacktestError as exc:
             return _error_response(exc)
         return JSONResponse(result, status_code=202)

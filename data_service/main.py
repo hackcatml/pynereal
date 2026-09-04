@@ -25,6 +25,7 @@ from config import ensure_provider_config, load_hub_config, load_initial_session
 from registry import SessionRegistry
 from api import build_session_api_router, build_control_router, build_validation_router
 from scripting_api import ScriptingExecutor, build_scripting_router
+from scripting_ai_api import build_scripting_ai_router
 from scripting_backtest import ScriptingBacktestManager
 from scripting_backtest_api import build_scripting_backtest_router
 from scripting_history import ScriptingHistoryStore
@@ -117,6 +118,13 @@ def build_app(
             scripting_workspace,
             registry,
             executor=scripting_executor,
+        )
+    )
+    app.include_router(
+        build_scripting_ai_router(
+            scripting_workspace,
+            codex_service,
+            scripting_executor,
         )
     )
     app.include_router(build_scripting_backtest_router(scripting_backtest_manager))

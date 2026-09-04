@@ -1,9 +1,23 @@
 (function () {
+  window.PyneFloatingLayerManager = window.PyneFloatingLayerManager || (() => {
+    let layer = 120;
+    return {
+      next() {
+        layer += 10;
+        return layer;
+      },
+    };
+  })();
+
   const SCRIPTING_TREE_WIDTH_KEY = "pynereal.scripting.tree.width";
   const SCRIPTING_TREE_COLLAPSED_KEY = "pynereal.scripting.tree.collapsed";
   const SCRIPTING_TREE_MIN_WIDTH = 210;
   const SCRIPTING_TREE_MAX_WIDTH = 520;
   const SCRIPTING_TREE_DEFAULT_WIDTH = 290;
+  const SCRIPTING_WINDOW_POSITION_KEY = "pynereal.scripting.window.position";
+  const SCRIPTING_WINDOW_MARGIN = 8;
+  const SCRIPTING_WINDOW_DEFAULT_WIDTH = 1180;
+  const SCRIPTING_WINDOW_DEFAULT_HEIGHT = 780;
   let initialized = false;
   let assignedFileHandler = null;
 
@@ -17,6 +31,7 @@
       esc,
       lockBodyScroll,
       mobileQuery: mobileHubQuery,
+      streamSse,
       unlockBodyScroll,
     } = options;
     if (
@@ -26,9 +41,11 @@
       || typeof esc !== "function"
       || typeof lockBodyScroll !== "function"
       || !mobileHubQuery
+      || typeof streamSse !== "function"
       || typeof unlockBodyScroll !== "function"
       || !window.PyneEditor
       || !window.PyneScriptingBacktest
+      || !window.PyneScriptingAi
     ) {
       throw new Error("PyneScripting initialization dependencies are unavailable");
     }
@@ -42,6 +59,8 @@
     let scriptingFileRequestSeq = 0;
     let scriptingOpenTimer = null;
     let scriptingCloseTimer = null;
+    let scriptingDesktopDrag = null;
+    let scriptingDesktopResize = null;
     let scriptingBaseContent = "";
     let scriptingBaseRevision = "";
     let scriptingBaseNote = "";
@@ -517,6 +536,13 @@
         || !scriptingNoteChanged();
       el("scripting-history").disabled = !loaded;
       updateScriptingValidationState();
+      window.PyneScriptingAi.setContext({
+        path: scriptingSelectedPath,
+        revision: scriptingBaseRevision,
+        content: el("scripting-code").value,
+        dirty: modified,
+        ready: loaded && !scriptingSaving && !scriptingConflict,
+      });
       if (scriptingSaving) setScriptingStatus("Saving...", "saving");
       else if (scriptingConflict) setScriptingStatus("Conflict", "conflict");
       else if (modified) setScriptingStatus("Modified", "dirty");
@@ -2229,6 +2255,16 @@
       const path = String(payload.path || scriptingSelectedPath);
       const language = String(payload.language || "");
       const content = String(payload.content || "");
+      const code = el("scripting-code");
+      const editorView = options.preserveEditorView === true
+        ? {
+          selectionStart: code.selectionStart,
+          selectionEnd: code.selectionEnd,
+          selectionDirection: code.selectionDirection,
+          scrollTop: code.scrollTop,
+          scrollLeft: code.scrollLeft,
+        }
+        : null;
       scriptingSelectedPath = path;
       scriptingBaseContent = content;
       scriptingBaseRevision = String(payload.revision || "");
@@ -2243,14 +2279,23 @@
       el("scripting-file-name").textContent = String(payload.name || path.split("/").pop() || "Source");
       el("scripting-file-path").textContent = path;
       el("scripting-file-meta").textContent = `${language === "markdown" ? "Markdown" : "Python"} · ${scriptingFileSize(payload.size)}`;
-      const code = el("scripting-code");
       const highlight = el("scripting-highlight");
       code.value = content;
       code.dataset.revision = scriptingBaseRevision;
-      code.scrollTop = 0;
-      code.scrollLeft = 0;
-      highlight.scrollTop = 0;
-      highlight.scrollLeft = 0;
+      if (editorView) {
+        const selectionStart = Math.min(editorView.selectionStart, content.length);
+        const selectionEnd = Math.min(editorView.selectionEnd, content.length);
+        code.setSelectionRange(selectionStart, selectionEnd, editorView.selectionDirection);
+        code.scrollTop = editorView.scrollTop;
+        code.scrollLeft = editorView.scrollLeft;
+        highlight.scrollTop = editorView.scrollTop;
+        highlight.scrollLeft = editorView.scrollLeft;
+      } else {
+        code.scrollTop = 0;
+        code.scrollLeft = 0;
+        highlight.scrollTop = 0;
+        highlight.scrollLeft = 0;
+      }
       setScriptingNotice();
       resetScriptingUndo();
       renderScriptingHighlight();
@@ -2281,7 +2326,7 @@
           }),
         });
         const savedPath = scriptingSelectedPath;
-        renderScriptingFile(payload, { preserveStatus: true });
+        renderScriptingFile(payload, { preserveStatus: true, preserveEditorView: true });
         if (payload.saved) await trackScriptingApply(savedPath);
         else setScriptingStatus("Note saved", "saved");
         if (isScriptingHistoryOpen()) await loadScriptingHistory();
@@ -2640,6 +2685,30 @@
       );
     }
 
+    function applyScriptingDraftAfterAi(path, content, expectedContent) {
+      if (
+        path !== scriptingSelectedPath
+        || scriptingSaving
+        || scriptingConflict
+      ) return false;
+      const code = el("scripting-code");
+      if (code.value !== expectedContent) {
+        setScriptingNotice(
+          "The editor changed while AI was working. The AI edit was not applied.",
+        );
+        setScriptingStatus("AI edit not applied", "dirty");
+        return false;
+      }
+      captureScriptingUndo("aiEdit");
+      const selectionStart = Math.min(code.selectionStart, content.length);
+      const selectionEnd = Math.min(code.selectionEnd, content.length);
+      code.value = content;
+      code.setSelectionRange(selectionStart, selectionEnd, code.selectionDirection);
+      handleScriptingInput();
+      setScriptingStatus("Modified by AI", "dirty");
+      return true;
+    }
+
     async function loadScriptingTree(options = {}) {
       const seq = ++scriptingTreeRequestSeq;
       const refreshSelectedFile = options.refreshSelectedFile === true
@@ -2704,6 +2773,82 @@
       }
     }
 
+    function storedScriptingWindowPosition() {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(SCRIPTING_WINDOW_POSITION_KEY) || "{}");
+        return parsed && typeof parsed === "object" ? parsed : {};
+      } catch {
+        return {};
+      }
+    }
+
+    function applyScriptingWindowPosition() {
+      const box = el("scripting-modal").querySelector(".scripting-modal-box");
+      if (mobileHubQuery.matches) {
+        box.style.left = "";
+        box.style.top = "";
+        box.style.width = "";
+        box.style.height = "";
+        return;
+      }
+      const stored = storedScriptingWindowPosition();
+      const maxWidth = Math.max(1, window.innerWidth - SCRIPTING_WINDOW_MARGIN * 2);
+      const maxHeight = Math.max(1, window.innerHeight - SCRIPTING_WINDOW_MARGIN * 2);
+      const minWidth = Math.min(SCRIPTING_WINDOW_DEFAULT_WIDTH, maxWidth) / 2;
+      const minHeight = Math.min(SCRIPTING_WINDOW_DEFAULT_HEIGHT, maxHeight) / 2;
+      const requestedWidth = Number.isFinite(Number(stored.width))
+        ? Number(stored.width)
+        : Math.min(SCRIPTING_WINDOW_DEFAULT_WIDTH, maxWidth);
+      const requestedHeight = Number.isFinite(Number(stored.height))
+        ? Number(stored.height)
+        : Math.min(SCRIPTING_WINDOW_DEFAULT_HEIGHT, maxHeight);
+      box.style.width = `${Math.min(Math.max(requestedWidth, minWidth), maxWidth)}px`;
+      box.style.height = `${Math.min(Math.max(requestedHeight, minHeight), maxHeight)}px`;
+      const rect = box.getBoundingClientRect();
+      const requestedLeft = Number.isFinite(Number(stored.left))
+        ? Number(stored.left)
+        : (window.innerWidth - rect.width) / 2;
+      const requestedTop = Number.isFinite(Number(stored.top))
+        ? Number(stored.top)
+        : (window.innerHeight - rect.height) / 2;
+      const left = Math.min(
+        Math.max(requestedLeft, SCRIPTING_WINDOW_MARGIN),
+        Math.max(SCRIPTING_WINDOW_MARGIN, window.innerWidth - rect.width - SCRIPTING_WINDOW_MARGIN),
+      );
+      const top = Math.min(
+        Math.max(requestedTop, SCRIPTING_WINDOW_MARGIN),
+        Math.max(SCRIPTING_WINDOW_MARGIN, window.innerHeight - rect.height - SCRIPTING_WINDOW_MARGIN),
+      );
+      box.style.left = `${Math.round(left)}px`;
+      box.style.top = `${Math.round(top)}px`;
+    }
+
+    function saveScriptingWindowPosition() {
+      if (mobileHubQuery.matches || !isScriptingOpen()) return;
+      const rect = el("scripting-modal").querySelector(".scripting-modal-box").getBoundingClientRect();
+      try {
+        localStorage.setItem(SCRIPTING_WINDOW_POSITION_KEY, JSON.stringify({
+          left: Math.round(rect.left),
+          top: Math.round(rect.top),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        }));
+      } catch {}
+    }
+
+    function activateScriptingWindow() {
+      if (mobileHubQuery.matches) {
+        el("scripting-modal").style.removeProperty("z-index");
+        el("scripting-unsaved-modal").style.removeProperty("z-index");
+        el("scripting-operation-modal").style.removeProperty("z-index");
+        return;
+      }
+      const layer = window.PyneFloatingLayerManager.next();
+      el("scripting-modal").style.zIndex = String(layer);
+      el("scripting-unsaved-modal").style.zIndex = String(layer + 2);
+      el("scripting-operation-modal").style.zIndex = String(layer + 2);
+    }
+
     function openScripting() {
       closeHubMenu();
       closeAiChat();
@@ -2717,9 +2862,11 @@
       }
       const modal = el("scripting-modal");
       const box = modal.querySelector(".scripting-modal-box");
+      activateScriptingWindow();
       modal.classList.remove(
         "scripting-closing",
         "scripting-dragging",
+        "scripting-window-resizing",
         "scripting-swipe-closing",
         "scripting-opening",
         "hidden",
@@ -2729,6 +2876,7 @@
       box.style.transform = "";
       box.style.transition = "";
       modal.setAttribute("aria-hidden", "false");
+      applyScriptingWindowPosition();
       setScriptingMobileView("tree");
       window.requestAnimationFrame(renderScriptingTreeLayout);
       lockBodyScroll();
@@ -2749,6 +2897,8 @@
       modal.classList.remove(
         "scripting-closing",
         "scripting-dragging",
+        "scripting-window-dragging",
+        "scripting-window-resizing",
         "scripting-swipe-closing",
         "scripting-opening",
         "scripting-show-editor",
@@ -2766,7 +2916,10 @@
       closeScriptingTreeMenus();
       closeScriptingOperation({ immediate: true });
       closeScriptingRestart();
+      window.PyneScriptingAi.close({ immediate: true });
       window.PyneScriptingBacktest.close();
+      scriptingDesktopDrag = null;
+      scriptingDesktopResize = null;
       scriptingOpenTimer = null;
       scriptingCloseTimer = null;
       unlockBodyScroll();
@@ -2870,6 +3023,129 @@
       }
       header.addEventListener("pointerup", (event) => endScriptingCloseDrag(event));
       header.addEventListener("pointercancel", (event) => endScriptingCloseDrag(event, true));
+    }
+
+    function initDesktopScriptingGestures() {
+      const modal = el("scripting-modal");
+      const box = modal.querySelector(".scripting-modal-box");
+      const header = modal.querySelector(".scripting-modal-header");
+      const resizeHandle = el("scripting-window-resize");
+
+      header.addEventListener("pointerdown", (event) => {
+        if (
+          mobileHubQuery.matches
+          || !event.isPrimary
+          || event.button !== 0
+          || !isScriptingOpen()
+        ) return;
+        const target = event.target instanceof Element ? event.target : null;
+        if (target && target.closest("button, input, textarea, select, .scripting-restart-popover")) return;
+        const rect = box.getBoundingClientRect();
+        scriptingDesktopDrag = {
+          id: event.pointerId,
+          startX: event.clientX,
+          startY: event.clientY,
+          left: rect.left,
+          top: rect.top,
+        };
+        modal.classList.add("scripting-window-dragging");
+        try { header.setPointerCapture(event.pointerId); } catch {}
+        event.preventDefault();
+      });
+      header.addEventListener("pointermove", (event) => {
+        if (!scriptingDesktopDrag || event.pointerId !== scriptingDesktopDrag.id) return;
+        event.preventDefault();
+        const rect = box.getBoundingClientRect();
+        const left = Math.min(
+          Math.max(
+            scriptingDesktopDrag.left + event.clientX - scriptingDesktopDrag.startX,
+            SCRIPTING_WINDOW_MARGIN,
+          ),
+          Math.max(SCRIPTING_WINDOW_MARGIN, window.innerWidth - rect.width - SCRIPTING_WINDOW_MARGIN),
+        );
+        const top = Math.min(
+          Math.max(
+            scriptingDesktopDrag.top + event.clientY - scriptingDesktopDrag.startY,
+            SCRIPTING_WINDOW_MARGIN,
+          ),
+          Math.max(SCRIPTING_WINDOW_MARGIN, window.innerHeight - rect.height - SCRIPTING_WINDOW_MARGIN),
+        );
+        box.style.left = `${left}px`;
+        box.style.top = `${top}px`;
+      }, { passive: false });
+      const finish = (event) => {
+        if (!scriptingDesktopDrag || event.pointerId !== scriptingDesktopDrag.id) return;
+        const pointerId = scriptingDesktopDrag.id;
+        scriptingDesktopDrag = null;
+        modal.classList.remove("scripting-window-dragging");
+        try { header.releasePointerCapture(pointerId); } catch {}
+        saveScriptingWindowPosition();
+      };
+      header.addEventListener("pointerup", finish);
+      header.addEventListener("pointercancel", finish);
+
+      resizeHandle.addEventListener("pointerdown", (event) => {
+        if (
+          mobileHubQuery.matches
+          || !event.isPrimary
+          || event.button !== 0
+          || !isScriptingOpen()
+        ) return;
+        const rect = box.getBoundingClientRect();
+        scriptingDesktopResize = {
+          id: event.pointerId,
+          startX: event.clientX,
+          startY: event.clientY,
+          width: rect.width,
+          height: rect.height,
+        };
+        modal.classList.add("scripting-window-resizing");
+        try { resizeHandle.setPointerCapture(event.pointerId); } catch {}
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      resizeHandle.addEventListener("pointermove", (event) => {
+        if (!scriptingDesktopResize || event.pointerId !== scriptingDesktopResize.id) return;
+        event.preventDefault();
+        const rect = box.getBoundingClientRect();
+        const maxWidth = Math.max(1, window.innerWidth - rect.left - SCRIPTING_WINDOW_MARGIN);
+        const maxHeight = Math.max(1, window.innerHeight - rect.top - SCRIPTING_WINDOW_MARGIN);
+        const viewportWidth = Math.max(1, window.innerWidth - SCRIPTING_WINDOW_MARGIN * 2);
+        const viewportHeight = Math.max(1, window.innerHeight - SCRIPTING_WINDOW_MARGIN * 2);
+        const minWidth = Math.min(
+          Math.min(SCRIPTING_WINDOW_DEFAULT_WIDTH, viewportWidth) / 2,
+          maxWidth,
+        );
+        const minHeight = Math.min(
+          Math.min(SCRIPTING_WINDOW_DEFAULT_HEIGHT, viewportHeight) / 2,
+          maxHeight,
+        );
+        box.style.width = `${Math.min(
+          Math.max(
+            scriptingDesktopResize.width + event.clientX - scriptingDesktopResize.startX,
+            minWidth,
+          ),
+          maxWidth,
+        )}px`;
+        box.style.height = `${Math.min(
+          Math.max(
+            scriptingDesktopResize.height + event.clientY - scriptingDesktopResize.startY,
+            minHeight,
+          ),
+          maxHeight,
+        )}px`;
+      }, { passive: false });
+      const finishWindowResize = (event) => {
+        if (!scriptingDesktopResize || event.pointerId !== scriptingDesktopResize.id) return;
+        const pointerId = scriptingDesktopResize.id;
+        scriptingDesktopResize = null;
+        modal.classList.remove("scripting-window-resizing");
+        try { resizeHandle.releasePointerCapture(pointerId); } catch {}
+        saveScriptingWindowPosition();
+        renderScriptingTreeLayout();
+      };
+      resizeHandle.addEventListener("pointerup", finishWindowResize);
+      resizeHandle.addEventListener("pointercancel", finishWindowResize);
     }
 
     function initMobileScriptingHistoryGestures() {
@@ -3057,6 +3333,12 @@
       const highlight = el("scripting-highlight");
 
       window.PyneScriptingBacktest.init({ api, mobileQuery: mobileHubQuery });
+      window.PyneScriptingAi.init({
+        api,
+        streamSse,
+        mobileQuery: mobileHubQuery,
+        onDraftChanged: applyScriptingDraftAfterAi,
+      });
       initScriptingTreeLayout();
       scriptingEditorController = window.PyneEditor.create({
         editor: code,
@@ -3083,6 +3365,7 @@
         if (!event.target.closest(".scripting-editor-pane")) return;
         scriptingEditorController.handleShortcut(event);
       });
+      modal.addEventListener("pointerdown", activateScriptingWindow, { capture: true });
       el("hub-scripting-open").addEventListener("click", openScripting);
       el("scripting-close").addEventListener("click", closeScripting);
       el("scripting-mode").addEventListener("click", openScriptingRestart);
@@ -3164,7 +3447,7 @@
       el("scripting-validation-next").addEventListener("click", () => {
         moveScriptingDiagnostic(1);
       });
-      ["scripting-validation-previous", "scripting-validation-next"].forEach((id) => {
+      ["scripting-ai", "scripting-validation-previous", "scripting-validation-next"].forEach((id) => {
         el(id).addEventListener("dblclick", (event) => {
           event.preventDefault();
         });
@@ -3400,6 +3683,7 @@
         if (!isScriptingOpen()) return;
         renderScriptingTreeLayout();
         if (!mobileHubQuery.matches) setScriptingMobileView("desktop");
+        applyScriptingWindowPosition();
       }, { passive: true });
       document.addEventListener("keydown", (event) => {
         const unsavedOpen = !el("scripting-unsaved-modal").classList.contains("hidden");
@@ -3456,6 +3740,7 @@
         }
       });
       initMobileScriptingGestures();
+      initDesktopScriptingGestures();
       initMobileScriptingHistoryGestures();
       initMobileScriptingOperationGestures();
     }

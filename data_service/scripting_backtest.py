@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
 import json
+import math
 import os
 import re
 import signal
@@ -24,12 +26,15 @@ from pynecore.core.syminfo import SymInfo
 from pynecore.providers.ccxt import CCXTProvider
 
 from scripting_validation import ScriptingValidator
+from scripting_backtest_summary import read_strategy_summary
 
 
-_ACTIVE_STATUSES = {"preparing", "running", "stopping"}
+_ACTIVE_STATUSES = {"queued", "preparing", "running", "stopping"}
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 _BACKTEST_DATA_EXCHANGES = ("binance", "bitget", "bybit", "okx", "hyperliquid")
 _DOWNLOAD_SOURCE_SECTION = "pynereal_download"
+_MAX_CONCURRENT_BACKTESTS = 10
+_MAX_BACKTEST_VARIANTS = 1000
 
 
 class ScriptingBacktestError(Exception):
@@ -49,6 +54,8 @@ class BacktestJob:
     time_to: int
     status: str
     created_at: int
+    run_key: str = ""
+    inputs: dict[str, Any] = field(default_factory=dict)
     started_at: int | None = None
     finished_at: int | None = None
     pid: int | None = None
@@ -56,6 +63,7 @@ class BacktestJob:
     error: str | None = None
     actual_time_from: int | None = None
     actual_time_to: int | None = None
+    summary: dict[str, Any] | None = None
     stop_requested: bool = False
     process: asyncio.subprocess.Process | None = field(default=None, repr=False)
     monitor_task: asyncio.Task[None] | None = field(default=None, repr=False)
@@ -127,20 +135,83 @@ class ScriptingBacktestManager:
         data_path: str,
         time_from: int,
         time_to: int,
+        inputs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        input_values = (
+            {name: [value] for name, value in inputs.items()}
+            if inputs is not None
+            else None
+        )
+        jobs = await self.start_variants(
+            script_path=script_path,
+            base_revision=base_revision,
+            data_path=data_path,
+            time_from=time_from,
+            time_to=time_to,
+            input_values=input_values,
+        )
+        return jobs[0]
+
+    async def input_payload(
+        self,
+        *,
+        script_path: str,
+        base_revision: str,
+        data_path: str,
+    ) -> dict[str, Any]:
+        normalized_script = self._normalize_relative_path(script_path, suffix=".py")
+        request = await self.run_io(
+            self._preflight_input_request,
+            normalized_script,
+            base_revision,
+            data_path,
+        )
+        result = await self.run_io(
+            self._inspect_input_metadata,
+            request["script_path"],
+            request["data_path"],
+        )
+        return {
+            "script_path": request["script_path"],
+            "script_revision": request["script_revision"],
+            "data_path": request["data_path"],
+            "max_concurrent": _MAX_CONCURRENT_BACKTESTS,
+            "max_variants": _MAX_BACKTEST_VARIANTS,
+            "inputs": result,
+        }
+
+    async def start_variants(
+        self,
+        *,
+        script_path: str,
+        base_revision: str,
+        data_path: str,
+        time_from: int,
+        time_to: int,
+        input_values: dict[str, list[Any]] | None,
+    ) -> list[dict[str, Any]]:
+        normalized_script = self._normalize_relative_path(script_path, suffix=".py")
+        preflight = await self.run_io(
+            self._preflight,
+            normalized_script,
+            base_revision,
+            data_path,
+            time_from,
+            time_to,
+        )
+        metadata = await self.run_io(
+            self._inspect_input_metadata,
+            preflight["script_path"],
+            preflight["data_path"],
+        )
+        variants = self._expand_input_variants(metadata, input_values)
+
         async with self._lock:
             if self._closed:
                 raise ScriptingBacktestError(
                     "backtest service is shutting down",
                     code="service_closed",
                     status_code=503,
-                )
-            active = self._active_job()
-            if active is not None:
-                raise ScriptingBacktestError(
-                    "another backtest is already running",
-                    code="backtest_busy",
-                    status_code=409,
                 )
             if self._data_process is not None and self._data_process.returncode is None:
                 raise ScriptingBacktestError(
@@ -149,93 +220,127 @@ class ScriptingBacktestManager:
                     status_code=409,
                 )
 
-            preflight = await self.run_io(
-                self._preflight,
-                script_path,
-                base_revision,
-                data_path,
-                time_from,
-                time_to,
-            )
-            job_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:10]
-            now_ms = int(time.time() * 1000)
-            job = BacktestJob(
-                id=job_id,
-                script_path=preflight["script_path"],
-                script_revision=preflight["script_revision"],
-                data_path=preflight["data_path"],
-                time_from=preflight["time_from"],
-                time_to=preflight["time_to"],
-                status="preparing",
-                created_at=now_ms,
-            )
-            self._jobs[job.id] = job
-            await self.run_io(self._prepare_job_files, job)
-
-            log_file = self._log_path(job.id).open("ab", buffering=0)
-            worker = Path(__file__).with_name("backtest_worker.py")
-            command = [
-                sys.executable,
-                "-u",
-                str(worker),
-                "--repo-root",
-                str(self.repo_root),
-                "--job-dir",
-                str(self._job_dir(job.id)),
-                "--script-path",
-                job.script_path,
-                "--data-path",
-                job.data_path,
-                "--time-from",
-                str(job.time_from),
-                "--time-to",
-                str(job.time_to),
-            ]
-            process_options: dict[str, Any] = {
-                "cwd": str(self.repo_root),
-                "stdin": asyncio.subprocess.DEVNULL,
-                "stdout": log_file,
-                "stderr": asyncio.subprocess.STDOUT,
-            }
-            if os.name == "posix":
-                process_options["start_new_session"] = True
-            elif os.name == "nt":
-                process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-
-            try:
-                process = await asyncio.create_subprocess_exec(
-                    *command,
-                    **process_options,
+            prepared: list[BacktestJob] = []
+            run_keys: set[str] = set()
+            for variant in variants:
+                run_key = self._run_key(preflight, variant)
+                if run_key in run_keys or self._active_job_by_run_key(run_key) is not None:
+                    raise ScriptingBacktestError(
+                        "an identical backtest is already queued or running",
+                        code="backtest_duplicate",
+                        status_code=409,
+                    )
+                run_keys.add(run_key)
+                job_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:10]
+                job = BacktestJob(
+                    id=job_id,
+                    run_key=run_key,
+                    script_path=preflight["script_path"],
+                    script_revision=preflight["script_revision"],
+                    data_path=preflight["data_path"],
+                    time_from=preflight["time_from"],
+                    time_to=preflight["time_to"],
+                    status="queued",
+                    created_at=int(time.time() * 1000),
+                    inputs=variant,
                 )
-            except Exception as exc:
-                log_file.close()
-                job.status = "failed"
-                job.finished_at = int(time.time() * 1000)
-                job.error = f"failed to start backtest worker: {type(exc).__name__}: {exc}"
-                await self.run_io(self._write_job, job)
-                raise ScriptingBacktestError(
-                    job.error,
-                    code="process_start_failed",
-                    status_code=500,
-                ) from exc
-            finally:
-                if not log_file.closed:
-                    log_file.close()
+                prepared.append(job)
 
-            job.process = process
-            job.pid = process.pid
-            job.started_at = int(time.time() * 1000)
-            await self.run_io(self._write_job, job)
-            job.monitor_task = asyncio.create_task(
-                self._monitor(job),
-                name=f"backtest-monitor-{job.id}",
+            for job in prepared:
+                self._jobs[job.id] = job
+                await self.run_io(self._prepare_job_files, job)
+            await self._fill_backtest_slots_locked()
+            return [self._payload(job) for job in prepared]
+
+    async def _fill_backtest_slots_locked(self) -> None:
+        while self._active_process_count() < _MAX_CONCURRENT_BACKTESTS:
+            queued = next(
+                (job for job in self._jobs.values() if job.status == "queued"),
+                None,
             )
-            return self._payload(job)
+            if queued is None:
+                return
+            await self._launch_job_locked(queued)
+
+    async def _launch_job_locked(self, job: BacktestJob) -> None:
+        job.status = "preparing"
+        await self.run_io(self._write_job, job)
+        log_file = self._log_path(job.id).open("ab", buffering=0)
+        worker = Path(__file__).with_name("backtest_worker.py")
+        command = [
+            sys.executable,
+            "-u",
+            str(worker),
+            "--repo-root",
+            str(self.repo_root),
+            "--job-dir",
+            str(self._job_dir(job.id)),
+            "--script-path",
+            job.script_path,
+            "--data-path",
+            job.data_path,
+            "--time-from",
+            str(job.time_from),
+            "--time-to",
+            str(job.time_to),
+        ]
+        process_options: dict[str, Any] = {
+            "cwd": str(self.repo_root),
+            "stdin": asyncio.subprocess.DEVNULL,
+            "stdout": log_file,
+            "stderr": asyncio.subprocess.STDOUT,
+        }
+        if os.name == "posix":
+            process_options["start_new_session"] = True
+        elif os.name == "nt":
+            process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                **process_options,
+            )
+        except Exception as exc:
+            job.status = "failed"
+            job.finished_at = int(time.time() * 1000)
+            job.error = f"failed to start backtest worker: {type(exc).__name__}: {exc}"
+            await self.run_io(self._write_job, job)
+            return
+        finally:
+            log_file.close()
+
+        job.process = process
+        job.pid = process.pid
+        job.started_at = int(time.time() * 1000)
+        await self.run_io(self._write_job, job)
+        job.monitor_task = asyncio.create_task(
+            self._monitor(job),
+            name=f"backtest-monitor-{job.id}",
+        )
 
     async def status(self, job_id: str) -> dict[str, Any]:
         job = self._get_job(job_id)
         await self._promote_running(job)
         return self._payload(job)
+
+    async def jobs(self, script_path: str | None = None) -> list[dict[str, Any]]:
+        normalized = (
+            self._normalize_relative_path(script_path, suffix=".py")
+            if script_path
+            else None
+        )
+        jobs = sorted(
+            (
+                job
+                for job in self._jobs.values()
+                if normalized is None or job.script_path == normalized
+            ),
+            key=lambda item: item.created_at,
+            reverse=True,
+        )
+        for job in jobs:
+            await self._promote_running(job)
+        return [self._payload(job) for job in jobs]
 
     async def latest(self, script_path: str | None = None) -> dict[str, Any] | None:
         normalized = (
@@ -271,10 +376,17 @@ class ScriptingBacktestManager:
             job = self._get_job(job_id)
             if job.status in _TERMINAL_STATUSES:
                 return self._payload(job)
+            if job.status == "queued":
+                job.stop_requested = True
+                job.status = "cancelled"
+                job.finished_at = int(time.time() * 1000)
+                await self.run_io(self._write_job, job)
+                return self._payload(job)
             job.stop_requested = True
             job.status = "stopping"
             await self.run_io(self._write_job, job)
             await self._terminate_job(job)
+            await self._fill_backtest_slots_locked()
             return self._payload(job)
 
     async def delete_results(self, script_path: str) -> dict[str, Any]:
@@ -479,6 +591,12 @@ class ScriptingBacktestManager:
             for job in list(self._jobs.values()):
                 if job.status not in _ACTIVE_STATUSES:
                     continue
+                if job.status == "queued":
+                    job.status = "interrupted"
+                    job.finished_at = int(time.time() * 1000)
+                    job.error = "data service stopped before the backtest started"
+                    await self.run_io(self._write_job, job)
+                    continue
                 job.stop_requested = True
                 job.status = "stopping"
                 await self.run_io(self._write_job, job)
@@ -501,6 +619,10 @@ class ScriptingBacktestManager:
             job.status = "cancelled"
         elif exit_code == 0 and result.get("status") == "completed":
             job.status = "completed"
+            job.summary = await self.run_io(
+                read_strategy_summary,
+                self._job_dir(job.id) / "strategy.csv",
+            )
         else:
             job.status = "failed"
             job.error = str(
@@ -511,6 +633,10 @@ class ScriptingBacktestManager:
         job.actual_time_to = self._optional_int(result.get("actual_time_to"))
         job.process = None
         await self.run_io(self._write_job, job)
+        if not job.stop_requested:
+            async with self._lock:
+                if not self._closed:
+                    await self._fill_backtest_slots_locked()
 
     async def _promote_running(self, job: BacktestJob) -> None:
         if job.status != "preparing":
@@ -568,6 +694,236 @@ class ScriptingBacktestManager:
                 process.kill()
         except ProcessLookupError:
             pass
+
+    def _preflight_input_request(
+        self,
+        script_path: str,
+        base_revision: str,
+        data_path: str,
+    ) -> dict[str, str]:
+        script_file, normalized_script = self._resolve_under(
+            self.scripts_root,
+            script_path,
+            suffix=".py",
+        )
+        if not script_file.is_file():
+            raise ScriptingBacktestError(
+                "script file was not found",
+                code="script_not_found",
+                status_code=404,
+            )
+        revision = hashlib.sha256(script_file.read_bytes()).hexdigest()
+        if not isinstance(base_revision, str) or revision != base_revision:
+            raise ScriptingBacktestError(
+                "script changed after it was loaded",
+                code="revision_conflict",
+                status_code=409,
+            )
+        data_file, normalized_data = self._resolve_under(
+            self.data_root,
+            data_path,
+            suffix=".ohlcv",
+        )
+        if not data_file.is_file():
+            raise ScriptingBacktestError(
+                "OHLCV data file was not found",
+                code="data_not_found",
+                status_code=404,
+            )
+        if not data_file.with_suffix(".toml").is_file():
+            raise ScriptingBacktestError(
+                "symbol metadata file was not found",
+                code="symbol_metadata_not_found",
+            )
+        return {
+            "script_path": normalized_script,
+            "script_revision": revision,
+            "data_path": normalized_data,
+        }
+
+    def _inspect_input_metadata(
+        self,
+        script_path: str,
+        data_path: str,
+    ) -> list[dict[str, Any]]:
+        work_dir = self.output_root / f".input-inspect-{uuid.uuid4().hex[:12]}"
+        work_dir.mkdir(parents=True, exist_ok=False)
+        result_path = work_dir / "result.json"
+        command = [
+            sys.executable,
+            "-u",
+            str(Path(__file__).with_name("backtest_input_worker.py")),
+            "--repo-root",
+            str(self.repo_root),
+            "--script-path",
+            script_path,
+            "--data-path",
+            data_path,
+            "--result-path",
+            str(result_path),
+        ]
+        try:
+            try:
+                process = subprocess.run(
+                    command,
+                    cwd=self.repo_root,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise ScriptingBacktestError(
+                    "script inputs could not be read before the timeout",
+                    code="input_inspection_timeout",
+                    status_code=500,
+                ) from exc
+            result = self._read_json_file(result_path)
+            if process.returncode != 0 or result.get("error"):
+                detail = str(result.get("error") or process.stdout or "unknown error")
+                raise ScriptingBacktestError(
+                    f"script inputs could not be read: {detail[:1000]}",
+                    code="input_inspection_failed",
+                    status_code=500,
+                )
+            raw_inputs = result.get("inputs")
+            if not isinstance(raw_inputs, list):
+                raise ScriptingBacktestError(
+                    "script input metadata is invalid",
+                    code="input_metadata_invalid",
+                    status_code=500,
+                )
+            return [item for item in raw_inputs if isinstance(item, dict)]
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+    def _expand_input_variants(
+        self,
+        metadata: list[dict[str, Any]],
+        requested: dict[str, list[Any]] | None,
+    ) -> list[dict[str, Any]]:
+        if requested is not None and not isinstance(requested, dict):
+            raise ScriptingBacktestError(
+                "input_values must be an object of value lists",
+                code="invalid_input_values",
+            )
+        requested = requested or {}
+        descriptors = {
+            str(item.get("id")): item
+            for item in metadata
+            if isinstance(item.get("id"), str) and item.get("id")
+        }
+        unknown = sorted(set(requested) - set(descriptors))
+        if unknown:
+            raise ScriptingBacktestError(
+                f"unknown script input: {unknown[0]}",
+                code="unknown_input",
+            )
+
+        names: list[str] = []
+        value_sets: list[list[Any]] = []
+        variant_count = 1
+        for name, descriptor in descriptors.items():
+            raw_values = requested.get(name, [descriptor.get("value")])
+            if not isinstance(raw_values, list) or not raw_values:
+                raise ScriptingBacktestError(
+                    f"{name} must have at least one value",
+                    code="invalid_input_values",
+                )
+            values: list[Any] = []
+            seen: set[str] = set()
+            for raw_value in raw_values:
+                value = self._validate_input_value(descriptor, raw_value)
+                marker = json.dumps(value, sort_keys=True, ensure_ascii=False)
+                if marker in seen:
+                    continue
+                seen.add(marker)
+                values.append(value)
+            names.append(name)
+            value_sets.append(values)
+            variant_count *= len(values)
+            if variant_count > _MAX_BACKTEST_VARIANTS:
+                raise ScriptingBacktestError(
+                    f"input combinations exceed the {_MAX_BACKTEST_VARIANTS} run limit",
+                    code="too_many_variants",
+                )
+
+        if not names:
+            return [{}]
+        return [
+            dict(zip(names, values, strict=True))
+            for values in itertools.product(*value_sets)
+        ]
+
+    @staticmethod
+    def _validate_input_value(descriptor: dict[str, Any], value: Any) -> Any:
+        name = str(descriptor.get("id") or "input")
+        input_type = str(descriptor.get("input_type") or "").lower()
+        if input_type == "bool":
+            if not isinstance(value, bool):
+                raise ScriptingBacktestError(f"{name} must be true or false", code="invalid_input_value")
+            normalized = value
+        elif input_type == "int":
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ScriptingBacktestError(f"{name} must be an integer", code="invalid_input_value")
+            normalized = value
+        elif input_type == "float":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ScriptingBacktestError(f"{name} must be a number", code="invalid_input_value")
+            normalized = float(value)
+            if not math.isfinite(normalized):
+                raise ScriptingBacktestError(
+                    f"{name} must be a finite number",
+                    code="invalid_input_value",
+                )
+        elif input_type in {"string", "source", "color", "enum"}:
+            if not isinstance(value, str):
+                raise ScriptingBacktestError(f"{name} must be text", code="invalid_input_value")
+            normalized = value
+        else:
+            if not isinstance(value, (bool, int, float, str)):
+                raise ScriptingBacktestError(
+                    f"{name} has an unsupported value",
+                    code="invalid_input_value",
+                )
+            normalized = value
+
+        options = descriptor.get("options")
+        if isinstance(options, list) and options and normalized not in options:
+            raise ScriptingBacktestError(
+                f"{name} must be one of its declared options",
+                code="invalid_input_value",
+            )
+        if isinstance(normalized, (int, float)) and not isinstance(normalized, bool):
+            minimum = descriptor.get("minval")
+            maximum = descriptor.get("maxval")
+            if isinstance(minimum, (int, float)) and normalized < minimum:
+                raise ScriptingBacktestError(
+                    f"{name} must be at least {minimum}",
+                    code="invalid_input_value",
+                )
+            if isinstance(maximum, (int, float)) and normalized > maximum:
+                raise ScriptingBacktestError(
+                    f"{name} must be at most {maximum}",
+                    code="invalid_input_value",
+                )
+        return normalized
+
+    @staticmethod
+    def _run_key(preflight: dict[str, Any], inputs: dict[str, Any]) -> str:
+        payload = {
+            "script_path": preflight["script_path"],
+            "script_revision": preflight["script_revision"],
+            "data_path": preflight["data_path"],
+            "time_from": preflight["time_from"],
+            "time_to": preflight["time_to"],
+            "inputs": inputs,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
 
     def _preflight(
         self,
@@ -1041,8 +1397,10 @@ class ScriptingBacktestManager:
         for metadata_path in self.output_root.glob("*/job.json"):
             try:
                 data = json.loads(metadata_path.read_text(encoding="utf-8"))
+                inputs = data.get("inputs") if isinstance(data.get("inputs"), dict) else {}
                 job = BacktestJob(
                     id=str(data["id"]),
+                    run_key=str(data.get("run_key") or ""),
                     script_path=str(data["script_path"]),
                     script_revision=str(data["script_revision"]),
                     data_path=str(data["data_path"]),
@@ -1050,6 +1408,7 @@ class ScriptingBacktestManager:
                     time_to=int(data["time_to"]),
                     status=str(data["status"]),
                     created_at=int(data["created_at"]),
+                    inputs=inputs,
                     started_at=self._optional_int(data.get("started_at")),
                     finished_at=self._optional_int(data.get("finished_at")),
                     pid=self._optional_int(data.get("pid")),
@@ -1057,11 +1416,28 @@ class ScriptingBacktestManager:
                     error=data.get("error"),
                     actual_time_from=self._optional_int(data.get("actual_time_from")),
                     actual_time_to=self._optional_int(data.get("actual_time_to")),
+                    summary=data.get("summary") if isinstance(data.get("summary"), dict) else None,
                 )
+                if not job.run_key:
+                    job.run_key = self._run_key(
+                        {
+                            "script_path": job.script_path,
+                            "script_revision": job.script_revision,
+                            "data_path": job.data_path,
+                            "time_from": job.time_from,
+                            "time_to": job.time_to,
+                        },
+                        job.inputs,
+                    )
                 if job.status in _ACTIVE_STATUSES:
                     job.status = "interrupted"
                     job.finished_at = int(time.time() * 1000)
                     job.error = "data service stopped before the backtest finished"
+                    self._write_job(job)
+                elif job.status == "completed" and job.summary is None:
+                    job.summary = read_strategy_summary(
+                        metadata_path.parent / "strategy.csv"
+                    )
                     self._write_job(job)
                 self._jobs[job.id] = job
             except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
@@ -1124,10 +1500,34 @@ class ScriptingBacktestManager:
             "eof": next_offset >= size,
         }
 
-    def _active_job(self) -> BacktestJob | None:
+    def _active_job(self, script_path: str | None = None) -> BacktestJob | None:
         return next(
-            (job for job in self._jobs.values() if job.status in _ACTIVE_STATUSES),
+            (
+                job
+                for job in self._jobs.values()
+                if job.status in _ACTIVE_STATUSES
+                and (script_path is None or job.script_path == script_path)
+            ),
             None,
+        )
+
+    def _active_job_by_run_key(self, run_key: str) -> BacktestJob | None:
+        return next(
+            (
+                job
+                for job in self._jobs.values()
+                if job.status in _ACTIVE_STATUSES and job.run_key == run_key
+            ),
+            None,
+        )
+
+    def _active_process_count(self) -> int:
+        return sum(
+            1
+            for job in self._jobs.values()
+            if job.status in {"preparing", "running", "stopping"}
+            and job.process is not None
+            and job.process.returncode is None
         )
 
     def _get_job(self, job_id: str) -> BacktestJob:
@@ -1144,6 +1544,7 @@ class ScriptingBacktestManager:
         job_dir = self._job_dir(job.id)
         return {
             "id": job.id,
+            "run_key": job.run_key,
             "script_path": job.script_path,
             "script_revision": job.script_revision,
             "data_path": job.data_path,
@@ -1152,18 +1553,31 @@ class ScriptingBacktestManager:
             "actual_time_from": job.actual_time_from,
             "actual_time_to": job.actual_time_to,
             "status": job.status,
+            "inputs": job.inputs,
+            "queue_position": self._queue_position(job),
             "created_at": job.created_at,
             "started_at": job.started_at,
             "finished_at": job.finished_at,
             "pid": job.pid,
             "exit_code": job.exit_code,
             "error": job.error,
+            "summary": job.summary,
             "artifacts": {
                 "plot": (job_dir / "plot.csv").is_file(),
                 "strategy": (job_dir / "strategy.csv").is_file(),
                 "trades": (job_dir / "trades.csv").is_file(),
             },
         }
+
+    def _queue_position(self, job: BacktestJob) -> int | None:
+        if job.status != "queued":
+            return None
+        queued = [item for item in self._jobs.values() if item.status == "queued"]
+        queued.sort(key=lambda item: item.created_at)
+        try:
+            return queued.index(job) + 1
+        except ValueError:
+            return None
 
     def _job_dir(self, job_id: str) -> Path:
         return self.output_root / job_id

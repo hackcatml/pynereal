@@ -14,6 +14,8 @@ _STATIC_FILES = {
     "state.js": "text/javascript",
     "editor.js": "text/javascript",
     "scripting.js": "text/javascript",
+    "scripting_ai.js": "text/javascript",
+    "scripting_ai.css": "text/css",
     "scripting_backtest.js": "text/javascript",
     "scripting_backtest.css": "text/css",
     "ui.js": "text/javascript",

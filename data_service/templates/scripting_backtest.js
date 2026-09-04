@@ -1,4 +1,5 @@
 (function () {
+  function createBacktestInstance(root, instanceOptions = {}) {
   let initialized = false;
   let api = null;
   let mobileQuery = null;
@@ -10,6 +11,13 @@
   let dateValues = { from: "", to: "" };
   let calendarMonths = { from: null, to: null };
   let job = null;
+  let jobs = [];
+  let jobsRefreshTimer = null;
+  let inputMetadata = [];
+  let inputDataPath = "";
+  let inputsExpanded = false;
+  let maxConcurrentBacktests = 10;
+  let maxInputVariants = 1000;
   let socket = null;
   let reconnectTimer = null;
   let logText = "";
@@ -18,15 +26,30 @@
   let findMatches = [];
   let findIndex = -1;
   let requestSequence = 0;
+  let inputRequestSequence = 0;
   let actionBusy = false;
   let dataBusy = false;
   let dataDeleteBusy = false;
   let pendingDataDeletePath = "";
+  let summaryOpen = false;
+  let summaryPagerSyncing = false;
+  let summaryPagerSyncTimer = null;
+  let summaryPagerSettleTimer = null;
   let closeTimer = null;
   let openTimer = null;
   let sheetDrag = null;
+  let desktopDrag = null;
+  let desktopResize = null;
+  let contextSequence = 0;
 
   const terminalStatuses = new Set(["completed", "failed", "cancelled", "interrupted"]);
+  const desktopGeometryKey = `pynereal.scripting.backtest.geometry.v1.${encodeURIComponent(
+    String(instanceOptions.instanceKey || "default"),
+  )}`;
+  const desktopWindowMargin = 10;
+  const desktopWindowOffset = Math.max(0, Number(instanceOptions.desktopOffset) || 0);
+  const desktopDefaultWidth = 860;
+  const desktopDefaultHeight = 720;
   const dataExchangeLabels = {
     binance: "Binance",
     bitget: "Bitget",
@@ -34,10 +57,22 @@
     okx: "OKX",
     hyperliquid: "Hyperliquid",
   };
-  const el = (id) => document.getElementById(id);
+  const el = (id) => (
+    root === document
+      ? document.getElementById(id)
+      : root.querySelector(`[data-backtest-element="${id}"]`)
+  );
+
+  function activate() {
+    if (typeof instanceOptions.activate === "function") instanceOptions.activate();
+  }
 
   function isOpen() {
     return !el("scripting-backtest-modal").classList.contains("hidden");
+  }
+
+  function isMobile() {
+    return Boolean(instanceOptions.mobile);
   }
 
   function escapeHtml(value) {
@@ -115,6 +150,23 @@
     return !el("scripting-backtest-data-delete-modal").classList.contains("hidden");
   }
 
+  function isClearConfirmationOpen() {
+    return !el("scripting-backtest-clear-popover").classList.contains("hidden");
+  }
+
+  function setClearConfirmationOpen(open) {
+    const button = el("scripting-backtest-delete");
+    const canOpen = Boolean(
+      open
+      && jobs.length
+      && jobs.every((item) => terminalStatuses.has(String(item.status || "")))
+      && !actionBusy
+      && !dataBusy
+    );
+    el("scripting-backtest-clear-popover").classList.toggle("hidden", !canOpen);
+    button.setAttribute("aria-expanded", canOpen ? "true" : "false");
+  }
+
   function defaultDataHistorySince() {
     const date = new Date();
     date.setUTCMonth(date.getUTCMonth() - 2);
@@ -130,6 +182,7 @@
   function setStatus(status = "ready", summary = "") {
     const node = el("scripting-backtest-status");
     const labels = {
+      queued: "Queued",
       preparing: "Preparing",
       running: "Running",
       stopping: "Stopping",
@@ -148,6 +201,9 @@
   function statusSummary(value) {
     if (!value) return "";
     if (value.error) return value.error;
+    if (value.status === "queued") {
+      return value.queue_position ? `Queue ${value.queue_position}` : "Waiting for a worker";
+    }
     if (value.status === "completed") return "";
     if (value.actual_time_from && value.actual_time_to) {
       const start = utcDate(value.actual_time_from).toISOString().replace(".000Z", "Z");
@@ -157,13 +213,189 @@
     return value.data_path || "";
   }
 
+  function summaryNumber(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function formatSummaryNumber(value, maximumFractionDigits = 2) {
+    const number = summaryNumber(value);
+    if (number === null) return "-";
+    return new Intl.NumberFormat("en-US", {
+      minimumFractionDigits: 0,
+      maximumFractionDigits,
+    }).format(number);
+  }
+
+  function formatSummaryAmount(value, currency) {
+    const formatted = formatSummaryNumber(value, 2);
+    return formatted === "-" ? formatted : `${formatted} ${currency}`.trim();
+  }
+
+  function formatSummaryPercent(value) {
+    const number = summaryNumber(value);
+    if (number === null) return "";
+    const digits = number !== 0 && Math.abs(number) < 0.01 ? 4 : 2;
+    return `${formatSummaryNumber(number, digits)}%`;
+  }
+
+  function summaryTone(value) {
+    const number = summaryNumber(value);
+    if (number === null || number === 0) return "";
+    return number > 0 ? "positive" : "negative";
+  }
+
+  function summaryMetric(label, value, detail = "", tone = "") {
+    return `<div class="scripting-backtest-summary-metric"><dt>${escapeHtml(label)}</dt>`
+      + `<dd${tone ? ` class="${tone}"` : ""}>${escapeHtml(value)}</dd>`
+      + `${detail ? `<small>${escapeHtml(detail)}</small>` : ""}</div>`;
+  }
+
+  function summaryMarkup(value, showInputLabel = false) {
+    const summary = value && value.summary;
+    if (!summary) return '<div class="scripting-backtest-summary-empty">Summary is unavailable.</div>';
+    const currency = String(summary.currency || "");
+    const netProfit = summaryNumber(summary.net_profit);
+    const drawdown = summaryNumber(summary.max_drawdown);
+    const profitFactor = summaryNumber(summary.profit_factor);
+    const inputLabel = showInputLabel ? jobLabel(value) : "";
+    return '<div class="scripting-backtest-summary-title">Performance'
+      + `${inputLabel ? `<span title="${escapeHtml(inputLabel)}">${escapeHtml(inputLabel)}</span>` : ""}</div>`
+      + '<dl class="scripting-backtest-summary-grid">'
+      + summaryMetric(
+        "Net profit",
+        formatSummaryAmount(netProfit, currency),
+        formatSummaryPercent(summary.net_profit_percent),
+        summaryTone(netProfit),
+      )
+      + summaryMetric(
+        "Max drawdown",
+        formatSummaryAmount(drawdown, currency),
+        formatSummaryPercent(summary.max_drawdown_percent),
+        drawdown && drawdown > 0 ? "negative" : "",
+      )
+      + summaryMetric(
+        "Total trades",
+        formatSummaryNumber(summary.total_trades, 0),
+        summary.open_trades ? `${formatSummaryNumber(summary.open_trades, 0)} open` : "",
+      )
+      + summaryMetric("Win rate", formatSummaryPercent(summary.win_rate) || "-")
+      + summaryMetric(
+        "Profit factor",
+        formatSummaryNumber(profitFactor, 2),
+        "",
+        profitFactor === null || profitFactor === 1 ? "" : summaryTone(profitFactor - 1),
+      )
+      + summaryMetric(
+        "Commission",
+        formatSummaryAmount(summary.commission, currency),
+        "",
+        summaryNumber(summary.commission) > 0 ? "negative" : "",
+      )
+      + summaryMetric(
+        "Buy & hold return",
+        formatSummaryAmount(summary.buy_hold_return, currency),
+        formatSummaryPercent(summary.buy_hold_return_percent),
+        summaryTone(summary.buy_hold_return),
+      )
+      + summaryMetric(
+        "Sharpe ratio",
+        formatSummaryNumber(summary.sharpe_ratio, 2),
+        "",
+        summaryTone(summary.sharpe_ratio),
+      )
+      + '</dl>';
+  }
+
+  function summaryJobs() {
+    const values = jobs.filter((value) => value && value.summary);
+    if (job && job.summary && !values.some((value) => value.id === job.id)) values.unshift(job);
+    return values;
+  }
+
+  function clearSummaryPagerTimers() {
+    if (summaryPagerSyncTimer !== null) clearTimeout(summaryPagerSyncTimer);
+    if (summaryPagerSettleTimer !== null) clearTimeout(summaryPagerSettleTimer);
+    summaryPagerSyncTimer = null;
+    summaryPagerSettleTimer = null;
+    summaryPagerSyncing = false;
+  }
+
+  function syncSummaryPagerToJob(smooth = false) {
+    const panel = el("scripting-backtest-summary-panel");
+    if (!isMobile() || !summaryOpen || !job || !panel.classList.contains("summary-pager")) return;
+    const page = panel.querySelector(
+      `[data-backtest-summary-job-id="${CSS.escape(String(job.id))}"]`,
+    );
+    if (!page) return;
+    const left = page.offsetLeft;
+    if (Math.abs(panel.scrollLeft - left) < 2) return;
+    summaryPagerSyncing = true;
+    panel.scrollTo({ left, behavior: smooth ? "smooth" : "auto" });
+    if (summaryPagerSyncTimer !== null) clearTimeout(summaryPagerSyncTimer);
+    summaryPagerSyncTimer = window.setTimeout(() => {
+      summaryPagerSyncTimer = null;
+      summaryPagerSyncing = false;
+    }, smooth ? 450 : 60);
+  }
+
+  function renderSummary() {
+    const panel = el("scripting-backtest-summary-panel");
+    const summary = job && job.summary;
+    if (!summary) {
+      clearSummaryPagerTimers();
+      panel.classList.remove("summary-pager");
+      delete panel.dataset.summarySignature;
+      panel.innerHTML = '<div class="scripting-backtest-summary-empty">Summary is available after a completed backtest.</div>';
+      return;
+    }
+    const values = summaryJobs();
+    if (isMobile() && values.length > 1) {
+      const signature = JSON.stringify(values.map((value) => [value.id, value.summary]));
+      panel.classList.add("summary-pager");
+      if (panel.dataset.summarySignature !== signature) {
+        clearSummaryPagerTimers();
+        panel.dataset.summarySignature = signature;
+        panel.innerHTML = values.map((value) => (
+          `<section class="scripting-backtest-summary-page" data-backtest-summary-job-id="${escapeHtml(value.id)}">`
+          + summaryMarkup(value, true)
+          + '</section>'
+        )).join("");
+      }
+      window.requestAnimationFrame(() => syncSummaryPagerToJob(false));
+      return;
+    }
+    clearSummaryPagerTimers();
+    panel.classList.remove("summary-pager");
+    delete panel.dataset.summarySignature;
+    panel.innerHTML = `<div class="scripting-backtest-summary-page">${summaryMarkup(job)}</div>`;
+  }
+
+  function setSummaryOpen(open) {
+    const available = Boolean(job && job.summary);
+    summaryOpen = Boolean(open && available);
+    const button = el("scripting-backtest-summary-toggle");
+    button.classList.toggle("active", summaryOpen);
+    button.setAttribute("aria-pressed", String(summaryOpen));
+    button.setAttribute("aria-label", summaryOpen ? "Show log" : "Show summary");
+    button.dataset.tooltip = summaryOpen ? "Log" : "Summary";
+    el("scripting-backtest-summary-panel").classList.toggle("hidden", !summaryOpen);
+    el("scripting-backtest-log").classList.toggle("hidden", summaryOpen);
+    if (summaryOpen) setFindOpen(false);
+    el("scripting-backtest-find-toggle").disabled = summaryOpen || !logText;
+    if (summaryOpen) window.requestAnimationFrame(() => syncSummaryPagerToJob(false));
+    window.requestAnimationFrame(updateLogJumpButton);
+  }
+
   function isActiveJob(value = job) {
-    return Boolean(value && ["preparing", "running", "stopping"].includes(value.status));
+    return Boolean(value && ["queued", "preparing", "running", "stopping"].includes(value.status));
   }
 
   function updateActionState() {
     const button = el("scripting-backtest-run");
     const active = isActiveJob();
+    const anyActive = jobs.some((item) => isActiveJob(item));
     const runnable = Boolean(
       context
       && context.path
@@ -173,25 +405,32 @@
       && ["strategy", "indicator"].includes(context.validation.script_kind)
       && context.validation.runnable,
     );
-    button.disabled = actionBusy || (!active && (!runnable || !selectedDataPath || !validRange(false)));
-    button.classList.toggle("btn-primary", !active);
-    button.classList.toggle("btn-danger-primary", active);
-    const actionLabel = active ? "Stop" : "Run";
-    button.dataset.tooltip = actionLabel;
-    button.setAttribute("aria-label", actionLabel);
-    button.querySelector("svg").innerHTML = active
-      ? '<rect x="3" y="3" width="18" height="18" rx="2"></rect>'
-      : '<polygon points="6 3 20 12 6 21 6 3"></polygon>';
-    el("scripting-backtest-data-button").disabled = actionBusy || dataBusy || active || dataRows.length === 0;
-    el("scripting-backtest-data-manage").disabled = actionBusy || dataBusy || active;
+    const inputState = collectInputValues(false);
+    button.disabled = actionBusy || dataBusy || !runnable || !selectedDataPath
+      || inputDataPath !== selectedDataPath || !validRange(false) || !inputState.ok;
+    const stopButton = el("scripting-backtest-stop");
+    stopButton.classList.toggle("hidden", !active);
+    stopButton.disabled = actionBusy || dataBusy || !active || job.status === "stopping";
+    el("scripting-backtest-data-button").disabled = actionBusy || dataBusy || dataRows.length === 0;
+    el("scripting-backtest-data-manage").disabled = actionBusy || dataBusy || anyActive;
     ["from-date", "to-date", "from-time", "to-time"].forEach((name) => {
-      el(`scripting-backtest-${name}`).disabled = actionBusy || dataBusy || active || dataRows.length === 0;
+      el(`scripting-backtest-${name}`).disabled = actionBusy || dataBusy || dataRows.length === 0;
     });
-    el("scripting-backtest-find-toggle").disabled = !logText;
+    el("scripting-backtest-inputs").querySelectorAll("input, button").forEach((control) => {
+      control.disabled = actionBusy || dataBusy;
+    });
+    el("scripting-backtest-inputs-reset").disabled = actionBusy || dataBusy || !inputMetadata.length;
+    el("scripting-backtest-find-toggle").disabled = summaryOpen || !logText;
+    const summaryButton = el("scripting-backtest-summary-toggle");
+    summaryButton.disabled = !job || !job.summary;
+    if (summaryButton.disabled && summaryOpen) setSummaryOpen(false);
     const deleteButton = el("scripting-backtest-delete");
-    const canDelete = Boolean(job && terminalStatuses.has(String(job.status || "")));
-    deleteButton.classList.toggle("hidden", !canDelete);
-    deleteButton.disabled = actionBusy || dataBusy || active || !canDelete;
+    const canDelete = Boolean(
+      jobs.length && jobs.every((item) => terminalStatuses.has(String(item.status || ""))),
+    );
+    deleteButton.closest(".scripting-backtest-clear-wrap").classList.toggle("hidden", !canDelete);
+    deleteButton.disabled = actionBusy || dataBusy || anyActive || !canDelete;
+    if (deleteButton.disabled) setClearConfirmationOpen(false);
   }
 
   function setDateValue(which, value) {
@@ -256,6 +495,238 @@
     }
     if (showError) setError(message);
     return !message;
+  }
+
+  function inputOptionValues(descriptor) {
+    if (String(descriptor.input_type || "").toLowerCase() === "bool") return [false, true];
+    return Array.isArray(descriptor.options) && descriptor.options.length
+      ? descriptor.options
+      : null;
+  }
+
+  function inputValueLabel(value) {
+    if (value === true) return "On";
+    if (value === false) return "Off";
+    return String(value ?? "");
+  }
+
+  function inputDetail(descriptor) {
+    const details = [String(descriptor.id || "")];
+    if (descriptor.minval !== null && descriptor.minval !== undefined) {
+      details.push(`min ${descriptor.minval}`);
+    }
+    if (descriptor.maxval !== null && descriptor.maxval !== undefined) {
+      details.push(`max ${descriptor.maxval}`);
+    }
+    if (descriptor.step !== null && descriptor.step !== undefined) {
+      details.push(`step ${descriptor.step}`);
+    }
+    return details.join(" · ");
+  }
+
+  function inputPlaceholder(descriptor) {
+    const type = String(descriptor.input_type || "").toLowerCase();
+    if (type === "int") return "e.g. 10, 20, 30";
+    if (type === "float") return "e.g. 0.5, 1.0, 1.5";
+    if (type === "source") return "e.g. close, open";
+    if (type === "color") return "e.g. #2962ff, #f23645";
+    if (type === "string" || type === "enum") return "e.g. fast, slow";
+    return "Comma-separated values";
+  }
+
+  function setInputsExpanded(expanded) {
+    inputsExpanded = Boolean(expanded && inputMetadata.length);
+    const section = el("scripting-backtest-inputs-section");
+    const container = el("scripting-backtest-inputs");
+    section.classList.toggle("inputs-collapsed", !inputsExpanded);
+    container.inert = !inputsExpanded;
+    container.setAttribute("aria-hidden", String(!inputsExpanded));
+    el("scripting-backtest-inputs-toggle").setAttribute("aria-expanded", String(inputsExpanded));
+  }
+
+  function renderInputs() {
+    const section = el("scripting-backtest-inputs-section");
+    const container = el("scripting-backtest-inputs");
+    section.classList.toggle("hidden", !inputMetadata.length);
+    container.innerHTML = "";
+    if (!inputMetadata.length) {
+      setInputsExpanded(false);
+      updateCombinationCount();
+      return;
+    }
+
+    let previousGroup = null;
+    inputMetadata.forEach((descriptor) => {
+      const group = String(descriptor.group || "");
+      if (group && group !== previousGroup) {
+        const groupTitle = document.createElement("div");
+        groupTitle.className = "scripting-backtest-input-group-title";
+        groupTitle.textContent = group;
+        container.appendChild(groupTitle);
+      }
+      previousGroup = group;
+
+      const row = document.createElement("div");
+      row.className = "scripting-backtest-input-row";
+      row.dataset.inputId = String(descriptor.id || "");
+      const label = document.createElement("label");
+      label.className = "scripting-backtest-input-label";
+      label.textContent = String(descriptor.title || descriptor.id || "Input");
+      if (descriptor.tooltip) label.title = String(descriptor.tooltip);
+      const detail = document.createElement("small");
+      detail.textContent = inputDetail(descriptor);
+      label.appendChild(detail);
+      row.appendChild(label);
+
+      const options = inputOptionValues(descriptor);
+      if (options) {
+        const optionList = document.createElement("div");
+        optionList.className = "scripting-backtest-input-options";
+        options.forEach((value) => {
+          const button = document.createElement("button");
+          button.className = "scripting-backtest-input-option";
+          button.type = "button";
+          button.dataset.inputValue = JSON.stringify(value);
+          button.textContent = inputValueLabel(value);
+          button.classList.toggle("selected", value === descriptor.value);
+          button.setAttribute("aria-pressed", String(value === descriptor.value));
+          optionList.appendChild(button);
+        });
+        row.appendChild(optionList);
+      } else {
+        const input = document.createElement("input");
+        input.className = "scripting-backtest-input-values";
+        input.type = "text";
+        input.autocomplete = "off";
+        input.spellcheck = false;
+        input.value = inputValueLabel(descriptor.value);
+        input.placeholder = inputPlaceholder(descriptor);
+        input.setAttribute("aria-label", `${descriptor.title || descriptor.id} values`);
+        label.htmlFor = `scripting-backtest-input-${descriptor.id}`;
+        input.id = `scripting-backtest-input-${descriptor.id}`;
+        row.appendChild(input);
+      }
+      container.appendChild(row);
+    });
+    applyJobInputsToControls(job && job.inputs);
+    setInputsExpanded(inputsExpanded);
+    updateCombinationCount();
+  }
+
+  function setInputControlValues(values) {
+    if (!values || typeof values !== "object") return;
+    inputMetadata.forEach((descriptor) => {
+      if (!Object.prototype.hasOwnProperty.call(values, descriptor.id)) return;
+      const row = el("scripting-backtest-inputs").querySelector(
+        `[data-input-id="${CSS.escape(String(descriptor.id))}"]`,
+      );
+      if (!row) return;
+      const selectedValues = Array.isArray(values[descriptor.id])
+        ? values[descriptor.id]
+        : [values[descriptor.id]];
+      const optionButtons = row.querySelectorAll("[data-input-value]");
+      if (optionButtons.length) {
+        optionButtons.forEach((button) => {
+          let value;
+          try { value = JSON.parse(button.dataset.inputValue); } catch { return; }
+          const selected = selectedValues.some((candidate) => candidate === value);
+          button.classList.toggle("selected", selected);
+          button.setAttribute("aria-pressed", String(selected));
+        });
+      } else {
+        const input = row.querySelector(".scripting-backtest-input-values");
+        if (input) input.value = selectedValues.map(inputValueLabel).join(", ");
+      }
+    });
+    updateCombinationCount();
+  }
+
+  function applyJobInputsToControls(values) {
+    if (!values || !inputMetadata.length) return;
+    setInputControlValues(values);
+  }
+
+  function resetInputControls() {
+    const values = Object.fromEntries(
+      inputMetadata.map((descriptor) => [descriptor.id, descriptor.value]),
+    );
+    setInputControlValues(values);
+  }
+
+  function parseInputToken(descriptor, token) {
+    const type = String(descriptor.input_type || "").toLowerCase();
+    if (type === "int") {
+      if (!/^[+-]?\d+$/.test(token)) throw new Error(`${descriptor.title || descriptor.id} requires integers.`);
+      return Number(token);
+    }
+    if (type === "float") {
+      const value = Number(token);
+      if (!Number.isFinite(value)) throw new Error(`${descriptor.title || descriptor.id} requires numbers.`);
+      return value;
+    }
+    return token;
+  }
+
+  function validateInputValue(descriptor, value) {
+    if (typeof value === "number") {
+      if (descriptor.minval !== null && descriptor.minval !== undefined && value < Number(descriptor.minval)) {
+        throw new Error(`${descriptor.title || descriptor.id} must be at least ${descriptor.minval}.`);
+      }
+      if (descriptor.maxval !== null && descriptor.maxval !== undefined && value > Number(descriptor.maxval)) {
+        throw new Error(`${descriptor.title || descriptor.id} must be at most ${descriptor.maxval}.`);
+      }
+    }
+    return value;
+  }
+
+  function collectInputValues(showError = true) {
+    const values = {};
+    let count = 1;
+    let message = "";
+    try {
+      inputMetadata.forEach((descriptor) => {
+        const row = el("scripting-backtest-inputs").querySelector(
+          `[data-input-id="${CSS.escape(String(descriptor.id))}"]`,
+        );
+        if (!row) throw new Error(`Input ${descriptor.id} is unavailable.`);
+        const optionButtons = Array.from(row.querySelectorAll("[data-input-value].selected"));
+        let selected;
+        if (row.querySelector("[data-input-value]")) {
+          selected = optionButtons.map((button) => JSON.parse(button.dataset.inputValue));
+        } else {
+          const raw = String(row.querySelector(".scripting-backtest-input-values")?.value || "");
+          const tokens = raw.split(",").map((value) => value.trim()).filter(Boolean);
+          selected = tokens.map((token) => parseInputToken(descriptor, token));
+        }
+        selected = selected.map((value) => validateInputValue(descriptor, value));
+        const unique = [];
+        const seen = new Set();
+        selected.forEach((value) => {
+          const marker = JSON.stringify(value);
+          if (seen.has(marker)) return;
+          seen.add(marker);
+          unique.push(value);
+        });
+        if (!unique.length) throw new Error(`${descriptor.title || descriptor.id} requires a value.`);
+        values[descriptor.id] = unique;
+        count *= unique.length;
+        if (count > maxInputVariants) {
+          throw new Error(`Input combinations exceed the ${maxInputVariants} run limit.`);
+        }
+      });
+    } catch (error) {
+      message = error.message || "Invalid input values.";
+    }
+    if (showError && message) setError(message);
+    return { ok: !message, values, count: message ? 0 : count, error: message };
+  }
+
+  function updateCombinationCount() {
+    const state = collectInputValues(false);
+    const node = el("scripting-backtest-combinations");
+    if (!inputMetadata.length) node.textContent = "";
+    else if (!state.ok) node.textContent = "Invalid values";
+    else node.textContent = `${state.count} run${state.count === 1 ? "" : "s"} · ${maxConcurrentBacktests} parallel`;
   }
 
   function closeCalendars(except = "") {
@@ -495,10 +966,19 @@
     return `${provider} · ${symbol}${timeframe}`;
   }
 
+  function renderSelectedDataFilename() {
+    const row = selectedData();
+    const filename = String(row && row.path || "").split(/[\\/]/).pop();
+    el("scripting-backtest-data-filename").textContent = filename;
+    el("scripting-backtest-data-filename-wrap").classList.toggle("has-value", Boolean(filename));
+  }
+
   function selectDataPath(path, rangeSource = "data") {
     const row = dataRows.find((item) => item.path === path);
     if (!row) return false;
+    const changed = selectedDataPath !== row.path;
     selectedDataPath = row.path;
+    renderSelectedDataFilename();
     const nodes = dataSelectNodes();
     nodes.label.textContent = dataOptionLabel(row);
     nodes.options.querySelectorAll(".script-select-option").forEach((node) => {
@@ -514,6 +994,8 @@
     });
     if (rangeSource === "job") setRangeFromJob(job, row);
     else if (rangeSource === "data") setRangeFromData(row);
+    if (changed || inputDataPath !== row.path) void loadInputs(row.path, contextSequence);
+    else if (rangeSource === "job") applyJobInputsToControls(job && job.inputs);
     updateActionState();
     return true;
   }
@@ -557,6 +1039,7 @@
       nodes.label.textContent = "No OHLCV data available";
       nodes.options.innerHTML = '<div class="script-select-empty">No OHLCV data available</div>';
       selectedDataPath = "";
+      renderSelectedDataFilename();
       updateActionState();
       return;
     }
@@ -620,7 +1103,7 @@
   }
 
   function openDataManager() {
-    if (actionBusy || dataBusy || isActiveJob()) return;
+    if (actionBusy || dataBusy || jobs.some((item) => isActiveJob(item))) return;
     closeCalendars();
     closeDataOptions();
     const selected = selectedData();
@@ -691,6 +1174,7 @@
   async function deleteBacktestData() {
     const path = pendingDataDeletePath;
     if (!path || dataDeleteBusy || actionBusy || dataBusy || isActiveJob()) return;
+    const sequence = contextSequence;
     closeDataOptions();
     setDataDeleteError();
     setDataDeleteBusy(true);
@@ -698,11 +1182,13 @@
       await api(`/api/scripting/backtest/data?data_path=${encodeURIComponent(path)}`, {
         method: "DELETE",
       });
+      if (sequence !== contextSequence || !isOpen()) return;
       const preferred = selectedDataPath === path ? "" : selectedDataPath;
       closeDataDelete(true);
-      await loadData(preferred);
+      await loadData(preferred, sequence);
       setError();
     } catch (error) {
+      if (sequence !== contextSequence || !isOpen()) return;
       setDataDeleteError(error.message || "OHLCV data could not be deleted.");
       setDataDeleteBusy(false);
     }
@@ -710,6 +1196,7 @@
 
   async function syncBacktestData(action) {
     if (dataBusy || actionBusy || isActiveJob()) return;
+    const sequence = contextSequence;
     if (action === "download") {
       setDataMessage();
       if (!el("scripting-backtest-data-timeframe").value.trim()) {
@@ -739,8 +1226,9 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+      if (sequence !== contextSequence || !isOpen()) return;
       setDataBusy(false);
-      await loadData(String(result.data_path || ""));
+      await loadData(String(result.data_path || ""), sequence);
       if (isDataManagerOpen()) {
         const selected = selectedData();
         el("scripting-backtest-data-current-path").textContent = selected ? selected.path : "None";
@@ -754,6 +1242,7 @@
       else setStatus("ready", String(result.message || "OHLCV data is ready."));
       setError();
     } catch (error) {
+      if (sequence !== contextSequence || !isOpen()) return;
       setDataMessage(error.message || "OHLCV data operation failed.", true);
       if (previousJob) setStatus(previousJob.status, statusSummary(previousJob));
       else setStatus("ready", `${dataRows.length} data source${dataRows.length === 1 ? "" : "s"}`);
@@ -764,7 +1253,7 @@
   function updateLogJumpButton() {
     const container = el("scripting-backtest-log");
     const button = el("scripting-backtest-log-jump");
-    const scrollable = Boolean(logText)
+    const scrollable = !summaryOpen && Boolean(logText)
       && container.scrollHeight > container.clientHeight + 2;
     button.classList.toggle("hidden", !scrollable);
     if (!scrollable) return;
@@ -856,16 +1345,108 @@
     renderLog({ focusMatch: true });
   }
 
-  function renderJob(value) {
+  function jobLabel(value) {
+    const entries = Object.entries(value && value.inputs || {});
+    if (!entries.length) return "Default";
+    const visible = entries.slice(0, 3).map(([name, inputValue]) => `${name}=${inputValueLabel(inputValue)}`);
+    if (entries.length > visible.length) visible.push(`+${entries.length - visible.length}`);
+    return visible.join(" · ");
+  }
+
+  function renderJobs() {
+    const container = el("scripting-backtest-jobs");
+    container.classList.toggle("hidden", jobs.length < 2);
+    container.innerHTML = jobs.map((value) => (
+      `<button type="button" class="scripting-backtest-job${job && job.id === value.id ? " selected" : ""}" `
+      + `data-backtest-job-id="${escapeHtml(value.id)}" data-status="${escapeHtml(value.status)}" `
+      + `role="option" aria-selected="${job && job.id === value.id ? "true" : "false"}" `
+      + `title="${escapeHtml(jobLabel(value))}">`
+      + '<span class="scripting-backtest-job-status" aria-hidden="true"></span>'
+      + `<span class="scripting-backtest-job-label">${escapeHtml(jobLabel(value))}</span></button>`
+    )).join("");
+  }
+
+  function mergeJob(value) {
+    if (!value || !value.id) return;
+    const index = jobs.findIndex((item) => item.id === value.id);
+    if (index >= 0) jobs[index] = value;
+    else jobs.unshift(value);
+    jobs.sort((left, right) => Number(right.created_at || 0) - Number(left.created_at || 0));
+  }
+
+  function renderJob(value, options = {}) {
     const previousJobId = job && job.id;
     job = value || null;
+    if (job) mergeJob(job);
     const status = job ? String(job.status || "ready") : "ready";
     setStatus(status, statusSummary(job));
     setError(job && job.status === "failed" ? job.error || "Backtest failed." : "");
+    if (!options.preserveSummaryPager) renderSummary();
+    if (summaryOpen && !(job && job.summary)) setSummaryOpen(false);
     if (job && job.data_path) {
       selectDataPath(job.data_path, previousJobId === job.id ? "none" : "job");
     }
+    if (job && previousJobId !== job.id) applyJobInputsToControls(job.inputs);
+    renderJobs();
+    scheduleJobsRefresh();
     updateActionState();
+  }
+
+  async function selectJob(jobId, sequence = contextSequence, options = {}) {
+    const selected = jobs.find((item) => item.id === jobId);
+    if (!selected || (job && job.id === selected.id)) return;
+    closeSocket();
+    logText = "";
+    logOffset = 0;
+    findMatches = [];
+    findIndex = -1;
+    renderLog({ follow: true });
+    renderJob(selected, options);
+    await connectJob(selected.id, true, sequence);
+  }
+
+  function handleSummaryPagerScroll() {
+    const panel = el("scripting-backtest-summary-panel");
+    if (
+      !isMobile()
+      || !summaryOpen
+      || summaryPagerSyncing
+      || !panel.classList.contains("summary-pager")
+    ) return;
+    if (summaryPagerSettleTimer !== null) clearTimeout(summaryPagerSettleTimer);
+    summaryPagerSettleTimer = window.setTimeout(() => {
+      summaryPagerSettleTimer = null;
+      const pages = Array.from(panel.querySelectorAll("[data-backtest-summary-job-id]"));
+      if (!pages.length) return;
+      const selected = pages.reduce((closest, page) => (
+        Math.abs(page.offsetLeft - panel.scrollLeft) < Math.abs(closest.offsetLeft - panel.scrollLeft)
+          ? page
+          : closest
+      ), pages[0]);
+      const jobId = String(selected.dataset.backtestSummaryJobId || "");
+      if (!jobId || (job && job.id === jobId)) return;
+      void selectJob(jobId, contextSequence, { preserveSummaryPager: true });
+    }, 90);
+  }
+
+  function clearJobsRefresh() {
+    if (jobsRefreshTimer !== null) {
+      clearTimeout(jobsRefreshTimer);
+      jobsRefreshTimer = null;
+    }
+  }
+
+  function scheduleJobsRefresh() {
+    if (!isOpen() || !jobs.some((item) => isActiveJob(item))) {
+      clearJobsRefresh();
+      return;
+    }
+    if (jobsRefreshTimer !== null) return;
+    const sequence = contextSequence;
+    jobsRefreshTimer = window.setTimeout(async () => {
+      jobsRefreshTimer = null;
+      await loadJobs(sequence, false);
+    }, 1000);
   }
 
   function closeSocket() {
@@ -881,7 +1462,7 @@
     }
   }
 
-  async function fillLog(jobId, reset = false) {
+  async function fillLog(jobId, reset = false, sequence = contextSequence) {
     if (reset) {
       logText = "";
       logOffset = 0;
@@ -893,6 +1474,7 @@
         `/api/scripting/backtests/${encodeURIComponent(jobId)}/log?offset=${logOffset}&max_bytes=131072`,
         { cache: "no-store" },
       );
+      if (sequence !== contextSequence || !isOpen()) return false;
       if (Number(payload.offset) !== logOffset && logOffset > 0) {
         logText = "";
       }
@@ -900,22 +1482,33 @@
       appendLog(payload.text);
       if (payload.eof) break;
     }
+    return true;
   }
 
-  async function connectJob(jobId, reset = false) {
+  async function connectJob(jobId, reset = false, sequence = contextSequence) {
     closeSocket();
     try {
-      await fillLog(jobId, reset);
+      const current = await fillLog(jobId, reset, sequence);
+      if (!current) return;
     } catch (error) {
-      if (isOpen()) setError(error.message || "Backtest log could not be loaded.");
+      if (sequence === contextSequence && isOpen()) {
+        setError(error.message || "Backtest log could not be loaded.");
+      }
     }
-    if (!isOpen() || !job || job.id !== jobId || terminalStatuses.has(job.status)) return;
+    if (
+      sequence !== contextSequence
+      || !isOpen()
+      || !job
+      || job.id !== jobId
+      || terminalStatuses.has(job.status)
+    ) return;
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(
       `${protocol}//${window.location.host}/ws/scripting/backtests/${encodeURIComponent(jobId)}?offset=${logOffset}`,
     );
     socket = ws;
     ws.onmessage = (event) => {
+      if (sequence !== contextSequence || socket !== ws) return;
       let payload;
       try { payload = JSON.parse(event.data); } catch { return; }
       if (payload.type !== "backtest_update" || !payload.job) return;
@@ -927,50 +1520,123 @@
     };
     ws.onclose = () => {
       if (socket === ws) socket = null;
-      if (!isOpen() || !job || job.id !== jobId || terminalStatuses.has(job.status)) return;
+      if (
+        sequence !== contextSequence
+        || !isOpen()
+        || !job
+        || job.id !== jobId
+        || terminalStatuses.has(job.status)
+      ) return;
       reconnectTimer = window.setTimeout(async () => {
         reconnectTimer = null;
         try {
           const status = await api(`/api/scripting/backtests/${encodeURIComponent(jobId)}`, { cache: "no-store" });
+          if (sequence !== contextSequence || !isOpen()) return;
           renderJob(status);
-          await connectJob(jobId);
+          await connectJob(jobId, false, sequence);
         } catch (error) {
-          if (isOpen()) setError(error.message || "Backtest status could not be refreshed.");
+          if (sequence === contextSequence && isOpen()) {
+            setError(error.message || "Backtest status could not be refreshed.");
+          }
         }
       }, 1000);
     };
   }
 
-  async function loadLatest() {
-    if (!context || !context.path) return;
+  async function loadJobs(sequence = contextSequence, connectSelected = true) {
+    const scriptPath = context && context.path;
+    if (!scriptPath) return;
     try {
       const payload = await api(
-        `/api/scripting/backtests/latest?script_path=${encodeURIComponent(context.path)}`,
+        `/api/scripting/backtests?script_path=${encodeURIComponent(scriptPath)}`,
         { cache: "no-store" },
       );
-      if (!isOpen() || !payload.job) return;
-      renderJob(payload.job);
-      await connectJob(payload.job.id, true);
+      if (
+        sequence !== contextSequence
+        || !isOpen()
+        || !context
+        || context.path !== scriptPath
+      ) return;
+      const selectedId = job && job.id;
+      jobs = Array.isArray(payload.jobs) ? payload.jobs : [];
+      const selected = jobs.find((item) => item.id === selectedId) || jobs[0] || null;
+      if (selected) {
+        const changed = !job || job.id !== selected.id;
+        renderJob(selected);
+        if (connectSelected && changed) await connectJob(selected.id, true, sequence);
+      } else {
+        job = null;
+        renderJobs();
+        updateActionState();
+      }
+      scheduleJobsRefresh();
     } catch (error) {
-      if (isOpen()) setError(error.message || "Previous backtest status could not be loaded.");
+      if (sequence === contextSequence && isOpen()) {
+        setError(error.message || "Backtest status could not be loaded.");
+      }
     }
   }
 
-  async function loadData(preferredPath = "") {
-    if (!context || !context.path) return;
+  async function loadInputs(dataPath = selectedDataPath, sequence = contextSequence) {
+    const scriptPath = context && context.path;
+    const revision = context && context.revision;
+    if (!scriptPath || !revision || !dataPath) return;
+    const request = ++inputRequestSequence;
+    try {
+      const query = new URLSearchParams({
+        script_path: scriptPath,
+        base_revision: revision,
+        data_path: dataPath,
+      });
+      const payload = await api(
+        `/api/scripting/backtest/inputs?${query.toString()}`,
+        { cache: "no-store" },
+      );
+      if (
+        sequence !== contextSequence
+        || request !== inputRequestSequence
+        || !isOpen()
+        || !context
+        || context.path !== scriptPath
+        || selectedDataPath !== dataPath
+      ) return;
+      inputMetadata = Array.isArray(payload.inputs) ? payload.inputs : [];
+      inputDataPath = dataPath;
+      maxConcurrentBacktests = Number(payload.max_concurrent) || 10;
+      maxInputVariants = Number(payload.max_variants) || 1000;
+      renderInputs();
+      updateActionState();
+    } catch (error) {
+      if (sequence !== contextSequence || request !== inputRequestSequence || !isOpen()) return;
+      inputMetadata = [];
+      inputDataPath = "";
+      renderInputs();
+      setError(error.message || "Script inputs could not be loaded.");
+    }
+  }
+
+  async function loadData(preferredPath = "", sequence = contextSequence) {
+    const scriptPath = context && context.path;
+    if (!scriptPath) return;
     const seq = ++requestSequence;
     setStatus("loading", "Reading OHLCV metadata");
     try {
       const payload = await api(
-        `/api/scripting/backtest/data?script_path=${encodeURIComponent(context.path)}`,
+        `/api/scripting/backtest/data?script_path=${encodeURIComponent(scriptPath)}`,
         { cache: "no-store" },
       );
-      if (seq !== requestSequence || !isOpen()) return;
+      if (
+        sequence !== contextSequence
+        || seq !== requestSequence
+        || !isOpen()
+        || !context
+        || context.path !== scriptPath
+      ) return;
       renderData(payload, preferredPath);
       if (!job) setStatus("ready", `${dataRows.length} data source${dataRows.length === 1 ? "" : "s"}`);
       if (!dataRows.length) setError("No OHLCV data with symbol metadata is available.");
     } catch (error) {
-      if (seq !== requestSequence || !isOpen()) return;
+      if (sequence !== contextSequence || seq !== requestSequence || !isOpen()) return;
       dataRows = [];
       selectedDataPath = "";
       renderData({ data: [] });
@@ -980,7 +1646,14 @@
   }
 
   async function deleteBacktestResults() {
-    if (!job || !terminalStatuses.has(String(job.status || "")) || actionBusy || dataBusy) return;
+    if (
+      !jobs.length
+      || jobs.some((item) => !terminalStatuses.has(String(item.status || "")))
+      || actionBusy
+      || dataBusy
+    ) return;
+    const sequence = contextSequence;
+    setClearConfirmationOpen(false);
     const previousJob = job;
     actionBusy = true;
     closeSocket();
@@ -989,7 +1662,12 @@
       await api(`/api/scripting/backtests?script_path=${encodeURIComponent(context.path)}`, {
         method: "DELETE",
       });
+      if (sequence !== contextSequence || !isOpen()) return;
       job = null;
+      jobs = [];
+      renderJobs();
+      setSummaryOpen(false);
+      renderSummary();
       logText = "";
       logOffset = 0;
       findQuery = "";
@@ -1001,35 +1679,32 @@
       setStatus("ready", `${dataRows.length} data source${dataRows.length === 1 ? "" : "s"}`);
       setError();
     } catch (error) {
+      if (sequence !== contextSequence || !isOpen()) return;
       job = previousJob;
       setStatus(previousJob.status, statusSummary(previousJob));
       setError(error.message || "Backtest results could not be deleted.");
     } finally {
-      actionBusy = false;
-      updateActionState();
+      if (sequence === contextSequence) {
+        actionBusy = false;
+        updateActionState();
+      }
     }
   }
 
-  async function runOrStop() {
+  async function runBacktests() {
     if (actionBusy || dataBusy) return;
+    const sequence = contextSequence;
+    setSummaryOpen(false);
     const previousJob = job;
     actionBusy = true;
     updateActionState();
     try {
-      if (isActiveJob()) {
-        setStatus("stopping", "Stopping worker");
-        const stopped = await api(
-          `/api/scripting/backtests/${encodeURIComponent(job.id)}/stop`,
-          { method: "POST" },
-        );
-        renderJob(stopped);
-        await fillLog(job.id);
-        return;
-      }
       if (context.dirty) throw new Error("Save before backtesting.");
       if (!validRange()) return;
+      const inputState = collectInputValues();
+      if (!inputState.ok) return;
       setError();
-      setStatus("preparing", "Starting worker");
+      setStatus("preparing", `Starting ${inputState.count} run${inputState.count === 1 ? "" : "s"}`);
       const started = await api("/api/scripting/backtests", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1039,11 +1714,23 @@
           data_path: selectedDataPath,
           time_from: rangeIso("from"),
           time_to: rangeIso("to"),
+          input_values: inputState.values,
         }),
       });
-      renderJob(started);
-      await connectJob(started.id, true);
+      if (sequence !== contextSequence || !isOpen()) return;
+      const startedJobs = Array.isArray(started.jobs) ? started.jobs : [];
+      if (!startedJobs.length) throw new Error("No backtest runs were started.");
+      maxConcurrentBacktests = Number(started.max_concurrent) || maxConcurrentBacktests;
+      const startedIds = new Set(startedJobs.map((value) => value.id));
+      jobs = [...startedJobs, ...jobs.filter((value) => !startedIds.has(value.id))];
+      closeSocket();
+      logText = "";
+      logOffset = 0;
+      renderLog({ follow: true });
+      renderJob(startedJobs[0]);
+      await connectJob(startedJobs[0].id, true, sequence);
     } catch (error) {
+      if (sequence !== contextSequence || !isOpen()) return;
       if (previousJob) setStatus(previousJob.status, statusSummary(previousJob));
       else setStatus("ready", `${dataRows.length} data source${dataRows.length === 1 ? "" : "s"}`);
       if (error && error.code === "revision_conflict") {
@@ -1051,12 +1738,235 @@
       }
       setError(error.message || "Backtest request failed.");
     } finally {
-      actionBusy = false;
-      updateActionState();
+      if (sequence === contextSequence) {
+        actionBusy = false;
+        updateActionState();
+      }
     }
   }
 
+  async function stopSelectedBacktest() {
+    if (!isActiveJob() || actionBusy || dataBusy) return;
+    const sequence = contextSequence;
+    actionBusy = true;
+    updateActionState();
+    try {
+      setStatus("stopping", "Stopping selected worker");
+      const stopped = await api(
+        `/api/scripting/backtests/${encodeURIComponent(job.id)}/stop`,
+        { method: "POST" },
+      );
+      if (sequence !== contextSequence || !isOpen()) return;
+      renderJob(stopped);
+      await fillLog(job.id, false, sequence);
+      await loadJobs(sequence, false);
+    } catch (error) {
+      if (sequence === contextSequence && isOpen()) {
+        setError(error.message || "Backtest could not be stopped.");
+      }
+    } finally {
+      if (sequence === contextSequence) {
+        actionBusy = false;
+        updateActionState();
+      }
+    }
+  }
+
+  function desktopGeometry() {
+    try {
+      const value = JSON.parse(localStorage.getItem(desktopGeometryKey) || "{}");
+      return value && typeof value === "object" ? value : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function saveDesktopGeometry() {
+    if (isMobile() || !isOpen()) return;
+    const box = el("scripting-backtest-modal").querySelector(".scripting-backtest-box");
+    const rect = box.getBoundingClientRect();
+    try {
+      localStorage.setItem(desktopGeometryKey, JSON.stringify({
+        left: Math.round(rect.left),
+        top: Math.round(rect.top),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      }));
+    } catch {}
+  }
+
+  function clampDesktopGeometry(left, top) {
+    const box = el("scripting-backtest-modal").querySelector(".scripting-backtest-box");
+    const rect = box.getBoundingClientRect();
+    return {
+      left: Math.min(
+        Math.max(left, desktopWindowMargin),
+        Math.max(desktopWindowMargin, window.innerWidth - rect.width - desktopWindowMargin),
+      ),
+      top: Math.min(
+        Math.max(top, desktopWindowMargin),
+        Math.max(desktopWindowMargin, window.innerHeight - rect.height - desktopWindowMargin),
+      ),
+    };
+  }
+
+  function applyDesktopGeometry() {
+    const box = el("scripting-backtest-modal").querySelector(".scripting-backtest-box");
+    const stored = desktopGeometry();
+    const maxWidth = Math.max(1, window.innerWidth - desktopWindowMargin * 2);
+    const maxHeight = Math.max(1, window.innerHeight - desktopWindowMargin * 2);
+    const minWidth = Math.min(desktopDefaultWidth, maxWidth) / 2;
+    const minHeight = Math.min(desktopDefaultHeight, maxHeight) / 2;
+    const requestedWidth = Number.isFinite(Number(stored.width))
+      ? Number(stored.width)
+      : Math.min(desktopDefaultWidth, maxWidth);
+    const requestedHeight = Number.isFinite(Number(stored.height))
+      ? Number(stored.height)
+      : Math.min(desktopDefaultHeight, maxHeight);
+    box.style.width = `${Math.min(Math.max(requestedWidth, minWidth), maxWidth)}px`;
+    box.style.height = `${Math.min(Math.max(requestedHeight, minHeight), maxHeight)}px`;
+    const rect = box.getBoundingClientRect();
+    const cascadeOffset = (desktopWindowOffset % 8) * 28;
+    const defaultLeft = window.innerWidth - rect.width - 24 - cascadeOffset;
+    const defaultTop = window.innerHeight - rect.height - 24 - cascadeOffset;
+    const position = clampDesktopGeometry(
+      Number.isFinite(Number(stored.left)) ? Number(stored.left) : defaultLeft,
+      Number.isFinite(Number(stored.top)) ? Number(stored.top) : defaultTop,
+    );
+    box.style.right = "auto";
+    box.style.bottom = "auto";
+    box.style.left = `${position.left}px`;
+    box.style.top = `${position.top}px`;
+    box.classList.toggle("compact", rect.width < 650);
+  }
+
+  function applyBacktestLayout() {
+    const box = el("scripting-backtest-modal").querySelector(".scripting-backtest-box");
+    if (isMobile()) {
+      box.style.removeProperty("left");
+      box.style.removeProperty("top");
+      box.style.removeProperty("right");
+      box.style.removeProperty("bottom");
+      box.style.removeProperty("width");
+      box.style.removeProperty("height");
+      box.classList.remove("compact");
+      box.setAttribute("aria-modal", "true");
+      return;
+    }
+    box.setAttribute("aria-modal", "false");
+    applyDesktopGeometry();
+  }
+
+  function beginDesktopDrag(event) {
+    if (
+      isMobile()
+      || !event.isPrimary
+      || event.button !== 0
+      || !isOpen()
+    ) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (target && target.closest("button, input, a")) return;
+    activate();
+    const box = el("scripting-backtest-modal").querySelector(".scripting-backtest-box");
+    const rect = box.getBoundingClientRect();
+    desktopDrag = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      left: rect.left,
+      top: rect.top,
+    };
+    el("scripting-backtest-modal").classList.add("window-dragging");
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch {}
+    event.preventDefault();
+  }
+
+  function moveDesktopDrag(event) {
+    if (!desktopDrag || event.pointerId !== desktopDrag.pointerId) return;
+    event.preventDefault();
+    const position = clampDesktopGeometry(
+      desktopDrag.left + event.clientX - desktopDrag.startX,
+      desktopDrag.top + event.clientY - desktopDrag.startY,
+    );
+    const box = el("scripting-backtest-modal").querySelector(".scripting-backtest-box");
+    box.style.left = `${position.left}px`;
+    box.style.top = `${position.top}px`;
+  }
+
+  function endDesktopDrag(event) {
+    if (!desktopDrag || event.pointerId !== desktopDrag.pointerId) return;
+    const pointerId = desktopDrag.pointerId;
+    desktopDrag = null;
+    el("scripting-backtest-modal").classList.remove("window-dragging");
+    try { event.currentTarget.releasePointerCapture(pointerId); } catch {}
+    saveDesktopGeometry();
+  }
+
+  function beginDesktopResize(event) {
+    if (
+      isMobile()
+      || !event.isPrimary
+      || event.button !== 0
+      || !isOpen()
+    ) return;
+    activate();
+    const box = el("scripting-backtest-modal").querySelector(".scripting-backtest-box");
+    const rect = box.getBoundingClientRect();
+    desktopResize = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      width: rect.width,
+      height: rect.height,
+    };
+    el("scripting-backtest-modal").classList.add("window-resizing");
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch {}
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function moveDesktopResize(event) {
+    if (!desktopResize || event.pointerId !== desktopResize.pointerId) return;
+    event.preventDefault();
+    const box = el("scripting-backtest-modal").querySelector(".scripting-backtest-box");
+    const rect = box.getBoundingClientRect();
+    const maxWidth = Math.max(1, window.innerWidth - rect.left - desktopWindowMargin);
+    const maxHeight = Math.max(1, window.innerHeight - rect.top - desktopWindowMargin);
+    const viewportWidth = Math.max(1, window.innerWidth - desktopWindowMargin * 2);
+    const viewportHeight = Math.max(1, window.innerHeight - desktopWindowMargin * 2);
+    const minWidth = Math.min(
+      Math.min(desktopDefaultWidth, viewportWidth) / 2,
+      maxWidth,
+    );
+    const minHeight = Math.min(
+      Math.min(desktopDefaultHeight, viewportHeight) / 2,
+      maxHeight,
+    );
+    const width = Math.min(
+      Math.max(desktopResize.width + event.clientX - desktopResize.startX, minWidth),
+      maxWidth,
+    );
+    const height = Math.min(
+      Math.max(desktopResize.height + event.clientY - desktopResize.startY, minHeight),
+      maxHeight,
+    );
+    box.style.width = `${width}px`;
+    box.style.height = `${height}px`;
+    box.classList.toggle("compact", width < 650);
+  }
+
+  function endDesktopResize(event) {
+    if (!desktopResize || event.pointerId !== desktopResize.pointerId) return;
+    const pointerId = desktopResize.pointerId;
+    desktopResize = null;
+    el("scripting-backtest-modal").classList.remove("window-resizing");
+    try { event.currentTarget.releasePointerCapture(pointerId); } catch {}
+    saveDesktopGeometry();
+  }
+
   function open(nextContext) {
+    activate();
+    const sequence = ++contextSequence;
     if (closeTimer !== null) {
       clearTimeout(closeTimer);
       closeTimer = null;
@@ -1072,10 +1982,17 @@
       validation: nextContext && nextContext.validation || null,
       error: String(nextContext && nextContext.error || ""),
     };
+    clearJobsRefresh();
     closeSocket();
     closeCalendars();
     closeDataOptions();
+    setClearConfirmationOpen(false);
     job = null;
+    jobs = [];
+    inputMetadata = [];
+    inputDataPath = "";
+    inputsExpanded = false;
+    inputRequestSequence += 1;
     logText = "";
     logOffset = 0;
     findQuery = "";
@@ -1083,6 +2000,11 @@
     findIndex = -1;
     dataRows = [];
     selectedDataPath = "";
+    renderSelectedDataFilename();
+    renderInputs();
+    renderJobs();
+    summaryOpen = false;
+    clearSummaryPagerTimers();
     actionBusy = false;
     dataBusy = false;
     closeDataManager(true);
@@ -1091,6 +2013,8 @@
     el("scripting-backtest-find-input").value = "";
     setFindOpen(false);
     renderLog({ follow: true });
+    renderSummary();
+    setSummaryOpen(false);
     setError();
     if (context.error) setError(context.error);
     else if (context.dirty) setError("Save before backtesting.");
@@ -1101,15 +2025,26 @@
     ) setError("Only a runnable strategy or indicator can be backtested.");
     const modal = el("scripting-backtest-modal");
     const box = modal.querySelector(".scripting-backtest-box");
-    modal.classList.remove("hidden", "closing", "dragging", "swipe-closing", "opening");
+    desktopDrag = null;
+    desktopResize = null;
+    modal.classList.remove(
+      "hidden",
+      "closing",
+      "dragging",
+      "window-dragging",
+      "window-resizing",
+      "swipe-closing",
+      "opening",
+    );
     modal.classList.add("opening");
     box.style.removeProperty("transform");
     box.style.removeProperty("transition");
     modal.setAttribute("aria-hidden", "false");
+    applyBacktestLayout();
     setStatus("loading", "");
     updateActionState();
     openTimer = window.setTimeout(finishOpening, 230);
-    void Promise.all([loadData(), loadLatest()]);
+    void Promise.all([loadData("", sequence), loadJobs(sequence)]);
   }
 
   function finishOpening() {
@@ -1122,28 +2057,43 @@
     const modal = el("scripting-backtest-modal");
     const box = modal.querySelector(".scripting-backtest-box");
     modal.classList.add("hidden");
-    modal.classList.remove("closing", "dragging", "swipe-closing", "opening");
+    modal.classList.remove(
+      "closing",
+      "dragging",
+      "window-dragging",
+      "window-resizing",
+      "swipe-closing",
+      "opening",
+    );
     box.style.removeProperty("transform");
     box.style.removeProperty("transition");
     modal.setAttribute("aria-hidden", "true");
     closeTimer = null;
     openTimer = null;
+    if (typeof instanceOptions.onClosed === "function") instanceOptions.onClosed();
   }
 
   function close(options = {}) {
     if (!isOpen() || closeTimer !== null || dataBusy) return;
+    contextSequence += 1;
+    clearJobsRefresh();
+    clearSummaryPagerTimers();
+    inputRequestSequence += 1;
     finishOpening();
     closeSocket();
     closeCalendars();
     closeDataOptions();
+    setClearConfirmationOpen(false);
     closeDataDelete(true);
     closeDataManager(true);
     setFindOpen(false);
     const modal = el("scripting-backtest-modal");
     const box = modal.querySelector(".scripting-backtest-box");
     sheetDrag = null;
-    modal.classList.remove("dragging");
-    if (mobileQuery && mobileQuery.matches) {
+    desktopDrag = null;
+    desktopResize = null;
+    modal.classList.remove("dragging", "window-dragging", "window-resizing");
+    if (isMobile()) {
       if (options.fromDrag === true) {
         modal.classList.add("swipe-closing");
         box.style.transition = "transform 220ms cubic-bezier(0.55, 0, 1, 0.45)";
@@ -1162,7 +2112,7 @@
   }
 
   function beginSheetDrag(event) {
-    if (!mobileQuery.matches || !event.isPrimary || !isOpen()) return;
+    if (!isMobile() || !event.isPrimary || !isOpen()) return;
     if (event.target.closest("button, input, a")) return;
     sheetDrag = {
       pointerId: event.pointerId,
@@ -1223,13 +2173,23 @@
       throw new Error("Backtest initialization dependencies are unavailable");
     }
     el("scripting-backtest-close").addEventListener("click", close);
+    el("scripting-backtest-modal").addEventListener("pointerdown", activate, { capture: true });
     const sheetHeader = el("scripting-backtest-modal").querySelector(".scripting-backtest-header");
+    const resizeHandle = el("scripting-backtest-resize");
     sheetHeader.addEventListener("pointerdown", beginSheetDrag);
     sheetHeader.addEventListener("pointermove", moveSheetDrag, { passive: false });
     sheetHeader.addEventListener("pointerup", endSheetDrag);
     sheetHeader.addEventListener("pointercancel", (event) => endSheetDrag(event, true));
+    sheetHeader.addEventListener("pointerdown", beginDesktopDrag);
+    sheetHeader.addEventListener("pointermove", moveDesktopDrag, { passive: false });
+    sheetHeader.addEventListener("pointerup", endDesktopDrag);
+    sheetHeader.addEventListener("pointercancel", endDesktopDrag);
+    resizeHandle.addEventListener("pointerdown", beginDesktopResize);
+    resizeHandle.addEventListener("pointermove", moveDesktopResize, { passive: false });
+    resizeHandle.addEventListener("pointerup", endDesktopResize);
+    resizeHandle.addEventListener("pointercancel", endDesktopResize);
     el("scripting-backtest-modal").addEventListener("click", (event) => {
-      if (event.target === el("scripting-backtest-modal")) close();
+      if (isMobile() && event.target === el("scripting-backtest-modal")) close();
     });
     el("scripting-backtest-data-manage").addEventListener("click", openDataManager);
     el("scripting-backtest-data-exchange-button").addEventListener("click", () => {
@@ -1291,14 +2251,72 @@
       });
       el(`scripting-backtest-${which}-time`).addEventListener("input", updateActionState);
     });
-    el("scripting-backtest-run").addEventListener("click", runOrStop);
-    el("scripting-backtest-delete").addEventListener("click", deleteBacktestResults);
+    el("scripting-backtest-run").addEventListener("click", () => {
+      void runBacktests();
+    });
+    el("scripting-backtest-stop").addEventListener("click", () => {
+      void stopSelectedBacktest();
+    });
+    el("scripting-backtest-inputs-toggle").addEventListener("click", () => {
+      setInputsExpanded(!inputsExpanded);
+    });
+    el("scripting-backtest-inputs-reset").addEventListener("click", resetInputControls);
+    el("scripting-backtest-inputs").addEventListener("input", () => {
+      updateCombinationCount();
+      updateActionState();
+    });
+    el("scripting-backtest-inputs").addEventListener("click", (event) => {
+      const option = event.target.closest("[data-input-value]");
+      if (!option) return;
+      const selected = !option.classList.contains("selected");
+      option.classList.toggle("selected", selected);
+      option.setAttribute("aria-pressed", String(selected));
+      updateCombinationCount();
+      updateActionState();
+    });
+    el("scripting-backtest-jobs").addEventListener("click", (event) => {
+      const option = event.target.closest("[data-backtest-job-id]");
+      if (option) void selectJob(String(option.dataset.backtestJobId || ""));
+    });
+    [
+      "scripting-backtest-run",
+      "scripting-backtest-stop",
+      "scripting-backtest-inputs-toggle",
+      "scripting-backtest-inputs-reset",
+    ].forEach((id) => {
+      el(id).addEventListener("dblclick", (event) => event.preventDefault());
+    });
+    el("scripting-backtest-summary-toggle").addEventListener("click", () => {
+      setSummaryOpen(!summaryOpen);
+    });
+    el("scripting-backtest-summary-toggle").addEventListener("dblclick", (event) => {
+      event.preventDefault();
+    });
+    el("scripting-backtest-summary-panel").addEventListener(
+      "scroll",
+      handleSummaryPagerScroll,
+      { passive: true },
+    );
+    el("scripting-backtest-delete").addEventListener("click", (event) => {
+      event.stopPropagation();
+      setClearConfirmationOpen(!isClearConfirmationOpen());
+    });
+    el("scripting-backtest-clear-cancel").addEventListener("click", () => {
+      setClearConfirmationOpen(false);
+      el("scripting-backtest-delete").focus({ preventScroll: true });
+    });
+    el("scripting-backtest-clear-confirm").addEventListener("click", () => {
+      void deleteBacktestResults();
+    });
     el("scripting-backtest-log").addEventListener("scroll", updateLogJumpButton, { passive: true });
     el("scripting-backtest-log-jump").addEventListener("click", jumpBacktestLog);
     el("scripting-backtest-log-jump").addEventListener("dblclick", (event) => {
       event.preventDefault();
     });
-    el("scripting-backtest-find-toggle").addEventListener("click", () => setFindOpen(true));
+    el("scripting-backtest-find-toggle").addEventListener("click", () => {
+      setSummaryOpen(false);
+      setFindOpen(true);
+    });
     el("scripting-backtest-find-toggle").addEventListener("dblclick", (event) => {
       event.preventDefault();
     });
@@ -1343,9 +2361,14 @@
       if (!event.target.closest(".scripting-backtest-date-picker")) closeCalendars();
       if (!event.target.closest(".scripting-backtest-data-select")) closeDataOptions();
       if (!event.target.closest(".scripting-backtest-exchange-select")) closeDataExchangeOptions();
+      if (!event.target.closest(".scripting-backtest-clear-wrap")) setClearConfirmationOpen(false);
     });
     document.addEventListener("keydown", (event) => {
       if (!isOpen()) return;
+      if (
+        typeof instanceOptions.isActive === "function"
+        && !instanceOptions.isActive()
+      ) return;
       if (isDataDeleteOpen()) {
         if (event.key === "Escape") {
           event.preventDefault();
@@ -1376,11 +2399,157 @@
       if (event.key !== "Escape") return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      if (!el("scripting-backtest-find").classList.contains("hidden")) setFindOpen(false);
+      if (isClearConfirmationOpen()) {
+        setClearConfirmationOpen(false);
+        el("scripting-backtest-delete").focus({ preventScroll: true });
+      } else if (!el("scripting-backtest-find").classList.contains("hidden")) setFindOpen(false);
       else if (!el("scripting-backtest-data-options").classList.contains("hidden")) closeDataOptions();
       else close();
     }, true);
+    window.addEventListener("resize", () => {
+      if (!isOpen()) return;
+      applyBacktestLayout();
+      renderSummary();
+    });
     initialized = true;
+  }
+
+  function setLayer(baseLayer) {
+    const layer = Math.max(112, Number(baseLayer) || 112);
+    el("scripting-backtest-modal").style.zIndex = String(layer);
+    el("scripting-backtest-data-modal").style.zIndex = String(layer + 2);
+    el("scripting-backtest-data-tooltip").style.zIndex = String(layer + 3);
+    el("scripting-backtest-data-delete-modal").style.zIndex = String(layer + 4);
+  }
+
+  return { init, open, close, isOpen, setLayer };
+  }
+
+  const templateElementIds = [
+    "scripting-backtest-modal",
+    "scripting-backtest-data-modal",
+    "scripting-backtest-data-tooltip",
+    "scripting-backtest-data-delete-modal",
+  ];
+  const desktopInstances = new Map();
+  let managerInitialized = false;
+  let managerApi = null;
+  let managerMobileQuery = null;
+  let mobileInstance = null;
+  let templateNodes = [];
+  let desktopInstanceSequence = 0;
+  let activeDesktopInstance = null;
+  let closingAll = false;
+
+  function cloneTemplateNode(template, suffix) {
+    const clone = template.cloneNode(true);
+    const identified = [clone, ...clone.querySelectorAll("[id]")].filter((node) => node.id);
+    const idMap = new Map();
+    identified.forEach((node) => {
+      const originalId = node.id;
+      const instanceId = `${originalId}-${suffix}`;
+      idMap.set(originalId, instanceId);
+      node.dataset.backtestElement = originalId;
+      node.id = instanceId;
+    });
+    const referenceNodes = [
+      clone,
+      ...clone.querySelectorAll("[aria-controls], [aria-labelledby], [for]"),
+    ];
+    referenceNodes.forEach((node) => {
+      ["aria-controls", "aria-labelledby", "for"].forEach((attribute) => {
+        const value = node.getAttribute(attribute);
+        if (!value) return;
+        node.setAttribute(
+          attribute,
+          value.split(/\s+/).map((item) => idMap.get(item) || item).join(" "),
+        );
+      });
+    });
+    return clone;
+  }
+
+  function activateDesktop(instance) {
+    activeDesktopInstance = instance;
+    instance.setLayer(window.PyneFloatingLayerManager.next());
+  }
+
+  function handleDesktopClosed(instance) {
+    if (closingAll || activeDesktopInstance !== instance) return;
+    activeDesktopInstance = [...desktopInstances.values()]
+      .reverse()
+      .find((candidate) => candidate !== instance && candidate.isOpen()) || null;
+    if (activeDesktopInstance) activateDesktop(activeDesktopInstance);
+  }
+
+  function createDesktopInstance(path) {
+    const suffix = `desktop-${++desktopInstanceSequence}`;
+    const host = document.createElement("div");
+    host.className = "scripting-backtest-instance";
+    host.dataset.backtestPath = path;
+    templateNodes.forEach((template) => host.appendChild(cloneTemplateNode(template, suffix)));
+    document.body.appendChild(host);
+
+    let instance = null;
+    instance = createBacktestInstance(host, {
+      instanceKey: path,
+      desktopOffset: desktopInstanceSequence - 1,
+      mobile: false,
+      activate: () => activateDesktop(instance),
+      isActive: () => activeDesktopInstance === instance,
+      onClosed: () => handleDesktopClosed(instance),
+    });
+    instance.init({ api: managerApi, mobileQuery: managerMobileQuery });
+    desktopInstances.set(path, instance);
+    return instance;
+  }
+
+  function init(options = {}) {
+    if (managerInitialized) return;
+    managerApi = options.api;
+    managerMobileQuery = options.mobileQuery;
+    if (typeof managerApi !== "function" || !managerMobileQuery) {
+      throw new Error("Backtest initialization dependencies are unavailable");
+    }
+    templateNodes = templateElementIds.map((id) => {
+      const node = document.getElementById(id);
+      if (!node) throw new Error(`Backtest template is unavailable: ${id}`);
+      return node.cloneNode(true);
+    });
+    mobileInstance = createBacktestInstance(document, {
+      instanceKey: "mobile",
+      mobile: true,
+    });
+    mobileInstance.init({ api: managerApi, mobileQuery: managerMobileQuery });
+    managerInitialized = true;
+  }
+
+  function open(nextContext) {
+    if (!managerInitialized) return;
+    if (managerMobileQuery.matches) {
+      mobileInstance.open(nextContext);
+      return;
+    }
+    const path = String(nextContext && nextContext.path || "");
+    const instance = desktopInstances.get(path) || createDesktopInstance(path);
+    instance.open(nextContext);
+  }
+
+  function close(options = {}) {
+    if (!managerInitialized) return;
+    closingAll = true;
+    mobileInstance.close(options);
+    desktopInstances.forEach((instance) => instance.close(options));
+    closingAll = false;
+    activeDesktopInstance = [...desktopInstances.values()]
+      .reverse()
+      .find((instance) => instance.isOpen()) || null;
+  }
+
+  function isOpen() {
+    if (!managerInitialized) return false;
+    return mobileInstance.isOpen()
+      || [...desktopInstances.values()].some((instance) => instance.isOpen());
   }
 
   window.PyneScriptingBacktest = { init, open, close, isOpen };

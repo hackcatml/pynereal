@@ -57,6 +57,27 @@ def _isolated_config(repo_root: Path) -> dict[str, Any]:
     return config
 
 
+def _apply_input_overrides(script_path: Path, values: dict[str, Any]) -> None:
+    if not values:
+        return
+    import tomlkit
+
+    settings_path = script_path.with_suffix(".toml")
+    if settings_path.is_file():
+        document = tomlkit.parse(settings_path.read_text(encoding="utf-8"))
+    else:
+        document = tomlkit.document()
+        document.add("script", tomlkit.table())
+    if "inputs" not in document:
+        document.add("inputs", tomlkit.table())
+    inputs = document["inputs"]
+    for input_id, value in values.items():
+        if input_id not in inputs:
+            inputs.add(input_id, tomlkit.table())
+        inputs[input_id]["value"] = value
+    settings_path.write_text(tomlkit.dumps(document), encoding="utf-8")
+
+
 def _run(args: argparse.Namespace) -> dict[str, Any]:
     repo_root = Path(args.repo_root).resolve()
     job_dir = Path(args.job_dir).resolve()
@@ -83,6 +104,14 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     script_snapshot = scripts_snapshot / args.script_path
     if not script_snapshot.is_file():
         raise FileNotFoundError(f"script snapshot was not created: {args.script_path}")
+    try:
+        job = json.loads((job_dir / "job.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        job = {}
+    input_values = job.get("inputs")
+    if not isinstance(input_values, dict):
+        input_values = {}
+    _apply_input_overrides(script_snapshot, input_values)
 
     syminfo = SymInfo.load_toml(source_metadata)
     time_from = int(args.time_from)
@@ -113,6 +142,12 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         f"to={datetime.fromtimestamp(actual_to, UTC).isoformat()}",
         flush=True,
     )
+    if input_values:
+        print(
+            "[backtest] inputs | "
+            + ", ".join(f"{name}={value!r}" for name, value in input_values.items()),
+            flush=True,
+        )
 
     lib_dir = scripts_snapshot / "lib"
     lib_added = False
