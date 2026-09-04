@@ -17,6 +17,22 @@ async def _safe_close(ex) -> None:
         pass
 
 
+def _advance_trade_window(ex, state: DataState, since: int) -> int:
+    """Keep the OHLCV trade buffer aligned with the latest live candle."""
+    if not state.live_bars:
+        return since
+
+    active_since = max(since, int(state.live_bars[-1][0]))
+    if active_since == since:
+        return since
+
+    state.collected_trades = ex.filter_by_since_limit(
+        state.collected_trades,
+        active_since,
+    )
+    return active_since
+
+
 async def watch_trades_loop(
     exchange_name: str,
     symbol: str,
@@ -48,7 +64,10 @@ async def watch_trades_loop(
                     on_trades(ws_trades)
 
                 async with state.lock:
-                    state.collected_trades.extend(ws_trades)
+                    since = _advance_trade_window(ex, state, since)
+                    state.collected_trades.extend(
+                        ex.filter_by_since_limit(ws_trades, since)
+                    )
                     generated = ex.build_ohlcvc(state.collected_trades, tf, since)
                     bars = state.live_bars
 
@@ -61,8 +80,9 @@ async def watch_trades_loop(
                             bar_to_push = bar
                         elif ts > last_ts:
                             bars.append(bar)
-                            state.collected_trades = ex.filter_by_since_limit(state.collected_trades, ts)
                             bar_to_push = bar
+
+                    since = _advance_trade_window(ex, state, since)
 
                 if bar_to_push is not None:
                     await on_bar(bar_to_push)

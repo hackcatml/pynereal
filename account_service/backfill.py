@@ -1202,7 +1202,7 @@ async def _fetch_position_window(
         account,
         f"{scope.name} position history",
         lambda: exchange.fetch_positions_history(
-            symbol,
+            [symbol] if symbol else None,
             since,
             POSITION_PAGE_LIMIT,
             params,
@@ -1252,7 +1252,7 @@ async def _fetch_okx_position_pages(
             account,
             f"{scope.name} position history",
             lambda params=params: exchange.fetch_positions_history(
-                symbol,
+                [symbol] if symbol else None,
                 None,
                 POSITION_PAGE_LIMIT,
                 params,
