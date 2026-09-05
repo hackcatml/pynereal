@@ -632,6 +632,7 @@ class ScriptingBacktestManager:
         job.actual_time_from = self._optional_int(result.get("actual_time_from"))
         job.actual_time_to = self._optional_int(result.get("actual_time_to"))
         job.process = None
+        await self.run_io(self._delete_runtime_directory, job.id)
         await self.run_io(self._write_job, job)
         if not job.stop_requested:
             async with self._lock:
@@ -1482,6 +1483,9 @@ class ScriptingBacktestManager:
     def _delete_job_directories(self, job_ids: list[str]) -> None:
         for job_id in job_ids:
             shutil.rmtree(self._job_dir(job_id), ignore_errors=True)
+
+    def _delete_runtime_directory(self, job_id: str) -> None:
+        shutil.rmtree(self._job_dir(job_id) / "runtime", ignore_errors=True)
 
     def _read_log_file(self, job_id: str, offset: int, max_bytes: int) -> dict[str, Any]:
         path = self._log_path(job_id)

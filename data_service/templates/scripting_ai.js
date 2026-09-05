@@ -569,7 +569,7 @@
   }
 
   function applyLayout() {
-    if (!isOpen()) return;
+    if (!isOpen() || el("scripting-ai-panel").classList.contains("closing")) return;
     if (isMobile()) applyMobileGeometry();
     else applyDesktopGeometry();
     closeModelMenu();
@@ -578,6 +578,7 @@
   function updateForKeyboard() {
     if (!isOpen() || !isMobile() || !window.visualViewport) return;
     const panel = el("scripting-ai-panel");
+    if (panel.classList.contains("closing")) return;
     const viewport = window.visualViewport;
     const overlap = Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop);
     if (overlap > 50) {
@@ -660,6 +661,11 @@
         panel.style.transform = "translateY(100dvh)";
       });
     } else {
+      const rect = panel.getBoundingClientRect();
+      panel.style.top = `${rect.top}px`;
+      panel.style.bottom = "auto";
+      panel.style.height = `${rect.height}px`;
+      panel.style.maxHeight = "none";
       panel.style.transform = "";
       panel.style.transition = "";
     }
@@ -860,6 +866,12 @@
       if (target && target.closest("#scripting-ai-model-menu, #scripting-ai-model-selector, #scripting-ai-title")) return;
       closeModelMenu();
     });
+    document.addEventListener("pointerdown", (event) => {
+      if (!isMobile() || !isOpen()) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target || el("scripting-ai-panel").contains(target)) return;
+      if (target.closest(".scripting-editor-pane")) close();
+    }, { capture: true });
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape" || !isOpen()) return;
       event.preventDefault();

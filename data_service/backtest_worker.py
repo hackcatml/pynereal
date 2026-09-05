@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
 import json
 import os
@@ -23,19 +24,113 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
-def _copy_scripts(source: Path, destination: Path) -> None:
-    def ignored(directory: str, names: list[str]) -> set[str]:
-        root = Path(directory)
-        return {
-            name
-            for name in names
-            if name.startswith(".")
-            or name == "__pycache__"
-            or Path(name).suffix.lower() in {".pyc", ".pyo"}
-            or (root / name).is_symlink()
-        }
+def _local_module_file(search_root: Path, module: str) -> Path | None:
+    if not module:
+        return None
+    path = search_root.joinpath(*module.split("."))
+    package = path / "__init__.py"
+    if package.is_file() and not package.is_symlink():
+        return package
+    source = path.with_suffix(".py")
+    if source.is_file() and not source.is_symlink():
+        return source
+    return None
 
-    shutil.copytree(source, destination, ignore=ignored)
+
+def _copy_script_snapshot(
+    scripts_root: Path,
+    source_script: Path,
+    destination: Path,
+) -> list[Path]:
+    scripts_root = scripts_root.resolve(strict=True)
+    source_script = source_script.resolve(strict=True)
+    source_script.relative_to(scripts_root)
+
+    copied: set[Path] = set()
+    pending = [source_script]
+
+    def add(path: Path | None) -> None:
+        if path is None or path in copied or path in pending:
+            return
+        try:
+            path.relative_to(scripts_root)
+        except ValueError:
+            return
+        pending.append(path)
+
+    def add_package_initializers(path: Path) -> None:
+        parent = path.parent
+        while parent != scripts_root:
+            initializer = parent / "__init__.py"
+            add(initializer if initializer.is_file() else None)
+            parent = parent.parent
+
+    while pending:
+        source = pending.pop()
+        if source in copied:
+            continue
+        if source.is_symlink() or not source.is_file():
+            raise FileNotFoundError(f"local script dependency is unavailable: {source}")
+
+        relative = source.relative_to(scripts_root)
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        copied.add(source)
+        add_package_initializers(source)
+
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    for search_root in (source.parent, scripts_root / "lib"):
+                        dependency = _local_module_file(search_root, alias.name)
+                        if dependency is not None:
+                            add(dependency)
+                            break
+                continue
+            if not isinstance(node, ast.ImportFrom):
+                continue
+
+            if node.level:
+                search_root = source.parent
+                for _ in range(node.level - 1):
+                    search_root = search_root.parent
+                search_roots = (search_root,)
+            else:
+                search_roots = (source.parent, scripts_root / "lib")
+
+            module = node.module or ""
+            dependency: Path | None = None
+            for search_root in search_roots:
+                dependency = _local_module_file(search_root, module)
+                if dependency is not None:
+                    add(dependency)
+                    break
+
+            package_dir = dependency.parent if dependency and dependency.name == "__init__.py" else None
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                if package_dir is not None:
+                    add(_local_module_file(package_dir, alias.name))
+                elif not module:
+                    for search_root in search_roots:
+                        child = _local_module_file(search_root, alias.name)
+                        if child is not None:
+                            add(child)
+                            break
+
+    settings = source_script.with_suffix(".toml")
+    if settings.is_file() and not settings.is_symlink():
+        target = destination / settings.relative_to(scripts_root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(settings, target)
+
+    snapshot = [path.relative_to(scripts_root) for path in copied]
+    if settings.is_file() and not settings.is_symlink():
+        snapshot.append(settings.relative_to(scripts_root))
+    return sorted(snapshot)
 
 
 def _isolated_config(repo_root: Path) -> dict[str, Any]:
@@ -100,7 +195,15 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
 
     print(f"[backtest] preparing {args.script_path}", flush=True)
     runtime_dir.mkdir(parents=True, exist_ok=True)
-    _copy_scripts(repo_root / "workdir" / "scripts", scripts_snapshot)
+    copied_scripts = _copy_script_snapshot(
+        repo_root / "workdir" / "scripts",
+        source_script,
+        scripts_snapshot,
+    )
+    print(
+        f"[backtest] script snapshot ready | files={len(copied_scripts)}",
+        flush=True,
+    )
     script_snapshot = scripts_snapshot / args.script_path
     if not script_snapshot.is_file():
         raise FileNotFoundError(f"script snapshot was not created: {args.script_path}")

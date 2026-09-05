@@ -1366,12 +1366,26 @@
     )).join("");
   }
 
+  function latestJobsByRunKey(values) {
+    const seenRunKeys = new Set();
+    return (Array.isArray(values) ? values : [])
+      .filter((value) => value && value.id)
+      .sort((left, right) => Number(right.created_at || 0) - Number(left.created_at || 0))
+      .filter((value) => {
+        const runKey = String(value.run_key || "");
+        if (!runKey) return true;
+        if (seenRunKeys.has(runKey)) return false;
+        seenRunKeys.add(runKey);
+        return true;
+      });
+  }
+
   function mergeJob(value) {
     if (!value || !value.id) return;
     const index = jobs.findIndex((item) => item.id === value.id);
     if (index >= 0) jobs[index] = value;
     else jobs.unshift(value);
-    jobs.sort((left, right) => Number(right.created_at || 0) - Number(left.created_at || 0));
+    jobs = latestJobsByRunKey(jobs);
   }
 
   function renderJob(value, options = {}) {
@@ -1558,7 +1572,7 @@
         || context.path !== scriptPath
       ) return;
       const selectedId = job && job.id;
-      jobs = Array.isArray(payload.jobs) ? payload.jobs : [];
+      jobs = latestJobsByRunKey(payload.jobs);
       const selected = jobs.find((item) => item.id === selectedId) || jobs[0] || null;
       if (selected) {
         const changed = !job || job.id !== selected.id;
@@ -1722,7 +1736,10 @@
       if (!startedJobs.length) throw new Error("No backtest runs were started.");
       maxConcurrentBacktests = Number(started.max_concurrent) || maxConcurrentBacktests;
       const startedIds = new Set(startedJobs.map((value) => value.id));
-      jobs = [...startedJobs, ...jobs.filter((value) => !startedIds.has(value.id))];
+      jobs = latestJobsByRunKey([
+        ...startedJobs,
+        ...jobs.filter((value) => !startedIds.has(value.id)),
+      ]);
       closeSocket();
       logText = "";
       logOffset = 0;
