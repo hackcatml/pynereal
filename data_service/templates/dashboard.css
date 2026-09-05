@@ -1945,10 +1945,6 @@ tr:last-child td { border-bottom: none; }
   text-align: center;
   white-space: nowrap;
 }
-.scripting-validation-error-mark {
-  padding-bottom: 1px;
-  border-bottom: 1px dashed #f85149;
-}
 .scripting-note-editor {
   flex: 0 0 auto;
   display: flex;
@@ -2016,73 +2012,13 @@ tr:last-child td { border-bottom: none; }
   overflow: hidden;
   background: #0b0f14;
 }
-.scripting-code,
 .scripting-editor {
   position: absolute;
   inset: 0;
   box-sizing: border-box;
-  margin: 0;
-  padding: 14px 16px 24px;
-  scrollbar-gutter: stable;
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
-  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  tab-size: 4;
-}
-.scripting-code {
-  overflow: hidden;
-  pointer-events: none;
-  color: #d4d4d4;
-}
-.scripting-editor {
-  z-index: 1;
-  overflow: auto;
-  border: 0;
-  outline: 0;
-  resize: none;
-  background: transparent;
-  color: rgba(255, 255, 255, 0.01);
-  caret-color: #f2f5f8;
-  -webkit-text-fill-color: rgba(255, 255, 255, 0.01);
-  cursor: text;
-}
-.scripting-editor::selection { background: rgba(86, 156, 214, 0.32); }
-.scripting-diff-gutter {
-  position: absolute;
-  inset: 0 auto 0 0;
-  z-index: 2;
-  width: 6px;
-  overflow: hidden;
-  pointer-events: none;
-}
-.scripting-diff-markers {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  will-change: transform;
-}
-.scripting-diff-marker {
-  position: absolute;
-  left: 0;
-  width: 3px;
-  min-height: 2px;
-}
-.scripting-diff-marker.added { background: #2ea043; }
-.scripting-diff-marker.modified { background: #1f6feb; }
-.scripting-diff-marker.deleted {
-  width: 0;
-  height: 0 !important;
+  min-width: 0;
   min-height: 0;
-  border-top: 4px solid transparent;
-  border-bottom: 4px solid transparent;
-  border-left: 5px solid #f85149;
-}
-.scripting-line-anchor {
-  display: inline-block;
-  width: 0;
-  height: 1em;
-  pointer-events: none;
+  background: #0b0f14;
 }
 .scripting-history-panel {
   position: absolute;
@@ -2528,37 +2464,19 @@ tr:last-child td { border-bottom: none; }
   line-height: 1.4;
 }
 .scripting-operation-box .confirm-footer { flex: 0 0 auto; }
-.scripting-code .py-comment { color: #6a9955; }
-.scripting-code .py-string { color: #ce9178; }
-.scripting-code .py-number { color: #b5cea8; }
-.scripting-code .py-keyword { color: #569cd6; }
-.scripting-code .py-builtin { color: #4ec9b0; }
-.scripting-code .py-constant { color: #4fc1ff; }
-.scripting-code .py-decorator { color: #c586c0; }
-
 @media (min-width: 721px) {
-  .scripting-tree,
-  .scripting-code,
-  .scripting-editor {
+  .scripting-tree {
     scrollbar-color: #3a4350 #0b0f14;
     scrollbar-width: thin;
   }
-  .scripting-tree::-webkit-scrollbar,
-  .scripting-code::-webkit-scrollbar,
-  .scripting-editor::-webkit-scrollbar { width: 10px; height: 10px; }
-  .scripting-tree::-webkit-scrollbar-track,
-  .scripting-code::-webkit-scrollbar-track,
-  .scripting-editor::-webkit-scrollbar-track { background: #0b0f14; }
-  .scripting-tree::-webkit-scrollbar-thumb,
-  .scripting-code::-webkit-scrollbar-thumb,
-  .scripting-editor::-webkit-scrollbar-thumb {
+  .scripting-tree::-webkit-scrollbar { width: 10px; height: 10px; }
+  .scripting-tree::-webkit-scrollbar-track { background: #0b0f14; }
+  .scripting-tree::-webkit-scrollbar-thumb {
     border: 2px solid #0b0f14;
     border-radius: 999px;
     background: #3a4350;
   }
-  .scripting-tree::-webkit-scrollbar-thumb:hover,
-  .scripting-code::-webkit-scrollbar-thumb:hover,
-  .scripting-editor::-webkit-scrollbar-thumb:hover { background: #4a5565; }
+  .scripting-tree::-webkit-scrollbar-thumb:hover { background: #4a5565; }
 }
 
 /* ---- futures watchlist ---- */
@@ -6687,12 +6605,6 @@ tr:last-child td { border-bottom: none; }
     padding-left: 10px;
   }
   .scripting-validation-code { display: none; }
-  .scripting-code,
-  .scripting-editor {
-    padding: 12px 12px calc(24px + env(safe-area-inset-bottom));
-    font-size: 11.5px;
-  }
-  .scripting-code { overflow: auto; }
   .scripting-history-panel {
     inset: auto 0 0;
     width: 100%;

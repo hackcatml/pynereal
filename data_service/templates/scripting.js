@@ -44,6 +44,7 @@
       || typeof streamSse !== "function"
       || typeof unlockBodyScroll !== "function"
       || !window.PyneEditor
+      || !window.PyneCodeMirror
       || !window.PyneScriptingBacktest
       || !window.PyneScriptingAi
     ) {
@@ -79,12 +80,7 @@
     let scriptingHistoryRequestSeq = 0;
     let scriptingHistoryDiffRequestSeq = 0;
     let scriptingDiffTimer = null;
-    let scriptingUndoStack = [];
     let scriptingUndoPointerType = "";
-    let scriptingUndoInputType = "";
-    let scriptingUndoCapturedAt = 0;
-    let scriptingApplyingUndo = false;
-    let scriptingComposing = false;
     let scriptingEditorController = null;
     let scriptingTreeWidth = SCRIPTING_TREE_DEFAULT_WIDTH;
     let scriptingTreeCollapsed = false;
@@ -104,6 +100,7 @@
     const scriptingExpandedDirectories = new Set();
     const scriptingTreeSelectedPaths = new Set();
     const el = (id) => document.getElementById(id);
+    const scriptingCodeEditor = () => el("scripting-code")._pyneCodeEditor;
 
     function isScriptingOpen() {
       return !el("scripting-modal").classList.contains("hidden");
@@ -436,22 +433,22 @@
     function goToScriptingDiagnostic(index) {
       let diagnostic = scriptingValidationErrors()[index];
       if (!diagnostic) return;
-      const editor = el("scripting-code");
+      const sourceEditor = scriptingCodeEditor();
       const mobile = mobileHubQuery.matches;
       if (mobile) {
         const active = document.activeElement;
         if (active && typeof active.blur === "function") active.blur();
-        editor.blur();
+        sourceEditor.blur();
       }
+      const source = sourceEditor.getValue();
       const originalLine = Math.max(Number(diagnostic.line || 1) - 1, 0);
       const currentLine = scriptingValidationUnchangedLineMap(
         scriptingBaseContent,
-        editor.value,
+        source,
       ).get(originalLine);
       if (Number.isInteger(currentLine)) {
         diagnostic = { ...diagnostic, line: currentLine + 1 };
       }
-      const source = editor.value;
       const targetLine = Math.max(Number(diagnostic.line || 1) - 1, 0);
       const targetColumn = Math.max(Number(diagnostic.column || 1) - 1, 0);
       const lines = source.split("\n");
@@ -461,22 +458,8 @@
         offset += lines[line].length + 1;
       }
       offset += Math.min(targetColumn, (lines[resolvedLine] || "").length);
-      // On mobile, setting the selection makes iOS Safari briefly focus the
-      // textarea and flash the soft keyboard (which reflows the visual viewport
-      // and the bottom address bar). We blur the editor on mobile anyway, so the
-      // caret would be invisible — skip it and just scroll to the line.
-      if (!mobile) {
-        editor.setSelectionRange(offset, offset);
-      }
-      const lineHeight = parseFloat(getComputedStyle(editor).lineHeight) || 18;
-      editor.scrollTop = Math.max(0, (resolvedLine - 3) * lineHeight);
-      if (!mobile) {
-        editor.focus({ preventScroll: true });
-      } else {
-        window.requestAnimationFrame(() => {
-          editor.blur();
-        });
-      }
+      sourceEditor.revealRange(offset, offset, { focus: !mobile });
+      if (mobile) sourceEditor.blur();
     }
 
     function setScriptingNote(value = "") {
@@ -514,12 +497,13 @@
     function updateScriptingEditState() {
       const loaded = Boolean(scriptingSelectedPath && scriptingBaseRevision);
       const modified = scriptingHasUnsavedChanges();
+      const codeEditor = el("scripting-code")._pyneCodeEditor;
       el("scripting-save").disabled = !loaded
         || !scriptingDirty
         || scriptingSaving
         || scriptingConflict;
       el("scripting-save").classList.toggle("dirty", scriptingDirty);
-      el("scripting-undo").disabled = !scriptingDirty || scriptingUndoStack.length === 0;
+      el("scripting-undo").disabled = !scriptingDirty || !codeEditor.canUndo();
       el("scripting-find-toggle").disabled = !loaded;
       el("scripting-backtest").disabled = !loaded
         || scriptingDirty
@@ -539,7 +523,7 @@
       window.PyneScriptingAi.setContext({
         path: scriptingSelectedPath,
         revision: scriptingBaseRevision,
-        content: el("scripting-code").value,
+        content: scriptingCodeEditor().getValue(),
         dirty: modified,
         ready: loaded && !scriptingSaving && !scriptingConflict,
       });
@@ -550,61 +534,14 @@
     }
 
     function resetScriptingUndo() {
-      scriptingUndoStack = [];
-      scriptingUndoInputType = "";
-      scriptingUndoCapturedAt = 0;
+      scriptingCodeEditor().clearHistory();
       updateScriptingEditState();
-    }
-
-    function captureScriptingUndo(inputType = "") {
-      if (inputType === "historyUndo" || inputType === "historyRedo") {
-        resetScriptingUndo();
-        return;
-      }
-      if (scriptingApplyingUndo || scriptingComposing) return;
-      const code = el("scripting-code");
-      const now = Date.now();
-      const groupedTypes = new Set([
-        "insertText",
-        "insertCompositionText",
-        "deleteContentBackward",
-        "deleteContentForward",
-      ]);
-      const shouldGroup = groupedTypes.has(inputType)
-        && inputType === scriptingUndoInputType
-        && now - scriptingUndoCapturedAt < 700;
-      if (!shouldGroup) {
-        scriptingUndoStack.push({
-          value: code.value,
-          selectionStart: code.selectionStart,
-          selectionEnd: code.selectionEnd,
-          scrollTop: code.scrollTop,
-          scrollLeft: code.scrollLeft,
-        });
-        if (scriptingUndoStack.length > 100) scriptingUndoStack.shift();
-      }
-      scriptingUndoInputType = inputType;
-      scriptingUndoCapturedAt = now;
     }
 
     function undoScriptingEdit({ focusEditor = true } = {}) {
-      const snapshot = scriptingUndoStack.pop();
-      if (!snapshot) return;
-      const code = el("scripting-code");
-      scriptingApplyingUndo = true;
-      code.value = snapshot.value;
-      code.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
-      handleScriptingInput();
-      code.scrollTop = snapshot.scrollTop;
-      code.scrollLeft = snapshot.scrollLeft;
-      el("scripting-highlight").scrollTop = code.scrollTop;
-      el("scripting-highlight").scrollLeft = code.scrollLeft;
-      el("scripting-diff-markers").style.transform = `translateY(${-code.scrollTop}px)`;
-      scriptingApplyingUndo = false;
-      scriptingUndoInputType = "";
-      scriptingUndoCapturedAt = 0;
-      updateScriptingEditState();
-      if (focusEditor) code.focus({ preventScroll: true });
+      const editor = scriptingCodeEditor();
+      editor.undo();
+      if (focusEditor) editor.focus({ preventScroll: true });
     }
 
     function openScriptingUnsaved(action) {
@@ -1770,10 +1707,8 @@
       el("scripting-file-name").textContent = "No file selected";
       el("scripting-file-path").textContent = "";
       el("scripting-file-meta").textContent = "";
-      el("scripting-code").value = "";
+      scriptingCodeEditor().setValue("");
       el("scripting-code").dataset.revision = "";
-      el("scripting-highlight").textContent = "";
-      el("scripting-diff-markers").replaceChildren();
       setScriptingNotice();
       closeScriptingHistory();
       el("scripting-editor-empty").classList.remove("hidden");
@@ -1798,112 +1733,6 @@
       if (bytes < 1024) return `${bytes} B`;
       if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)} KB`;
       return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    }
-
-    function wrapScriptingPythonToken(className, value) {
-      return `<span class="${className}">${esc(value)}</span>`;
-    }
-
-    function highlightScriptingPython(source) {
-      if (!source) return "";
-      const keywords = new Set([
-        "and", "as", "assert", "async", "await", "break", "class", "continue", "def",
-        "del", "elif", "else", "except", "finally", "for", "from", "global", "if",
-        "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise",
-        "return", "try", "while", "with", "yield",
-      ]);
-      const builtins = new Set([
-        "abs", "all", "any", "bool", "dict", "enumerate", "filter", "float", "int",
-        "len", "list", "map", "max", "min", "open", "print", "range", "reversed",
-        "round", "set", "sorted", "str", "sum", "super", "tuple", "type", "zip",
-      ]);
-      const constants = new Set(["False", "None", "True", "Ellipsis", "NotImplemented"]);
-      const isIdentStart = (char) => /[A-Za-z_]/.test(char);
-      const isIdent = (char) => /[A-Za-z0-9_]/.test(char);
-      const stringPrefixMatch = (offset) => {
-        const match = /^(?:[rRuUbBfF]|[rR][fF]|[fF][rR]|[bB][rR]|[rR][bB])(?=['"])/
-          .exec(source.slice(offset, offset + 3));
-        return match ? match[0] : "";
-      };
-      let html = "";
-      let index = 0;
-
-      while (index < source.length) {
-        const char = source[index];
-        const prefix = stringPrefixMatch(index);
-        const quoteOffset = index + prefix.length;
-        const quote = source[quoteOffset];
-        if ((prefix || char === "\"" || char === "'") && (quote === "\"" || quote === "'")) {
-          const triple = source.slice(quoteOffset, quoteOffset + 3) === quote.repeat(3);
-          let end = quoteOffset + (triple ? 3 : 1);
-          while (end < source.length) {
-            if (triple && source.slice(end, end + 3) === quote.repeat(3)) {
-              end += 3;
-              break;
-            }
-            if (!triple && source[end] === "\n") break;
-            if (!triple && source[end] === "\\") end += 2;
-            else if (!triple && source[end] === quote) {
-              end += 1;
-              break;
-            } else end += 1;
-          }
-          html += wrapScriptingPythonToken("py-string", source.slice(index, end));
-          index = end;
-          continue;
-        }
-        if (char === "#") {
-          let end = index;
-          while (end < source.length && source[end] !== "\n") end += 1;
-          html += wrapScriptingPythonToken("py-comment", source.slice(index, end));
-          index = end;
-          continue;
-        }
-        if (char === "@" && (index === 0 || source[index - 1] === "\n")) {
-          let end = index + 1;
-          while (end < source.length && /[A-Za-z0-9_.]/.test(source[end])) end += 1;
-          html += wrapScriptingPythonToken("py-decorator", source.slice(index, end));
-          index = end;
-          continue;
-        }
-        if (/[0-9]/.test(char)) {
-          const match = /^(?:0[xX][0-9A-Fa-f_]+|0[bB][01_]+|0[oO][0-7_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d[\d_]*)?j?)/
-            .exec(source.slice(index));
-          if (match) {
-            html += wrapScriptingPythonToken("py-number", match[0]);
-            index += match[0].length;
-            continue;
-          }
-        }
-        if (isIdentStart(char)) {
-          let end = index + 1;
-          while (end < source.length && isIdent(source[end])) end += 1;
-          const word = source.slice(index, end);
-          if (keywords.has(word)) html += wrapScriptingPythonToken("py-keyword", word);
-          else if (builtins.has(word)) html += wrapScriptingPythonToken("py-builtin", word);
-          else if (constants.has(word)) html += wrapScriptingPythonToken("py-constant", word);
-          else html += esc(word);
-          index = end;
-          continue;
-        }
-        html += esc(char);
-        index += 1;
-      }
-      return html;
-    }
-
-    function scriptingHighlightTextBoundary(root, offset) {
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-      let remaining = Math.max(0, Number(offset) || 0);
-      let node = walker.nextNode();
-      let last = null;
-      while (node) {
-        last = node;
-        if (remaining <= node.data.length) return { node, offset: remaining };
-        remaining -= node.data.length;
-        node = walker.nextNode();
-      }
-      return last ? { node: last, offset: last.data.length } : null;
     }
 
     function scriptingDiagnosticOffsets(source, diagnostic) {
@@ -1938,65 +1767,48 @@
       return { start, end };
     }
 
-    function renderScriptingValidationMarks(source, highlight) {
+    function scriptingValidationRanges(source) {
       if (
         !scriptingValidation
         || (
           scriptingValidation.revision
           && scriptingValidation.revision !== scriptingBaseRevision
         )
-      ) return;
+      ) return [];
       const lineMap = scriptingValidationUnchangedLineMap(
         scriptingBaseContent,
         source,
       );
-      const ranges = scriptingValidationErrors()
+      return scriptingValidationErrors()
         .map((diagnostic) => {
           const originalLine = Math.max(Number(diagnostic.line || 1) - 1, 0);
           const currentLine = lineMap.get(originalLine);
           if (!Number.isInteger(currentLine)) return null;
-          return scriptingDiagnosticOffsets(
+          const offsets = scriptingDiagnosticOffsets(
             source,
             { ...diagnostic, line: currentLine + 1 },
           );
+          return offsets ? { ...offsets, diagnostic } : null;
         })
-        .filter(Boolean)
-        .sort((left, right) => right.start - left.start);
-      const seen = new Set();
-      ranges.forEach(({ start, end }) => {
-        const key = `${start}:${end}`;
-        if (seen.has(key)) return;
-        seen.add(key);
-        const startBoundary = scriptingHighlightTextBoundary(highlight, start);
-        const endBoundary = scriptingHighlightTextBoundary(highlight, end);
-        if (!startBoundary || !endBoundary) return;
-        const range = document.createRange();
-        range.setStart(startBoundary.node, startBoundary.offset);
-        range.setEnd(endBoundary.node, endBoundary.offset);
-        if (range.collapsed) return;
-        const mark = document.createElement("span");
-        mark.className = "scripting-validation-error-mark";
-        mark.appendChild(range.extractContents());
-        range.insertNode(mark);
-      });
+        .filter(Boolean);
+    }
+
+    function renderScriptingValidationMarks(source) {
+      const codeEditor = el("scripting-code")._pyneCodeEditor;
+      const ranges = scriptingValidationRanges(source);
+      codeEditor.setDiagnostics(ranges.map(({ start, end, diagnostic }) => ({
+        from: start,
+        to: end,
+        severity: diagnostic.severity,
+        message: diagnostic.message,
+      })));
     }
 
     function renderScriptingHighlight() {
-      const code = el("scripting-code");
-      const highlight = el("scripting-highlight");
-      const source = code.value;
-      const syntax = scriptingLanguage === "python"
-        ? highlightScriptingPython(source)
-        : esc(source);
-      let lineIndex = 0;
-      const withAnchors = syntax.replace(/\n/g, () => {
-        lineIndex += 1;
-        return `\n<span class="scripting-line-anchor" data-line="${lineIndex}"></span>`;
-      });
-      highlight.innerHTML = `<span class="scripting-line-anchor" data-line="0"></span>${withAnchors}`;
-      renderScriptingValidationMarks(source, highlight);
-      highlight.scrollTop = code.scrollTop;
-      highlight.scrollLeft = code.scrollLeft;
+      const editor = scriptingCodeEditor();
+      const source = editor.getValue();
+      editor.setLanguage(scriptingLanguage);
+      renderScriptingValidationMarks(source);
       scheduleScriptingDiff();
     }
 
@@ -2005,7 +1817,7 @@
         clearTimeout(scriptingDiffTimer);
         scriptingDiffTimer = null;
       }
-      el("scripting-diff-markers").replaceChildren();
+      scriptingCodeEditor().setChangedLines();
     }
 
     function scheduleScriptingDiff() {
@@ -2176,45 +1988,14 @@
         clearScriptingDiff();
         return;
       }
-      const highlight = el("scripting-highlight");
-      const markers = el("scripting-diff-markers");
-      const anchors = highlight.querySelectorAll(".scripting-line-anchor");
-      if (!anchors.length) return;
-      const changes = scriptingChangedLines(scriptingBaseContent, el("scripting-code").value);
-      const highlightRect = highlight.getBoundingClientRect();
-      const lineHeight = parseFloat(getComputedStyle(highlight).lineHeight) || 18;
-      const lineTop = (line) => {
-        const anchor = anchors[Math.max(0, Math.min(line, anchors.length - 1))];
-        return anchor
-          ? anchor.getBoundingClientRect().top - highlightRect.top + highlight.scrollTop
-          : 0;
-      };
-      const fragment = document.createDocumentFragment();
-      changes.lines.forEach(({ line, type }) => {
-        const marker = document.createElement("span");
-        const top = lineTop(line);
-        const nextTop = line + 1 < anchors.length ? lineTop(line + 1) : top + lineHeight;
-        marker.className = `scripting-diff-marker ${type}`;
-        marker.style.top = `${top}px`;
-        marker.style.height = `${Math.max(2, nextTop - top)}px`;
-        fragment.appendChild(marker);
-      });
-      changes.deletionLines.forEach((line) => {
-        const marker = document.createElement("span");
-        const boundaryTop = line < anchors.length
-          ? lineTop(line)
-          : lineTop(anchors.length - 1) + lineHeight;
-        marker.className = "scripting-diff-marker deleted";
-        marker.style.top = `${Math.max(0, boundaryTop - 4)}px`;
-        fragment.appendChild(marker);
-      });
-      markers.replaceChildren(fragment);
-      markers.style.transform = `translateY(${-el("scripting-code").scrollTop}px)`;
+      const editor = scriptingCodeEditor();
+      const changes = scriptingChangedLines(scriptingBaseContent, editor.getValue());
+      editor.setChangedLines(changes);
     }
 
     function handleScriptingInput() {
       scriptingDirty = Boolean(scriptingBaseRevision)
-        && el("scripting-code").value !== scriptingBaseContent;
+        && scriptingCodeEditor().getValue() !== scriptingBaseContent;
       if (!scriptingConflict) setScriptingNotice();
       renderScriptingHighlight();
       if (scriptingEditorController && scriptingEditorController.isOpen()) {
@@ -2225,30 +2006,7 @@
 
     function toggleScriptingComments() {
       if (scriptingLanguage !== "python") return;
-      const editor = el("scripting-code");
-      const source = editor.value;
-      const selectionStart = editor.selectionStart;
-      const selectionEnd = editor.selectionEnd;
-      const lineStart = selectionStart === 0
-        ? 0
-        : source.lastIndexOf("\n", selectionStart - 1) + 1;
-      const effectiveEnd = selectionEnd > selectionStart && source[selectionEnd - 1] === "\n"
-        ? selectionEnd - 1
-        : selectionEnd;
-      const nextLineBreak = source.indexOf("\n", effectiveEnd);
-      const lineEnd = nextLineBreak === -1 ? source.length : nextLineBreak;
-      const lines = source.slice(lineStart, lineEnd).split("\n");
-      const nonEmpty = lines.filter((line) => line.trim().length > 0);
-      const remove = nonEmpty.length > 0 && nonEmpty.every((line) => /^\s*#/.test(line));
-      captureScriptingUndo("insertText");
-      const updated = lines.map((line) => {
-        if (!line.trim()) return line;
-        if (remove) return line.replace(/^(\s*)# ?/, "$1");
-        return line.replace(/^(\s*)/, "$1# ");
-      }).join("\n");
-      editor.value = source.slice(0, lineStart) + updated + source.slice(lineEnd);
-      editor.setSelectionRange(lineStart, lineStart + updated.length);
-      handleScriptingInput();
+      scriptingCodeEditor().toggleComment();
     }
 
     function renderScriptingFile(payload, options = {}) {
@@ -2256,13 +2014,11 @@
       const language = String(payload.language || "");
       const content = String(payload.content || "");
       const code = el("scripting-code");
+      const editor = scriptingCodeEditor();
       const editorView = options.preserveEditorView === true
         ? {
-          selectionStart: code.selectionStart,
-          selectionEnd: code.selectionEnd,
-          selectionDirection: code.selectionDirection,
-          scrollTop: code.scrollTop,
-          scrollLeft: code.scrollLeft,
+          selection: editor.getSelection(),
+          scroll: editor.getScrollPosition(),
         }
         : null;
       scriptingSelectedPath = path;
@@ -2279,22 +2035,14 @@
       el("scripting-file-name").textContent = String(payload.name || path.split("/").pop() || "Source");
       el("scripting-file-path").textContent = path;
       el("scripting-file-meta").textContent = `${language === "markdown" ? "Markdown" : "Python"} · ${scriptingFileSize(payload.size)}`;
-      const highlight = el("scripting-highlight");
-      code.value = content;
+      editor.setValue(content, {
+        selection: editorView ? editorView.selection : undefined,
+      });
       code.dataset.revision = scriptingBaseRevision;
       if (editorView) {
-        const selectionStart = Math.min(editorView.selectionStart, content.length);
-        const selectionEnd = Math.min(editorView.selectionEnd, content.length);
-        code.setSelectionRange(selectionStart, selectionEnd, editorView.selectionDirection);
-        code.scrollTop = editorView.scrollTop;
-        code.scrollLeft = editorView.scrollLeft;
-        highlight.scrollTop = editorView.scrollTop;
-        highlight.scrollLeft = editorView.scrollLeft;
+        editor.setScrollPosition(editorView.scroll);
       } else {
-        code.scrollTop = 0;
-        code.scrollLeft = 0;
-        highlight.scrollTop = 0;
-        highlight.scrollLeft = 0;
+        editor.setScrollPosition();
       }
       setScriptingNotice();
       resetScriptingUndo();
@@ -2320,7 +2068,7 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             path: scriptingSelectedPath,
-            content: el("scripting-code").value,
+            content: scriptingCodeEditor().getValue(),
             base_revision: scriptingBaseRevision,
             note: scriptingNote,
           }),
@@ -2397,8 +2145,7 @@
     }
 
     function discardScriptingChanges() {
-      const code = el("scripting-code");
-      code.value = scriptingBaseContent;
+      scriptingCodeEditor().setValue(scriptingBaseContent);
       scriptingDirty = false;
       setScriptingNote(scriptingBaseNote);
       if (!scriptingConflict) setScriptingNotice();
@@ -2691,19 +2438,22 @@
         || scriptingSaving
         || scriptingConflict
       ) return false;
-      const code = el("scripting-code");
-      if (code.value !== expectedContent) {
+      const editor = scriptingCodeEditor();
+      if (editor.getValue() !== expectedContent) {
         setScriptingNotice(
           "The editor changed while AI was working. The AI edit was not applied.",
         );
         setScriptingStatus("AI edit not applied", "dirty");
         return false;
       }
-      captureScriptingUndo("aiEdit");
-      const selectionStart = Math.min(code.selectionStart, content.length);
-      const selectionEnd = Math.min(code.selectionEnd, content.length);
-      code.value = content;
-      code.setSelectionRange(selectionStart, selectionEnd, code.selectionDirection);
+      const selection = editor.getSelection();
+      editor.setValue(content, {
+        addToHistory: true,
+        selection: {
+          anchor: Math.min(selection.anchor, content.length),
+          head: Math.min(selection.head, content.length),
+        },
+      });
       handleScriptingInput();
       setScriptingStatus("Modified by AI", "dirty");
       return true;
@@ -3330,8 +3080,12 @@
       const modal = el("scripting-modal");
       const tree = el("scripting-tree");
       const code = el("scripting-code");
-      const highlight = el("scripting-highlight");
 
+      window.PyneCodeMirror.create(code, {
+        value: "",
+        language: "python",
+        ariaLabel: "Script source",
+      });
       window.PyneScriptingBacktest.init({ api, mobileQuery: mobileHubQuery });
       window.PyneScriptingAi.init({
         api,
@@ -3353,8 +3107,6 @@
         closeButton: el("scripting-find-close"),
         replaceButton: el("scripting-replace-one"),
         replaceAllButton: el("scripting-replace-all"),
-        highlightRoot: highlight,
-        beforeReplace: () => captureScriptingUndo("replaceText"),
         afterReplace: handleScriptingInput,
         onOpen: () => {
           setScriptingNoteOpen(false);
@@ -3362,6 +3114,7 @@
         },
       });
       modal.addEventListener("keydown", (event) => {
+        if (event.defaultPrevented) return;
         if (!event.target.closest(".scripting-editor-pane")) return;
         scriptingEditorController.handleShortcut(event);
       });
@@ -3418,7 +3171,7 @@
         event.preventDefault();
         event.stopPropagation();
         setScriptingNoteOpen(false);
-        el("scripting-code").focus({ preventScroll: true });
+        scriptingCodeEditor().focus({ preventScroll: true });
       });
       el("scripting-undo").addEventListener("pointerdown", (event) => {
         scriptingUndoPointerType = event.pointerType || "";
@@ -3583,14 +3336,9 @@
       el("scripting-restore").addEventListener("click", () => {
         runScriptingNavigation(restoreScriptingRevision);
       });
-      code.addEventListener("beforeinput", (event) => captureScriptingUndo(event.inputType || ""));
       code.addEventListener("input", handleScriptingInput);
-      code.addEventListener("compositionstart", () => { scriptingComposing = true; });
-      code.addEventListener("compositionend", () => {
-        scriptingComposing = false;
-        handleScriptingInput();
-      });
       code.addEventListener("keydown", (event) => {
+        if (event.defaultPrevented) return;
         if (scriptingEditorController.handleShortcut(event)) return;
         const command = event.metaKey || event.ctrlKey;
         if (command && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "z") {
@@ -3606,23 +3354,8 @@
         if (command && event.key === "/") {
           event.preventDefault();
           toggleScriptingComments();
-          return;
-        }
-        if (event.key === "Tab" && !command && !event.altKey) {
-          event.preventDefault();
-          captureScriptingUndo("insertText");
-          const start = code.selectionStart;
-          const end = code.selectionEnd;
-          code.value = code.value.slice(0, start) + "    " + code.value.slice(end);
-          code.setSelectionRange(start + 4, start + 4);
-          handleScriptingInput();
         }
       });
-      code.addEventListener("scroll", () => {
-        highlight.scrollTop = code.scrollTop;
-        highlight.scrollLeft = code.scrollLeft;
-        el("scripting-diff-markers").style.transform = `translateY(${-code.scrollTop}px)`;
-      }, { passive: true });
       el("scripting-unsaved-close").addEventListener("click", closeScriptingUnsaved);
       el("scripting-unsaved-cancel").addEventListener("click", closeScriptingUnsaved);
       el("scripting-unsaved-discard").addEventListener("click", () => {

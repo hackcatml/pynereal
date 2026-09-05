@@ -72,9 +72,6 @@ App.ui = {
     sourceNotice: document.getElementById("source-notice"),
     sourceNoticeText: document.getElementById("source-notice-text"),
     sourceReload: document.getElementById("source-reload"),
-    sourceHighlight: document.getElementById("source-highlight"),
-    sourceDiffGutter: document.getElementById("source-diff-gutter"),
-    sourceDiffMarkers: document.getElementById("source-diff-markers"),
     sourceCode: document.getElementById("source-code"),
     sourceHistoryPanel: document.getElementById("source-history-panel"),
     sourceHistoryPath: document.getElementById("source-history-path"),
@@ -94,13 +91,8 @@ App.ui = {
   manualAlertArmedInputDirty: false,
   activeTemplatePlaceholder: null,
   sourceDiffTimer: null,
-  sourceUndoStack: [],
   sourceEditorController: null,
   sourceUndoPointerType: "",
-  sourceUndoInputType: "",
-  sourceUndoCapturedAt: 0,
-  sourceApplyingUndo: false,
-  sourceComposing: false,
   sourceHistoryRequestSeq: 0,
   sourceHistoryDiffRequestSeq: 0,
   setChartInfo(ohlcvText = null) {
@@ -1027,7 +1019,7 @@ App.ui = {
       this.elements.sourceNoteInput.value = state.sourceNote;
     }
     if (!state.sourceDirty) {
-      this.elements.sourceCode.value = source;
+      this.elements.sourceCode._pyneCodeEditor.setValue(source);
       this.resetSourceUndo();
     }
     this.renderSourceHighlight();
@@ -1044,39 +1036,16 @@ App.ui = {
     this.elements.sourceNotice.classList.toggle("hidden", !message);
   },
   renderSourceHighlight() {
-    const source = this.elements.sourceCode.value || "No source loaded.";
-    let lineIndex = 0;
-    const highlighted = this.highlightPython(source).replace(/\n/g, () => {
-      lineIndex += 1;
-      return `\n<span class="source-line-anchor" data-line="${lineIndex}"></span>`;
-    });
-    this.elements.sourceHighlight.innerHTML =
-      `<span class="source-line-anchor" data-line="0"></span>${highlighted}`;
-    this.syncSourceScroll();
+    const codeEditor = this.elements.sourceCode._pyneCodeEditor;
+    codeEditor.setLanguage("python");
     this.scheduleSourceDiff();
-  },
-  syncSourceScroll() {
-    const editor = this.elements.sourceCode;
-    const highlight = this.elements.sourceHighlight;
-    highlight.scrollTop = editor.scrollTop;
-    highlight.scrollLeft = editor.scrollLeft;
-    this.syncSourceDiffScroll();
-  },
-  syncSourceDiffScroll() {
-    const markers = this.elements.sourceDiffMarkers;
-    const editor = this.elements.sourceCode;
-    if (!markers || !editor) return;
-    markers.style.transform = `translateY(${-editor.scrollTop}px)`;
   },
   clearSourceDiff() {
     if (this.sourceDiffTimer !== null) {
       clearTimeout(this.sourceDiffTimer);
       this.sourceDiffTimer = null;
     }
-    if (this.elements.sourceDiffMarkers) {
-      this.elements.sourceDiffMarkers.replaceChildren();
-      this.syncSourceDiffScroll();
-    }
+    this.elements.sourceCode._pyneCodeEditor.setChangedLines();
   },
   scheduleSourceDiff() {
     if (!App.state.sourceDirty) {
@@ -1231,127 +1200,37 @@ App.ui = {
   },
   renderSourceDiff() {
     const state = App.state;
-    const markers = this.elements.sourceDiffMarkers;
-    const highlight = this.elements.sourceHighlight;
-    if (!markers || !highlight || !state.scriptSourceLoaded || !state.sourceDirty) {
+    if (!state.scriptSourceLoaded || !state.sourceDirty) {
       this.clearSourceDiff();
       return;
     }
 
-    const current = this.elements.sourceCode.value;
+    const current = this.elements.sourceCode._pyneCodeEditor.getValue();
     if (current === state.scriptSource) {
       this.clearSourceDiff();
       return;
     }
 
     const changes = this.sourceDiffMarkers(state.scriptSource, current);
-    const anchors = highlight.querySelectorAll(".source-line-anchor");
-    const highlightRect = highlight.getBoundingClientRect();
-    const lineHeight = parseFloat(getComputedStyle(highlight).lineHeight) || 18;
-    const topCache = new Map();
-    const lineTop = (line) => {
-      const clamped = Math.max(0, Math.min(line, anchors.length - 1));
-      if (topCache.has(clamped)) return topCache.get(clamped);
-      const anchor = anchors[clamped];
-      const top = anchor
-        ? anchor.getBoundingClientRect().top - highlightRect.top + highlight.scrollTop
-        : 0;
-      topCache.set(clamped, top);
-      return top;
-    };
-    const fragment = document.createDocumentFragment();
-
-    [...changes.lines.entries()].sort((a, b) => a[0] - b[0]).forEach(([line, type]) => {
-      const marker = document.createElement("span");
-      const top = lineTop(line);
-      const nextTop = line + 1 < anchors.length ? lineTop(line + 1) : top + lineHeight;
-      marker.className = `source-diff-marker ${type}`;
-      marker.style.top = `${top}px`;
-      marker.style.height = `${Math.max(2, nextTop - top)}px`;
-      fragment.appendChild(marker);
+    this.elements.sourceCode._pyneCodeEditor.setChangedLines({
+      lines: [...changes.lines.entries()].map(([line, type]) => ({ line, type })),
+      deletionLines: [...changes.deletions],
     });
-
-    [...changes.deletions].sort((a, b) => a - b).forEach((line) => {
-      const marker = document.createElement("span");
-      marker.className = "source-diff-marker deleted";
-      marker.style.top = `${lineTop(line)}px`;
-      fragment.appendChild(marker);
-    });
-
-    markers.replaceChildren(fragment);
-    this.syncSourceDiffScroll();
   },
   resetSourceUndo() {
-    this.sourceUndoStack = [];
-    this.sourceUndoInputType = "";
-    this.sourceUndoCapturedAt = 0;
+    this.elements.sourceCode._pyneCodeEditor.clearHistory();
     this.updateSourceUndoState();
   },
   updateSourceUndoState() {
     const button = this.elements.sourceUndo;
     if (!button) return;
-    button.disabled = !App.state.sourceDirty || this.sourceUndoStack.length === 0;
-  },
-  captureSourceUndo(inputType = "") {
-    if (inputType === "historyUndo" || inputType === "historyRedo") {
-      this.resetSourceUndo();
-      return;
-    }
-    if (
-      this.sourceApplyingUndo ||
-      this.sourceComposing
-    ) {
-      return;
-    }
-    const editor = this.elements.sourceCode;
-    const now = Date.now();
-    const groupedTypes = new Set([
-      "insertText",
-      "insertCompositionText",
-      "deleteContentBackward",
-      "deleteContentForward"
-    ]);
-    const shouldGroup = (
-      groupedTypes.has(inputType) &&
-      inputType === this.sourceUndoInputType &&
-      now - this.sourceUndoCapturedAt < 700
-    );
-    if (!shouldGroup) {
-      this.sourceUndoStack.push({
-        value: editor.value,
-        selectionStart: editor.selectionStart,
-        selectionEnd: editor.selectionEnd,
-        scrollTop: editor.scrollTop,
-        scrollLeft: editor.scrollLeft
-      });
-      if (this.sourceUndoStack.length > 100) {
-        this.sourceUndoStack.shift();
-      }
-    }
-    this.sourceUndoInputType = inputType;
-    this.sourceUndoCapturedAt = now;
+    const codeEditor = this.elements.sourceCode._pyneCodeEditor;
+    button.disabled = !App.state.sourceDirty || !codeEditor.canUndo();
   },
   undoSourceEdit({ focusEditor = true } = {}) {
-    const editor = this.elements.sourceCode;
-    const snapshot = this.sourceUndoStack.pop();
-    if (!snapshot) return;
-
-    this.sourceApplyingUndo = true;
-    editor.value = snapshot.value;
-    editor.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
-    this.handleSourceInput();
-    editor.scrollTop = snapshot.scrollTop;
-    editor.scrollLeft = snapshot.scrollLeft;
-    this.syncSourceScroll();
-    this.sourceApplyingUndo = false;
-    this.sourceUndoInputType = "";
-    this.sourceUndoCapturedAt = 0;
-    if (App.state.sourceDirty) {
-      this.updateSourceUndoState();
-    } else {
-      this.resetSourceUndo();
-    }
-    if (focusEditor) editor.focus({ preventScroll: true });
+    const codeEditor = this.elements.sourceCode._pyneCodeEditor;
+    codeEditor.undo();
+    if (focusEditor) codeEditor.focus({ preventScroll: true });
   },
   updateSourceSaveState() {
     const state = App.state;
@@ -1414,7 +1293,8 @@ App.ui = {
   },
   handleSourceInput() {
     const state = App.state;
-    state.sourceDirty = state.scriptSourceLoaded && this.elements.sourceCode.value !== state.scriptSource;
+    state.sourceDirty = state.scriptSourceLoaded
+      && this.elements.sourceCode._pyneCodeEditor.getValue() !== state.scriptSource;
     state.sourceSaveStatus = "";
     if (!state.sourceDirty && !state.sourceConflict) {
       this.setSourceNotice();
@@ -1432,7 +1312,7 @@ App.ui = {
     state.sourceSaving = true;
     state.sourceSaveStatus = "";
     this.updateSourceSaveState();
-    const source = this.elements.sourceCode.value;
+    const source = this.elements.sourceCode._pyneCodeEditor.getValue();
     const result = await App.data.saveScriptSource(source, state.sourceNote);
     state.sourceSaving = false;
 
@@ -1440,7 +1320,7 @@ App.ui = {
       state.sourceSaveStatus = result.data.saved ? "Applies at next warm-up" : "Note saved";
       state.sourceConflict = false;
       this.setSourceNotice();
-      this.elements.sourceCode.value = state.scriptSource;
+      this.elements.sourceCode._pyneCodeEditor.setValue(state.scriptSource);
       this.setSourceNote(state.sourceBaseNote);
       this.setSourceNoteOpen(false);
       this.resetSourceUndo();
@@ -1680,7 +1560,7 @@ App.ui = {
       return;
     }
     state.sourceSaveStatus = "Applies at next warm-up";
-    this.elements.sourceCode.value = state.scriptSource;
+    this.elements.sourceCode._pyneCodeEditor.setValue(state.scriptSource);
     this.setSourceNote(state.sourceBaseNote);
     this.setSourceNoteOpen(false);
     this.resetSourceUndo();
@@ -1703,91 +1583,8 @@ App.ui = {
     this.setSourceNotice();
     this.renderSourcePanel();
   },
-  insertSourceText(text) {
-    const editor = this.elements.sourceCode;
-    const start = editor.selectionStart;
-    const end = editor.selectionEnd;
-    this.captureSourceUndo("insertText");
-    editor.value = editor.value.slice(0, start) + text + editor.value.slice(end);
-    editor.selectionStart = start + text.length;
-    editor.selectionEnd = start + text.length;
-    this.handleSourceInput();
-  },
   toggleSourceComments() {
-    const editor = this.elements.sourceCode;
-    const source = editor.value;
-    const selectionStart = editor.selectionStart;
-    const selectionEnd = editor.selectionEnd;
-    const lineStart = selectionStart === 0
-      ? 0
-      : source.lastIndexOf("\n", selectionStart - 1) + 1;
-    const effectiveEnd = (
-      selectionEnd > selectionStart && source[selectionEnd - 1] === "\n"
-    ) ? selectionEnd - 1 : selectionEnd;
-    const nextLineBreak = source.indexOf("\n", effectiveEnd);
-    const lineEnd = nextLineBreak === -1 ? source.length : nextLineBreak;
-    const selectedSource = source.slice(lineStart, lineEnd);
-    const lines = selectedSource.split("\n");
-    const nonEmptyLines = lines.filter((line) => line.trim().length > 0);
-    const removeComments = (
-      nonEmptyLines.length > 0 &&
-      nonEmptyLines.every((line) => /^\s*#/.test(line))
-    );
-    const commentBlankLines = nonEmptyLines.length === 0;
-    const edits = [];
-    const updatedLines = lines.map((line) => {
-      if (!line.trim() && !commentBlankLines) {
-        edits.push({ at: 0, delta: 0 });
-        return line;
-      }
-      const indentation = line.match(/^\s*/)?.[0].length || 0;
-      if (removeComments) {
-        const match = line.slice(indentation).match(/^# ?/);
-        const removed = match ? match[0].length : 0;
-        edits.push({ at: indentation, delta: -removed });
-        return line.slice(0, indentation) + line.slice(indentation + removed);
-      }
-      edits.push({ at: indentation, delta: 2 });
-      return `${line.slice(0, indentation)}# ${line.slice(indentation)}`;
-    });
-    const updatedSource = updatedLines.join("\n");
-    const originalLineStarts = [];
-    const updatedLineStarts = [];
-    let originalOffset = 0;
-    let updatedOffset = 0;
-    lines.forEach((line, index) => {
-      originalLineStarts.push(originalOffset);
-      updatedLineStarts.push(updatedOffset);
-      originalOffset += line.length + (index < lines.length - 1 ? 1 : 0);
-      updatedOffset += updatedLines[index].length + (index < lines.length - 1 ? 1 : 0);
-    });
-    const lengthDelta = updatedSource.length - selectedSource.length;
-    const mapSelection = (position) => {
-      if (position <= lineStart) return position;
-      if (position >= lineEnd) return position + lengthDelta;
-      const relative = position - lineStart;
-      let lineIndex = originalLineStarts.length - 1;
-      while (lineIndex > 0 && originalLineStarts[lineIndex] > relative) {
-        lineIndex -= 1;
-      }
-      const column = relative - originalLineStarts[lineIndex];
-      const edit = edits[lineIndex];
-      let updatedColumn = column;
-      if (edit.delta > 0 && column >= edit.at) {
-        updatedColumn += edit.delta;
-      } else if (edit.delta < 0 && column > edit.at) {
-        updatedColumn = Math.max(edit.at, column + edit.delta);
-      }
-      return lineStart + updatedLineStarts[lineIndex] + updatedColumn;
-    };
-
-    this.captureSourceUndo("toggleComment");
-    editor.value = source.slice(0, lineStart) + updatedSource + source.slice(lineEnd);
-    editor.setSelectionRange(
-      mapSelection(selectionStart),
-      mapSelection(selectionEnd),
-    );
-    this.handleSourceInput();
+    this.elements.sourceCode._pyneCodeEditor.toggleComment();
   },
   escapeHtml(value) {
     return String(value).replace(/[&<>"']/g, (ch) => ({
@@ -1797,116 +1594,6 @@ App.ui = {
       "\"": "&quot;",
       "'": "&#39;"
     })[ch]);
-  },
-  wrapPythonToken(className, value) {
-    return `<span class="${className}">${this.escapeHtml(value)}</span>`;
-  },
-  highlightPython(source) {
-    if (!source) {
-      return this.escapeHtml("No source loaded.");
-    }
-
-    const keywords = new Set([
-      "and", "as", "assert", "async", "await", "break", "class", "continue", "def",
-      "del", "elif", "else", "except", "finally", "for", "from", "global", "if",
-      "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise",
-      "return", "try", "while", "with", "yield"
-    ]);
-    const builtins = new Set([
-      "abs", "all", "any", "bool", "dict", "enumerate", "filter", "float", "int",
-      "len", "list", "map", "max", "min", "open", "print", "range", "reversed",
-      "round", "set", "sorted", "str", "sum", "super", "tuple", "type", "zip"
-    ]);
-    const constants = new Set(["False", "None", "True", "Ellipsis", "NotImplemented"]);
-    let html = "";
-    let i = 0;
-
-    const isIdentStart = (ch) => /[A-Za-z_]/.test(ch);
-    const isIdent = (ch) => /[A-Za-z0-9_]/.test(ch);
-    const stringPrefixMatch = (offset) => {
-      const part = source.slice(offset, offset + 3);
-      const match = /^(?:[rRuUbBfF]|[rR][fF]|[fF][rR]|[bB][rR]|[rR][bB])(?=['"])/.exec(part);
-      return match ? match[0] : "";
-    };
-
-    while (i < source.length) {
-      const ch = source[i];
-      const prefix = stringPrefixMatch(i);
-      const quoteOffset = i + prefix.length;
-
-      if ((prefix || ch === "\"" || ch === "'") && (source[quoteOffset] === "\"" || source[quoteOffset] === "'")) {
-        const quote = source[quoteOffset];
-        const triple = source.slice(quoteOffset, quoteOffset + 3) === quote.repeat(3);
-        let end = quoteOffset + (triple ? 3 : 1);
-        while (end < source.length) {
-          if (triple && source.slice(end, end + 3) === quote.repeat(3)) {
-            end += 3;
-            break;
-          }
-          if (!triple && source[end] === "\n") {
-            break;
-          }
-          if (!triple && source[end] === "\\") {
-            end += 2;
-          } else if (!triple && source[end] === quote) {
-            end += 1;
-            break;
-          } else {
-            end += 1;
-          }
-        }
-        html += this.wrapPythonToken("py-string", source.slice(i, end));
-        i = end;
-        continue;
-      }
-
-      if (ch === "#") {
-        let end = i;
-        while (end < source.length && source[end] !== "\n") end += 1;
-        html += this.wrapPythonToken("py-comment", source.slice(i, end));
-        i = end;
-        continue;
-      }
-
-      if (ch === "@" && (i === 0 || source[i - 1] === "\n")) {
-        let end = i + 1;
-        while (end < source.length && /[A-Za-z0-9_.]/.test(source[end])) end += 1;
-        html += this.wrapPythonToken("py-decorator", source.slice(i, end));
-        i = end;
-        continue;
-      }
-
-      if (/[0-9]/.test(ch)) {
-        const match = /^(?:0[xX][0-9A-Fa-f_]+|0[bB][01_]+|0[oO][0-7_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d[\d_]*)?j?)/.exec(source.slice(i));
-        if (match) {
-          html += this.wrapPythonToken("py-number", match[0]);
-          i += match[0].length;
-          continue;
-        }
-      }
-
-      if (isIdentStart(ch)) {
-        let end = i + 1;
-        while (end < source.length && isIdent(source[end])) end += 1;
-        const word = source.slice(i, end);
-        if (keywords.has(word)) {
-          html += this.wrapPythonToken("py-keyword", word);
-        } else if (builtins.has(word)) {
-          html += this.wrapPythonToken("py-builtin", word);
-        } else if (constants.has(word)) {
-          html += this.wrapPythonToken("py-constant", word);
-        } else {
-          html += this.escapeHtml(word);
-        }
-        i = end;
-        continue;
-      }
-
-      html += this.escapeHtml(ch);
-      i += 1;
-    }
-
-    return html;
   },
   async toggleSourcePanel(forceOpen = null) {
     const state = App.state;
@@ -1929,7 +1616,7 @@ App.ui = {
       if (this.sourceEditorController) {
         this.sourceEditorController.close({ focusEditor: false });
       }
-      this.elements.sourceCode.blur();
+      this.elements.sourceCode._pyneCodeEditor.blur();
     }
     if (App.chart && App.chart.resizeToContainer) {
       requestAnimationFrame(() => App.chart.resizeToContainer());
@@ -2069,6 +1756,11 @@ App.ui = {
       sourceHistoryList,
       sourceHistoryRestore
     } = this.elements;
+    window.PyneCodeMirror.create(sourceCode, {
+      value: sourceCode.textContent || "No source loaded.",
+      language: "python",
+      ariaLabel: "Script source",
+    });
     this.sourceEditorController = window.PyneEditor.create({
       editor: sourceCode,
       panel: this.elements.sourceFindPanel,
@@ -2082,8 +1774,6 @@ App.ui = {
       closeButton: this.elements.sourceFindClose,
       replaceButton: this.elements.sourceReplaceOne,
       replaceAllButton: this.elements.sourceReplaceAll,
-      highlightRoot: this.elements.sourceHighlight,
-      beforeReplace: () => this.captureSourceUndo("replaceText"),
       afterReplace: () => this.handleSourceInput(),
       onOpen: () => this.setSourceNoteOpen(false),
     });
@@ -2297,34 +1987,16 @@ App.ui = {
       e.preventDefault();
       e.stopPropagation();
       this.setSourceNoteOpen(false);
-      sourceCode.focus({ preventScroll: true });
-    });
-
-    sourceCode.addEventListener("beforeinput", (e) => {
-      this.captureSourceUndo(e.inputType || "");
-    });
-
-    sourceCode.addEventListener("compositionstart", () => {
-      this.captureSourceUndo("insertCompositionText");
-      this.sourceComposing = true;
-    });
-
-    sourceCode.addEventListener("compositionend", () => {
-      this.sourceComposing = false;
-      this.sourceUndoInputType = "insertCompositionText";
-      this.sourceUndoCapturedAt = Date.now();
+      sourceCode._pyneCodeEditor.focus({ preventScroll: true });
     });
 
     sourceCode.addEventListener("input", () => {
       this.handleSourceInput();
     });
 
-    sourceCode.addEventListener("scroll", () => {
-      this.syncSourceScroll();
-    });
-
     sourceCode.addEventListener("keydown", (e) => {
       if (this.sourceEditorController.handleShortcut(e)) return;
+      if (e.defaultPrevented) return;
       if (
         (e.metaKey || e.ctrlKey) &&
         !e.altKey &&
@@ -2347,11 +2019,6 @@ App.ui = {
       ) {
         e.preventDefault();
         this.toggleSourceComments();
-        return;
-      }
-      if (e.key === "Tab") {
-        e.preventDefault();
-        this.insertSourceText("    ");
       }
     });
 

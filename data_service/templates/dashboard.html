@@ -4,10 +4,11 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=196" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=197" />
   <link rel="stylesheet" href="/static/scripting_backtest.css?v=30" />
   <link rel="stylesheet" href="/static/scripting_ai.css?v=6" />
-  <link rel="stylesheet" href="/static/editor.css?v=4" />
+  <link rel="stylesheet" href="/static/editor.css?v=5" />
+  <link rel="stylesheet" href="/static/codemirror.css?v=1" />
 </head>
 <body>
   <header class="topbar">
@@ -525,13 +526,8 @@
             <button id="scripting-editor-reload" class="btn" type="button">Reload</button>
           </div>
           <div id="scripting-editor-wrap" class="scripting-editor-wrap hidden">
-            <pre id="scripting-highlight" class="scripting-code" aria-hidden="true" inert></pre>
-            <div id="scripting-diff-gutter" class="scripting-diff-gutter" aria-hidden="true" inert>
-              <div id="scripting-diff-markers" class="scripting-diff-markers"></div>
-            </div>
-            <textarea id="scripting-code" class="scripting-editor" spellcheck="false"
-                      autocapitalize="off" autocomplete="off" autocorrect="off"
-                      wrap="soft" aria-label="Script source"></textarea>
+            <div id="scripting-code" class="scripting-editor"
+                 role="textbox" aria-multiline="true" aria-label="Script source"></div>
           </div>
         </section>
       </div>
@@ -1830,10 +1826,11 @@
     </form>
   </div>
 
-  <script src="/static/editor.js?v=6"></script>
+  <script src="/static/codemirror.js?v=3"></script>
+  <script src="/static/editor.js?v=8"></script>
   <script src="/static/scripting_backtest.js?v=32"></script>
   <script src="/static/scripting_ai.js?v=9"></script>
-  <script src="/static/scripting.js?v=49"></script>
+  <script src="/static/scripting.js?v=51"></script>
   <script src="/static/dashboard.js?v=179"></script>
 </body>
 </html>

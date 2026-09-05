@@ -4,8 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Chart</title>
-  <link rel="stylesheet" href="/static/styles.css?v=38" />
-  <link rel="stylesheet" href="/static/editor.css?v=4" />
+  <link rel="stylesheet" href="/static/styles.css?v=39" />
+  <link rel="stylesheet" href="/static/editor.css?v=5" />
+  <link rel="stylesheet" href="/static/codemirror.css?v=1" />
   <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.9/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
@@ -181,11 +182,8 @@
       <button id="source-reload" type="button">Reload</button>
     </div>
     <div class="source-editor-wrap">
-      <pre id="source-highlight" class="source-code source-highlight" aria-hidden="true" inert>No source loaded.</pre>
-      <div id="source-diff-gutter" class="source-diff-gutter" aria-hidden="true" inert>
-        <div id="source-diff-markers" class="source-diff-markers"></div>
-      </div>
-      <textarea id="source-code" class="source-editor" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="soft">No source loaded.</textarea>
+      <div id="source-code" class="source-editor" role="textbox" aria-multiline="true"
+           aria-label="Script source">No source loaded.</div>
     </div>
     <section id="source-history-panel" class="source-history-panel hidden" aria-hidden="true"
              aria-label="Version history">
@@ -291,8 +289,9 @@
   </section>
   <!--RUNTIME_CONFIG-->
   <script src="/static/state.js?v=6"></script>
-  <script src="/static/editor.js?v=6"></script>
-  <script src="/static/ui.js?v=28"></script>
+  <script src="/static/codemirror.js?v=3"></script>
+  <script src="/static/editor.js?v=8"></script>
+  <script src="/static/ui.js?v=30"></script>
   <script src="/static/bgcolor.js?v=2"></script>
   <script src="/static/chart.js?v=3"></script>
   <script src="/static/measure.js"></script>

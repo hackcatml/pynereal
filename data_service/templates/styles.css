@@ -1236,106 +1236,13 @@ body.source-open .source-panel {
   background: #0b0f14;
 }
 
-.source-diff-gutter {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  z-index: 2;
-  width: 6px;
-  overflow: hidden;
-  pointer-events: none;
-}
-
-.source-diff-markers {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  will-change: transform;
-}
-
-.source-diff-marker {
-  position: absolute;
-  left: 0;
-  width: 3px;
-  min-height: 2px;
-}
-
-.source-diff-marker.added {
-  background: #2ea043;
-}
-
-.source-diff-marker.modified {
-  background: #1f6feb;
-}
-
-.source-diff-marker.deleted {
-  width: 0;
-  min-height: 0;
-  border-top: 4px solid transparent;
-  border-bottom: 4px solid transparent;
-  border-left: 5px solid #f85149;
-}
-
-.source-line-anchor {
-  display: inline-block;
-  width: 0;
-  height: 1em;
-  pointer-events: none;
-}
-
-.source-code,
 .source-editor {
   position: absolute;
   inset: 0;
   box-sizing: border-box;
-  margin: 0;
-  padding: 14px 16px 24px;
-  /* 두 레이어가 항상 동일한 스크롤바 거터를 예약해 content width(=줄바꿈 폭)를 일치시킨다 */
-  scrollbar-gutter: stable;
-  white-space: pre-wrap;
-  /* anywhere/word-break는 pre와 textarea의 break 위치가 어긋날 수 있어 break-word로 통일 */
-  overflow-wrap: break-word;
-  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  tab-size: 4;
-}
-
-.source-code {
-  overflow: hidden;
-  pointer-events: none;
-  color: #d4d4d4;
-}
-
-.source-editor {
-  z-index: 1;
-  overflow: auto;
-  border: 0;
-  outline: 0;
-  resize: none;
-  background: transparent;
-  color: rgba(255, 255, 255, 0.01);
-  caret-color: #e6edf3;
-  -webkit-text-fill-color: rgba(255, 255, 255, 0.01);
-}
-
-.source-editor::selection {
-  background: rgba(86, 156, 214, 0.32);
-}
-
-@media (min-width: 721px) {
-  .source-editor {
-    scrollbar-color: #3a4350 #0b0f14;
-    scrollbar-width: thin;
-  }
-  .source-editor::-webkit-scrollbar { width: 10px; height: 10px; }
-  .source-editor::-webkit-scrollbar-track { background: #0b0f14; }
-  .source-editor::-webkit-scrollbar-thumb {
-    border: 2px solid #0b0f14;
-    border-radius: 999px;
-    background: #3a4350;
-  }
-  .source-editor::-webkit-scrollbar-thumb:hover { background: #4a5565; }
+  min-width: 0;
+  min-height: 0;
+  background: #0b0f14;
 }
 
 .source-history-panel {
@@ -1492,38 +1399,6 @@ body.source-open .source-panel {
 }
 .source-history-diff .history-diff-line.meta { color: #8b949e; }
 
-.source-editor:focus {
-  outline: none;
-}
-
-.source-code .py-comment {
-  color: #6a9955;
-}
-
-.source-code .py-string {
-  color: #ce9178;
-}
-
-.source-code .py-number {
-  color: #b5cea8;
-}
-
-.source-code .py-keyword {
-  color: #569cd6;
-}
-
-.source-code .py-builtin {
-  color: #4ec9b0;
-}
-
-.source-code .py-constant {
-  color: #4fc1ff;
-}
-
-.source-code .py-decorator {
-  color: #c586c0;
-}
-
 @media (max-width: 640px), (hover: none) and (pointer: coarse) {
   body.source-open #chart {
     right: 0;
@@ -1596,19 +1471,6 @@ body.source-open .source-panel {
     display: inline-flex;
   }
   .source-find { display: inline-flex; }
-
-  .source-code {
-    overflow: auto;
-    padding: 12px 14px 18px;
-    font-size: 11px;
-    line-height: 1.5;
-  }
-
-  .source-editor {
-    padding: 12px 14px 18px;
-    font-size: 11px;
-    line-height: 1.5;
-  }
 
   .source-status {
     max-width: 112px;

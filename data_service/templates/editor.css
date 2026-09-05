@@ -116,20 +116,6 @@
   color: #ffffff;
 }
 
-.editor-search-match {
-  border-radius: 2px;
-  background: rgba(210, 153, 34, 0.52);
-  color: inherit;
-}
-
-.editor-search-match.current {
-  background: #f2cc60;
-  color: #11161d;
-  box-shadow: 0 0 0 1px rgba(255, 224, 112, 0.7);
-}
-
-.editor-search-match.current * { color: #11161d !important; }
-
 .editor-replace-toggle span {
   width: 0;
   height: 0;

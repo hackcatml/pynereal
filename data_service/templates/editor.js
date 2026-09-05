@@ -1,9 +1,8 @@
 (function () {
-  const MAX_VISIBLE_SEARCH_HIGHLIGHTS = 80;
-  const SEARCH_HIGHLIGHT_OVERSCAN_LINES = 2;
-
   function create(options) {
     const editor = options.editor;
+    const codeEditor = editor && editor._pyneCodeEditor;
+    if (!codeEditor) throw new Error("CodeMirror editor is required");
     const panel = options.panel;
     const findInput = options.findInput;
     const replaceInput = options.replaceInput;
@@ -15,7 +14,6 @@
     const closeButton = options.closeButton;
     const replaceButton = options.replaceButton;
     const replaceAllButton = options.replaceAllButton;
-    const highlightRoot = options.highlightRoot || null;
     const mobileQuery = window.matchMedia("(max-width: 720px)");
     let matches = [];
     let currentIndex = -1;
@@ -29,7 +27,7 @@
     function collectMatches() {
       const query = findInput.value;
       if (!query) return [];
-      const source = editor.value.toLowerCase();
+      const source = codeEditor.getValue().toLowerCase();
       const needle = query.toLowerCase();
       const found = [];
       let offset = 0;
@@ -49,94 +47,16 @@
     }
 
     function clearSearchHighlights() {
-      if (!highlightRoot) return;
-      const parents = new Set();
-      highlightRoot.querySelectorAll("mark.editor-search-match").forEach((mark) => {
-        if (mark.parentNode) parents.add(mark.parentNode);
-        mark.replaceWith(...mark.childNodes);
-      });
-      parents.forEach((parent) => parent.normalize());
-    }
-
-    function textSegments() {
-      const walker = document.createTreeWalker(highlightRoot, NodeFilter.SHOW_TEXT);
-      const segments = [];
-      let start = 0;
-      let node = walker.nextNode();
-      while (node) {
-        const end = start + node.data.length;
-        segments.push({ node, start, end });
-        start = end;
-        node = walker.nextNode();
-      }
-      return segments;
-    }
-
-    function textBoundary(segments, offset) {
-      if (!segments.length) return null;
-      const target = Math.max(0, Number(offset) || 0);
-      let low = 0;
-      let high = segments.length - 1;
-      while (low <= high) {
-        const middle = Math.floor((low + high) / 2);
-        const segment = segments[middle];
-        if (target < segment.start) high = middle - 1;
-        else if (target > segment.end) low = middle + 1;
-        else return { node: segment.node, offset: target - segment.start };
-      }
-      const last = segments[segments.length - 1];
-      return { node: last.node, offset: last.node.data.length };
-    }
-
-    function highlightedMatchIndexes() {
-      const style = getComputedStyle(editor);
-      const lineHeight = parseFloat(style.lineHeight) || 18;
-      const paddingTop = parseFloat(style.paddingTop) || 0;
-      const firstLine = Math.max(
-        0,
-        Math.floor((editor.scrollTop - paddingTop) / lineHeight)
-          - SEARCH_HIGHLIGHT_OVERSCAN_LINES,
-      );
-      const lastLine = Math.ceil(
-        (editor.scrollTop + editor.clientHeight - paddingTop) / lineHeight,
-      ) + SEARCH_HIGHLIGHT_OVERSCAN_LINES;
-      const indexes = [];
-      for (let index = 0; index < matches.length; index += 1) {
-        const line = matches[index].line;
-        if (line < firstLine) continue;
-        if (line > lastLine || indexes.length >= MAX_VISIBLE_SEARCH_HIGHLIGHTS) break;
-        indexes.push(index);
-      }
-      if (currentIndex >= 0 && !indexes.includes(currentIndex)) indexes.push(currentIndex);
-      indexes.sort((left, right) => left - right);
-      return indexes;
+      codeEditor.clearSearchMatches();
     }
 
     function renderSearchHighlights() {
       highlightFrame = null;
-      if (!highlightRoot) return;
-      clearSearchHighlights();
-      if (!isOpen() || !matches.length) return;
-      const segments = textSegments();
-      const indexes = highlightedMatchIndexes();
-      for (let position = indexes.length - 1; position >= 0; position -= 1) {
-        const index = indexes[position];
-        const match = matches[index];
-        const start = textBoundary(segments, match.start);
-        const end = textBoundary(segments, match.end);
-        if (!start || !end) continue;
-        const range = document.createRange();
-        range.setStart(start.node, start.offset);
-        range.setEnd(end.node, end.offset);
-        const mark = document.createElement("mark");
-        mark.className = `editor-search-match${index === currentIndex ? " current" : ""}`;
-        mark.appendChild(range.extractContents());
-        range.insertNode(mark);
-      }
+      if (!isOpen() || !matches.length) codeEditor.clearSearchMatches();
+      else codeEditor.setSearchMatches(matches, currentIndex);
     }
 
     function scheduleSearchHighlights() {
-      if (!highlightRoot) return;
       if (highlightFrame !== null) cancelAnimationFrame(highlightFrame);
       highlightFrame = requestAnimationFrame(renderSearchHighlights);
     }
@@ -160,34 +80,21 @@
       }
       currentIndex = (index + matches.length) % matches.length;
       const match = matches[currentIndex];
-      editor.setSelectionRange(match.start, match.end);
-
-      const before = editor.value.slice(0, match.start);
-      const line = before.split("\n").length - 1;
-      const style = getComputedStyle(editor);
-      const lineHeight = parseFloat(style.lineHeight) || 18;
-      const paddingTop = parseFloat(style.paddingTop) || 0;
-      const matchTop = paddingTop + line * lineHeight;
-      const visibleTop = editor.scrollTop;
-      const visibleBottom = visibleTop + editor.clientHeight - lineHeight;
-      if (matchTop < visibleTop || matchTop > visibleBottom) {
-        editor.scrollTop = Math.max(0, matchTop - editor.clientHeight / 2 + lineHeight);
-      }
-      editor.dispatchEvent(new Event("scroll"));
-      if (focusEditor) editor.focus({ preventScroll: true });
+      codeEditor.revealRange(match.start, match.end, { focus: focusEditor });
       updateControls();
       return true;
     }
 
-    function refresh({ select = false, anchor = editor.selectionStart } = {}) {
+    function refresh({ select = false, anchor = codeEditor.getSelection().from } = {}) {
       matches = collectMatches();
       if (!matches.length) {
         currentIndex = -1;
         updateControls();
         return;
       }
+      const selection = codeEditor.getSelection();
       const selectedIndex = matches.findIndex((match) => (
-        match.start === editor.selectionStart && match.end === editor.selectionEnd
+        match.start === selection.from && match.end === selection.to
       ));
       if (selectedIndex >= 0) currentIndex = selectedIndex;
       else {
@@ -207,7 +114,8 @@
 
     function open({ replace = false } = {}) {
       if (!isOpen() && typeof options.onOpen === "function") options.onOpen();
-      const selection = editor.value.slice(editor.selectionStart, editor.selectionEnd);
+      const range = codeEditor.getSelection();
+      const selection = codeEditor.getValue().slice(range.from, range.to);
       if (selection && !selection.includes("\n") && selection.length <= 120) {
         findInput.value = selection;
       }
@@ -224,7 +132,7 @@
     function close({ focusEditor = true } = {}) {
       panel.classList.add("hidden");
       panel.setAttribute("aria-hidden", "true");
-      if (focusEditor && !mobileQuery.matches) editor.focus({ preventScroll: true });
+      if (focusEditor && !mobileQuery.matches) codeEditor.focus({ preventScroll: true });
       else if (document.activeElement && panel.contains(document.activeElement)) {
         document.activeElement.blur();
       }
@@ -245,7 +153,7 @@
       if (!matches.length || currentIndex < 0) return;
       const match = matches[currentIndex];
       if (typeof options.beforeReplace === "function") options.beforeReplace();
-      editor.setRangeText(replaceInput.value, match.start, match.end, "end");
+      codeEditor.replaceRange(match.start, match.end, replaceInput.value, { emitChange: false });
       if (typeof options.afterReplace === "function") options.afterReplace();
       refresh({ select: true, anchor: match.start + replaceInput.value.length });
     }
@@ -253,7 +161,7 @@
     function replaceAll() {
       if (!matches.length) return;
       if (typeof options.beforeReplace === "function") options.beforeReplace();
-      const source = editor.value;
+      const source = codeEditor.getValue();
       const replacement = replaceInput.value;
       const parts = [];
       let offset = 0;
@@ -262,8 +170,10 @@
         offset = match.end;
       });
       parts.push(source.slice(offset));
-      editor.value = parts.join("");
-      editor.setSelectionRange(0, 0);
+      codeEditor.setValue(parts.join(""), {
+        addToHistory: true,
+        selection: { anchor: 0, head: 0 },
+      });
       if (typeof options.afterReplace === "function") options.afterReplace();
       refresh({ select: false, anchor: 0 });
     }
