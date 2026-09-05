@@ -697,4 +697,8 @@ Apache License Version 2.0.
 ## Acknowledgements
 
 - [PyneCore](https://github.com/PyneSys/pynecore)
-- [lightweight-charts](https://tradingview.github.io/lightweight-charts/)
+- [Lightweight Charts](https://tradingview.github.io/lightweight-charts/)
+- [CCXT](https://github.com/ccxt/ccxt)
+- [OpenAI Codex](https://openai.com/codex/)
+- [CodeMirror](https://codemirror.net/)
+- [Lezer](https://lezer.codemirror.net/)
