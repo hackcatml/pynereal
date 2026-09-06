@@ -209,14 +209,22 @@ def calculate_strategy_statistics(
     stats.gross_loss = float(position.grossloss) if not isinstance(position.grossloss, NA) else 0.0
     stats.max_equity_drawdown = float(position.max_drawdown) if not isinstance(position.max_drawdown, NA) else 0.0
     stats.max_equity_runup = float(position.max_runup) if not isinstance(position.max_runup, NA) else 0.0
+    stats.max_equity_drawdown_percent = (
+        float(position.max_drawdown_percent)
+        if not isinstance(position.max_drawdown_percent, NA)
+        else 0.0
+    )
+    stats.max_equity_runup_percent = (
+        float(position.max_runup_percent)
+        if not isinstance(position.max_runup_percent, NA)
+        else 0.0
+    )
 
     # Calculate percentages
     if initial_capital > 0:
         stats.net_profit_percent = (stats.net_profit / initial_capital) * 100
         stats.gross_profit_percent = (stats.gross_profit / initial_capital) * 100
         stats.gross_loss_percent = (stats.gross_loss / initial_capital) * 100
-        stats.max_equity_drawdown_percent = (stats.max_equity_drawdown / initial_capital) * 100
-        stats.max_equity_runup_percent = (stats.max_equity_runup / initial_capital) * 100
 
     # Buy & Hold calculation
     if first_price and last_price and first_price > 0:

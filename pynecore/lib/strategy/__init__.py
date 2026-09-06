@@ -374,8 +374,10 @@ class Position:
         'closed_trades_count', 'wintrades', 'eventrades', 'losstrades',
         'size', 'sign', 'avg_price', 'aggregate_avg_price', 'aggregate_openprofit',
         'position_open_time', 'position_open_bar_index', 'cum_profit',
-        'entry_equity', 'max_equity', 'min_equity',
-        'drawdown_summ', 'runup_summ', 'max_drawdown', 'max_runup',
+        'min_equity', 'max_realized_equity',
+        'drawdown_summ', 'runup_summ', 'current_drawdown', 'current_drawdown_percent',
+        'max_drawdown', 'max_drawdown_percent',
+        'max_runup', 'max_runup_percent',
         'entry_summ', 'open_commission',
         'risk_allowed_direction', 'risk_max_cons_loss_days', 'risk_max_cons_loss_days_alert',
         'risk_max_drawdown_value', 'risk_max_drawdown_type', 'risk_max_drawdown_alert',
@@ -429,13 +431,16 @@ class Position:
         self.position_open_time: int | None = None
         self.position_open_bar_index: int | None = None
         self.cum_profit: float | NA[float] = 0.0
-        self.entry_equity: float = 0.0
-        self.max_equity: float = -float("inf")
         self.min_equity: float = float("inf")
+        self.max_realized_equity: float = -float("inf")
         self.drawdown_summ: float = 0.0
         self.runup_summ: float = 0.0
+        self.current_drawdown: float = 0.0
+        self.current_drawdown_percent: float = 0.0
         self.max_drawdown: float = 0.0
+        self.max_drawdown_percent: float = 0.0
         self.max_runup: float = 0.0
+        self.max_runup_percent: float = 0.0
         self.entry_summ: float = 0.0
         self.open_commission: float = 0.0
 
@@ -627,17 +632,6 @@ class Position:
                         closed_trade.max_drawdown *= (1 - size_ratio)
                         closed_trade.max_runup *= (1 - size_ratio)
 
-                    # P/L from high/low to calculate drawdown and runup
-                    hprofit = (-size * (h - closed_trade.entry_price) - closed_trade.commission)
-                    lprofit = (-size * (l - closed_trade.entry_price) - closed_trade.commission)
-
-                    # Drawdown and runup
-                    drawdown = -min(hprofit, lprofit, 0.0)
-                    runup = max(hprofit, lprofit, 0.0)
-                    # Drawdown summ runup summ
-                    self.drawdown_summ += drawdown
-                    self.runup_summ += runup
-
                     closed_trade.size = -size
                     closed_trade.exit_id = order.exit_id if order.exit_id is not None else order.order_id
                     closed_trade.exit_bar_index = int(lib.bar_index)
@@ -733,12 +727,6 @@ class Position:
                     if trade.size == 0.0:
                         continue
 
-                    if pnl > 0.0:
-                        # Modify summs and entry equity with commission
-                        self.runup_summ -= closed_trade.commission
-                        self.drawdown_summ += closed_trade.commission / 2
-                        self.entry_equity += closed_trade.commission / 2
-
                 new_open_trades.append(trade)
 
             self.open_trades = new_open_trades
@@ -797,13 +785,15 @@ class Position:
             # Realize commission
             self.netprofit -= commission
 
-            entry_equity = self.equity
-            if not self.open_trades:
-                # Set max and min equity
-                self.max_equity = max(self.max_equity, entry_equity)
-                self.min_equity = min(self.min_equity, entry_equity)
-                # Entry equity
-                self.entry_equity = entry_equity
+            # Run-up starts from the equity mark left by each entry fill. Existing
+            # open profit only lifts the anchor when it is positive.
+            entry_mark = float(lib._script.initial_capital) + float(self.netprofit)
+            if self.size:
+                open_mark = self.size * (price - self.avg_price)
+                if open_mark > 0.0:
+                    entry_mark += open_mark
+            if entry_mark < self.min_equity:
+                self.min_equity = entry_mark
 
             assert order.order_id is not None
 
@@ -1389,40 +1379,69 @@ class Position:
                 # Profit of trade
                 trade.profit = trade.size * (self.c - trade.entry_price) - 2 * trade.commission
 
-                # P/L from high/low to calculate drawdown and runup
-                hprofit = trade.size * (self.h - self.avg_price) - trade.commission
-                lprofit = trade.size * (self.l - self.avg_price) - trade.commission
-                # Drawdown
+                # Position excursion is measured from the position average. Fees
+                # already live in netprofit, so these marks remain gross.
+                hprofit = trade.size * (self.h - self.avg_price)
+                lprofit = trade.size * (self.l - self.avg_price)
                 drawdown = -min(hprofit, lprofit, 0.0)
-                trade.max_drawdown = max(drawdown, trade.max_drawdown)
-                # Runup
                 runup = max(hprofit, lprofit, 0.0)
-                trade.max_runup = max(runup, trade.max_runup)
 
-                # Calculate percentage values for drawdown and runup
-                # This part is missing in the original code
-                trade_value = abs(trade.size) * trade.entry_price
-                if trade_value > 0:
-                    # Calculate drawdown percentage
-                    trade.max_drawdown_percent = max(
-                        (drawdown / trade_value) * 100.0 if drawdown > 0 else 0.0,
-                        trade.max_drawdown_percent
-                    )
+                # A trade's own excursion uses its entry price, not a position
+                # average shifted by later pyramiding entries.
+                trade_hprofit = (
+                    trade.size * (self.h - trade.entry_price) - trade.commission
+                )
+                trade_lprofit = (
+                    trade.size * (self.l - trade.entry_price) - trade.commission
+                )
+                trade.max_drawdown = max(
+                    -min(trade_hprofit, trade_lprofit, 0.0),
+                    trade.max_drawdown,
+                )
+                trade.max_runup = max(
+                    max(trade_hprofit, trade_lprofit, 0.0),
+                    trade.max_runup,
+                )
 
-                    # Calculate runup percentage
-                    trade.max_runup_percent = max(
-                        (runup / trade_value) * 100.0 if runup > 0 else 0.0,
-                        trade.max_runup_percent
+                entry_cost = abs(trade.size) * trade.entry_price + trade.commission
+                if entry_cost > 0.0:
+                    trade.max_drawdown_percent = (
+                        trade.max_drawdown / entry_cost * 100.0
                     )
+                    trade.max_runup_percent = trade.max_runup / entry_cost * 100.0
 
                 # Drawdown summ runup summ
                 self.drawdown_summ += drawdown
                 self.runup_summ += runup
 
-        # Calculate max drawdown and runup
-        if self.drawdown_summ or self.runup_summ:
-            self.max_drawdown = max(self.max_drawdown, self.max_equity - self.entry_equity + self.drawdown_summ)
-            self.max_runup = max(self.max_runup, self.entry_equity - self.min_equity + self.runup_summ)
+        # Position excursions use realized equity endpoints. Open paper profit
+        # does not raise the drawdown high-water mark.
+        initial_capital = float(lib._script.initial_capital)
+        realized_equity = initial_capital + float(self.netprofit)
+        if realized_equity > self.max_realized_equity:
+            self.max_realized_equity = realized_equity
+
+        peak = max(initial_capital, self.max_realized_equity)
+        equity_drawdown = peak - realized_equity + self.drawdown_summ
+        self.current_drawdown = equity_drawdown
+        self.current_drawdown_percent = (
+            equity_drawdown / peak * 100.0 if peak > 0.0 else 0.0
+        )
+        self.max_drawdown = max(self.max_drawdown, equity_drawdown)
+        self.max_drawdown_percent = max(
+            self.max_drawdown_percent,
+            self.current_drawdown_percent,
+        )
+
+        if self.min_equity < float("inf"):
+            equity_runup = realized_equity + self.runup_summ - self.min_equity
+            self.max_runup = max(self.max_runup, equity_runup)
+            top = self.min_equity + equity_runup
+            if top > 0.0:
+                self.max_runup_percent = max(
+                    self.max_runup_percent,
+                    equity_runup / top * 100.0,
+                )
 
         # Cumulative stats
         if self.new_closed_trades:
@@ -1439,10 +1458,6 @@ class Position:
                     closed_trade.cum_profit_percent = (closed_trade.cum_profit / initial_capital) * 100.0
                 except ZeroDivisionError:
                     closed_trade.cum_profit_percent = 0.0
-
-                # Modify entry equity, for max drawdown and runup
-                self.entry_equity += closed_trade.profit
-
 
 #
 # Functions
@@ -2104,8 +2119,20 @@ def max_drawdown() -> float | NA[float]:
 
 # noinspection PyProtectedMember
 @module_property
+def max_drawdown_percent() -> float | NA[float]:
+    return lib._script.position.max_drawdown_percent
+
+
+# noinspection PyProtectedMember
+@module_property
 def max_runup() -> float | NA[float]:
     return lib._script.position.max_runup
+
+
+# noinspection PyProtectedMember
+@module_property
+def max_runup_percent() -> float | NA[float]:
+    return lib._script.position.max_runup_percent
 
 
 # noinspection PyProtectedMember

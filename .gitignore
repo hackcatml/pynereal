@@ -40,3 +40,6 @@ workdir/scripts/demo/*
 !workdir/scripts/demo/demo_1m.py
 !workdir/scripts/lib/
 !workdir/scripts/lib/**
+
+# Local working documents grouped by branch/topic
+workdocs/

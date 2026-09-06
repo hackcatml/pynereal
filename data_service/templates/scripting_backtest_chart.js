@@ -33,7 +33,10 @@
     pricePaging: false,
     priceWindowReplacing: false,
     maxDrawdownIndex: -1,
+    maxDrawdownPercentIndex: -1,
     drawdownIndices: [],
+    drawdownSortKey: "percent",
+    drawdownSortDirection: "desc",
     paneResizePointer: null,
   };
 
@@ -132,7 +135,10 @@
     const date = new Date(Number(timestamp) * 1000);
     if (!Number.isFinite(date.getTime())) return "-";
     const part = (value) => String(value).padStart(2, "0");
-    return `${date.getUTCFullYear()}-${part(date.getUTCMonth() + 1)}-${part(date.getUTCDate())}`
+    const year = window.matchMedia("(max-width: 720px)").matches
+      ? part(date.getUTCFullYear() % 100)
+      : String(date.getUTCFullYear());
+    return `${year}-${part(date.getUTCMonth() + 1)}-${part(date.getUTCDate())}`
       + ` ${part(date.getUTCHours())}:${part(date.getUTCMinutes())} UTC`;
   }
 
@@ -534,37 +540,68 @@
       deepestIndex = -1;
     }
     if (deepestIndex >= 0) indices.push(deepestIndex);
-    return indices.sort((left, right) => (
-      equity.drawdownPercents[right] - equity.drawdownPercents[left]
-      || equity.drawdowns[right] - equity.drawdowns[left]
-      || equity.timestamps[right] - equity.timestamps[left]
+    if (
+      state.maxDrawdownPercentIndex >= 0
+      && !indices.includes(state.maxDrawdownPercentIndex)
+    ) {
+      indices.push(state.maxDrawdownPercentIndex);
+    }
+    return indices;
+  }
+
+  function sortedDrawdownIndices() {
+    const valueAt = (index) => {
+      if (state.drawdownSortKey === "time") return state.equity.timestamps[index];
+      if (state.drawdownSortKey === "amount") return state.equity.drawdowns[index];
+      return state.equity.drawdownPercents[index];
+    };
+    const direction = state.drawdownSortDirection === "asc" ? 1 : -1;
+    return [...state.drawdownIndices].sort((left, right) => (
+      (valueAt(left) - valueAt(right)) * direction
+      || state.equity.timestamps[right] - state.equity.timestamps[left]
     ));
+  }
+
+  function renderDrawdownSortHeaders() {
+    document.querySelectorAll("[data-drawdown-sort]").forEach((button) => {
+      const active = button.dataset.drawdownSort === state.drawdownSortKey;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+      const arrow = button.querySelector(".backtest-drawdown-sort-arrow");
+      if (arrow) {
+        arrow.textContent = active
+          ? (state.drawdownSortDirection === "asc" ? "\u2191" : "\u2193")
+          : "";
+      }
+    });
   }
 
   function renderDrawdownList() {
     const list = el("backtest-drawdown-list");
     const empty = el("backtest-drawdown-empty");
     const fragment = document.createDocumentFragment();
-    state.drawdownIndices.forEach((index) => {
+    sortedDrawdownIndices().forEach((index) => {
       const button = document.createElement("button");
       button.className = "backtest-drawdown-item";
       button.type = "button";
       button.dataset.equityIndex = String(index);
       const time = document.createElement("span");
-      time.textContent = formatListTimestamp(state.equity.timestamps[index]);
-      const value = document.createElement("span");
-      value.className = "backtest-drawdown-item-value";
+      time.className = "backtest-drawdown-item-time";
+      const timestamp = document.createElement("span");
+      timestamp.className = "backtest-drawdown-item-timestamp";
+      timestamp.textContent = formatListTimestamp(state.equity.timestamps[index]);
+      time.append(timestamp);
       const amount = document.createElement("strong");
       amount.textContent = formatAmount(state.equity.drawdowns[index]);
       const percent = document.createElement("span");
       percent.className = "backtest-drawdown-item-percent";
       percent.textContent = formatPercent(state.equity.drawdownPercents[index]);
-      value.append(amount, percent);
-      button.append(time, value);
+      button.append(time, amount, percent);
       fragment.append(button);
     });
     list.replaceChildren(fragment);
     empty.classList.toggle("hidden", state.drawdownIndices.length > 0);
+    renderDrawdownSortHeaders();
   }
 
   function closeDrawdownList() {
@@ -577,23 +614,35 @@
     const popover = el("backtest-drawdown-popover");
     const list = el("backtest-drawdown-list");
     if (popover.classList.contains("hidden")) return;
-    list.style.maxHeight = "280px";
+    const compact = window.matchMedia("(max-width: 720px)").matches;
+    const maximumListHeight = compact ? 112 : 280;
+    list.style.maxHeight = `${maximumListHeight}px`;
     const toggleRect = toggle.getBoundingClientRect();
-    const popoverRect = popover.getBoundingClientRect();
     const margin = 8;
     const gap = 5;
-    const roomBelow = window.innerHeight - toggleRect.bottom - gap - margin;
+    const viewportHeight = window.visualViewport
+      ? window.visualViewport.height
+      : window.innerHeight;
+    const roomBelow = viewportHeight - toggleRect.bottom - gap - margin;
     const roomAbove = toggleRect.top - gap - margin;
-    const openAbove = roomBelow < Math.min(140, popoverRect.height) && roomAbove > roomBelow;
+    const openAbove = compact
+      || (roomBelow < Math.min(140, popover.offsetHeight) && roomAbove > roomBelow);
     const available = Math.max(56, openAbove ? roomAbove : roomBelow);
-    list.style.maxHeight = `${Math.min(280, available - 8)}px`;
+    const reservedHeight = Math.max(8, popover.offsetHeight - list.offsetHeight);
+    list.style.maxHeight = `${Math.min(
+      maximumListHeight,
+      Math.max(44, available - reservedHeight),
+    )}px`;
     const width = popover.offsetWidth;
     popover.style.left = `${Math.max(margin, Math.min(
       window.innerWidth - width - margin,
       toggleRect.right - width,
     ))}px`;
-    popover.style.top = openAbove ? "auto" : `${toggleRect.bottom + gap}px`;
-    popover.style.bottom = openAbove ? `${window.innerHeight - toggleRect.top + gap}px` : "auto";
+    const height = popover.offsetHeight;
+    popover.style.top = openAbove
+      ? `${Math.max(margin, toggleRect.top - gap - height)}px`
+      : `${Math.min(viewportHeight - height - margin, toggleRect.bottom + gap)}px`;
+    popover.style.bottom = "auto";
   }
 
   function toggleDrawdownList() {
@@ -606,6 +655,23 @@
     popover.classList.remove("hidden");
     el("backtest-drawdown-list-toggle").setAttribute("aria-expanded", "true");
     positionDrawdownList();
+  }
+
+  function toggleDrawdownBreakdown() {
+    const button = el("backtest-chart-max-drawdown");
+    const breakdown = el("backtest-drawdown-breakdown");
+    const opening = button.getAttribute("aria-expanded") !== "true";
+    button.setAttribute("aria-expanded", opening ? "true" : "false");
+    breakdown.setAttribute("aria-hidden", opening ? "false" : "true");
+    if (opening) {
+      breakdown.classList.add("open");
+      breakdown.style.maxHeight = `${breakdown.scrollHeight}px`;
+    } else {
+      breakdown.style.maxHeight = `${breakdown.scrollHeight}px`;
+      void breakdown.offsetHeight;
+      breakdown.classList.remove("open");
+      breakdown.style.maxHeight = "0px";
+    }
   }
 
   function initPriceChart() {
@@ -1111,22 +1177,48 @@
     el("backtest-equity-zoom-in").addEventListener("click", () => zoomEquity(0.65));
     el("backtest-equity-zoom-out").addEventListener("click", () => zoomEquity(1.55));
     el("backtest-equity-fit").addEventListener("click", fitEquity);
-    el("backtest-chart-max-drawdown").addEventListener("click", () => {
+    [
+      "backtest-equity-zoom-in",
+      "backtest-equity-zoom-out",
+      "backtest-equity-fit",
+      "backtest-equity-selection",
+    ].forEach((id) => {
+      el(id).addEventListener("dblclick", (event) => event.preventDefault());
+    });
+    el("backtest-equity-selection").addEventListener("touchend", (event) => {
+      event.preventDefault();
+    }, { passive: false });
+    el("backtest-chart-max-drawdown").addEventListener("click", toggleDrawdownBreakdown);
+    el("backtest-chart-max-drawdown-loss").addEventListener("click", () => {
       focusEquityIndex(state.maxDrawdownIndex);
     });
+    el("backtest-chart-max-drawdown-rate").addEventListener("click", () => {
+      focusEquityIndex(state.maxDrawdownPercentIndex);
+    });
     el("backtest-drawdown-list-toggle").addEventListener("click", toggleDrawdownList);
+    el("backtest-drawdown-popover").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-drawdown-sort]");
+      if (!button) return;
+      const key = String(button.dataset.drawdownSort || "percent");
+      if (key === state.drawdownSortKey) {
+        state.drawdownSortDirection = state.drawdownSortDirection === "asc" ? "desc" : "asc";
+      } else {
+        state.drawdownSortKey = key;
+        state.drawdownSortDirection = "desc";
+      }
+      renderDrawdownList();
+    });
     el("backtest-drawdown-list").addEventListener("click", (event) => {
       const item = event.target.closest("[data-equity-index]");
       if (!item) return;
       const index = Number(item.dataset.equityIndex);
-      closeDrawdownList();
       focusEquityIndex(index);
     });
     document.addEventListener("pointerdown", (event) => {
-      if (!el("backtest-drawdown-row").contains(event.target)) closeDrawdownList();
-    });
-    document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") closeDrawdownList();
+      if (
+        !el("backtest-drawdown-row").contains(event.target)
+        && !el("backtest-drawdown-popover").contains(event.target)
+      ) closeDrawdownList();
     });
   }
 
@@ -1177,6 +1269,30 @@
     });
   }
 
+  function syncMobileViewportHeight() {
+    const compact = window.matchMedia("(max-width: 720px)").matches;
+    if (!compact) {
+      document.documentElement.style.removeProperty("--backtest-viewport-height");
+      return;
+    }
+    const viewportHeight = window.visualViewport
+      ? window.visualViewport.height
+      : window.innerHeight;
+    document.documentElement.style.setProperty(
+      "--backtest-viewport-height",
+      `${Math.floor(viewportHeight)}px`,
+    );
+  }
+
+  function handleViewportResize() {
+    syncMobileViewportHeight();
+    window.requestAnimationFrame(() => {
+      drawEquity();
+      positionDrawdownList();
+      positionPriceNavButtons();
+    });
+  }
+
   async function init() {
     if (!jobId) {
       showError("Backtest job was not specified.");
@@ -1196,30 +1312,64 @@
       state.levels = buildLevels(state.equity);
       state.viewStart = 0;
       state.viewEnd = Math.max(1, state.equity.length - 1);
-      state.drawdownIndices = collectDrawdownIndices(state.equity);
-      renderDrawdownList();
       el("backtest-chart-final-equity").textContent = formatAmount(
         state.equity.equities[state.equity.length - 1],
       );
       let maximumDrawdown = 0;
+      let maximumDrawdownPercent = 0;
       for (let index = 0; index < state.equity.length; index += 1) {
         if (state.equity.drawdowns[index] > maximumDrawdown) {
           maximumDrawdown = state.equity.drawdowns[index];
           state.maxDrawdownIndex = index;
         }
+        if (state.equity.drawdownPercents[index] > maximumDrawdownPercent) {
+          maximumDrawdownPercent = state.equity.drawdownPercents[index];
+          state.maxDrawdownPercentIndex = index;
+        }
       }
+      state.drawdownIndices = collectDrawdownIndices(state.equity);
+      renderDrawdownList();
+      const summaryDrawdownValue = state.job.summary && state.job.summary.max_drawdown;
+      const summaryDrawdownPercentValue = state.job.summary
+        && state.job.summary.max_drawdown_percent;
+      const summaryDrawdown = summaryDrawdownValue == null
+        ? Number.NaN
+        : Number(summaryDrawdownValue);
+      const summaryDrawdownPercent = summaryDrawdownPercentValue == null
+        ? Number.NaN
+        : Number(summaryDrawdownPercentValue);
       const maxDrawdownButton = el("backtest-chart-max-drawdown");
-      el("backtest-chart-max-drawdown-value").textContent = formatAmount(maximumDrawdown);
-      el("backtest-chart-max-drawdown-percent").textContent = state.maxDrawdownIndex >= 0
-        ? formatPercent(state.equity.drawdownPercents[state.maxDrawdownIndex])
-        : "-";
-      maxDrawdownButton.disabled = state.maxDrawdownIndex < 0;
+      const maxDrawdownLossButton = el("backtest-chart-max-drawdown-loss");
+      el("backtest-chart-max-drawdown-loss-value").textContent = formatAmount(
+        Number.isFinite(summaryDrawdown) ? summaryDrawdown : maximumDrawdown,
+      );
+      el("backtest-chart-max-drawdown-rate-value").textContent = Number.isFinite(
+        summaryDrawdownPercent,
+      )
+        ? formatPercent(summaryDrawdownPercent)
+        : state.maxDrawdownPercentIndex >= 0
+          ? formatPercent(state.equity.drawdownPercents[state.maxDrawdownPercentIndex])
+          : "-";
+      maxDrawdownButton.disabled = (
+        state.maxDrawdownIndex < 0 && state.maxDrawdownPercentIndex < 0
+      );
+      maxDrawdownLossButton.disabled = state.maxDrawdownIndex < 0;
       if (state.maxDrawdownIndex >= 0) {
         const occurredAt = formatTimestamp(state.equity.timestamps[state.maxDrawdownIndex]);
-        el("backtest-chart-max-drawdown-tooltip").textContent = `Occurred ${occurredAt}`;
-        maxDrawdownButton.setAttribute(
+        maxDrawdownLossButton.setAttribute(
           "aria-label",
-          `Go to maximum drawdown at ${occurredAt}`,
+          `Go to maximum drawdown loss at ${occurredAt}`,
+        );
+      }
+      const maxDrawdownRateButton = el("backtest-chart-max-drawdown-rate");
+      maxDrawdownRateButton.disabled = state.maxDrawdownPercentIndex < 0;
+      if (state.maxDrawdownPercentIndex >= 0) {
+        const occurredAt = formatTimestamp(
+          state.equity.timestamps[state.maxDrawdownPercentIndex],
+        );
+        maxDrawdownRateButton.setAttribute(
+          "aria-label",
+          `Go to maximum drawdown rate at ${occurredAt}`,
         );
       }
       el("backtest-equity-loading").classList.add("hidden");
@@ -1233,10 +1383,10 @@
     }
   }
 
-  window.addEventListener("resize", () => {
-    drawEquity();
-    positionDrawdownList();
-    positionPriceNavButtons();
-  });
+  syncMobileViewportHeight();
+  window.addEventListener("resize", handleViewportResize);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", handleViewportResize);
+  }
   void init();
 })();

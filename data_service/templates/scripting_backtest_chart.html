@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Backtest chart</title>
-  <link rel="stylesheet" href="/static/scripting_backtest_chart.css?v=14" />
+  <link rel="stylesheet" href="/static/scripting_backtest_chart.css?v=28" />
   <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.9/dist/lightweight-charts.standalone.production.js"></script>
   <script src="/static/bgcolor.js?v=2"></script>
 </head>
@@ -70,20 +70,37 @@
             <b id="backtest-chart-final-equity">-</b>
           </span>
           <div id="backtest-drawdown-row" class="backtest-drawdown-row">
-            <button id="backtest-chart-max-drawdown" class="backtest-equity-metric backtest-drawdown-metric"
-                    type="button" aria-label="Go to maximum drawdown">
-              <small>Max Drawdown</small>
-              <b id="backtest-chart-max-drawdown-value">-</b>
-              <span id="backtest-chart-max-drawdown-percent" class="backtest-drawdown-percent">-</span>
-              <span id="backtest-chart-max-drawdown-tooltip" class="backtest-metric-tooltip"
-                    role="tooltip"></span>
-            </button>
-            <button id="backtest-drawdown-list-toggle" class="backtest-drawdown-list-toggle"
-                    type="button" aria-label="Drawdown list" aria-expanded="false"
-                    aria-controls="backtest-drawdown-popover">+</button>
-            <div id="backtest-drawdown-popover" class="backtest-drawdown-popover hidden">
-              <div id="backtest-drawdown-list" class="backtest-drawdown-list"></div>
-              <span id="backtest-drawdown-empty" class="backtest-drawdown-empty hidden">No drawdowns</span>
+            <div class="backtest-drawdown-group">
+              <button id="backtest-chart-max-drawdown"
+                      class="backtest-equity-metric backtest-drawdown-metric backtest-drawdown-summary-toggle"
+                      type="button" aria-label="Show maximum drawdown details"
+                      aria-expanded="false" aria-controls="backtest-drawdown-breakdown">
+                <small class="backtest-drawdown-summary-label">
+                  <span>Max Drawdown</span>
+                  <svg class="backtest-drawdown-summary-chevron" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m9 18 6-6-6-6" />
+                  </svg>
+                </small>
+              </button>
+              <div id="backtest-drawdown-breakdown" class="backtest-drawdown-breakdown" aria-hidden="true">
+                <div class="backtest-drawdown-breakdown-inner">
+                  <button id="backtest-chart-max-drawdown-loss"
+                          class="backtest-equity-metric backtest-drawdown-metric backtest-drawdown-detail"
+                          type="button" aria-label="Go to maximum drawdown loss">
+                    <small>Max loss</small>
+                    <b><span id="backtest-chart-max-drawdown-loss-value">-</span></b>
+                  </button>
+                  <button id="backtest-chart-max-drawdown-rate"
+                          class="backtest-equity-metric backtest-drawdown-metric backtest-drawdown-detail"
+                          type="button" aria-label="Go to maximum drawdown rate">
+                    <small>Max rate</small>
+                    <b class="backtest-drawdown-percent"><span id="backtest-chart-max-drawdown-rate-value">-</span></b>
+                  </button>
+                </div>
+              </div>
+              <button id="backtest-drawdown-list-toggle" class="backtest-drawdown-list-toggle"
+                      type="button" aria-label="Drawdown lists" aria-expanded="false"
+                      aria-controls="backtest-drawdown-popover">Drawdown lists</button>
             </div>
           </div>
         </div>
@@ -92,8 +109,23 @@
       </div>
     </section>
   </main>
+  <div id="backtest-drawdown-popover" class="backtest-drawdown-popover hidden">
+    <div class="backtest-drawdown-list-header" role="row">
+      <button type="button" data-drawdown-sort="time" aria-label="Sort by time">
+        <span>Time</span><span class="backtest-drawdown-sort-arrow" aria-hidden="true"></span>
+      </button>
+      <button type="button" data-drawdown-sort="amount" aria-label="Sort by loss">
+        <span>Loss</span><span class="backtest-drawdown-sort-arrow" aria-hidden="true"></span>
+      </button>
+      <button type="button" data-drawdown-sort="percent" aria-label="Sort by percent">
+        <span>%</span><span class="backtest-drawdown-sort-arrow" aria-hidden="true"></span>
+      </button>
+    </div>
+    <div id="backtest-drawdown-list" class="backtest-drawdown-list"></div>
+    <span id="backtest-drawdown-empty" class="backtest-drawdown-empty hidden">No drawdowns</span>
+  </div>
   <div id="backtest-chart-error" class="backtest-chart-error hidden" role="alert"></div>
   <!--BACKTEST_CONFIG-->
-  <script src="/static/scripting_backtest_chart.js?v=18"></script>
+  <script src="/static/scripting_backtest_chart.js?v=30"></script>
 </body>
 </html>

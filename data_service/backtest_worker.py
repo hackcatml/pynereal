@@ -12,6 +12,7 @@ import sys
 import time
 import tomllib
 import traceback
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -31,12 +32,18 @@ def _write_equity_curve(
     candles: list[Any],
     values: list[float],
     initial_capital: float,
+    drawdown_values: Sequence[float] | None = None,
 ) -> int:
     if not values:
         return 0
     if len(values) != len(candles):
         raise ValueError(
             f"equity curve length mismatch: candles={len(candles)} equity={len(values)}"
+        )
+    if drawdown_values is not None and len(drawdown_values) != len(values) * 2:
+        raise ValueError(
+            "drawdown curve length mismatch: "
+            f"equity={len(values)} drawdown={len(drawdown_values)}"
         )
 
     peak = float(initial_capital)
@@ -50,8 +57,14 @@ def _write_equity_curve(
                 if not math.isfinite(equity):
                     raise ValueError(f"non-finite equity at bar {bar_index}")
                 peak = max(peak, equity)
-                drawdown = max(0.0, peak - equity)
-                drawdown_percent = (drawdown / peak * 100.0) if peak else 0.0
+                if drawdown_values is None:
+                    drawdown = max(0.0, peak - equity)
+                    drawdown_percent = (drawdown / peak * 100.0) if peak else 0.0
+                else:
+                    drawdown = float(drawdown_values[bar_index * 2])
+                    drawdown_percent = float(drawdown_values[bar_index * 2 + 1])
+                    if not math.isfinite(drawdown) or not math.isfinite(drawdown_percent):
+                        raise ValueError(f"non-finite drawdown at bar {bar_index}")
                 writer.writerow((
                     bar_index,
                     int(candle.timestamp),
@@ -333,6 +346,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             realtime_config=config,
             custom_inputs={},
             preload_ohlcv=candles,
+            track_drawdown_curve=True,
         )
         plot_options: dict[str, dict[str, Any]] = {}
 
@@ -374,6 +388,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             candles,
             runner.equity_curve,
             float(runner.script.initial_capital),
+            runner.drawdown_curve,
         )
         if equity_count:
             print(f"[backtest] equity curve ready | points={equity_count}", flush=True)
