@@ -26,6 +26,12 @@ from pynecore.core.syminfo import SymInfo
 from pynecore.providers.ccxt import CCXTProvider
 
 from scripting_validation import ScriptingValidator
+from scripting_backtest_chart import (
+    PlotCsvIndex,
+    build_plot_index,
+    plot_signature,
+    read_chart_window,
+)
 from scripting_backtest_summary import read_strategy_summary
 
 
@@ -56,6 +62,7 @@ class BacktestJob:
     created_at: int
     run_key: str = ""
     inputs: dict[str, Any] = field(default_factory=dict)
+    data_info: dict[str, str] = field(default_factory=dict)
     started_at: int | None = None
     finished_at: int | None = None
     pid: int | None = None
@@ -89,6 +96,7 @@ class ScriptingBacktestManager:
             thread_name_prefix="pynereal-backtest-io",
         )
         self._jobs: dict[str, BacktestJob] = {}
+        self._plot_index_cache: dict[str, PlotCsvIndex] = {}
         self._lock = asyncio.Lock()
         self._data_process: asyncio.subprocess.Process | None = None
         self._closed = False
@@ -243,6 +251,7 @@ class ScriptingBacktestManager:
                     status="queued",
                     created_at=int(time.time() * 1000),
                     inputs=variant,
+                    data_info=preflight["data_info"],
                 )
                 prepared.append(job)
 
@@ -371,6 +380,52 @@ class ScriptingBacktestManager:
         safe_max = min(max(1, int(max_bytes)), 512 * 1024)
         return await self.run_io(self._read_log_file, job_id, safe_offset, safe_max)
 
+    def artifact_path(self, job_id: str, name: str) -> Path:
+        job = self._get_job(job_id)
+        filenames = {
+            "equity": "equity.csv",
+        }
+        filename = filenames.get(name)
+        if filename is None:
+            raise ScriptingBacktestError(
+                "unsupported backtest artifact",
+                code="artifact_unsupported",
+                status_code=404,
+            )
+        path = self._job_dir(job.id) / filename
+        if not path.is_file():
+            raise ScriptingBacktestError(
+                f"{name} is unavailable for this backtest",
+                code="artifact_unavailable",
+                status_code=404,
+            )
+        return path
+
+    async def chart_window(
+        self,
+        job_id: str,
+        *,
+        start_index: int,
+        end_index: int,
+    ) -> dict[str, Any]:
+        job = self._get_job(job_id)
+        plot_path = self._job_dir(job.id) / "plot.csv"
+        if not plot_path.is_file():
+            raise ScriptingBacktestError(
+                "price chart is unavailable for this backtest",
+                code="chart_unavailable",
+                status_code=404,
+            )
+        return await self.run_io(
+            self._read_chart_window,
+            job.id,
+            plot_path,
+            self._job_dir(job.id) / "trades.csv",
+            self._job_dir(job.id) / "plotchars.csv",
+            start_index,
+            end_index,
+        )
+
     async def stop(self, job_id: str) -> dict[str, Any]:
         async with self._lock:
             job = self._get_job(job_id)
@@ -407,6 +462,7 @@ class ScriptingBacktestManager:
             await self.run_io(self._delete_job_directories, job_ids)
             for job_id in job_ids:
                 self._jobs.pop(job_id, None)
+                self._plot_index_cache.pop(job_id, None)
         return {"ok": True, "deleted": len(job_ids), "script_path": normalized}
 
     async def sync_data(
@@ -1012,6 +1068,7 @@ class ScriptingBacktestManager:
             "script_path": normalized_script,
             "script_revision": revision,
             "data_path": normalized_data,
+            "data_info": self._backtest_data_info(entry),
             "time_from": requested_from,
             "time_to": requested_to,
         }
@@ -1399,6 +1456,14 @@ class ScriptingBacktestManager:
             try:
                 data = json.loads(metadata_path.read_text(encoding="utf-8"))
                 inputs = data.get("inputs") if isinstance(data.get("inputs"), dict) else {}
+                data_info = data.get("data_info") if isinstance(data.get("data_info"), dict) else {}
+                if not data_info:
+                    data_path = self.data_root / str(data["data_path"])
+                    if data_path.is_file() and data_path.with_suffix(".toml").is_file():
+                        try:
+                            data_info = self._backtest_data_info(self._data_entry(data_path))
+                        except (OSError, ValueError, TypeError):
+                            data_info = {}
                 job = BacktestJob(
                     id=str(data["id"]),
                     run_key=str(data.get("run_key") or ""),
@@ -1410,6 +1475,7 @@ class ScriptingBacktestManager:
                     status=str(data["status"]),
                     created_at=int(data["created_at"]),
                     inputs=inputs,
+                    data_info={str(key): str(value) for key, value in data_info.items()},
                     started_at=self._optional_int(data.get("started_at")),
                     finished_at=self._optional_int(data.get("finished_at")),
                     pid=self._optional_int(data.get("pid")),
@@ -1504,6 +1570,31 @@ class ScriptingBacktestManager:
             "eof": next_offset >= size,
         }
 
+    def _read_chart_window(
+        self,
+        job_id: str,
+        plot_path: Path,
+        trades_path: Path,
+        plotchars_path: Path,
+        start_index: int,
+        end_index: int,
+    ) -> dict[str, Any]:
+        index = self._plot_index_cache.get(job_id)
+        if index is None or index.signature != plot_signature(plot_path):
+            index = build_plot_index(
+                plot_path,
+                self._job_dir(job_id) / "plot_metadata.json",
+            )
+            self._plot_index_cache[job_id] = index
+        return read_chart_window(
+            plot_path,
+            trades_path,
+            plotchars_path,
+            index,
+            start_index=start_index,
+            end_index=end_index,
+        )
+
     def _active_job(self, script_path: str | None = None) -> BacktestJob | None:
         return next(
             (
@@ -1558,6 +1649,7 @@ class ScriptingBacktestManager:
             "actual_time_to": job.actual_time_to,
             "status": job.status,
             "inputs": job.inputs,
+            "data_info": job.data_info,
             "queue_position": self._queue_position(job),
             "created_at": job.created_at,
             "started_at": job.started_at,
@@ -1570,7 +1662,18 @@ class ScriptingBacktestManager:
                 "plot": (job_dir / "plot.csv").is_file(),
                 "strategy": (job_dir / "strategy.csv").is_file(),
                 "trades": (job_dir / "trades.csv").is_file(),
+                "equity": (job_dir / "equity.csv").is_file(),
             },
+        }
+
+    @staticmethod
+    def _backtest_data_info(entry: dict[str, Any]) -> dict[str, str]:
+        source = entry.get("download_source")
+        source = source if isinstance(source, dict) else {}
+        return {
+            "exchange": str(source.get("exchange") or entry.get("provider") or "").upper(),
+            "symbol": str(source.get("symbol") or entry.get("symbol") or ""),
+            "timeframe": str(source.get("input_timeframe") or entry.get("timeframe") or ""),
         }
 
     def _queue_position(self, job: BacktestJob) -> int | None:

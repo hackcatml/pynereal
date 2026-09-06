@@ -1,10 +1,15 @@
 (function () {
   window.PyneFloatingLayerManager = window.PyneFloatingLayerManager || (() => {
     let layer = 120;
+    let activeOwner = null;
     return {
-      next() {
+      next(owner = null) {
         layer += 10;
+        activeOwner = owner;
         return layer;
+      },
+      isActive(owner) {
+        return activeOwner === owner;
       },
     };
   })();
@@ -2593,7 +2598,7 @@
         el("scripting-operation-modal").style.removeProperty("z-index");
         return;
       }
-      const layer = window.PyneFloatingLayerManager.next();
+      const layer = window.PyneFloatingLayerManager.next("scripting");
       el("scripting-modal").style.zIndex = String(layer);
       el("scripting-unsaved-modal").style.zIndex = String(layer + 2);
       el("scripting-operation-modal").style.zIndex = String(layer + 2);

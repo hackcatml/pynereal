@@ -372,6 +372,19 @@
     panel.innerHTML = `<div class="scripting-backtest-summary-page">${summaryMarkup(job)}</div>`;
   }
 
+  function equityAvailable(value = job) {
+    return Boolean(value && value.artifacts && value.artifacts.equity);
+  }
+
+  function openEquityChart() {
+    if (!equityAvailable()) return;
+    window.open(
+      `/backtests/${encodeURIComponent(job.id)}`,
+      "_blank",
+      "noopener",
+    );
+  }
+
   function setSummaryOpen(open) {
     const available = Boolean(job && job.summary);
     summaryOpen = Boolean(open && available);
@@ -424,6 +437,8 @@
     const summaryButton = el("scripting-backtest-summary-toggle");
     summaryButton.disabled = !job || !job.summary;
     if (summaryButton.disabled && summaryOpen) setSummaryOpen(false);
+    const equityButton = el("scripting-backtest-equity-toggle");
+    equityButton.disabled = !equityAvailable();
     const deleteButton = el("scripting-backtest-delete");
     const canDelete = Boolean(
       jobs.length && jobs.every((item) => terminalStatuses.has(String(item.status || ""))),
@@ -2309,6 +2324,12 @@
     el("scripting-backtest-summary-toggle").addEventListener("dblclick", (event) => {
       event.preventDefault();
     });
+    el("scripting-backtest-equity-toggle").addEventListener("click", () => {
+      openEquityChart();
+    });
+    el("scripting-backtest-equity-toggle").addEventListener("dblclick", (event) => {
+      event.preventDefault();
+    });
     el("scripting-backtest-summary-panel").addEventListener(
       "scroll",
       handleSummaryPagerScroll,
@@ -2410,6 +2431,7 @@
       if (command && !event.altKey && event.key.toLowerCase() === "f") {
         event.preventDefault();
         event.stopImmediatePropagation();
+        setSummaryOpen(false);
         setFindOpen(true);
         return;
       }
@@ -2488,7 +2510,7 @@
 
   function activateDesktop(instance) {
     activeDesktopInstance = instance;
-    instance.setLayer(window.PyneFloatingLayerManager.next());
+    instance.setLayer(window.PyneFloatingLayerManager.next(instance));
   }
 
   function handleDesktopClosed(instance) {
@@ -2513,7 +2535,8 @@
       desktopOffset: desktopInstanceSequence - 1,
       mobile: false,
       activate: () => activateDesktop(instance),
-      isActive: () => activeDesktopInstance === instance,
+      isActive: () => activeDesktopInstance === instance
+        && window.PyneFloatingLayerManager.isActive(instance),
       onClosed: () => handleDesktopClosed(instance),
     });
     instance.init({ api: managerApi, mobileQuery: managerMobileQuery });

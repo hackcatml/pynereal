@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import ast
 import copy
+import csv
 import json
+import math
 import os
 import shutil
 import sys
@@ -22,6 +24,66 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
         encoding="utf-8",
     )
     os.replace(temporary, path)
+
+
+def _write_equity_curve(
+    path: Path,
+    candles: list[Any],
+    values: list[float],
+    initial_capital: float,
+) -> int:
+    if not values:
+        return 0
+    if len(values) != len(candles):
+        raise ValueError(
+            f"equity curve length mismatch: candles={len(candles)} equity={len(values)}"
+        )
+
+    peak = float(initial_capital)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(("Bar Index", "Timestamp", "Equity", "Drawdown", "Drawdown %"))
+            for bar_index, (candle, raw_equity) in enumerate(zip(candles, values, strict=True)):
+                equity = float(raw_equity)
+                if not math.isfinite(equity):
+                    raise ValueError(f"non-finite equity at bar {bar_index}")
+                peak = max(peak, equity)
+                drawdown = max(0.0, peak - equity)
+                drawdown_percent = (drawdown / peak * 100.0) if peak else 0.0
+                writer.writerow((
+                    bar_index,
+                    int(candle.timestamp),
+                    format(equity, ".12g"),
+                    format(drawdown, ".12g"),
+                    format(drawdown_percent, ".12g"),
+                ))
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return len(values)
+
+
+def _plot_option(plot_data: dict[str, Any], order: int) -> dict[str, Any]:
+    kind = str(plot_data.get("kind") or "line")
+    option: dict[str, Any] = {
+        "title": str(plot_data.get("title") or "Plot"),
+        "kind": kind,
+        "order": order,
+    }
+    if kind == "bgcolor":
+        option.update({
+            "offset": int(plot_data.get("offset") or 0),
+            "show_last": plot_data.get("show_last"),
+        })
+    else:
+        option.update({
+            "color": plot_data.get("color"),
+            "linewidth": plot_data.get("linewidth"),
+            "style": plot_data.get("style"),
+        })
+    return option
 
 
 def _local_module_file(search_root: Path, module: str) -> Path | None:
@@ -258,6 +320,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         sys.path.insert(0, str(lib_dir))
         lib_added = True
     runner: ScriptRunner | None = None
+    plotchar_handle = None
     try:
         runner = ScriptRunner(
             script_snapshot,
@@ -271,12 +334,49 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             custom_inputs={},
             preload_ohlcv=candles,
         )
+        plot_options: dict[str, dict[str, Any]] = {}
+
+        def on_plot(plot_data: dict[str, Any]) -> None:
+            title = str(plot_data.get("title") or "Plot")
+            plot_options[title] = _plot_option(plot_data, len(plot_options))
+
+        plotchar_path = job_dir / "plotchars.csv"
+        plotchar_handle = plotchar_path.open("w", encoding="utf-8", newline="")
+        plotchar_writer = csv.writer(plotchar_handle)
+        plotchar_writer.writerow(("Time", "Title", "Char", "Text", "Location", "Color", "Size"))
+
+        def on_plotchar(plotchar_data: dict[str, Any]) -> None:
+            plotchar_writer.writerow((
+                plotchar_data.get("time"),
+                plotchar_data.get("title"),
+                plotchar_data.get("char"),
+                plotchar_data.get("text"),
+                plotchar_data.get("location"),
+                plotchar_data.get("color"),
+                plotchar_data.get("size"),
+            ))
+
+        runner.script.on_plot_callback = on_plot
+        runner.script.on_plotchar_callback = on_plotchar
         (job_dir / "runtime-ready").touch()
         started = time.monotonic()
 
         print("[backtest] running", flush=True)
         runner.run()
+        plotchar_handle.flush()
+        _write_json(
+            job_dir / "plot_metadata.json",
+            {"plots": list(plot_options.values())},
+        )
         elapsed = time.monotonic() - started
+        equity_count = _write_equity_curve(
+            job_dir / "equity.csv",
+            candles,
+            runner.equity_curve,
+            float(runner.script.initial_capital),
+        )
+        if equity_count:
+            print(f"[backtest] equity curve ready | points={equity_count}", flush=True)
         print(f"[backtest] completed in {elapsed:.3f}s", flush=True)
         return {
             "status": "completed",
@@ -284,8 +384,11 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             "actual_time_from": actual_from,
             "actual_time_to": actual_to,
             "elapsed_seconds": elapsed,
+            "equity_point_count": equity_count,
         }
     finally:
+        if plotchar_handle is not None:
+            plotchar_handle.close()
         if runner is not None:
             runner.destroy()
         if lib_added:

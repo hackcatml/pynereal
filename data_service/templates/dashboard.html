@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
   <link rel="stylesheet" href="/static/dashboard.css?v=197" />
-  <link rel="stylesheet" href="/static/scripting_backtest.css?v=30" />
+  <link rel="stylesheet" href="/static/scripting_backtest.css?v=33" />
   <link rel="stylesheet" href="/static/scripting_ai.css?v=6" />
   <link rel="stylesheet" href="/static/editor.css?v=5" />
   <link rel="stylesheet" href="/static/codemirror.css?v=1" />
@@ -782,6 +782,14 @@
           <span id="scripting-backtest-status" class="scripting-backtest-status">Ready</span>
           <span id="scripting-backtest-summary"></span>
           <div class="scripting-backtest-status-actions">
+            <button id="scripting-backtest-equity-toggle" class="btn btn-icon" type="button"
+                    data-tooltip="Equity curve" aria-label="Open equity curve" disabled>
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 19V5"></path>
+                <path d="M4 19h16"></path>
+                <path d="m7 15 4-5 3 3 5-7"></path>
+              </svg>
+            </button>
             <button id="scripting-backtest-summary-toggle" class="btn btn-icon" type="button"
                     data-tooltip="Summary" aria-label="Show summary" aria-pressed="false" disabled>
               <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1828,9 +1836,9 @@
 
   <script src="/static/codemirror.js?v=3"></script>
   <script src="/static/editor.js?v=8"></script>
-  <script src="/static/scripting_backtest.js?v=33"></script>
-  <script src="/static/scripting_ai.js?v=11"></script>
-  <script src="/static/scripting.js?v=51"></script>
+  <script src="/static/scripting_backtest.js?v=36"></script>
+  <script src="/static/scripting_ai.js?v=12"></script>
+  <script src="/static/scripting.js?v=52"></script>
   <script src="/static/dashboard.js?v=179"></script>
 </body>
 </html>

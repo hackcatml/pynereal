@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Backtest chart</title>
+  <link rel="stylesheet" href="/static/scripting_backtest_chart.css?v=14" />
+  <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.9/dist/lightweight-charts.standalone.production.js"></script>
+  <script src="/static/bgcolor.js?v=2"></script>
+</head>
+<body>
+  <header class="backtest-chart-header">
+    <div class="backtest-chart-title">
+      <strong id="backtest-chart-script">Backtest</strong>
+      <span id="backtest-chart-data"></span>
+    </div>
+    <div id="backtest-chart-range" class="backtest-chart-range">
+      <span id="backtest-chart-range-inline" class="backtest-chart-range-inline"></span>
+      <div class="backtest-chart-range-mobile">
+        <span class="backtest-chart-range-label">From</span><time id="backtest-chart-from"></time>
+        <span class="backtest-chart-range-label">To</span><time id="backtest-chart-to"></time>
+      </div>
+    </div>
+  </header>
+  <main class="backtest-chart-layout">
+    <section class="backtest-price-pane" aria-label="Backtest price chart">
+      <div class="backtest-pane-header">
+        <strong id="backtest-price-symbol">-</strong>
+        <span class="backtest-price-separator" aria-hidden="true"></span>
+        <strong id="backtest-price-timeframe">-</strong>
+        <span class="backtest-price-separator" aria-hidden="true"></span>
+        <strong id="backtest-price-exchange">-</strong>
+        <span class="backtest-price-separator backtest-price-ohlcv-separator" aria-hidden="true"></span>
+        <span id="backtest-price-ohlcv"></span>
+      </div>
+      <div id="backtest-price-chart" class="backtest-price-chart"></div>
+      <button id="backtest-nav-to-start" class="backtest-nav-btn backtest-nav-btn-left"
+              type="button" title="처음으로" aria-label="처음으로">&laquo;</button>
+      <button id="backtest-nav-to-end" class="backtest-nav-btn backtest-nav-btn-right"
+              type="button" title="끝으로" aria-label="끝으로">&raquo;</button>
+      <div id="backtest-price-loading" class="backtest-pane-state">Loading price chart...</div>
+    </section>
+    <div id="backtest-pane-resizer" class="backtest-pane-resizer" role="separator"
+         aria-label="Resize equity curve" aria-orientation="horizontal"></div>
+    <section class="backtest-equity-pane" aria-label="Backtest equity curve">
+      <div class="backtest-pane-header">
+        <strong>Equity Curve</strong>
+        <span id="backtest-equity-selection">
+          <time id="backtest-equity-selection-time"></time>
+          <span class="backtest-equity-selection-separator" aria-hidden="true">&middot;</span>
+          <span id="backtest-equity-selection-value"></span>
+        </span>
+        <div class="backtest-equity-actions">
+          <button id="backtest-equity-zoom-in" type="button" title="Zoom in" aria-label="Zoom in">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4M11 8v6M8 11h6"></path></svg>
+          </button>
+          <button id="backtest-equity-zoom-out" type="button" title="Zoom out" aria-label="Zoom out">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4M8 11h6"></path></svg>
+          </button>
+          <button id="backtest-equity-fit" type="button" title="Fit all" aria-label="Fit all">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"></path><path d="m3 8 5-5M21 8l-5-5M3 16l5 5M21 16l-5 5"></path></svg>
+          </button>
+        </div>
+      </div>
+      <div class="backtest-equity-stage">
+        <canvas id="backtest-equity-canvas" class="backtest-equity-canvas"></canvas>
+        <div class="backtest-equity-metrics" aria-label="Backtest metrics">
+          <span class="backtest-equity-metric">
+            <small>Final Equity</small>
+            <b id="backtest-chart-final-equity">-</b>
+          </span>
+          <div id="backtest-drawdown-row" class="backtest-drawdown-row">
+            <button id="backtest-chart-max-drawdown" class="backtest-equity-metric backtest-drawdown-metric"
+                    type="button" aria-label="Go to maximum drawdown">
+              <small>Max Drawdown</small>
+              <b id="backtest-chart-max-drawdown-value">-</b>
+              <span id="backtest-chart-max-drawdown-percent" class="backtest-drawdown-percent">-</span>
+              <span id="backtest-chart-max-drawdown-tooltip" class="backtest-metric-tooltip"
+                    role="tooltip"></span>
+            </button>
+            <button id="backtest-drawdown-list-toggle" class="backtest-drawdown-list-toggle"
+                    type="button" aria-label="Drawdown list" aria-expanded="false"
+                    aria-controls="backtest-drawdown-popover">+</button>
+            <div id="backtest-drawdown-popover" class="backtest-drawdown-popover hidden">
+              <div id="backtest-drawdown-list" class="backtest-drawdown-list"></div>
+              <span id="backtest-drawdown-empty" class="backtest-drawdown-empty hidden">No drawdowns</span>
+            </div>
+          </div>
+        </div>
+        <div id="backtest-equity-tooltip" class="backtest-equity-tooltip hidden"></div>
+        <div id="backtest-equity-loading" class="backtest-pane-state">Loading equity curve...</div>
+      </div>
+    </section>
+  </main>
+  <div id="backtest-chart-error" class="backtest-chart-error hidden" role="alert"></div>
+  <!--BACKTEST_CONFIG-->
+  <script src="/static/scripting_backtest_chart.js?v=18"></script>
+</body>
+</html>

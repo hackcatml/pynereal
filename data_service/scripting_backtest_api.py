@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from scripting_backtest import ScriptingBacktestError, ScriptingBacktestManager
 
@@ -155,6 +155,33 @@ def build_scripting_backtest_router(
                 job_id,
                 offset=offset,
                 max_bytes=max_bytes,
+            )
+        except ScriptingBacktestError as exc:
+            return _error_response(exc)
+        return JSONResponse(payload)
+
+    @router.get(
+        "/api/scripting/backtests/{job_id}/equity.csv",
+        response_model=None,
+    )
+    async def get_backtest_equity(job_id: str) -> FileResponse | JSONResponse:
+        try:
+            path = manager.artifact_path(job_id, "equity")
+        except ScriptingBacktestError as exc:
+            return _error_response(exc)
+        return FileResponse(path, media_type="text/csv")
+
+    @router.get("/api/scripting/backtests/{job_id}/chart")
+    async def get_backtest_chart(
+        job_id: str,
+        start_index: int,
+        end_index: int,
+    ) -> JSONResponse:
+        try:
+            payload = await manager.chart_window(
+                job_id,
+                start_index=start_index,
+                end_index=end_index,
             )
         except ScriptingBacktestError as exc:
             return _error_response(exc)

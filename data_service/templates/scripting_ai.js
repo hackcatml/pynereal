@@ -595,7 +595,9 @@
       el("scripting-ai-panel").style.removeProperty("z-index");
       return;
     }
-    el("scripting-ai-panel").style.zIndex = String(window.PyneFloatingLayerManager.next());
+    el("scripting-ai-panel").style.zIndex = String(
+      window.PyneFloatingLayerManager.next("scripting-ai"),
+    );
   }
 
   function open() {
