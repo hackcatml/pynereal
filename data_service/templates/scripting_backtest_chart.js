@@ -609,6 +609,14 @@
     el("backtest-drawdown-list-toggle").setAttribute("aria-expanded", "false");
   }
 
+  function pointerNearElement(event, element, distance) {
+    const rect = element.getBoundingClientRect();
+    return event.clientX >= rect.left - distance
+      && event.clientX <= rect.right + distance
+      && event.clientY >= rect.top - distance
+      && event.clientY <= rect.bottom + distance;
+  }
+
   function positionDrawdownList() {
     const toggle = el("backtest-drawdown-list-toggle");
     const popover = el("backtest-drawdown-popover");
@@ -1215,11 +1223,28 @@
       focusEquityIndex(index);
     });
     document.addEventListener("pointerdown", (event) => {
+      const row = el("backtest-drawdown-row");
+      const popover = el("backtest-drawdown-popover");
+      const toggle = el("backtest-drawdown-list-toggle");
+      const insideDrawdownUi = row.contains(event.target) || popover.contains(event.target);
+      if (!popover.classList.contains("hidden")) {
+        if (!insideDrawdownUi) {
+          event.preventDefault();
+          event.stopPropagation();
+          closeDrawdownList();
+        }
+        return;
+      }
       if (
-        !el("backtest-drawdown-row").contains(event.target)
-        && !el("backtest-drawdown-popover").contains(event.target)
-      ) closeDrawdownList();
-    });
+        event.pointerType === "touch"
+        && !insideDrawdownUi
+        && pointerNearElement(event, toggle, 12)
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleDrawdownList();
+      }
+    }, true);
   }
 
   function bindPaneResize() {
