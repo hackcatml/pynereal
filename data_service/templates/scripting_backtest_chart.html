@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Backtest chart</title>
   <link rel="stylesheet" href="/static/measure.css?v=1" />
-  <link rel="stylesheet" href="/static/scripting_backtest_chart.css?v=29" />
+  <link rel="stylesheet" href="/static/scripting_backtest_chart.css?v=30" />
   <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.9/dist/lightweight-charts.standalone.production.js"></script>
   <script src="/static/bgcolor.js?v=2"></script>
 </head>
@@ -113,10 +113,10 @@
   <div id="backtest-drawdown-popover" class="backtest-drawdown-popover hidden">
     <div class="backtest-drawdown-list-header" role="row">
       <button type="button" data-drawdown-sort="time" aria-label="Sort by time">
-        <span>Time</span><span class="backtest-drawdown-sort-arrow" aria-hidden="true"></span>
+        <span>Time (UTC)</span><span class="backtest-drawdown-sort-arrow" aria-hidden="true"></span>
       </button>
       <button type="button" data-drawdown-sort="amount" aria-label="Sort by loss">
-        <span>Loss</span><span class="backtest-drawdown-sort-arrow" aria-hidden="true"></span>
+        <span id="backtest-drawdown-loss-header">Loss</span><span class="backtest-drawdown-sort-arrow" aria-hidden="true"></span>
       </button>
       <button type="button" data-drawdown-sort="percent" aria-label="Sort by percent">
         <span>%</span><span class="backtest-drawdown-sort-arrow" aria-hidden="true"></span>
@@ -148,6 +148,6 @@
   <div id="measure-label" class="measure-label hidden"></div>
   <!--BACKTEST_CONFIG-->
   <script src="/static/measure.js?v=1"></script>
-  <script src="/static/scripting_backtest_chart.js?v=32"></script>
+  <script src="/static/scripting_backtest_chart.js?v=33"></script>
 </body>
 </html>

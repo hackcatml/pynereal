@@ -537,7 +537,10 @@ class ScriptRunner:
                             self.script.initial_capital,
                             self.equity_curve if self.equity_curve else None,
                             self.first_price,
-                            self.last_price
+                            self.last_price,
+                            last_time=lib._time,
+                            timezone=self.tz,
+                            risk_free_rate=self.script.risk_free_rate,
                         )
 
                         write_strategy_statistics_csv(stats, self.strat_writer)

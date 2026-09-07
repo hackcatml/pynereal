@@ -1692,7 +1692,14 @@ tr:last-child td { border-bottom: none; }
   height: 17px;
   fill: currentColor;
 }
-.scripting-tree-item:hover,
+@media (hover: hover) and (pointer: fine) {
+  .scripting-tree-item:hover,
+  .scripting-tree-row-action:hover {
+    outline: none;
+    background: #21262d;
+    color: #ffffff;
+  }
+}
 .scripting-tree-item:focus-visible {
   outline: none;
   background: #21262d;
@@ -1702,7 +1709,6 @@ tr:last-child td { border-bottom: none; }
   background: rgba(41, 98, 255, 0.25);
   color: #ffffff;
 }
-.scripting-tree-row-action:hover,
 .scripting-tree-row-action:active,
 .scripting-tree-row-action:focus-visible {
   outline: none;

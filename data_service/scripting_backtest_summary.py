@@ -60,4 +60,5 @@ def read_strategy_summary(path: Path) -> dict[str, Any] | None:
         "buy_hold_return": amount("Buy & hold return"),
         "buy_hold_return_percent": percent("Buy & hold return"),
         "sharpe_ratio": amount("Sharpe ratio"),
+        "sortino_ratio": amount("Sortino ratio"),
     }

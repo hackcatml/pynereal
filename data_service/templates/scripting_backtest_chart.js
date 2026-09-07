@@ -139,7 +139,7 @@
       ? part(date.getUTCFullYear() % 100)
       : String(date.getUTCFullYear());
     return `${year}-${part(date.getUTCMonth() + 1)}-${part(date.getUTCDate())}`
-      + ` ${part(date.getUTCHours())}:${part(date.getUTCMinutes())} UTC`;
+      + ` ${part(date.getUTCHours())}:${part(date.getUTCMinutes())}`;
   }
 
   function inferredDataInfo(path) {
@@ -579,6 +579,12 @@
   function renderDrawdownList() {
     const list = el("backtest-drawdown-list");
     const empty = el("backtest-drawdown-empty");
+    const currency = String(state.job && state.job.summary && state.job.summary.currency || "").trim();
+    el("backtest-drawdown-loss-header").textContent = currency ? `Loss (${currency})` : "Loss";
+    const percentFormat = new Intl.NumberFormat("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
     const fragment = document.createDocumentFragment();
     sortedDrawdownIndices().forEach((index) => {
       const button = document.createElement("button");
@@ -592,10 +598,11 @@
       timestamp.textContent = formatListTimestamp(state.equity.timestamps[index]);
       time.append(timestamp);
       const amount = document.createElement("strong");
-      amount.textContent = formatAmount(state.equity.drawdowns[index]);
+      amount.textContent = formatNumber(state.equity.drawdowns[index], 2);
       const percent = document.createElement("span");
       percent.className = "backtest-drawdown-item-percent";
-      percent.textContent = formatPercent(state.equity.drawdownPercents[index]);
+      const percentValue = state.equity.drawdownPercents[index];
+      percent.textContent = Number.isFinite(percentValue) ? `${percentFormat.format(percentValue)}%` : "-";
       button.append(time, amount, percent);
       fragment.append(button);
     });

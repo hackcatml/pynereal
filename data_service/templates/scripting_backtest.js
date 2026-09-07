@@ -1,4 +1,6 @@
 (function () {
+  let summaryRiskGradientSequence = 0;
+
   function createBacktestInstance(root, instanceOptions = {}) {
   let initialized = false;
   let api = null;
@@ -32,6 +34,10 @@
   let dataDeleteBusy = false;
   let pendingDataDeletePath = "";
   let summaryOpen = false;
+  let summaryRiskRatio = "sharpe";
+  let summaryCompareOpen = false;
+  let summaryCompareMinWidth = 0;
+  let summaryInputAnchor = null;
   let summaryPagerSyncing = false;
   let summaryPagerSyncTimer = null;
   let summaryPagerSettleTimer = null;
@@ -252,60 +258,189 @@
       + `${detail ? `<small>${escapeHtml(detail)}</small>` : ""}</div>`;
   }
 
-  function summaryMarkup(value, showInputLabel = false) {
-    const summary = value && value.summary;
-    if (!summary) return '<div class="scripting-backtest-summary-empty">Summary is unavailable.</div>';
+  function summaryRiskMetric(summary) {
+    const gradientId = `scripting-backtest-risk-${++summaryRiskGradientSequence}`;
+    const ratios = [["sharpe", "Sharpe ratio"], ["sortino", "Sortino ratio"]];
+    const activeLabel = summaryRiskRatio === "sharpe" ? "Sharpe ratio" : "Sortino ratio";
+    const nextLabel = summaryRiskRatio === "sharpe" ? "Sortino ratio" : "Sharpe ratio";
+    const activeValue = formatSummaryNumber(summary[`${summaryRiskRatio}_ratio`], 3);
+    return `<div class="scripting-backtest-summary-metric scripting-backtest-risk" data-risk-ratio="${summaryRiskRatio}">`
+      + '<dt><button class="scripting-backtest-risk-toggle" type="button"'
+      + ` aria-label="${escapeHtml(`${activeLabel}: ${activeValue}. Show ${nextLabel}`)}">`
+      + '<span class="scripting-backtest-risk-labels" aria-hidden="true"><span class="scripting-backtest-risk-track">'
+      + [...ratios, ratios[0]].map(([key, label]) => (
+        `<span class="scripting-backtest-risk-label" data-risk-label="${key}" aria-hidden="true">${label}</span>`
+      )).join("")
+      + '</span></span>'
+      + '<span class="scripting-backtest-risk-arrows" aria-hidden="true">'
+      + '<svg viewBox="0 0 16 13"><defs>'
+      + `<linearGradient id="${gradientId}-up" gradientUnits="userSpaceOnUse" x1="4" y1="9" x2="4" y2="0">`
+      + '<stop offset="0" stop-color="currentColor" /><stop offset="1" class="scripting-backtest-risk-gradient-primary" />'
+      + '</linearGradient>'
+      + `<linearGradient id="${gradientId}-right" gradientUnits="userSpaceOnUse" x1="4" y1="9" x2="16" y2="9">`
+      + '<stop offset="0" stop-color="currentColor" /><stop offset="1" class="scripting-backtest-risk-gradient-secondary" />'
+      + '</linearGradient></defs>'
+      + `<path d="M4 9V3" stroke="url(#${gradientId}-up)" />`
+      + `<path d="M4 9h9" stroke="url(#${gradientId}-right)" />`
+      + `<path class="scripting-backtest-risk-arrowhead" d="m4 0-3 4h6z" fill="url(#${gradientId}-up)" />`
+      + `<path class="scripting-backtest-risk-arrowhead" d="m16 9-4-3v6z" fill="url(#${gradientId}-right)" /></svg>`
+      + '</span></button></dt><dd class="scripting-backtest-risk-values" aria-live="polite">'
+      + ratios.map(([key]) => (
+        `<span class="${summaryTone(summary[`${key}_ratio`])}" data-risk-value="${key}"`
+        + ` aria-hidden="${key !== summaryRiskRatio}">${escapeHtml(formatSummaryNumber(summary[`${key}_ratio`], 3))}</span>`
+      )).join("")
+      + '</dd></div>';
+  }
+
+  function toggleSummaryRiskRatio() {
+    summaryRiskRatio = summaryRiskRatio === "sharpe" ? "sortino" : "sharpe";
+    const activeLabel = summaryRiskRatio === "sharpe" ? "Sharpe ratio" : "Sortino ratio";
+    const nextLabel = summaryRiskRatio === "sharpe" ? "Sortino ratio" : "Sharpe ratio";
+    el("scripting-backtest-summary-panel").querySelectorAll(".scripting-backtest-risk").forEach((metric) => {
+      metric.dataset.riskRatio = summaryRiskRatio;
+      metric.querySelectorAll("[data-risk-value]").forEach((value) => {
+        value.setAttribute("aria-hidden", String(value.dataset.riskValue !== summaryRiskRatio));
+      });
+      const activeValue = metric.querySelector(`[data-risk-value="${summaryRiskRatio}"]`).textContent;
+      metric.querySelector("button").setAttribute("aria-label", `${activeLabel}: ${activeValue}. Show ${nextLabel}`);
+    });
+  }
+
+  function summaryMetrics(summary) {
     const currency = String(summary.currency || "");
     const netProfit = summaryNumber(summary.net_profit);
     const drawdown = summaryNumber(summary.max_drawdown);
     const profitFactor = summaryNumber(summary.profit_factor);
-    const inputLabel = showInputLabel ? jobLabel(value) : "";
-    return '<div class="scripting-backtest-summary-title">Performance'
-      + `${inputLabel ? `<span title="${escapeHtml(inputLabel)}">${escapeHtml(inputLabel)}</span>` : ""}</div>`
-      + '<dl class="scripting-backtest-summary-grid">'
-      + summaryMetric(
+    return [
+      [
         "Net profit",
         formatSummaryAmount(netProfit, currency),
         formatSummaryPercent(summary.net_profit_percent),
         summaryTone(netProfit),
-      )
-      + summaryMetric(
+      ],
+      [
         "Max drawdown",
         formatSummaryAmount(drawdown, currency),
         formatSummaryPercent(summary.max_drawdown_percent),
         drawdown && drawdown > 0 ? "negative" : "",
-      )
-      + summaryMetric(
+      ],
+      [
         "Total trades",
         formatSummaryNumber(summary.total_trades, 0),
         summary.open_trades ? `${formatSummaryNumber(summary.open_trades, 0)} open` : "",
-      )
-      + summaryMetric("Win rate", formatSummaryPercent(summary.win_rate) || "-")
-      + summaryMetric(
+      ],
+      ["Win rate", formatSummaryPercent(summary.win_rate) || "-"],
+      [
         "Profit factor",
         formatSummaryNumber(profitFactor, 2),
         "",
         profitFactor === null || profitFactor === 1 ? "" : summaryTone(profitFactor - 1),
-      )
-      + summaryMetric(
+      ],
+      [
         "Commission",
         formatSummaryAmount(summary.commission, currency),
         "",
         summaryNumber(summary.commission) > 0 ? "negative" : "",
-      )
-      + summaryMetric(
+      ],
+      [
         "Buy & hold return",
         formatSummaryAmount(summary.buy_hold_return, currency),
         formatSummaryPercent(summary.buy_hold_return_percent),
         summaryTone(summary.buy_hold_return),
-      )
-      + summaryMetric(
-        "Sharpe ratio",
-        formatSummaryNumber(summary.sharpe_ratio, 2),
-        "",
-        summaryTone(summary.sharpe_ratio),
-      )
+      ],
+    ];
+  }
+
+  function summaryHeading() {
+    return '<div class="scripting-backtest-summary-title">Performance'
+      + (summaryJobs().length > 1
+        ? `<button type="button" class="scripting-backtest-compare-toggle${summaryCompareOpen ? " active" : ""}"`
+          + ` aria-pressed="${summaryCompareOpen}">Compare</button>`
+        : "")
+      + '</div>';
+  }
+
+  function summaryMarkup(value) {
+    const summary = value && value.summary;
+    if (!summary) return '<div class="scripting-backtest-summary-empty">Summary is unavailable.</div>';
+    return summaryHeading()
+      + '<dl class="scripting-backtest-summary-grid">'
+      + summaryMetrics(summary).map((metric) => summaryMetric(...metric)).join("")
+      + summaryRiskMetric(summary)
       + '</dl>';
+  }
+
+  function summaryComparisonMarkup(values) {
+    const columns = values.map(({ summary }) => [
+      ...summaryMetrics(summary),
+      ["Sharpe ratio", formatSummaryNumber(summary.sharpe_ratio, 3), "", summaryTone(summary.sharpe_ratio)],
+      ["Sortino ratio", formatSummaryNumber(summary.sortino_ratio, 3), "", summaryTone(summary.sortino_ratio)],
+    ]);
+    return summaryHeading()
+      + '<div class="scripting-backtest-compare-scroll" tabindex="0" aria-label="Summary comparison">'
+      + '<table class="scripting-backtest-compare-table" aria-label="Backtest performance comparison">'
+      + '<thead><tr><th scope="col">Metric</th>'
+      + values.map((value, index) => (
+        '<th scope="col"><button type="button" class="scripting-backtest-compare-column"'
+        + ` data-summary-input-job-id="${escapeHtml(value.id)}"`
+        + ` aria-label="Result ${index + 1} inputs">${index + 1}</button></th>`
+      )).join("")
+      + '</tr></thead><tbody>'
+      + columns[0].map(([label], row) => (
+        `<tr><th scope="row">${escapeHtml(label)}</th>`
+        + columns.map((column) => {
+          const [, value, detail = "", tone = ""] = column[row];
+          return `<td><span${tone ? ` class="${tone}"` : ""}>${escapeHtml(value)}</span>`
+            + (detail ? `<small>${escapeHtml(detail)}</small>` : "") + '</td>';
+        }).join("")
+        + '</tr>'
+      )).join("")
+      + '</tbody></table></div>';
+  }
+
+  function hideSummaryInputTooltip() {
+    if (summaryInputAnchor) summaryInputAnchor.removeAttribute("aria-describedby");
+    summaryInputAnchor = null;
+    el("scripting-backtest-summary-input-tooltip").classList.add("hidden");
+  }
+
+  function showSummaryInputTooltip(anchor) {
+    const value = summaryJobs().find((item) => item.id === anchor.dataset.summaryInputJobId);
+    if (!value) return;
+    hideSummaryInputTooltip();
+    const tooltip = el("scripting-backtest-summary-input-tooltip");
+    const entries = Object.entries(value.inputs || {});
+    tooltip.textContent = entries.length
+      ? entries.map(([name, input]) => `${name} = ${inputValueLabel(input)}`).join("\n")
+      : "Default inputs";
+    tooltip.classList.remove("hidden");
+    tooltip.scrollTop = 0;
+    const rect = anchor.getBoundingClientRect();
+    const bounds = tooltip.getBoundingClientRect();
+    const margin = 8;
+    const left = Math.min(
+      Math.max(margin, rect.left + (rect.width - bounds.width) / 2),
+      Math.max(margin, window.innerWidth - bounds.width - margin),
+    );
+    const top = rect.bottom + bounds.height + margin <= window.innerHeight
+      ? rect.bottom
+      : Math.max(margin, rect.top - bounds.height);
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+    anchor.setAttribute("aria-describedby", tooltip.id);
+    summaryInputAnchor = anchor;
+  }
+
+  function toggleSummaryComparison() {
+    summaryCompareOpen = !summaryCompareOpen && summaryJobs().length > 1;
+    summaryCompareMinWidth = 0;
+    hideSummaryInputTooltip();
+    clearSummaryPagerTimers();
+    const panel = el("scripting-backtest-summary-panel");
+    delete panel.dataset.summarySignature;
+    renderSummary();
+    panel.scrollTop = 0;
+    panel.scrollLeft = 0;
   }
 
   function summaryJobs() {
@@ -343,14 +478,36 @@
   function renderSummary() {
     const panel = el("scripting-backtest-summary-panel");
     const summary = job && job.summary;
+    const values = summaryJobs();
+    if (!summary || values.length < 2) {
+      summaryCompareOpen = false;
+      hideSummaryInputTooltip();
+    }
+    panel.classList.toggle("summary-comparison", summaryCompareOpen);
+    if (!summaryCompareOpen) summaryCompareMinWidth = 0;
     if (!summary) {
+      hideSummaryInputTooltip();
       clearSummaryPagerTimers();
       panel.classList.remove("summary-pager");
       delete panel.dataset.summarySignature;
       panel.innerHTML = '<div class="scripting-backtest-summary-empty">Summary is available after a completed backtest.</div>';
       return;
     }
-    const values = summaryJobs();
+    if (summaryCompareOpen) {
+      const signature = `compare:${JSON.stringify(values.map((value) => [value.id, value.inputs, value.summary]))}`;
+      clearSummaryPagerTimers();
+      panel.classList.remove("summary-pager");
+      if (panel.dataset.summarySignature !== signature) {
+        hideSummaryInputTooltip();
+        panel.dataset.summarySignature = signature;
+        panel.innerHTML = summaryComparisonMarkup(values);
+        panel.querySelector(".scripting-backtest-compare-scroll").addEventListener(
+          "scroll", hideSummaryInputTooltip, { passive: true },
+        );
+        window.requestAnimationFrame(syncSummaryComparisonWidth);
+      }
+      return;
+    }
     if (isMobile() && values.length > 1) {
       const signature = JSON.stringify(values.map((value) => [value.id, value.summary]));
       panel.classList.add("summary-pager");
@@ -359,7 +516,7 @@
         panel.dataset.summarySignature = signature;
         panel.innerHTML = values.map((value) => (
           `<section class="scripting-backtest-summary-page" data-backtest-summary-job-id="${escapeHtml(value.id)}">`
-          + summaryMarkup(value, true)
+          + summaryMarkup(value)
           + '</section>'
         )).join("");
       }
@@ -395,9 +552,13 @@
     button.dataset.tooltip = summaryOpen ? "Log" : "Summary";
     el("scripting-backtest-summary-panel").classList.toggle("hidden", !summaryOpen);
     el("scripting-backtest-log").classList.toggle("hidden", summaryOpen);
+    hideSummaryInputTooltip();
     if (summaryOpen) setFindOpen(false);
     el("scripting-backtest-find-toggle").disabled = summaryOpen || !logText;
-    if (summaryOpen) window.requestAnimationFrame(() => syncSummaryPagerToJob(false));
+    if (summaryOpen) window.requestAnimationFrame(() => {
+      syncSummaryPagerToJob(false);
+      syncSummaryComparisonWidth();
+    });
     window.requestAnimationFrame(updateLogJumpButton);
   }
 
@@ -1842,12 +2003,39 @@
     };
   }
 
+  function desktopMinimumWidth(maxWidth) {
+    const defaultMinimum = Math.min(desktopDefaultWidth, maxWidth) / 2;
+    return Math.min(maxWidth, Math.max(
+      defaultMinimum,
+      summaryOpen && summaryCompareOpen ? summaryCompareMinWidth : 0,
+    ));
+  }
+
+  function syncSummaryComparisonWidth() {
+    if (isMobile() || !isOpen() || !summaryOpen || !summaryCompareOpen) return;
+    const table = el("scripting-backtest-summary-panel").querySelector(".scripting-backtest-compare-table");
+    if (!table) return;
+    // Measure the table's intrinsic minimum before applying the window resize limit.
+    table.style.width = "1px";
+    summaryCompareMinWidth = Math.ceil(table.getBoundingClientRect().width) + 80;
+    table.style.removeProperty("width");
+    const box = el("scripting-backtest-modal").querySelector(".scripting-backtest-box");
+    const rect = box.getBoundingClientRect();
+    const maxWidth = Math.max(1, window.innerWidth - desktopWindowMargin * 2);
+    const width = Math.min(Math.max(rect.width, desktopMinimumWidth(maxWidth)), maxWidth);
+    box.style.width = `${width}px`;
+    box.classList.toggle("compact", width < 650);
+    const position = clampDesktopGeometry(rect.left, rect.top);
+    box.style.left = `${position.left}px`;
+    box.style.top = `${position.top}px`;
+  }
+
   function applyDesktopGeometry() {
     const box = el("scripting-backtest-modal").querySelector(".scripting-backtest-box");
     const stored = desktopGeometry();
     const maxWidth = Math.max(1, window.innerWidth - desktopWindowMargin * 2);
     const maxHeight = Math.max(1, window.innerHeight - desktopWindowMargin * 2);
-    const minWidth = Math.min(desktopDefaultWidth, maxWidth) / 2;
+    const minWidth = desktopMinimumWidth(maxWidth);
     const minHeight = Math.min(desktopDefaultHeight, maxHeight) / 2;
     const requestedWidth = Number.isFinite(Number(stored.width))
       ? Number(stored.width)
@@ -1898,6 +2086,7 @@
     ) return;
     const target = event.target instanceof Element ? event.target : null;
     if (target && target.closest("button, input, a")) return;
+    hideSummaryInputTooltip();
     activate();
     const box = el("scripting-backtest-modal").querySelector(".scripting-backtest-box");
     const rect = box.getBoundingClientRect();
@@ -1941,6 +2130,7 @@
       || event.button !== 0
       || !isOpen()
     ) return;
+    hideSummaryInputTooltip();
     activate();
     const box = el("scripting-backtest-modal").querySelector(".scripting-backtest-box");
     const rect = box.getBoundingClientRect();
@@ -1967,7 +2157,7 @@
     const viewportWidth = Math.max(1, window.innerWidth - desktopWindowMargin * 2);
     const viewportHeight = Math.max(1, window.innerHeight - desktopWindowMargin * 2);
     const minWidth = Math.min(
-      Math.min(desktopDefaultWidth, viewportWidth) / 2,
+      desktopMinimumWidth(viewportWidth),
       maxWidth,
     );
     const minHeight = Math.min(
@@ -2036,6 +2226,9 @@
     renderInputs();
     renderJobs();
     summaryOpen = false;
+    summaryCompareOpen = false;
+    summaryCompareMinWidth = 0;
+    hideSummaryInputTooltip();
     clearSummaryPagerTimers();
     actionBusy = false;
     dataBusy = false;
@@ -2107,6 +2300,7 @@
 
   function close(options = {}) {
     if (!isOpen() || closeTimer !== null || dataBusy) return;
+    hideSummaryInputTooltip();
     contextSequence += 1;
     clearJobsRefresh();
     clearSummaryPagerTimers();
@@ -2335,6 +2529,53 @@
       handleSummaryPagerScroll,
       { passive: true },
     );
+    el("scripting-backtest-summary-panel").addEventListener("click", (event) => {
+      if (event.target.closest(".scripting-backtest-compare-toggle")) {
+        toggleSummaryComparison();
+        return;
+      }
+      const column = event.target.closest("[data-summary-input-job-id]");
+      if (column) {
+        if (isMobile() && summaryInputAnchor === column) hideSummaryInputTooltip();
+        else showSummaryInputTooltip(column);
+        return;
+      }
+      if (event.target.closest(".scripting-backtest-risk")) toggleSummaryRiskRatio();
+    });
+    el("scripting-backtest-summary-panel").addEventListener("dblclick", (event) => {
+      if (event.target.closest(".scripting-backtest-risk, .scripting-backtest-compare-toggle, [data-summary-input-job-id]")) {
+        event.preventDefault();
+      }
+    });
+    el("scripting-backtest-summary-panel").addEventListener("pointerover", (event) => {
+      if (event.pointerType !== "mouse") return;
+      const column = event.target.closest("[data-summary-input-job-id]");
+      if (column && !column.contains(event.relatedTarget)) showSummaryInputTooltip(column);
+    });
+    el("scripting-backtest-summary-panel").addEventListener("pointerout", (event) => {
+      if (event.pointerType !== "mouse") return;
+      const column = event.target.closest("[data-summary-input-job-id]");
+      if (column && !column.contains(event.relatedTarget)
+        && !el("scripting-backtest-summary-input-tooltip").contains(event.relatedTarget)) {
+        hideSummaryInputTooltip();
+      }
+    });
+    el("scripting-backtest-summary-input-tooltip").addEventListener("pointerleave", (event) => {
+      if (event.pointerType === "mouse" && !summaryInputAnchor?.contains(event.relatedTarget)) {
+        hideSummaryInputTooltip();
+      }
+    });
+    el("scripting-backtest-summary-panel").addEventListener("focusin", (event) => {
+      if (isMobile()) return;
+      const column = event.target.closest("[data-summary-input-job-id]");
+      if (column) showSummaryInputTooltip(column);
+    });
+    el("scripting-backtest-summary-panel").addEventListener("focusout", (event) => {
+      if (!isMobile() && event.target === summaryInputAnchor
+        && !el("scripting-backtest-summary-input-tooltip").contains(event.relatedTarget)) {
+        hideSummaryInputTooltip();
+      }
+    });
     el("scripting-backtest-delete").addEventListener("click", (event) => {
       event.stopPropagation();
       setClearConfirmationOpen(!isClearConfirmationOpen());
@@ -2395,6 +2636,10 @@
     });
     document.addEventListener("pointerdown", (event) => {
       if (!isOpen()) return;
+      if (summaryInputAnchor && !summaryInputAnchor.contains(event.target)
+        && !el("scripting-backtest-summary-input-tooltip").contains(event.target)) {
+        hideSummaryInputTooltip();
+      }
       if (isDataDeleteOpen()) return;
       if (!event.target.closest(".scripting-backtest-date-picker")) closeCalendars();
       if (!event.target.closest(".scripting-backtest-data-select")) closeDataOptions();
@@ -2438,7 +2683,9 @@
       if (event.key !== "Escape") return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      if (isClearConfirmationOpen()) {
+      if (summaryInputAnchor) {
+        hideSummaryInputTooltip();
+      } else if (isClearConfirmationOpen()) {
         setClearConfirmationOpen(false);
         el("scripting-backtest-delete").focus({ preventScroll: true });
       } else if (!el("scripting-backtest-find").classList.contains("hidden")) setFindOpen(false);
@@ -2447,8 +2694,10 @@
     }, true);
     window.addEventListener("resize", () => {
       if (!isOpen()) return;
+      hideSummaryInputTooltip();
       applyBacktestLayout();
       renderSummary();
+      window.requestAnimationFrame(syncSummaryComparisonWidth);
     });
     initialized = true;
   }
@@ -2458,6 +2707,7 @@
     el("scripting-backtest-modal").style.zIndex = String(layer);
     el("scripting-backtest-data-modal").style.zIndex = String(layer + 2);
     el("scripting-backtest-data-tooltip").style.zIndex = String(layer + 3);
+    el("scripting-backtest-summary-input-tooltip").style.zIndex = String(layer + 3);
     el("scripting-backtest-data-delete-modal").style.zIndex = String(layer + 4);
   }
 
@@ -2468,6 +2718,7 @@
     "scripting-backtest-modal",
     "scripting-backtest-data-modal",
     "scripting-backtest-data-tooltip",
+    "scripting-backtest-summary-input-tooltip",
     "scripting-backtest-data-delete-modal",
   ];
   const desktopInstances = new Map();

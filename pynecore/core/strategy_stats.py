@@ -6,7 +6,9 @@ Calculates comprehensive trading statistics similar to TradingView's Strategy Te
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, tzinfo
 
 from ..types.na import NA
 from ..lib.strategy import Trade
@@ -31,8 +33,8 @@ class StrategyStatistics:
     max_equity_drawdown_percent: float = 0.0
     buy_and_hold_return: float = 0.0
     buy_and_hold_return_percent: float = 0.0
-    sharpe_ratio: float = 0.0
-    sortino_ratio: float = 0.0
+    sharpe_ratio: float | None = None
+    sortino_ratio: float | None = None
     profit_factor: float = 0.0
 
     # Trade statistics
@@ -100,7 +102,7 @@ class StrategyStatistics:
     # Additional ratio calculations
     ratio_avg_win_loss: float = 0.0
 
-    def to_dict(self) -> dict[str, float | int]:
+    def to_dict(self) -> dict[str, float | int | None]:
         """Convert statistics to dictionary for CSV export"""
         return {
             # Overview
@@ -184,21 +186,146 @@ class StrategyStatistics:
         }
 
 
+def calculate_monthly_risk_ratios(
+        monthly_returns: Sequence[float],
+        *,
+        risk_free_rate: float = 2.0,
+) -> tuple[float | None, float | None]:
+    """Return Sharpe/Sortino for explicit monthly samples, without annualizing.
+
+    Returns are fractions (0.1 means 10%); risk_free_rate is an annual percentage
+    (2.0 means 2%). Undefined ratios are None. Non-finite inputs are rejected
+    rather than dropped, since dropping a month changes both denominators.
+
+    This implements the published TradingView RiskMetrics monthly formulas;
+    month selection is handled separately by calculate_monthly_returns.
+    """
+    if not math.isfinite(risk_free_rate):
+        raise ValueError("risk_free_rate must be finite")
+    if any(not math.isfinite(value) for value in monthly_returns):
+        raise ValueError("monthly_returns must contain only finite values")
+    count = len(monthly_returns)
+    if count == 0:
+        return None, None
+
+    target = risk_free_rate / 100.0 / 12.0
+    base = monthly_returns[0]
+    # Center the sum so identical samples retain exactly zero variance.
+    mean = base + math.fsum(value - base for value in monthly_returns) / count
+    deviation = math.sqrt(math.fsum((value - mean) ** 2 for value in monthly_returns) / count)
+    downside = math.sqrt(math.fsum(min(0.0, value - target) ** 2 for value in monthly_returns) / count)
+    excess = mean - target
+    sharpe = excess / deviation if deviation > 0.0 else None
+    sortino = excess / downside if downside > 0.0 else None
+    return sharpe, sortino
+
+
+def calculate_monthly_returns(
+        position: Position,
+        initial_capital: float,
+        *,
+        last_time: int | None = None,
+        last_price: float | None = None,
+        timezone: tzinfo = UTC,
+) -> list[float] | None:
+    """Build report samples from existing fills, without per-bar collection.
+
+    Net closed-trade PnL belongs to its exit month. Only the final month includes
+    remaining open trades, valued at last_price with their paid entry fees.
+    Flat reports stop at the last exit; an initial zero-return month is omitted.
+    This sampling policy matches the seven recorded Strategy Tester fixtures.
+
+    Trade times and last_time are Unix milliseconds. None means the retained
+    history or valuation is insufficient; an empty list means no usable months.
+    """
+    if position.closed_trades_count != len(position.closed_trades):
+        return None
+    if not position.closed_trades and not position.open_trades:
+        return []
+
+    def month(timestamp: int) -> int:
+        if timestamp < 0:
+            raise ValueError("Trade timestamp is unavailable")
+        date = datetime.fromtimestamp(timestamp / 1000, timezone)
+        return date.year * 12 + date.month - 1
+
+    try:
+        if not math.isfinite(initial_capital) or initial_capital <= 0 or timezone is None:
+            return None
+        profits: dict[int, list[float]] = {}
+        first_month: int | None = None
+        latest_time = -1
+        for trade in position.closed_trades:
+            entry_month = month(trade.entry_time)
+            if trade.exit_time < trade.entry_time:
+                return None
+            exit_month = month(trade.exit_time)
+            first_month = min(first_month, entry_month) if first_month is not None else entry_month
+            latest_time = max(latest_time, trade.exit_time)
+            # Commission already includes the allocated entry and exit fees.
+            profit = trade.size * (trade.exit_price - trade.entry_price) - trade.commission
+            if not math.isfinite(profit):
+                return None
+            profits.setdefault(exit_month, []).append(profit)
+
+        if position.open_trades:
+            if last_time is None or last_price is None or not math.isfinite(last_price):
+                return None
+            final_month = month(last_time)
+            for trade in position.open_trades:
+                entry_month = month(trade.entry_time)
+                first_month = min(first_month, entry_month) if first_month is not None else entry_month
+                latest_time = max(latest_time, trade.entry_time)
+                profit = trade.size * (last_price - trade.entry_price) - trade.commission
+                if not math.isfinite(profit):
+                    return None
+                profits.setdefault(final_month, []).append(profit)
+            if last_time < latest_time:
+                return None
+        else:
+            final_month = month(latest_time)
+
+        if first_month is None:
+            return []
+        balance = initial_capital
+        returns = []
+        for period in range(first_month, final_month + 1):
+            profit = math.fsum(profits.get(period, ()))
+            if balance <= 0:
+                return None
+            value = profit / balance
+            balance += profit
+            if not math.isfinite(value) or not math.isfinite(balance):
+                return None
+            if period != first_month or value != 0.0:
+                returns.append(value)
+        return returns
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
 def calculate_strategy_statistics(
         position: Position,
         initial_capital: float,
         equity_curve: list[float] | None = None,
         first_price: float | None = None,
-        last_price: float | None = None
+        last_price: float | None = None,
+        *,
+        last_time: int | None = None,
+        timezone: tzinfo = UTC,
+        risk_free_rate: float = 2.0,
 ) -> StrategyStatistics:
     """
     Calculate comprehensive strategy statistics from position data.
 
     :param position: Position object containing all trade data
     :param initial_capital: Initial capital for percentage calculations
-    :param equity_curve: List of equity values for Sharpe/Sortino calculations
+    :param equity_curve: Retained for compatibility; ratios use monthly trade returns
     :param first_price: First price for buy & hold calculation
     :param last_price: Last price for buy & hold calculation
+    :param last_time: Report valuation timestamp in Unix milliseconds for open positions
+    :param timezone: Exchange timezone used for calendar month boundaries
+    :param risk_free_rate: Annual risk-free percentage for monthly Sharpe/Sortino
     :return: StrategyStatistics object with all calculated metrics
     """
     stats = StrategyStatistics()
@@ -416,33 +543,13 @@ def calculate_strategy_statistics(
 
         stats.max_contracts_held = max_size
 
-    # Sharpe and Sortino ratios (if equity curve provided)
-    if equity_curve and len(equity_curve) > 1:
-        returns = []
-        for i in range(1, len(equity_curve)):
-            if equity_curve[i - 1] != 0:
-                ret = (equity_curve[i] - equity_curve[i - 1]) / equity_curve[i - 1]
-                returns.append(ret)
-
-        if returns:
-            avg_return = sum(returns) / len(returns)
-
-            # Sharpe ratio calculation
-            if len(returns) > 1:
-                variance = sum((r - avg_return) ** 2 for r in returns) / (len(returns) - 1)
-                std_dev = math.sqrt(variance)
-                if std_dev > 0:
-                    # Annualized Sharpe ratio (assuming daily returns and 252 trading days)
-                    stats.sharpe_ratio = (avg_return * 252) / (std_dev * math.sqrt(252))
-
-            # Sortino ratio calculation
-            downside_returns = [r for r in returns if r < 0]
-            if len(downside_returns) > 1:
-                downside_variance = sum(r ** 2 for r in downside_returns) / len(downside_returns)
-                downside_std = math.sqrt(downside_variance)
-                if downside_std > 0:
-                    # Annualized Sortino ratio
-                    stats.sortino_ratio = (avg_return * 252) / (downside_std * math.sqrt(252))
+    returns = calculate_monthly_returns(
+        position, initial_capital, last_time=last_time, last_price=last_price, timezone=timezone,
+    )
+    if returns is not None and math.isfinite(risk_free_rate):
+        stats.sharpe_ratio, stats.sortino_ratio = calculate_monthly_risk_ratios(
+            returns, risk_free_rate=risk_free_rate,
+        )
 
     return stats
 
@@ -599,11 +706,11 @@ def write_strategy_statistics_csv(
 
     # Additional statistics
     csv_writer.write("Sharpe ratio",
-                     stats.sharpe_ratio, "",
+                     stats.sharpe_ratio if stats.sharpe_ratio is not None else "", "",
                      "", "", "", ""
                      )
     csv_writer.write("Sortino ratio",
-                     stats.sortino_ratio, "",
+                     stats.sortino_ratio if stats.sortino_ratio is not None else "", "",
                      "", "", "", ""
                      )
     csv_writer.write("Profit factor",

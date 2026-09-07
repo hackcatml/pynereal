@@ -398,7 +398,7 @@ body {
 .backtest-drawdown-list-header,
 .backtest-drawdown-item {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(74px, auto) 46px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: center;
   column-gap: 6px;
 }
@@ -770,7 +770,6 @@ body {
   }
   .backtest-drawdown-list-header,
   .backtest-drawdown-item {
-    grid-template-columns: minmax(0, 1fr) minmax(62px, auto) 38px;
     column-gap: 1px;
   }
   .backtest-drawdown-list-header,
