@@ -25,7 +25,8 @@ Run your crypto trading strategy in real time without TradingView.
 - 👁️ **Futures Watchlist** — live prices, 24-hour moves, turnover, favorites,
   and direct session setup across supported exchanges
 - 📝 **Scripting workspace** — manage, edit, compare, and restore strategy
-  files from the dashboard
+  files with CodeMirror 6 and AI-assisted editing; run parallel backtests and
+  compare their performance and result charts
 - 📱 Full mobile dashboard
 
 ## 🤖 AI Copilot
@@ -171,20 +172,101 @@ excluded.
 ## Scripting Workspace
 
 Open **Scripting** from the Hub menu to manage files under `workdir/scripts`.
-The workspace supports creating strategy templates, Markdown files, and
+The workspace supports creating strategy and indicator templates, Markdown files, and
 directories, as well as duplicating, renaming, and deleting files or directory
 trees. Directory copies exclude hidden files, symbolic links, and
 `__pycache__`.
 
-The built-in editor provides undo, comment toggling, find and replace, change
+On desktop, the workspace can be moved and resized, and the source tree can be
+resized or collapsed. Right-click a file or directory for actions; Shift-click
+files to select a range for duplication or deletion. On mobile, use each row's
+three-dot menu and drag the sheet down to close it.
+
+### Editing and Version History
+
+The CodeMirror 6 editor is shared with the chart Source editor. It provides
+undo, comment toggling, find and replace, change
 markers, optional revision notes, color-coded diffs, and restoration of earlier
 versions. Revision history is stored locally in
 `workdir/data/cache/scripting_history.sqlite`.
+
+Use `Cmd/Ctrl + F` to find, `Cmd/Ctrl + R` to find and replace, and
+`Cmd/Ctrl + /` to toggle comments. Toolbar controls are also available on mobile.
+CodeMirror is bundled; normal setup and Update do not require Node.js or npm.
+
+Opening or saving a Python file runs static validation, with cached results for
+an unchanged revision. Errors are underlined, and the error navigation buttons
+move between diagnostics. This checks syntax and supported declarations/imports
+without executing the strategy; it does not replace a backtest.
+
+External edits are recorded when the workspace next reads the file. Saving
+against an outdated revision reports a conflict instead of overwriting newer
+disk contents. Notes can be saved or cleared without changing the source.
 
 Files used by a running Runner cannot be renamed or deleted. Saving an active
 strategy shows when it will be picked up by the next warm-up; select that status
 to restart the affected Runner immediately instead. Deleting a script used only
 by stopped sessions clears those sessions' script selection after confirmation.
+
+### Script AI
+
+With the AI service enabled, open **Script AI** from the editor toolbar to ask
+about the current source or request changes. Unsaved edits are included in the
+conversation context. AI changes are returned to the editor as an **unsaved
+draft**; review them and press Save to update the actual file and version history.
+
+On desktop, the chat is a movable, resizable floating window. On mobile, it opens
+as a partial-height sheet; touching the editor behind it dismisses the chat.
+File management, editing, validation, and backtesting also work with AI disabled.
+
+### Backtesting
+
+Choose **Backtest** from a Python file's actions or the editor toolbar. Save the
+source first, select an OHLCV file and UTC date/time range, then press Run.
+Both strategies and indicators can run; performance reports require strategy
+output. The data manager can download a new dataset, update one to the present,
+or delete an unused dataset. Data used by a registered session or an active
+backtest cannot be deleted.
+
+Expand **Inputs** to set values declared with `input.*`. Multiple values produce
+all combinations, up to 1,000 runs. At most **10 backtest processes** run at once;
+the rest wait in a queue. Identical settings cannot be queued or run twice at the
+same time. Rerunning a completed configuration shows its latest result in the
+result selector.
+
+Each script has its own backtest window on desktop. Windows can be moved,
+resized, and brought to the front independently of the editor and Script AI.
+Closing a window does not stop its job; use Stop to cancel a run. Logs stream to
+the window and support `Cmd/Ctrl + F` search and first/last-line navigation.
+
+### Results and Comparison
+
+Summary shows net profit, drawdown, trades, win rate, profit factor, commission,
+buy-and-hold return, and switchable Sharpe/Sortino ratios. When several summaries
+are available, **Compare** displays them as columns in one table. Hover over a
+column number, or tap it on mobile, to see that run's input values. The table
+keeps metric labels visible while scrolling horizontally on smaller screens.
+
+**Equity Curve** opens a new chart tab on desktop and mobile, with candles,
+strategy plots and markers above the equity curve. Zoom the curve and select a
+point to move the price chart to that time. Expand **Max Drawdown** for **Max loss**
+and **Max rate**: their maxima are tracked independently and may occur on different
+bars. **Drawdown lists** supports sorting by time, loss, or percentage and jumping
+to the selected time. The chart also includes the live chart's measurement tools.
+
+Sharpe/Sortino use monthly trade returns and the strategy's risk-free rate.
+Unavailable ratios display `-`. Existing result files are not automatically
+recalculated after a statistics update; rerun the backtest for the new values.
+
+Results are stored in `workdir/output/backtests/<job_id>/`, including logs,
+`strategy.csv`, `trades.csv`, plots, and equity data where produced. Temporary
+runtime copies are removed after execution. **Clear** asks for confirmation and
+deletes all stored results for the selected script when no jobs are active.
+
+Backtest calculations run in separate processes with Webhook and Telegram
+disabled. They do not change the live Runner's `pre_run`/`run_ready` schedule,
+but share the host's CPU, memory, and disk. Parallel runs can still compete with
+live trading workloads; the 10-process limit is not a guarantee of spare capacity.
 
 ## Session Configuration
 
