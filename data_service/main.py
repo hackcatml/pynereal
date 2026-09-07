@@ -24,6 +24,12 @@ from calendar_store import CalendarEventStore
 from config import ensure_provider_config, load_hub_config, load_initial_sessions
 from registry import SessionRegistry
 from api import build_session_api_router, build_control_router, build_validation_router
+from scripting_api import ScriptingExecutor, build_scripting_router
+from scripting_ai_api import build_scripting_ai_router
+from scripting_backtest import ScriptingBacktestManager
+from scripting_backtest_api import build_scripting_backtest_router
+from scripting_history import ScriptingHistoryStore
+from scripting_workspace import ScriptingWorkspace
 from ui import build_ui_router
 from update_service import UpdateService
 from watchlist import WatchlistService
@@ -49,6 +55,19 @@ def build_app(
     update_service: UpdateService,
 ) -> FastAPI:
     app = FastAPI()
+    scripting_executor = ScriptingExecutor()
+    app.state.scripting_executor = scripting_executor
+    scripting_workspace = ScriptingWorkspace(
+        _PROJECT_ROOT / "workdir" / "scripts",
+        ScriptingHistoryStore(
+            _PROJECT_ROOT / "workdir" / "data" / "cache" / "scripting_history.sqlite"
+        ),
+    )
+    scripting_backtest_manager = ScriptingBacktestManager(
+        _PROJECT_ROOT,
+        registry=registry,
+    )
+    app.state.scripting_backtest_manager = scripting_backtest_manager
 
     @app.exception_handler(StarletteHTTPException)
     async def log_history_import_body_error(
@@ -94,7 +113,22 @@ def build_app(
         )
     )
     app.include_router(build_validation_router())
-    app.include_router(build_session_api_router(registry))
+    app.include_router(
+        build_scripting_router(
+            scripting_workspace,
+            registry,
+            executor=scripting_executor,
+        )
+    )
+    app.include_router(
+        build_scripting_ai_router(
+            scripting_workspace,
+            codex_service,
+            scripting_executor,
+        )
+    )
+    app.include_router(build_scripting_backtest_router(scripting_backtest_manager))
+    app.include_router(build_session_api_router(registry, scripting_workspace))
 
     @app.websocket("/ws/hub")
     async def hub_ws(ws: WebSocket):
@@ -326,7 +360,13 @@ async def main() -> None:
                     try:
                         await watchlist_service.close()
                     finally:
-                        await codex_service.close()
+                        try:
+                            await codex_service.close()
+                        finally:
+                            try:
+                                await app.state.scripting_backtest_manager.close()
+                            finally:
+                                app.state.scripting_executor.close()
     if update_shutdown.is_set():
         update_service.apply_and_restart()
 

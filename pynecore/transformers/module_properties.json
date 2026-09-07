@@ -629,7 +629,13 @@
     "max_drawdown": {
       "type": "property"
     },
+    "max_drawdown_percent": {
+      "type": "property"
+    },
     "max_runup": {
+      "type": "property"
+    },
+    "max_runup_percent": {
       "type": "property"
     },
     "netprofit": {

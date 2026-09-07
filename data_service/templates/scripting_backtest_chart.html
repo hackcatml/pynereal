@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Backtest chart</title>
+  <link rel="stylesheet" href="/static/measure.css?v=1" />
+  <link rel="stylesheet" href="/static/scripting_backtest_chart.css?v=30" />
+  <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.9/dist/lightweight-charts.standalone.production.js"></script>
+  <script src="/static/bgcolor.js?v=2"></script>
+</head>
+<body>
+  <header class="backtest-chart-header">
+    <div class="backtest-chart-title">
+      <strong id="backtest-chart-script">Backtest</strong>
+      <span id="backtest-chart-data"></span>
+    </div>
+    <div id="backtest-chart-range" class="backtest-chart-range">
+      <span id="backtest-chart-range-inline" class="backtest-chart-range-inline"></span>
+      <div class="backtest-chart-range-mobile">
+        <span class="backtest-chart-range-label">From</span><time id="backtest-chart-from"></time>
+        <span class="backtest-chart-range-label">To</span><time id="backtest-chart-to"></time>
+      </div>
+    </div>
+  </header>
+  <main class="backtest-chart-layout">
+    <section class="backtest-price-pane" aria-label="Backtest price chart">
+      <div class="backtest-pane-header">
+        <strong id="backtest-price-symbol">-</strong>
+        <span class="backtest-price-separator" aria-hidden="true"></span>
+        <strong id="backtest-price-timeframe">-</strong>
+        <span class="backtest-price-separator" aria-hidden="true"></span>
+        <strong id="backtest-price-exchange">-</strong>
+        <span class="backtest-price-separator backtest-price-ohlcv-separator" aria-hidden="true"></span>
+        <span id="backtest-price-ohlcv"></span>
+      </div>
+      <div id="backtest-price-chart" class="backtest-price-chart"></div>
+      <button id="backtest-nav-to-start" class="backtest-nav-btn backtest-nav-btn-left"
+              type="button" title="처음으로" aria-label="처음으로">&laquo;</button>
+      <button id="backtest-nav-to-end" class="backtest-nav-btn backtest-nav-btn-right"
+              type="button" title="끝으로" aria-label="끝으로">&raquo;</button>
+      <div id="backtest-price-loading" class="backtest-pane-state">Loading price chart...</div>
+    </section>
+    <div id="backtest-pane-resizer" class="backtest-pane-resizer" role="separator"
+         aria-label="Resize equity curve" aria-orientation="horizontal"></div>
+    <section class="backtest-equity-pane" aria-label="Backtest equity curve">
+      <div class="backtest-pane-header">
+        <strong>Equity Curve</strong>
+        <span id="backtest-equity-selection">
+          <time id="backtest-equity-selection-time"></time>
+          <span class="backtest-equity-selection-separator" aria-hidden="true">&middot;</span>
+          <span id="backtest-equity-selection-value"></span>
+        </span>
+        <div class="backtest-equity-actions">
+          <button id="backtest-equity-zoom-in" type="button" title="Zoom in" aria-label="Zoom in">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4M11 8v6M8 11h6"></path></svg>
+          </button>
+          <button id="backtest-equity-zoom-out" type="button" title="Zoom out" aria-label="Zoom out">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4M8 11h6"></path></svg>
+          </button>
+          <button id="backtest-equity-fit" type="button" title="Fit all" aria-label="Fit all">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"></path><path d="m3 8 5-5M21 8l-5-5M3 16l5 5M21 16l-5 5"></path></svg>
+          </button>
+        </div>
+      </div>
+      <div class="backtest-equity-stage">
+        <canvas id="backtest-equity-canvas" class="backtest-equity-canvas"></canvas>
+        <div class="backtest-equity-metrics" aria-label="Backtest metrics">
+          <span class="backtest-equity-metric">
+            <small>Final Equity</small>
+            <b id="backtest-chart-final-equity">-</b>
+          </span>
+          <div id="backtest-drawdown-row" class="backtest-drawdown-row">
+            <div class="backtest-drawdown-group">
+              <button id="backtest-chart-max-drawdown"
+                      class="backtest-equity-metric backtest-drawdown-metric backtest-drawdown-summary-toggle"
+                      type="button" aria-label="Show maximum drawdown details"
+                      aria-expanded="false" aria-controls="backtest-drawdown-breakdown">
+                <small class="backtest-drawdown-summary-label">
+                  <span>Max Drawdown</span>
+                  <svg class="backtest-drawdown-summary-chevron" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m9 18 6-6-6-6" />
+                  </svg>
+                </small>
+              </button>
+              <div id="backtest-drawdown-breakdown" class="backtest-drawdown-breakdown" aria-hidden="true">
+                <div class="backtest-drawdown-breakdown-inner">
+                  <button id="backtest-chart-max-drawdown-loss"
+                          class="backtest-equity-metric backtest-drawdown-metric backtest-drawdown-detail"
+                          type="button" aria-label="Go to maximum drawdown loss">
+                    <small>Max loss</small>
+                    <b><span id="backtest-chart-max-drawdown-loss-value">-</span></b>
+                  </button>
+                  <button id="backtest-chart-max-drawdown-rate"
+                          class="backtest-equity-metric backtest-drawdown-metric backtest-drawdown-detail"
+                          type="button" aria-label="Go to maximum drawdown rate">
+                    <small>Max rate</small>
+                    <b class="backtest-drawdown-percent"><span id="backtest-chart-max-drawdown-rate-value">-</span></b>
+                  </button>
+                </div>
+              </div>
+              <button id="backtest-drawdown-list-toggle" class="backtest-drawdown-list-toggle"
+                      type="button" aria-label="Drawdown lists" aria-expanded="false"
+                      aria-controls="backtest-drawdown-popover">Drawdown lists</button>
+            </div>
+          </div>
+        </div>
+        <div id="backtest-equity-tooltip" class="backtest-equity-tooltip hidden"></div>
+        <div id="backtest-equity-loading" class="backtest-pane-state">Loading equity curve...</div>
+      </div>
+    </section>
+  </main>
+  <div id="backtest-drawdown-popover" class="backtest-drawdown-popover hidden">
+    <div class="backtest-drawdown-list-header" role="row">
+      <button type="button" data-drawdown-sort="time" aria-label="Sort by time">
+        <span>Time (UTC)</span><span class="backtest-drawdown-sort-arrow" aria-hidden="true"></span>
+      </button>
+      <button type="button" data-drawdown-sort="amount" aria-label="Sort by loss">
+        <span id="backtest-drawdown-loss-header">Loss</span><span class="backtest-drawdown-sort-arrow" aria-hidden="true"></span>
+      </button>
+      <button type="button" data-drawdown-sort="percent" aria-label="Sort by percent">
+        <span>%</span><span class="backtest-drawdown-sort-arrow" aria-hidden="true"></span>
+      </button>
+    </div>
+    <div id="backtest-drawdown-list" class="backtest-drawdown-list"></div>
+    <span id="backtest-drawdown-empty" class="backtest-drawdown-empty hidden">No drawdowns</span>
+  </div>
+  <div id="backtest-chart-error" class="backtest-chart-error hidden" role="alert"></div>
+  <div id="drawing-toolbar" class="drawing-toolbar hidden" aria-label="Drawing tools">
+    <button id="drawing-tools-toggle" class="drawing-tool-btn drawing-tools-toggle" type="button" title="Tools" aria-label="Tools" aria-expanded="false">
+      <svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+      </svg>
+    </button>
+    <div id="drawing-tool-palette" class="drawing-tool-palette hidden" role="menu" aria-label="Drawing tool list">
+      <button id="measure-tool-toggle" class="drawing-tool-btn measure-tool-icon" type="button" title="Measure price change" aria-label="Measure price change" role="menuitem">
+        <svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.41 2.41 0 0 1 0-3.4l2.6-2.6a2.41 2.41 0 0 1 3.4 0Z"/>
+          <path d="m14.5 12.5 2-2"/>
+          <path d="m11.5 9.5 2-2"/>
+          <path d="m8.5 6.5 2-2"/>
+          <path d="m17.5 15.5 2-2"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+  <svg id="measure-overlay" class="measure-overlay" aria-hidden="true"></svg>
+  <div id="measure-label" class="measure-label hidden"></div>
+  <!--BACKTEST_CONFIG-->
+  <script src="/static/measure.js?v=1"></script>
+  <script src="/static/scripting_backtest_chart.js?v=33"></script>
+</body>
+</html>

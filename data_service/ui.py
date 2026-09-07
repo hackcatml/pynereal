@@ -10,11 +10,23 @@ _TEMPLATES = Path(__file__).parent / "templates"
 
 _STATIC_FILES = {
     "styles.css": "text/css",
+    "editor.css": "text/css",
+    "codemirror.css": "text/css",
     "state.js": "text/javascript",
+    "editor.js": "text/javascript",
+    "codemirror.js": "text/javascript",
+    "scripting.js": "text/javascript",
+    "scripting_ai.js": "text/javascript",
+    "scripting_ai.css": "text/css",
+    "scripting_backtest.js": "text/javascript",
+    "scripting_backtest.css": "text/css",
+    "scripting_backtest_chart.js": "text/javascript",
+    "scripting_backtest_chart.css": "text/css",
     "ui.js": "text/javascript",
     "bgcolor.js": "text/javascript",
     "chart.js": "text/javascript",
     "measure.js": "text/javascript",
+    "measure.css": "text/css",
     "data.js": "text/javascript",
     "ws.js": "text/javascript",
     "main.js": "text/javascript",
@@ -42,6 +54,16 @@ def build_ui_router() -> APIRouter:
         )
         html = html.replace("<!--RUNTIME_CONFIG-->", config_script)
         return HTMLResponse(content=html)
+
+    @r.get("/backtests/{job_id}", response_class=HTMLResponse)
+    def backtest_chart_page(job_id: str) -> HTMLResponse:
+        html = (_TEMPLATES / "scripting_backtest_chart.html").read_text(encoding="utf-8")
+        config_script = (
+            "<script>\n"
+            f"  window.BACKTEST_JOB_ID = {json.dumps(job_id)};\n"
+            "</script>"
+        )
+        return HTMLResponse(content=html.replace("<!--BACKTEST_CONFIG-->", config_script))
 
     @r.get("/static/{filename}")
     def static_file(filename: str) -> Response:

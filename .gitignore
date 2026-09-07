@@ -1,4 +1,5 @@
 venv
+node_modules/
 tests
 .idea
 __pycache__
@@ -19,9 +20,12 @@ workdir/config/watchlist_favorites.json
 workdir/config/update_request.json
 workdir/config/update_state.json
 workdir/output/realtime/
+workdir/output/backtests/
 
 # Ignore SQLite cache files but keep the directory
 workdir/data/cache/*.sqlite
+workdir/data/cache/*.sqlite-shm
+workdir/data/cache/*.sqlite-wal
 workdir/data/cache/watchlist_logos/
 
 # Ignore OHLCV and TOML files in workdir/data/
@@ -36,3 +40,6 @@ workdir/scripts/demo/*
 !workdir/scripts/demo/demo_1m.py
 !workdir/scripts/lib/
 !workdir/scripts/lib/**
+
+# Local working documents grouped by branch/topic
+workdocs/

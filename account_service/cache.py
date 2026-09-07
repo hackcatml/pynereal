@@ -857,6 +857,73 @@ class AccountCache:
             """
         ).fetchall()
         for derived in derived_rows:
+            terminal_candidates = connection.execute(
+                """
+                SELECT id, source, market_scope, dex, side, opened_at, closed_at
+                FROM position_history
+                WHERE id != ? AND account = ? AND exchange = ? AND symbol = ?
+                  AND source IN ('native', 'trades')
+                  AND ABS(
+                      (julianday(closed_at) - julianday(?)) * 86400.0
+                  ) <= ?
+                ORDER BY opened_at, id
+                """,
+                (
+                    int(derived["id"]),
+                    str(derived["account"]),
+                    str(derived["exchange"]),
+                    str(derived["symbol"]),
+                    str(derived["closed_at"]),
+                    _POSITION_LIFECYCLE_OPEN_TOLERANCE_SECONDS,
+                ),
+            ).fetchall()
+            terminal_candidates = [
+                candidate
+                for candidate in terminal_candidates
+                if _position_sides_match(candidate["side"], derived["side"])
+                and _position_scopes_match(
+                    candidate["market_scope"],
+                    derived["market_scope"],
+                )
+                and _position_scopes_match(candidate["dex"], derived["dex"])
+            ]
+            derived_opened_at = _iso_timestamp(derived["opened_at"])
+            stale_terminal_candidates = [
+                candidate
+                for candidate in terminal_candidates
+                if derived_opened_at is not None
+                and (
+                    candidate_opened_at := _iso_timestamp(candidate["opened_at"])
+                )
+                is not None
+                and abs(candidate_opened_at - derived_opened_at)
+                > _POSITION_LIFECYCLE_OPEN_TOLERANCE_SECONDS
+            ]
+            if stale_terminal_candidates:
+                stale_native_scopes = {
+                    str(candidate["market_scope"] or derived["market_scope"])
+                    for candidate in stale_terminal_candidates
+                    if candidate["source"] == "native"
+                }
+                connection.execute(
+                    "DELETE FROM position_history WHERE id = ?",
+                    (int(derived["id"]),),
+                )
+                for market_scope in stale_native_scopes:
+                    connection.execute(
+                        """
+                        DELETE FROM sync_cursors
+                        WHERE account = ? AND exchange = ?
+                          AND stream = 'positions' AND market_scope = ?
+                        """,
+                        (
+                            str(derived["account"]),
+                            str(derived["exchange"]),
+                            market_scope,
+                        ),
+                    )
+                continue
+
             candidates = connection.execute(
                 """
                 SELECT id, source, market_scope, dex, side, closed_at

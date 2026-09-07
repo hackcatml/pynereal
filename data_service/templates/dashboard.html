@@ -4,7 +4,11 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=149" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=198" />
+  <link rel="stylesheet" href="/static/scripting_backtest.css?v=38" />
+  <link rel="stylesheet" href="/static/scripting_ai.css?v=6" />
+  <link rel="stylesheet" href="/static/editor.css?v=5" />
+  <link rel="stylesheet" href="/static/codemirror.css?v=1" />
 </head>
 <body>
   <header class="topbar">
@@ -118,6 +122,17 @@
         </span>
         <span>Watchlist</span>
       </button>
+      <button id="hub-scripting-open" class="hub-menu-item" type="button">
+        <span class="hub-menu-emoji" aria-hidden="true">
+          <svg class="hub-menu-glyph" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+            <polyline points="14 2 14 8 20 8" />
+            <polyline points="10 13 8 15 10 17" />
+            <polyline points="14 13 16 15 14 17" />
+          </svg>
+        </span>
+        <span>Scripting</span>
+      </button>
     </nav>
     <div class="hub-menu-footer">
       <div id="hub-update-message" class="hub-update-message" aria-live="polite"></div>
@@ -198,6 +213,789 @@
     </table>
     <div id="empty" class="muted">No sessions yet. Add one above.</div>
   </section>
+
+  <div id="scripting-modal" class="modal scripting-modal hidden" aria-hidden="true">
+    <div class="modal-box scripting-modal-box" role="dialog" aria-modal="true"
+         aria-labelledby="scripting-title">
+      <div class="modal-header scripting-modal-header">
+        <div class="scripting-title-group">
+          <button id="scripting-back" class="btn btn-icon scripting-back hidden" type="button"
+                  title="Back to project tree" aria-label="Back to project tree">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M19 12H5" />
+              <path d="m12 19-7-7 7-7" />
+            </svg>
+          </button>
+          <span id="scripting-title">Scripting</span>
+          <button id="scripting-mode" class="scripting-mode" type="button" disabled
+                  aria-controls="scripting-restart-modal" aria-expanded="false">Ready</button>
+          <div id="scripting-restart-modal" class="scripting-restart-popover hidden"
+               role="dialog" aria-modal="false" aria-labelledby="scripting-restart-title"
+               aria-hidden="true">
+            <strong id="scripting-restart-title">Restart Runners now?</strong>
+            <span>Apply the saved script immediately.</span>
+            <div id="scripting-restart-sessions" class="scripting-restart-sessions"></div>
+            <div id="scripting-restart-error" class="scripting-operation-error hidden"
+                 role="alert"></div>
+            <div class="scripting-restart-actions">
+              <button id="scripting-restart-cancel" class="btn" type="button">Cancel</button>
+              <button id="scripting-restart-submit" class="btn btn-primary" type="button">Restart</button>
+            </div>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button id="scripting-refresh" class="btn btn-icon" type="button"
+                  title="Refresh project tree" aria-label="Refresh project tree">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 12a9 9 0 0 1 15.7-6L21 8" />
+              <path d="M21 3v5h-5" />
+              <path d="M21 12a9 9 0 0 1-15.7 6L3 16" />
+              <path d="M3 21v-5h5" />
+            </svg>
+          </button>
+          <button id="scripting-close" class="btn btn-icon" type="button"
+                  title="Close" aria-label="Close">&times;</button>
+        </div>
+      </div>
+      <div id="scripting-workspace" class="scripting-workspace">
+        <aside class="scripting-tree-pane" aria-label="Script project tree">
+          <div class="scripting-tree-header">
+            <div class="scripting-tree-title">
+              <button id="scripting-tree-toggle" class="scripting-tree-toggle" type="button"
+                      title="Collapse project tree" aria-label="Collapse project tree"
+                      aria-expanded="true" aria-controls="scripting-tree">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M3 5h6l2 3h10v11H3Z" />
+                </svg>
+              </button>
+              <span class="mono">workdir/scripts</span>
+            </div>
+            <div class="scripting-tree-tools">
+              <span id="scripting-file-count">0 files</span>
+              <button id="scripting-new-menu-toggle" class="scripting-tree-tool" type="button"
+                      title="New" aria-label="New file or directory" aria-expanded="false"
+                      aria-controls="scripting-new-menu">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+              </button>
+              <button id="scripting-actions-menu-toggle" class="scripting-tree-tool" type="button"
+                      title="Actions" aria-label="Actions for selected path" aria-expanded="false"
+                      aria-controls="scripting-actions-menu" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="5" cy="12" r="1.5" />
+                  <circle cx="12" cy="12" r="1.5" />
+                  <circle cx="19" cy="12" r="1.5" />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div id="scripting-new-menu" class="scripting-tree-menu hidden" role="menu"
+               aria-label="Create in scripting workspace">
+            <button type="button" role="menuitem" data-scripting-operation="new_strategy">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <path d="M14 2v6h6M12 11v7M8.5 14.5h7" />
+              </svg>
+              <span>New strategy</span>
+            </button>
+            <button type="button" role="menuitem" data-scripting-operation="new_markdown">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <path d="M14 2v6h6M8 13v5m0-5 2 2 2-2v5m2-5v5m0 0 2-2m-2 2-2-2" />
+              </svg>
+              <span>New Markdown</span>
+            </button>
+            <button type="button" role="menuitem" data-scripting-operation="new_directory">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 5h6l2 3h10v11H3Z" />
+                <path d="M12 11v5M9.5 13.5h5" />
+              </svg>
+              <span>New directory</span>
+            </button>
+          </div>
+          <div id="scripting-actions-menu" class="scripting-tree-menu hidden" role="menu"
+               aria-label="Selected path actions">
+            <button type="button" role="menuitem" data-scripting-operation="backtest">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <polygon points="11 19 2 12 11 5 11 19" />
+                <polygon points="22 19 13 12 22 5 22 19" />
+              </svg>
+              <span>Backtest</span>
+            </button>
+            <button type="button" role="menuitem" data-scripting-operation="duplicate">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="8" y="8" width="12" height="12" rx="1" />
+                <path d="M16 8V4H4v12h4" />
+              </svg>
+              <span>Duplicate</span>
+            </button>
+            <button type="button" role="menuitem" data-scripting-operation="rename">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m4 16-1 5 5-1L19 9l-4-4Z" />
+                <path d="m13.5 6.5 4 4" />
+              </svg>
+              <span>Rename</span>
+            </button>
+            <button class="danger" type="button" role="menuitem" data-scripting-operation="delete">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 6h18M8 6V3h8v3M6 6l1 15h10l1-15M10 10v7M14 10v7" />
+              </svg>
+              <span>Delete</span>
+            </button>
+          </div>
+          <div id="scripting-tree-loading" class="scripting-state">
+            <span class="assets-spinner" aria-hidden="true"></span>
+            <span>Loading scripts...</span>
+          </div>
+          <div id="scripting-tree-error" class="scripting-state scripting-state-error hidden"
+               role="alert"></div>
+          <div id="scripting-tree-empty" class="scripting-state hidden">No script files.</div>
+          <div id="scripting-tree" class="scripting-tree hidden" role="tree"
+               aria-label="Scripts"></div>
+        </aside>
+        <div id="scripting-tree-resizer" class="scripting-tree-resizer"
+             role="separator" aria-label="Resize project tree" aria-orientation="vertical"
+             aria-valuemin="210" aria-valuemax="520" aria-valuenow="290" tabindex="0"></div>
+        <section class="scripting-editor-pane" aria-label="Script source">
+          <div class="scripting-editor-header">
+            <div class="scripting-editor-identity">
+              <strong id="scripting-file-name">No file selected</strong>
+              <span id="scripting-file-path" class="mono"></span>
+            </div>
+            <div class="scripting-editor-actions">
+              <span id="scripting-file-meta" class="scripting-file-meta"></span>
+              <button id="scripting-undo" class="btn btn-icon" type="button"
+                      title="Undo edit" aria-label="Undo edit" disabled>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M9 14 4 9l5-5" />
+                  <path d="M4 9h11a5 5 0 0 1 0 10h-1" />
+                </svg>
+              </button>
+              <button id="scripting-find-toggle" class="btn btn-icon scripting-find-toggle" type="button"
+                      title="Find" aria-label="Find" disabled>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="11" cy="11" r="7" />
+                  <path d="m20 20-4-4" />
+                </svg>
+              </button>
+              <button id="scripting-backtest" class="btn btn-icon" type="button"
+                      title="Backtest" aria-label="Backtest" disabled>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <polygon points="11 19 2 12 11 5 11 19" />
+                  <polygon points="22 19 13 12 22 5 22 19" />
+                </svg>
+              </button>
+              <button id="scripting-ai" class="btn btn-icon hidden" type="button"
+                      title="Script AI" aria-label="Open Script AI" aria-expanded="false" disabled>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="5" y="5" width="14" height="14" rx="2" />
+                  <path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3" />
+                  <path d="m8.2 15 1.6-6 1.6 6M8.8 12.8h2M14.4 9v6" />
+                </svg>
+              </button>
+              <button id="scripting-note-toggle" class="btn btn-icon" type="button"
+                      title="Version note" aria-label="Version note"
+                      aria-expanded="false" aria-controls="scripting-note-editor" disabled>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M19 17V5a2 2 0 0 0-2-2H4" />
+                  <path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3" />
+                  <path d="M15 8h-5" />
+                  <path d="M15 12h-6" />
+                </svg>
+              </button>
+              <button id="scripting-history" class="btn btn-icon" type="button"
+                      title="Version history" aria-label="Version history" disabled>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+                  <path d="M3 3v5h5" />
+                  <path d="M12 7v5l3 2" />
+                </svg>
+              </button>
+              <button id="scripting-validation-toggle"
+                      class="btn btn-icon scripting-validation-toggle hidden" type="button"
+                      title="Static validation" aria-label="Static validation"
+                      aria-expanded="false" aria-controls="scripting-validation-panel" disabled>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="12" cy="12" r="9" />
+                  <path d="M12 7v6" />
+                  <path d="M12 17h.01" />
+                </svg>
+                <span id="scripting-validation-count" class="scripting-validation-count hidden"
+                      aria-hidden="true"></span>
+              </button>
+              <button id="scripting-save" class="btn btn-icon" type="button"
+                      title="Save script" aria-label="Save script" disabled>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z" />
+                  <path d="M17 21v-8H7v8M7 3v5h8" />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div id="scripting-note-editor" class="scripting-note-editor hidden">
+            <label for="scripting-note-input">Note</label>
+            <input id="scripting-note-input" type="text" maxlength="240"
+                   placeholder="Optional note for this version" autocomplete="off" />
+            <button id="scripting-note-close" class="btn btn-icon" type="button"
+                    title="Clear note" aria-label="Clear note">&times;</button>
+            <button id="scripting-note-save" class="btn btn-icon scripting-note-save" type="button"
+                    title="Save note" aria-label="Save note" disabled>
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m5 12 4 4L19 6" />
+              </svg>
+            </button>
+          </div>
+          <div id="scripting-find-panel" class="editor-find-panel hidden" role="search"
+               aria-label="Find and replace" aria-hidden="true">
+            <div class="editor-find-row">
+              <button id="scripting-replace-toggle" class="editor-find-action editor-replace-toggle"
+                      type="button" title="Toggle replace" aria-label="Toggle replace"
+                      aria-expanded="false" aria-controls="scripting-replace-row">
+                <span aria-hidden="true"></span>
+              </button>
+              <input id="scripting-find-input" type="text" placeholder="Find"
+                     aria-label="Find" autocomplete="off" spellcheck="false" />
+              <span id="scripting-find-count" class="editor-find-count" aria-live="polite">0/0</span>
+              <button id="scripting-find-previous" class="editor-find-action" type="button"
+                      title="Previous match" aria-label="Previous match" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6" /></svg>
+              </button>
+              <button id="scripting-find-next" class="editor-find-action" type="button"
+                      title="Next match" aria-label="Next match" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+              </button>
+              <button id="scripting-find-close" class="editor-find-action editor-find-close"
+                      type="button" title="Close find" aria-label="Close find">&times;</button>
+            </div>
+            <div id="scripting-replace-row" class="editor-find-row editor-replace-row hidden">
+              <span class="editor-find-spacer" aria-hidden="true"></span>
+              <input id="scripting-replace-input" type="text" placeholder="Replace"
+                     aria-label="Replace" autocomplete="off" spellcheck="false" />
+              <span class="editor-find-count" aria-hidden="true"></span>
+              <button id="scripting-replace-one" class="editor-replace-command" type="button"
+                      title="Replace current match" disabled>Replace</button>
+              <button id="scripting-replace-all"
+                      class="editor-replace-command editor-replace-all" type="button"
+                      title="Toggle replace all" aria-pressed="false">All</button>
+            </div>
+          </div>
+          <section id="scripting-validation-panel" class="scripting-validation-panel hidden"
+                   aria-label="Static validation results" aria-hidden="true">
+            <div id="scripting-validation-list" class="scripting-validation-list">
+              <button id="scripting-validation-diagnostic"
+                      class="scripting-validation-diagnostic error" type="button"
+                      title="Go to source">
+                <span id="scripting-validation-location"
+                      class="scripting-validation-location"></span>
+                <span id="scripting-validation-code" class="scripting-validation-code"></span>
+                <span id="scripting-validation-message"
+                      class="scripting-validation-message"></span>
+              </button>
+              <div class="scripting-validation-controls">
+                <span id="scripting-validation-position"
+                      class="scripting-validation-position hidden" aria-live="polite"></span>
+                <button id="scripting-validation-previous"
+                        class="btn btn-icon scripting-validation-nav hidden" type="button"
+                        title="Previous error" aria-label="Previous error">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m6 15 6-6 6 6" />
+                  </svg>
+                </button>
+                <button id="scripting-validation-next"
+                        class="btn btn-icon scripting-validation-nav hidden" type="button"
+                        title="Next error" aria-label="Next error">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m6 9 6 6 6-6" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </section>
+          <div id="scripting-editor-empty" class="scripting-editor-state">
+            Select a file from the project tree.
+          </div>
+          <div id="scripting-editor-loading" class="scripting-editor-state hidden">
+            <span class="assets-spinner" aria-hidden="true"></span>
+            <span>Loading source...</span>
+          </div>
+          <div id="scripting-editor-error"
+               class="scripting-editor-state scripting-state-error hidden" role="alert"></div>
+          <div id="scripting-editor-notice" class="scripting-editor-notice hidden" role="status">
+            <span id="scripting-editor-notice-text"></span>
+            <button id="scripting-editor-reload" class="btn" type="button">Reload</button>
+          </div>
+          <div id="scripting-editor-wrap" class="scripting-editor-wrap hidden">
+            <div id="scripting-code" class="scripting-editor"
+                 role="textbox" aria-multiline="true" aria-label="Script source"></div>
+          </div>
+        </section>
+      </div>
+      <aside id="scripting-history-panel" class="scripting-history-panel hidden"
+             aria-hidden="true" aria-label="Version history">
+        <div class="scripting-history-header">
+          <div>
+            <strong>Version history</strong>
+            <span id="scripting-history-path" class="mono"></span>
+          </div>
+          <button id="scripting-history-close" class="btn btn-icon" type="button"
+                  title="Close history" aria-label="Close history">&times;</button>
+        </div>
+        <div id="scripting-history-loading" class="scripting-history-state hidden">
+          <span class="assets-spinner" aria-hidden="true"></span>
+          <span>Loading history...</span>
+        </div>
+        <div id="scripting-history-error" class="scripting-history-state scripting-state-error hidden"
+             role="alert"></div>
+        <div id="scripting-history-empty" class="scripting-history-state hidden">
+          No saved versions.
+        </div>
+        <div id="scripting-history-content" class="scripting-history-content hidden">
+          <div id="scripting-history-list" class="scripting-history-list"></div>
+          <section class="scripting-history-detail">
+            <div class="scripting-history-detail-header">
+              <div>
+                <strong id="scripting-history-detail-title">Select a version</strong>
+                <span id="scripting-history-detail-meta"></span>
+              </div>
+              <div class="scripting-history-detail-actions">
+                <button id="scripting-restore" class="btn btn-primary" type="button" disabled>
+                  Restore
+                </button>
+              </div>
+            </div>
+            <pre id="scripting-history-diff" class="scripting-history-diff">Select a version to review its changes.</pre>
+          </section>
+        </div>
+      </aside>
+      <div id="scripting-window-resize" class="scripting-window-resize" aria-hidden="true">
+        <svg viewBox="0 0 16 16"><path d="m6 14 8-8M10 14l4-4" /></svg>
+      </div>
+    </div>
+  </div>
+
+  <div id="scripting-unsaved-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-box modal-box-sm" role="dialog" aria-modal="true"
+         aria-labelledby="scripting-unsaved-title">
+      <div class="modal-header">
+        <span id="scripting-unsaved-title">Unsaved changes</span>
+        <button id="scripting-unsaved-close" class="btn btn-icon" type="button"
+                title="Close" aria-label="Close">&times;</button>
+      </div>
+      <div class="confirm-body">
+        <div class="confirm-message">Save your changes before leaving this file?</div>
+        <div id="scripting-unsaved-path" class="confirm-session mono"></div>
+      </div>
+      <div class="confirm-footer scripting-unsaved-actions">
+        <button id="scripting-unsaved-cancel" class="btn" type="button">Cancel</button>
+        <button id="scripting-unsaved-discard" class="btn btn-danger-primary" type="button">Discard</button>
+        <button id="scripting-unsaved-save" class="btn btn-primary" type="button">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="scripting-operation-modal" class="modal scripting-operation-modal hidden"
+       aria-hidden="true">
+    <div class="modal-box modal-box-sm scripting-operation-box" role="dialog" aria-modal="true"
+         aria-labelledby="scripting-operation-title">
+      <div class="scripting-operation-handle" aria-hidden="true"></div>
+      <div class="modal-header">
+        <span id="scripting-operation-title">File management</span>
+        <button id="scripting-operation-close" class="btn btn-icon" type="button"
+                title="Close" aria-label="Close">&times;</button>
+      </div>
+      <form id="scripting-operation-form">
+        <div class="scripting-operation-body">
+          <p id="scripting-operation-message" class="scripting-operation-message"></p>
+          <div id="scripting-operation-fields" class="scripting-operation-fields"></div>
+          <div id="scripting-operation-usage" class="scripting-operation-usage hidden"></div>
+          <div id="scripting-operation-error" class="scripting-operation-error hidden"
+               role="alert"></div>
+        </div>
+        <div class="confirm-footer">
+          <button id="scripting-operation-cancel" class="btn" type="button">Cancel</button>
+          <button id="scripting-operation-submit" class="btn btn-primary" type="submit">Create</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="scripting-ai-panel" class="scripting-ai-panel hidden" role="dialog"
+       aria-label="Script AI chat" aria-hidden="true">
+    <div id="scripting-ai-sheet-handle" class="scripting-ai-sheet-handle" aria-hidden="true"></div>
+    <div id="scripting-ai-header" class="ai-chat-header scripting-ai-header">
+      <button id="scripting-ai-title" class="ai-chat-title scripting-ai-title" type="button"
+              aria-haspopup="listbox" aria-expanded="false">
+        <span>Script AI</span>
+        <span class="ai-chat-title-chevron" aria-hidden="true">&gt;</span>
+      </button>
+      <div class="modal-actions">
+        <button id="scripting-ai-clear" class="btn btn-icon" type="button"
+                title="Clear chat" aria-label="Clear chat">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5" />
+          </svg>
+        </button>
+        <button id="scripting-ai-close" class="btn btn-icon" type="button"
+                title="Close" aria-label="Close">&times;</button>
+      </div>
+    </div>
+    <div id="scripting-ai-model-menu" class="ai-model-menu hidden" role="listbox"
+         aria-label="AI model and reasoning effort"></div>
+    <div id="scripting-ai-messages" class="ai-chat-messages scripting-ai-messages"></div>
+    <form id="scripting-ai-form" class="ai-chat-form scripting-ai-form">
+      <div class="ai-chat-composer">
+        <textarea id="scripting-ai-input" class="ai-chat-input" rows="1"
+                  placeholder="Ask about this script&#8230;" enterkeyhint="send"></textarea>
+        <div class="ai-chat-composer-actions">
+          <button id="scripting-ai-model-selector" class="ai-model-selector" type="button"
+                  aria-haspopup="listbox" aria-expanded="false" disabled>
+            <span id="scripting-ai-model-label">Default model</span>
+            <svg class="ai-model-chevron" viewBox="0 0 12 12" width="12" height="12"
+                 aria-hidden="true">
+              <path d="M2.5 4.25 6 7.75l3.5-3.5" fill="none" stroke="currentColor"
+                    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+          <button id="scripting-ai-send" class="scripting-ai-send" type="submit"
+                  aria-label="Send" title="Send"><span aria-hidden="true">&#8593;</span></button>
+        </div>
+      </div>
+    </form>
+    <div id="scripting-ai-resize" class="scripting-ai-resize" aria-hidden="true">
+      <svg viewBox="0 0 16 16"><path d="m6 14 8-8M10 14l4-4" /></svg>
+    </div>
+  </div>
+
+  <div id="scripting-backtest-modal" class="modal scripting-backtest-modal hidden"
+       aria-hidden="true">
+    <div class="modal-box scripting-backtest-box" role="dialog" aria-modal="true"
+         aria-labelledby="scripting-backtest-title">
+      <div class="scripting-backtest-handle" aria-hidden="true"></div>
+      <div class="modal-header scripting-backtest-header">
+        <div class="scripting-backtest-heading">
+          <span id="scripting-backtest-title">Backtest</span>
+          <span id="scripting-backtest-path" class="mono"></span>
+        </div>
+        <div class="modal-actions">
+          <button id="scripting-backtest-close" class="btn btn-icon" type="button"
+                  title="Close" aria-label="Close">&times;</button>
+        </div>
+      </div>
+      <div class="scripting-backtest-body">
+        <div class="scripting-backtest-settings">
+          <div class="scripting-backtest-field scripting-backtest-data-field">
+            <span class="scripting-backtest-data-caption">
+              <span>OHLCV data</span>
+              <span id="scripting-backtest-data-filename-wrap"
+                    class="scripting-backtest-data-filename-wrap">
+                <span>(</span><span id="scripting-backtest-data-filename"
+                                   class="scripting-backtest-data-filename"></span><span>)</span>
+              </span>
+            </span>
+            <div class="scripting-backtest-data-row">
+              <div id="scripting-backtest-data-control"
+                   class="script-select script-select-animated scripting-backtest-data-select">
+                <button id="scripting-backtest-data-button" class="script-select-button" type="button"
+                        aria-haspopup="listbox" aria-expanded="false" disabled>
+                  <span id="scripting-backtest-data-label" class="script-select-label">No OHLCV data available</span>
+                  <span class="script-select-toggle-chevron" aria-hidden="true"></span>
+                </button>
+                <div id="scripting-backtest-data-options" class="script-select-options hidden"
+                     role="listbox" aria-label="OHLCV data"></div>
+              </div>
+              <button id="scripting-backtest-data-manage" class="btn btn-icon scripting-backtest-data-manage"
+                      type="button" title="Download or update OHLCV data"
+                      aria-label="Download or update OHLCV data">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 3v12" />
+                  <path d="m7 10 5 5 5-5" />
+                  <path d="M5 17v4h14v-4" />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div class="scripting-backtest-range">
+            <div class="scripting-backtest-field">
+              <span>Date from <small>UTC</small></span>
+              <div id="scripting-backtest-from-date-picker" class="scripting-backtest-date-picker">
+                <button id="scripting-backtest-from-date" class="scripting-backtest-date" type="button"
+                        aria-haspopup="dialog" aria-expanded="false">
+                  <span></span>
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M8 2v4M16 2v4M3 9h18" />
+                    <rect x="3" y="4" width="18" height="17" rx="2" />
+                  </svg>
+                </button>
+                <div id="scripting-backtest-from-calendar"
+                     class="scripting-backtest-calendar hidden" role="dialog"></div>
+              </div>
+              <input id="scripting-backtest-from-time" class="scripting-backtest-time" type="text"
+                     value="00:00" maxlength="5" inputmode="numeric" autocomplete="off"
+                     aria-label="Backtest start time in UTC" />
+            </div>
+            <div class="scripting-backtest-field">
+              <span>Date to <small>UTC</small></span>
+              <div id="scripting-backtest-to-date-picker" class="scripting-backtest-date-picker">
+                <button id="scripting-backtest-to-date" class="scripting-backtest-date" type="button"
+                        aria-haspopup="dialog" aria-expanded="false">
+                  <span></span>
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M8 2v4M16 2v4M3 9h18" />
+                    <rect x="3" y="4" width="18" height="17" rx="2" />
+                  </svg>
+                </button>
+                <div id="scripting-backtest-to-calendar"
+                     class="scripting-backtest-calendar hidden" role="dialog"></div>
+              </div>
+              <input id="scripting-backtest-to-time" class="scripting-backtest-time" type="text"
+                     value="00:00" maxlength="5" inputmode="numeric" autocomplete="off"
+                     aria-label="Backtest end time in UTC" />
+            </div>
+          </div>
+        </div>
+        <section id="scripting-backtest-inputs-section"
+                 class="scripting-backtest-inputs-section hidden" aria-label="Backtest inputs">
+          <div class="scripting-backtest-inputs-header">
+            <button id="scripting-backtest-inputs-toggle" class="scripting-backtest-inputs-toggle"
+                    type="button" aria-expanded="false" aria-controls="scripting-backtest-inputs">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m9 18 6-6-6-6"></path>
+              </svg>
+              <span>Inputs</span>
+              <span id="scripting-backtest-combinations" class="scripting-backtest-combinations"></span>
+            </button>
+            <button id="scripting-backtest-inputs-reset"
+                    class="btn btn-icon scripting-backtest-inputs-reset" type="button"
+                    data-tooltip="Reset inputs" aria-label="Reset inputs">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+                <path d="M3 3v5h5" />
+              </svg>
+            </button>
+          </div>
+          <div id="scripting-backtest-inputs" class="scripting-backtest-inputs"></div>
+        </section>
+        <div id="scripting-backtest-jobs" class="scripting-backtest-jobs hidden"
+             role="listbox" aria-label="Backtest runs"></div>
+        <div class="scripting-backtest-status-row">
+          <span id="scripting-backtest-status" class="scripting-backtest-status">Ready</span>
+          <span id="scripting-backtest-summary"></span>
+          <div class="scripting-backtest-status-actions">
+            <button id="scripting-backtest-equity-toggle" class="btn btn-icon" type="button"
+                    data-tooltip="Equity curve" aria-label="Open equity curve" disabled>
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 19V5"></path>
+                <path d="M4 19h16"></path>
+                <path d="m7 15 4-5 3 3 5-7"></path>
+              </svg>
+            </button>
+            <button id="scripting-backtest-summary-toggle" class="btn btn-icon" type="button"
+                    data-tooltip="Summary" aria-label="Show summary" aria-pressed="false" disabled>
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                   aria-hidden="true">
+                <rect x="4" y="3" width="16" height="18" rx="2.5"></rect>
+                <line x1="8" y1="8" x2="16" y2="8"></line>
+                <line x1="8" y1="12" x2="15" y2="12"></line>
+                <line x1="8" y1="16" x2="12.5" y2="16"></line>
+              </svg>
+            </button>
+            <div class="scripting-backtest-clear-wrap hidden">
+              <button id="scripting-backtest-delete" class="btn btn-icon" type="button"
+                      data-tooltip="Clear" aria-label="Clear backtest results"
+                      aria-haspopup="dialog" aria-expanded="false">
+                <svg class="icon scripting-backtest-broom-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M20 4 13 11" />
+                  <path d="M11 9 15 13" />
+                  <path d="M11 9 4.5 14.5 10 20 15 13" />
+                  <path d="M13 11 7 17" />
+                </svg>
+              </button>
+              <div id="scripting-backtest-clear-popover"
+                   class="scripting-backtest-clear-popover hidden" role="dialog"
+                   aria-label="Clear backtest results?">
+                <strong>Clear backtest results?</strong>
+                <span>This permanently deletes all saved logs, summaries, and result files for this script.</span>
+                <div class="scripting-backtest-clear-actions">
+                  <button id="scripting-backtest-clear-cancel" class="btn" type="button">Cancel</button>
+                  <button id="scripting-backtest-clear-confirm" class="btn btn-danger-primary"
+                          type="button">Delete</button>
+                </div>
+              </div>
+            </div>
+            <button id="scripting-backtest-find-toggle" class="btn btn-icon" type="button"
+                    data-tooltip="Find" aria-label="Find in log" disabled>
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" />
+                <path d="m20 20-4-4" />
+              </svg>
+            </button>
+            <button id="scripting-backtest-stop" class="btn btn-icon btn-danger-primary hidden"
+                    type="button" data-tooltip="Stop" aria-label="Stop selected backtest">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="5" y="5" width="14" height="14" rx="1.5"></rect>
+              </svg>
+            </button>
+            <button id="scripting-backtest-run" class="btn btn-icon btn-primary" type="button"
+                    data-tooltip="Run" aria-label="Run" disabled>
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <polygon points="6 3 20 12 6 21 6 3"></polygon>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div id="scripting-backtest-error" class="scripting-backtest-error hidden"
+             role="alert"></div>
+        <div class="scripting-backtest-log-shell">
+          <div id="scripting-backtest-summary-panel" class="scripting-backtest-summary-panel hidden"
+               aria-label="Backtest summary"></div>
+          <div id="scripting-backtest-find" class="scripting-backtest-find hidden" role="search">
+            <input id="scripting-backtest-find-input" type="text" placeholder="Find"
+                   autocomplete="off" spellcheck="false" aria-label="Find in backtest log" />
+            <span id="scripting-backtest-find-count">0/0</span>
+            <button id="scripting-backtest-find-previous" type="button"
+                    title="Previous match" aria-label="Previous match" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6" /></svg>
+            </button>
+            <button id="scripting-backtest-find-next" type="button"
+                    title="Next match" aria-label="Next match" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+            </button>
+            <button id="scripting-backtest-find-close" type="button"
+                    title="Close find" aria-label="Close find">&times;</button>
+          </div>
+          <div id="scripting-backtest-log" class="scripting-backtest-log" tabindex="0"
+               aria-label="Backtest log"><span class="scripting-backtest-log-empty">Run a backtest to view its log.</span></div>
+          <button id="scripting-backtest-log-jump"
+                  class="btn btn-icon scripting-backtest-log-jump hidden" type="button"
+                  data-tooltip="Jump to end" aria-label="Jump to end">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3v14" />
+              <path d="m6 11 6 6 6-6" />
+              <path d="M5 21h14" />
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div id="scripting-backtest-resize" class="scripting-backtest-resize" aria-hidden="true">
+        <svg viewBox="0 0 16 16"><path d="m6 14 8-8M10 14l4-4" /></svg>
+      </div>
+    </div>
+  </div>
+
+  <div id="scripting-backtest-data-modal" class="modal scripting-backtest-data-modal hidden"
+       aria-hidden="true">
+    <div class="modal-box modal-box-sm scripting-backtest-data-box" role="dialog" aria-modal="true"
+         aria-labelledby="scripting-backtest-data-title">
+      <div class="modal-header">
+        <span id="scripting-backtest-data-title">OHLCV data</span>
+        <button id="scripting-backtest-data-close" class="btn btn-icon" type="button"
+                title="Close" aria-label="Close">&times;</button>
+      </div>
+      <div class="scripting-backtest-data-body">
+        <section class="scripting-backtest-data-current">
+          <div>
+            <span>Selected data</span>
+            <strong id="scripting-backtest-data-current-path" class="mono">None</strong>
+          </div>
+          <button id="scripting-backtest-data-update" class="btn" type="button">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+              <path d="M21 3v5h-5" />
+              <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+              <path d="M3 21v-5h5" />
+            </svg>
+            <span>Update to now</span>
+          </button>
+        </section>
+        <form id="scripting-backtest-data-download-form" autocomplete="off" novalidate>
+          <span class="scripting-backtest-data-section-title">Download new data</span>
+          <div class="scripting-backtest-data-fields">
+            <div class="scripting-backtest-data-field">
+              <span>Exchange</span>
+              <div id="scripting-backtest-data-exchange-control"
+                   class="script-select script-select-animated scripting-backtest-exchange-select">
+                <input id="scripting-backtest-data-exchange" type="hidden" value="" />
+                <button id="scripting-backtest-data-exchange-button" class="script-select-button"
+                        type="button" aria-haspopup="listbox" aria-expanded="false"
+                        aria-controls="scripting-backtest-data-exchange-options">
+                  <span id="scripting-backtest-data-exchange-label" class="script-select-label">Select exchange</span>
+                  <span class="script-select-toggle-chevron" aria-hidden="true"></span>
+                </button>
+                <div id="scripting-backtest-data-exchange-options"
+                     class="script-select-options hidden" role="listbox"></div>
+              </div>
+            </div>
+            <label>
+              <span>Timeframe</span>
+              <input id="scripting-backtest-data-timeframe" type="text" placeholder="5m"
+                     autocapitalize="none" spellcheck="false" required />
+            </label>
+            <label class="scripting-backtest-data-symbol-field">
+              <span>Symbol</span>
+              <input id="scripting-backtest-data-symbol" type="text" placeholder="BTC/USDT:USDT"
+                     autocapitalize="characters" spellcheck="false" required />
+              <small id="scripting-backtest-data-symbol-error" class="field-error"></small>
+            </label>
+            <label>
+              <span>History since <small>UTC</small></span>
+              <input id="scripting-backtest-data-history-since" type="text" placeholder="Earliest available"
+                     inputmode="numeric" spellcheck="false" />
+            </label>
+            <label>
+              <span>File name <small>optional</small></span>
+              <input id="scripting-backtest-data-file-name" type="text" placeholder="Custom name"
+                     autocapitalize="none" autocomplete="off" spellcheck="false" />
+            </label>
+          </div>
+          <div class="scripting-backtest-data-actions">
+            <div id="scripting-backtest-data-message" class="scripting-backtest-data-message hidden"
+                 role="status"></div>
+            <button id="scripting-backtest-data-download" class="btn btn-primary" type="submit">
+              <svg class="icon scripting-backtest-download-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3v12" />
+                <path d="m7 10 5 5 5-5" />
+                <path d="M5 17v4h14v-4" />
+              </svg>
+              <svg class="icon scripting-backtest-hourglass-icon hidden" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M6 2h12M6 22h12" />
+                <path d="M8 2v5l4 5-4 5v5M16 2v5l-4 5 4 5v5" />
+              </svg>
+              <span>Download</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div id="scripting-backtest-data-tooltip" class="scripting-backtest-data-tooltip hidden"
+       role="tooltip"></div>
+  <div id="scripting-backtest-summary-input-tooltip"
+       class="scripting-backtest-data-tooltip scripting-backtest-summary-input-tooltip hidden"
+       role="tooltip"></div>
+
+  <div id="scripting-backtest-data-delete-modal"
+       class="modal scripting-backtest-data-delete-modal hidden" aria-hidden="true">
+    <div class="modal-box modal-box-sm" role="dialog" aria-modal="true"
+         aria-labelledby="scripting-backtest-data-delete-title">
+      <div class="modal-header">
+        <span id="scripting-backtest-data-delete-title">Delete OHLCV data?</span>
+        <button id="scripting-backtest-data-delete-close" class="btn btn-icon" type="button"
+                title="Close" aria-label="Close">&times;</button>
+      </div>
+      <div class="confirm-body">
+        <div class="confirm-message">This permanently deletes the OHLCV file and its symbol metadata.</div>
+        <div id="scripting-backtest-data-delete-path" class="confirm-session mono"></div>
+        <div id="scripting-backtest-data-delete-error" class="error" role="alert"></div>
+      </div>
+      <div class="confirm-footer">
+        <button id="scripting-backtest-data-delete-cancel" class="btn" type="button">Cancel</button>
+        <button id="scripting-backtest-data-delete-confirm" class="btn btn-danger-primary" type="button">Delete</button>
+      </div>
+    </div>
+  </div>
 
   <div id="watchlist-modal" class="modal watchlist-modal hidden" aria-hidden="true">
     <div class="modal-box watchlist-modal-box" role="dialog" aria-modal="true" aria-labelledby="watchlist-title">
@@ -1039,6 +1837,11 @@
     </form>
   </div>
 
-  <script src="/static/dashboard.js?v=163"></script>
+  <script src="/static/codemirror.js?v=3"></script>
+  <script src="/static/editor.js?v=8"></script>
+  <script src="/static/scripting_backtest.js?v=41"></script>
+  <script src="/static/scripting_ai.js?v=12"></script>
+  <script src="/static/scripting.js?v=52"></script>
+  <script src="/static/dashboard.js?v=179"></script>
 </body>
 </html>

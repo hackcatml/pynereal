@@ -543,10 +543,15 @@ App.data = {
       }
       const data = await resp.json();
       App.state.scriptSourceName = data.name || "";
+      App.state.scriptSourcePath = data.path || data.name || "";
+      App.state.scriptSourceRevision = data.revision || "";
       App.state.scriptSource = data.source || "";
       App.state.scriptSourceLoaded = true;
       App.state.sourceDirty = false;
+      App.state.sourceBaseNote = data.note || "";
+      App.state.sourceNote = App.state.sourceBaseNote;
       App.state.sourceSaveStatus = "";
+      App.state.sourceConflict = false;
       if (data.title) {
         App.state.scriptTitle = data.title;
         App.state.scriptTitleVisible = true;
@@ -558,22 +563,37 @@ App.data = {
       return false;
     }
   },
-  async saveScriptSource(source) {
+  async saveScriptSource(source, note = "") {
     try {
       const resp = await fetch(`${App.config.apiBase}/script-source`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source })
+        body: JSON.stringify({
+          source,
+          base_revision: App.state.scriptSourceRevision,
+          note
+        })
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
-        return { ok: false, error: data.error || `Save failed (${resp.status})` };
+        return {
+          ok: false,
+          error: data.error || `Save failed (${resp.status})`,
+          status: resp.status,
+          code: data.code || "",
+          currentRevision: data.current_revision || ""
+        };
       }
       App.state.scriptSourceName = data.name || App.state.scriptSourceName || "";
+      App.state.scriptSourcePath = data.path || App.state.scriptSourcePath || data.name || "";
+      App.state.scriptSourceRevision = data.revision || App.state.scriptSourceRevision || "";
       App.state.scriptSource = data.source || "";
       App.state.scriptSourceLoaded = true;
       App.state.sourceDirty = false;
+      App.state.sourceBaseNote = data.note || "";
+      App.state.sourceNote = App.state.sourceBaseNote;
       App.state.sourceSaveStatus = "";
+      App.state.sourceConflict = false;
       if (data.title) {
         App.state.scriptTitle = data.title;
         App.state.scriptTitleVisible = true;
@@ -582,6 +602,103 @@ App.data = {
       return { ok: true, data };
     } catch (e) {
       return { ok: false, error: "Save failed" };
+    }
+  },
+  async saveScriptNote(note = "") {
+    try {
+      const resp = await fetch(`${App.config.apiBase}/script-source`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source: App.state.scriptSource,
+          base_revision: App.state.scriptSourceRevision,
+          note
+        })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        return {
+          ok: false,
+          error: data.error || `Save failed (${resp.status})`,
+          status: resp.status,
+          code: data.code || "",
+          currentRevision: data.current_revision || ""
+        };
+      }
+      App.state.scriptSourceRevision = data.revision || App.state.scriptSourceRevision || "";
+      App.state.sourceBaseNote = data.note || "";
+      App.state.sourceNote = App.state.sourceBaseNote;
+      App.state.sourceSaveStatus = "";
+      App.state.sourceConflict = false;
+      return { ok: true, data };
+    } catch (e) {
+      return { ok: false, error: "Save failed" };
+    }
+  },
+  async loadScriptHistory() {
+    const path = App.state.scriptSourcePath;
+    if (!path) return { ok: false, error: "Script path is unavailable" };
+    try {
+      const resp = await fetch(
+        `/api/scripting/history?path=${encodeURIComponent(path)}&limit=100`,
+        { cache: "no-store" }
+      );
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) return { ok: false, error: data.error || `History failed (${resp.status})` };
+      return { ok: true, data };
+    } catch (e) {
+      return { ok: false, error: "Version history could not be loaded" };
+    }
+  },
+  async loadScriptDiff(revisionId) {
+    const path = App.state.scriptSourcePath;
+    if (!path) return { ok: false, error: "Script path is unavailable" };
+    try {
+      const resp = await fetch(
+        `/api/scripting/diff?path=${encodeURIComponent(path)}&revision_id=${encodeURIComponent(revisionId)}`,
+        { cache: "no-store" }
+      );
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) return { ok: false, error: data.error || `Diff failed (${resp.status})` };
+      return { ok: true, data };
+    } catch (e) {
+      return { ok: false, error: "Version diff could not be loaded" };
+    }
+  },
+  async restoreScriptRevision(revisionId) {
+    const path = App.state.scriptSourcePath;
+    if (!path) return { ok: false, error: "Script path is unavailable" };
+    try {
+      const resp = await fetch("/api/scripting/restore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          path,
+          revision_id: revisionId,
+          base_revision: App.state.scriptSourceRevision
+        })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        return {
+          ok: false,
+          error: data.error || `Restore failed (${resp.status})`,
+          status: resp.status,
+          code: data.code || "",
+          currentRevision: data.current_revision || ""
+        };
+      }
+      App.state.scriptSourcePath = data.path || path;
+      App.state.scriptSourceRevision = data.revision || "";
+      App.state.scriptSource = data.content || "";
+      App.state.scriptSourceLoaded = true;
+      App.state.sourceDirty = false;
+      App.state.sourceBaseNote = data.note || "";
+      App.state.sourceNote = App.state.sourceBaseNote;
+      App.state.sourceConflict = false;
+      return { ok: true, data };
+    } catch (e) {
+      return { ok: false, error: "Version could not be restored" };
     }
   },
   async loadWebhookConfig() {

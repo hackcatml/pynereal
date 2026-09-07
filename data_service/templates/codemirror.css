@@ -1,0 +1,118 @@
+.pyne-codemirror-host {
+  padding: 0 !important;
+  overflow: hidden !important;
+  white-space: normal !important;
+  color: #d4d4d4 !important;
+  -webkit-text-fill-color: currentColor !important;
+}
+
+.pyne-codemirror-host .cm-editor {
+  width: 100%;
+  height: 100%;
+  background: #0b0f14;
+  color: #d4d4d4;
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.pyne-codemirror-host .cm-editor.cm-focused { outline: none; }
+
+.pyne-codemirror-host .cm-scroller {
+  overflow: auto;
+  scrollbar-gutter: stable;
+  font: inherit;
+}
+
+.pyne-codemirror-host .cm-content {
+  min-height: 100%;
+  padding: 14px 16px 24px;
+  caret-color: #f2f5f8;
+}
+
+.pyne-codemirror-host .cm-line { padding: 0; }
+
+.pyne-codemirror-host .cm-cursor,
+.pyne-codemirror-host .cm-dropCursor { border-left-color: #f2f5f8; }
+
+.pyne-codemirror-host .cm-selectionBackground,
+.pyne-codemirror-host .cm-content ::selection {
+  background: rgba(86, 156, 214, 0.32) !important;
+}
+
+.pyne-codemirror-host .cm-activeLine { background: rgba(255, 255, 255, 0.025); }
+
+.pyne-codemirror-host .cm-gutters {
+  border: 0;
+  background: #0b0f14;
+  color: transparent;
+}
+
+.pyne-codemirror-host .cm-pyne-diff-gutter {
+  width: 6px;
+  min-width: 6px;
+}
+
+.pyne-codemirror-host .cm-pyne-diff-gutter .cm-gutterElement {
+  width: 6px;
+  padding: 0;
+}
+
+.cm-pyne-diff-marker {
+  display: block;
+  width: 3px;
+  height: 100%;
+  min-height: 1.55em;
+}
+
+.cm-pyne-diff-marker.added { background: #2ea043; }
+.cm-pyne-diff-marker.modified { background: #1f6feb; }
+.cm-pyne-diff-marker.deleted {
+  width: 0;
+  height: 0;
+  min-height: 0;
+  margin-top: -4px;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid #f85149;
+}
+
+.cm-pyne-search-match {
+  border-radius: 2px;
+  background: rgba(210, 153, 34, 0.32);
+}
+
+.cm-pyne-search-current {
+  background: #f2cc60;
+  color: #11161d !important;
+}
+
+.cm-pyne-diagnostic-error {
+  text-decoration: underline wavy #f85149 1px;
+  text-decoration-skip-ink: none;
+}
+
+.cm-pyne-diagnostic-warning {
+  text-decoration: underline wavy #d29922 1px;
+  text-decoration-skip-ink: none;
+}
+
+@media (min-width: 721px) {
+  .pyne-codemirror-host .cm-scroller {
+    scrollbar-color: #3a4350 #0b0f14;
+    scrollbar-width: thin;
+  }
+  .pyne-codemirror-host .cm-scroller::-webkit-scrollbar { width: 10px; height: 10px; }
+  .pyne-codemirror-host .cm-scroller::-webkit-scrollbar-track { background: #0b0f14; }
+  .pyne-codemirror-host .cm-scroller::-webkit-scrollbar-thumb {
+    border: 2px solid #0b0f14;
+    border-radius: 999px;
+    background: #3a4350;
+  }
+  .pyne-codemirror-host .cm-scroller::-webkit-scrollbar-thumb:hover { background: #4a5565; }
+}
+
+@media (max-width: 720px) {
+  .pyne-codemirror-host .cm-editor { font-size: 11.5px; }
+  .pyne-codemirror-host .cm-content {
+    padding: 12px 12px calc(24px + env(safe-area-inset-bottom));
+  }
+}
