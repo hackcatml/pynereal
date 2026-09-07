@@ -26,6 +26,7 @@ _STATIC_FILES = {
     "bgcolor.js": "text/javascript",
     "chart.js": "text/javascript",
     "measure.js": "text/javascript",
+    "measure.css": "text/css",
     "data.js": "text/javascript",
     "ws.js": "text/javascript",
     "main.js": "text/javascript",

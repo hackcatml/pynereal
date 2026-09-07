@@ -515,6 +515,14 @@ body {
   inset: 34px 0 0;
 }
 
+.drawing-toolbar {
+  top: calc(var(--measure-chart-top, 88px) + 12px);
+}
+
+.measure-overlay {
+  clip-path: inset(var(--measure-chart-top, 0px) 0 var(--measure-chart-bottom, 0px));
+}
+
 .backtest-nav-btn {
   position: absolute;
   bottom: 34px;

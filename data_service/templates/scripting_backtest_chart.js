@@ -682,6 +682,54 @@
     }
   }
 
+  function initPriceTools() {
+    const app = window.App;
+    const container = el("backtest-price-chart");
+    app.state = {};
+    app.collections = app.collections || {};
+    app.ui = {
+      formatNumber: (value, decimals) => Number(value).toLocaleString(undefined, {
+        minimumFractionDigits: decimals,
+        maximumFractionDigits: decimals,
+      }),
+    };
+    app.chart = {
+      container,
+      chart: state.priceChart,
+      candleSeries: state.candleSeries,
+      setMagnetMode(enabled) {
+        state.priceChart.applyOptions({
+          crosshair: {
+            mode: enabled ? LightweightCharts.CrosshairMode.Magnet : LightweightCharts.CrosshairMode.Normal,
+          },
+        });
+      },
+      restoreMagnetMode() { this.setMagnetMode(true); },
+      plotPointFromClient(clientX, clientY) {
+        if (!app.measure.isClientInPlot(clientX, clientY)) return null;
+        const rect = container.getBoundingClientRect();
+        const timeScale = state.priceChart.timeScale();
+        const x = clientX - rect.left;
+        const price = state.candleSeries.coordinateToPrice(clientY - rect.top);
+        if (price == null || !Number.isFinite(price)) return null;
+        return {
+          time: timeScale.coordinateToTime(x),
+          logical: timeScale.coordinateToLogical(x),
+          price,
+        };
+      },
+    };
+    app.measure.init();
+    syncPriceToolsLayout();
+  }
+
+  function syncPriceToolsLayout() {
+    const rect = el("backtest-price-chart").getBoundingClientRect();
+    document.documentElement.style.setProperty("--measure-chart-top", `${rect.top}px`);
+    document.documentElement.style.setProperty("--measure-chart-bottom", `${Math.max(0, window.innerHeight - rect.bottom)}px`);
+    window.App.measure.scheduleRender();
+  }
+
   function initPriceChart() {
     const container = el("backtest-price-chart");
     state.priceChart = LightweightCharts.createChart(container, {
@@ -741,6 +789,7 @@
       );
       state.priceChart.panes()[0].attachPrimitive(state.bgcolorPrimitive);
     }
+    initPriceTools();
     state.priceChart.subscribeCrosshairMove((param) => {
       if (!param || !param.time) return;
       const bar = param.seriesData.get(state.candleSeries);
@@ -770,6 +819,7 @@
     });
     const observer = new ResizeObserver(() => {
       state.priceChart.resize(container.clientWidth, container.clientHeight);
+      syncPriceToolsLayout();
       drawEquity();
     });
     observer.observe(container);
@@ -983,6 +1033,28 @@
       window.App.collections.ohlcvIndexByTime = new Map(
         state.priceBars.map((bar, index) => [Number(bar.time), index]),
       );
+      window.App.collections.ohlcvData = state.priceBars;
+      const interval = state.priceBars.length > 1
+        ? Number(state.priceBars[1].time) - Number(state.priceBars[0].time)
+        : 60;
+      window.App.state.timeframeInterval = interval;
+      // Paging changes logical indexes; keep measurement endpoints on their candles.
+      const measure = window.App.measure.activeMeasurement();
+      if (measure) {
+        for (const point of new Set([measure.start, measure.end])) {
+          const index = window.App.collections.ohlcvIndexByTime.get(point.time);
+          if (Number.isInteger(index)) {
+            point.logical = index;
+          } else if (logicalRange && point.time == null) {
+            point.logical += prepended;
+          } else {
+            window.App.measure.clear();
+            break;
+          }
+        }
+      }
+      window.App.measure.scheduleRender();
+      el("drawing-toolbar").classList.remove("hidden");
     }
     if (state.bgcolorPrimitive) state.bgcolorPrimitive.clear();
     applyPlotData();
