@@ -4,7 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Chart</title>
-  <link rel="stylesheet" href="/static/styles.css?v=3" />
+  <link rel="stylesheet" href="/static/styles.css?v=40" />
+  <link rel="stylesheet" href="/static/measure.css?v=1" />
+  <link rel="stylesheet" href="/static/editor.css?v=5" />
+  <link rel="stylesheet" href="/static/codemirror.css?v=1" />
   <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.9/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
@@ -32,7 +35,20 @@
   <button id="nav-to-start" class="nav-btn nav-btn-left" title="처음으로">&laquo;</button>
   <button id="nav-to-end" class="nav-btn nav-btn-right" title="최신으로">&raquo;</button>
   <div id="chart-info">
-    <div id="chart-info-line">Loading...</div>
+    <div id="chart-info-line">
+      <span id="chart-info-base" class="info-main">Loading...</span><!--
+      --><span id="chart-info-separator" class="chart-info-separator chart-info-sep hidden" aria-hidden="true"></span><!--
+      --><button id="chart-runner-status" class="chart-runner-status hidden" type="button"
+              aria-label="Strategy status" aria-expanded="false">
+        <span class="chart-runner-led" aria-hidden="true"></span>
+        <span id="chart-runner-popover" class="chart-runner-popover" role="status">
+          <strong id="chart-runner-status-text">running</strong>
+          <span>Strategy calculation step:<br>Warm-up &rarr; Confirmed bar calculation</span>
+          <span>Warm-up recalculates the strategy over historical candles before the next confirmed bar is processed.</span>
+        </span>
+      </button><!--
+      --><span id="chart-info-ohlcv" class="info-ohlcv"></span>
+    </div>
     <div id="chart-info-title-row" class="hidden">
       <span id="chart-info-title"></span>
       <div id="toolbar">
@@ -69,14 +85,134 @@
       </div>
       <div class="source-panel-actions">
         <span id="source-status" class="source-status"></span>
-        <button id="source-save" class="source-action source-save" title="Save script" aria-label="Save script" disabled>💾</button>
+        <button id="source-undo" class="source-action source-undo" title="Undo edit" aria-label="Undo edit" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 14 4 9l5-5" />
+            <path d="M4 9h11a5 5 0 0 1 0 10h-1" />
+          </svg>
+        </button>
+        <button id="source-find-toggle" class="source-action source-find" title="Find"
+                aria-label="Find" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="7" />
+            <path d="m20 20-4-4" />
+          </svg>
+        </button>
+        <button id="source-note-toggle" class="source-action source-note" title="Version note"
+                aria-label="Version note" aria-expanded="false"
+                aria-controls="source-note-editor" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 17V5a2 2 0 0 0-2-2H4" />
+            <path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3" />
+            <path d="M15 8h-5" />
+            <path d="M15 12h-6" />
+          </svg>
+        </button>
+        <button id="source-history" class="source-action source-history" title="Version history"
+                aria-label="Version history" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+            <path d="M3 3v5h5" />
+            <path d="M12 7v5l3 2" />
+          </svg>
+        </button>
+        <button id="source-save" class="source-action source-save" title="Save script"
+                aria-label="Save script" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z" />
+            <path d="M17 21v-8H7v8M7 3v5h8" />
+          </svg>
+        </button>
         <button id="source-close" class="source-action source-close" title="Close" aria-label="Close source panel">&times;</button>
       </div>
     </div>
-    <div class="source-editor-wrap">
-      <pre id="source-highlight" class="source-code source-highlight" aria-hidden="true">No source loaded.</pre>
-      <textarea id="source-code" class="source-editor" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="soft">No source loaded.</textarea>
+    <div id="source-note-editor" class="source-note-editor hidden">
+      <label for="source-note-input">Note</label>
+      <input id="source-note-input" type="text" maxlength="240"
+             placeholder="Optional note for this version" autocomplete="off" />
+      <button id="source-note-close" class="source-note-close" type="button"
+              title="Clear note" aria-label="Clear note">&times;</button>
+      <button id="source-note-save" class="source-note-save" type="button"
+              title="Save note" aria-label="Save note" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="m5 12 4 4L19 6" />
+        </svg>
+      </button>
     </div>
+    <div id="source-find-panel" class="editor-find-panel hidden" role="search"
+         aria-label="Find and replace" aria-hidden="true">
+      <div class="editor-find-row">
+        <button id="source-replace-toggle" class="editor-find-action editor-replace-toggle"
+                type="button" title="Toggle replace" aria-label="Toggle replace"
+                aria-expanded="false" aria-controls="source-replace-row">
+          <span aria-hidden="true"></span>
+        </button>
+        <input id="source-find-input" type="text" placeholder="Find"
+               aria-label="Find" autocomplete="off" spellcheck="false" />
+        <span id="source-find-count" class="editor-find-count" aria-live="polite">0/0</span>
+        <button id="source-find-previous" class="editor-find-action" type="button"
+                title="Previous match" aria-label="Previous match" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6" /></svg>
+        </button>
+        <button id="source-find-next" class="editor-find-action" type="button"
+                title="Next match" aria-label="Next match" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+        </button>
+        <button id="source-find-close" class="editor-find-action editor-find-close"
+                type="button" title="Close find" aria-label="Close find">&times;</button>
+      </div>
+      <div id="source-replace-row" class="editor-find-row editor-replace-row hidden">
+        <span class="editor-find-spacer" aria-hidden="true"></span>
+        <input id="source-replace-input" type="text" placeholder="Replace"
+               aria-label="Replace" autocomplete="off" spellcheck="false" />
+        <span class="editor-find-count" aria-hidden="true"></span>
+        <button id="source-replace-one" class="editor-replace-command" type="button"
+                title="Replace current match" disabled>Replace</button>
+        <button id="source-replace-all" class="editor-replace-command editor-replace-all"
+                type="button" title="Toggle replace all" aria-pressed="false">All</button>
+      </div>
+    </div>
+    <div id="source-notice" class="source-notice hidden" role="status">
+      <span id="source-notice-text"></span>
+      <button id="source-reload" type="button">Reload</button>
+    </div>
+    <div class="source-editor-wrap">
+      <div id="source-code" class="source-editor" role="textbox" aria-multiline="true"
+           aria-label="Script source">No source loaded.</div>
+    </div>
+    <section id="source-history-panel" class="source-history-panel hidden" aria-hidden="true"
+             aria-label="Version history">
+      <div class="source-history-header">
+        <div>
+          <strong>Version history</strong>
+          <span id="source-history-path"></span>
+        </div>
+        <button id="source-history-close" class="source-action source-close" type="button"
+                title="Close history" aria-label="Close history">&times;</button>
+      </div>
+      <div id="source-history-state" class="source-history-state">Loading history...</div>
+      <div id="source-history-content" class="source-history-content hidden">
+        <div id="source-history-list" class="source-history-list"></div>
+        <div class="source-history-detail">
+          <div class="source-history-detail-header">
+            <div>
+              <strong id="source-history-title">Select a version</strong>
+              <span id="source-history-meta"></span>
+            </div>
+            <div class="source-history-detail-actions">
+              <button id="source-history-restore" type="button" disabled>Restore</button>
+            </div>
+          </div>
+          <pre id="source-history-diff" class="source-history-diff">Select a version to review its changes.</pre>
+        </div>
+      </div>
+    </section>
   </aside>
   <div id="alert-template-backdrop" class="template-backdrop hidden"></div>
   <section id="alert-template-modal" class="template-modal hidden" aria-hidden="true" aria-label="Alert message templates">
@@ -153,13 +289,15 @@
     </div>
   </section>
   <!--RUNTIME_CONFIG-->
-  <script src="/static/state.js?v=2"></script>
-  <script src="/static/ui.js?v=2"></script>
+  <script src="/static/state.js?v=6"></script>
+  <script src="/static/codemirror.js?v=3"></script>
+  <script src="/static/editor.js?v=8"></script>
+  <script src="/static/ui.js?v=30"></script>
   <script src="/static/bgcolor.js?v=2"></script>
   <script src="/static/chart.js?v=3"></script>
-  <script src="/static/measure.js"></script>
-  <script src="/static/data.js?v=5"></script>
-  <script src="/static/ws.js?v=3"></script>
+  <script src="/static/measure.js?v=1"></script>
+  <script src="/static/data.js?v=12"></script>
+  <script src="/static/ws.js?v=4"></script>
   <script src="/static/main.js"></script>
 </body>
 </html>

@@ -74,10 +74,33 @@ DEFAULT_DEVELOPER_INSTRUCTIONS = (
     "that ID and wait_for_ready=true. Within one user turn, call the session list at most once, the "
     "exact session context at most once, and the chart capture at most once. Reuse those results "
     "instead of refreshing them unless the tool explicitly rejects a changed generation. If the user "
+    "reports a mismatch, asks for verification, or challenges a prior claim in any language, infer "
+    "that intent from the conversation rather than fixed keywords. Use detail_level=compact for that "
+    "exact context and call compare_session_evidence once with the same session and generation, omitting "
+    "max_events unless a smaller result is specifically required. Also compare "
+    "when evidence_summary recommends diagnostics. For normal evaluation use detail_level=standard. "
+    "Separate observations from interpretations, locate the earliest chronological divergence, and "
+    "try to disprove plausible causes before accepting one. A first divergence is not itself a root "
+    "cause. Confirm a cause only through direct source execution logic, reproduction, or two independent "
+    "supporting observations; otherwise label it as a hypothesis and state missing evidence. "
+    "Before diagnosing a user-reported historical value, verify that the current snapshot reproduces "
+    "that value and lifecycle. If it does not, state that the historical issue is not reproduced and "
+    "do not diagnose it from the different current state. "
+    "An unmatched account event proves only an account-side execution. It may be manual or external, "
+    "so confirm its origin before attributing it to the strategy, webhook, or engine. "
+    "Honor comparison investigation_constraints. If strategy-source attribution is disallowed, stop "
+    "after reporting the account-only execution and required order-origin evidence; do not inspect "
+    "source branches, rerun the strategy, capture a chart, or rank repainting or webhook hypotheses. "
+    "Read structured events and source_excerpts before using shell searches. "
+    "Do not rerun a strategy or browse the web to invent missing historical execution evidence; state "
+    "which alert, webhook, or order-origin record is needed instead. "
+    "When a user challenges the prior answer, lower that answer's confidence and recheck contrary "
+    "evidence before defending it. If the user "
     "explicitly names a configured account, pass the "
     "human-readable account name in the account argument; that selection must not be replaced by "
-    "another account. Otherwise omit account so the server matches configured accounts from current "
-    "positions and recent order history. Treat the returned confirmed bars, simulation state, plots, "
+    "another account. Otherwise omit account so the server matches accounts on the session exchange "
+    "from Account Center's cached current positions, order history, and position history, with a "
+    "scoped refresh only when that cache is missing or stale. Treat the returned confirmed bars, simulation state, plots, "
     "trades, source, logs, calculation generation, and warnings as the authoritative session evidence. "
     "For live-risk evaluation, prefer simulation.position.aggregate_avg_price and "
     "simulation.pnl.aggregate_openprofit. Use avg_price, openprofit, and open_trade_ledger for Pine "
@@ -195,6 +218,7 @@ class CodexService:
         project_root: Path,
         session_registry: Any,
         calendar_store: Any,
+        account_data_service: Any | None = None,
         developer_instructions: str = DEFAULT_DEVELOPER_INSTRUCTIONS,
         timeout_seconds: float = 600,
         chat_state_path: Path | None = None,
@@ -206,6 +230,7 @@ class CodexService:
             self.project_root,
             session_registry=session_registry,
             calendar_store=calendar_store,
+            account_data_service=account_data_service,
         )
         self.file_tools = self.dynamic_tools.file_tools
         self.developer_instructions = (

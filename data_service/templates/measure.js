@@ -233,9 +233,9 @@ App.measure = {
         this.ensureMobileAim();
       }
       if (App.ui) {
-        App.ui.closeManualAlertConfirm();
-        App.ui.closeManualAlertMenu();
-        App.ui.closeAlertTemplateModal();
+        App.ui.closeManualAlertConfirm?.();
+        App.ui.closeManualAlertMenu?.();
+        App.ui.closeAlertTemplateModal?.();
       }
       if (App.chart) {
         App.chart.setMagnetMode(false);
@@ -854,14 +854,15 @@ App.measure = {
     this.label.classList.remove("hidden");
 
     const labelRect = this.label.getBoundingClientRect();
+    const chartRect = this.chartRect();
     const margin = 8;
     let labelLeft = x2 - labelRect.width / 2;
     let labelTop = y2 + 12;
-    if (labelTop + labelRect.height > height - margin) {
+    if (labelTop + labelRect.height > chartRect.bottom - margin) {
       labelTop = y2 - labelRect.height - 12;
     }
-    labelLeft = Math.max(margin, Math.min(labelLeft, width - labelRect.width - margin));
-    labelTop = Math.max(margin, Math.min(labelTop, height - labelRect.height - margin));
+    labelLeft = Math.max(chartRect.left + margin, Math.min(labelLeft, chartRect.right - labelRect.width - margin));
+    labelTop = Math.max(chartRect.top + margin, Math.min(labelTop, chartRect.bottom - labelRect.height - margin));
     this.label.style.left = `${Math.round(labelLeft)}px`;
     this.label.style.top = `${Math.round(labelTop)}px`;
   }

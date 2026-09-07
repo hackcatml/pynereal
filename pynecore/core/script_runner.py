@@ -1,4 +1,5 @@
 import os
+from array import array
 from typing import Iterable, Iterator, Callable, TYPE_CHECKING, Any
 from types import ModuleType
 import sys
@@ -189,14 +190,15 @@ class ScriptRunner:
 
     __slots__ = ('script_module', 'script', 'ohlcv_iter', 'syminfo', 'update_syminfo_every_run',
                  'bar_index', 'tz', 'plot_writer', 'strat_writer', 'trades_writer', 'last_bar_index',
-                 'equity_curve', 'first_price', 'last_price', '_step_iter', '_all_ohlcv')
+                 'equity_curve', 'drawdown_curve', 'first_price', 'last_price', '_step_iter', '_all_ohlcv')
 
     def __init__(self, script_path: Path, ohlcv_iter: Iterable[OHLCV], syminfo: SymInfo, *,
                  plot_path: Path | None = None, strat_path: Path | None = None,
                  trade_path: Path | None = None,
                  update_syminfo_every_run: bool = False, last_bar_index=0,
                  realtime_config: dict = None, custom_inputs: dict[str, Any] = None,
-                 preload_ohlcv: list[OHLCV] | None = None):
+                 preload_ohlcv: list[OHLCV] | None = None,
+                 track_drawdown_curve: bool = False):
         """
         Initialize the script runner
 
@@ -209,6 +211,7 @@ class ScriptRunner:
         :param update_syminfo_every_run: If it is needed to update the syminfo lib in every run,
                                          needed for parallel script executions
         :param last_bar_index: Last bar index, the index of the last bar of the historical data
+        :param track_drawdown_curve: Track per-bar drawdown values for backtest chart artifacts
         :raises ImportError: If the script does not have a 'main' function
         :raises ImportError: If the 'main' function is not decorated with @script.[indicator|strategy|library]
         :raises OSError: If the plot file could not be opened
@@ -267,6 +270,7 @@ class ScriptRunner:
 
         # Initialize tracking variables for statistics
         self.equity_curve: list[float] = []
+        self.drawdown_curve: array | None = array("d") if track_drawdown_curve else None
         self.first_price: float | None = None
         self.last_price: float | None = None
 
@@ -445,6 +449,11 @@ class ScriptRunner:
                 if is_strat and position:
                     current_equity = float(position.equity) if position.equity else self.script.initial_capital
                     self.equity_curve.append(current_equity)
+                    if self.drawdown_curve is not None:
+                        self.drawdown_curve.extend((
+                            float(position.current_drawdown),
+                            float(position.current_drawdown_percent),
+                        ))
 
                 # Call the progress callback
                 if on_progress and lib._datetime is not None:
@@ -528,7 +537,10 @@ class ScriptRunner:
                             self.script.initial_capital,
                             self.equity_curve if self.equity_curve else None,
                             self.first_price,
-                            self.last_price
+                            self.last_price,
+                            last_time=lib._time,
+                            timezone=self.tz,
+                            risk_free_rate=self.script.risk_free_rate,
                         )
 
                         write_strategy_statistics_csv(stats, self.strat_writer)
@@ -661,6 +673,7 @@ class ScriptRunner:
         self.first_price = None
         self.last_price = None
         self.equity_curve = []
+        self.drawdown_curve = None
         self.tz = None
         # Reset request.security context only when the runner is fully destroyed.
         try:

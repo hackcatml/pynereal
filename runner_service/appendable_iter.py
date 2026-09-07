@@ -81,6 +81,11 @@ class AppendableIterable(Generic[T]):
             self._q[-1] = item
             self._cv.notify()
 
+    def discard_last(self) -> None:
+        with self._cv:
+            if self._q:
+                self._q.pop()
+
     def close(self) -> None:
         """더 이상 아이템을 넣지 않을 때 호출. 반복자는 큐를 모두 비우면 종료합니다."""
         with self._cv:

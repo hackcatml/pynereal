@@ -32,7 +32,6 @@ _SOURCES = {
     "bitget": {"spot", "swap", "margin", "funding", "earn"},
     "bybit": {"spot", "swap", "margin", "funding"},
     "okx": {"spot", "funding"},
-    "hyperliquid": {"spot", "swap"},
 }
 _DESTINATIONS = {
     "binance": {
@@ -58,10 +57,6 @@ _DESTINATIONS = {
     "okx": {
         "spot": ("funding",),
         "funding": ("spot",),
-    },
-    "hyperliquid": {
-        "spot": ("swap",),
-        "swap": ("spot",),
     },
 }
 _BINANCE_TRANSFER_TYPES = {
@@ -601,6 +596,20 @@ class AssetTransferService:
             self._hierarchy_cache[exchange_id] = (revision, now, hierarchy)
         return hierarchy
 
+    def account_name_aliases(self, exchange_id: str) -> dict[str, str]:
+        normalized_exchange = str(exchange_id or "").strip().lower()
+        hierarchy = self._account_hierarchy(normalized_exchange)
+        aliases: dict[str, str] = {}
+        for identity in hierarchy.accounts.values():
+            values = [identity.key, identity.label, identity.external_id]
+            if identity.role == "main":
+                values.append(identity.group_id)
+            for value in values:
+                normalized = str(value or "").strip().lower()
+                if normalized:
+                    aliases[normalized] = identity.key
+        return aliases
+
     def _discover_bitget_hierarchy(
         self,
         accounts: list[ExchangeAccount],
@@ -1076,10 +1085,6 @@ class AssetTransferService:
             return ("spot", "funding")
         if exchange_id == "okx":
             return ("spot", "funding")
-        if exchange_id == "hyperliquid" and effective_source == "swap":
-            # Hyperliquid's sub-account USDC transfer moves Perps collateral.
-            if source_account.role == "main" or target_account.role == "main":
-                return ("swap",)
         return ()
 
     def _target_account_options(
@@ -1219,16 +1224,7 @@ class AssetTransferService:
                     self.read_attempts,
                     secrets,
                 )
-                if exchange_id == "hyperliquid":
-                    assets = _wallet_assets(
-                        balance,
-                        allowed_assets={"USDC"},
-                        unsupported_note=(
-                            "Hyperliquid Spot/Perp internal transfer supports USDC only."
-                        ),
-                    )
-                else:
-                    assets = _wallet_assets(balance)
+                assets = _wallet_assets(balance)
             hierarchy = self._account_hierarchy(exchange_id, account)
             source_identity = hierarchy.identity(account.name)
             target_accounts = (
@@ -1301,9 +1297,6 @@ class AssetTransferService:
         amount = _decimal(payload.get("amount"), "amount")
         if amount <= 0:
             raise AssetTransferError("amount must be greater than zero")
-        if exchange_id == "hyperliquid" and asset != "USDC":
-            raise AssetTransferError("Hyperliquid transfer supports USDC only")
-
         account = _account_by_name(
             self.config_path,
             payload.get("account"),
@@ -1639,25 +1632,7 @@ class AssetTransferService:
             first = rows[0] if isinstance(rows, list) and rows else {}
             transaction_id = first.get("transId") if isinstance(first, dict) else None
         else:
-            response = _state_change(
-                lambda: exchange.transfer(
-                    asset,
-                    _amount_text(amount),
-                    source,
-                    destination,
-                ),
-                operation="Hyperliquid Spot/Perp transfer",
-                exchange_label="Hyperliquid",
-                secrets=secrets,
-            )
-            if response.get("status") != "ok":
-                raise AssetTransferError(
-                    "Hyperliquid rejected the Spot/Perp transfer",
-                    status_code=502,
-                    details={"status": "failed"},
-                )
-            transaction_id = response.get("id")
-            return str(transaction_id) if transaction_id else None
+            raise AssetTransferError("internal transfer is not supported for this exchange")
 
         if transaction_id is None:
             raise AssetTransferError(
@@ -1807,47 +1782,7 @@ class AssetTransferService:
             rows = _response_rows(response, "data")
             transaction_id = rows[0].get("transId") if rows else None
         else:
-            if (
-                source_account.role == "main"
-                and target_account.role == "sub"
-                and target_account.external_id
-            ):
-                from_account = "main"
-                to_account = target_account.external_id
-            elif (
-                source_account.role == "sub"
-                and target_account.role == "main"
-                and source_account.external_id
-            ):
-                from_account = source_account.external_id
-                to_account = "main"
-            else:
-                raise AssetTransferError(
-                    "Hyperliquid supports account transfer only between main and sub accounts"
-                )
-            response = _state_change(
-                lambda: exchange.transfer(
-                    asset,
-                    amount_value,
-                    from_account,
-                    to_account,
-                ),
-                operation="Hyperliquid account transfer",
-                exchange_label="Hyperliquid",
-                secrets=secrets,
-            )
-            status = _external_id(response.get("status")).lower()
-            if status and status not in {"ok", "success"}:
-                raise AssetTransferError(
-                    "Hyperliquid rejected the account transfer",
-                    status_code=502,
-                    details={"status": "failed"},
-                )
-            transaction_id = response.get("id")
-            return (
-                str(transaction_id) if transaction_id else None,
-                "success",
-            )
+            raise AssetTransferError("account transfer is not supported for this exchange")
 
         if transaction_id is None:
             raise AssetTransferError(

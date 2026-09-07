@@ -4,6 +4,12 @@ App.ui = {
   elements: {
     chartInfo: document.getElementById("chart-info"),
     chartInfoLine: document.getElementById("chart-info-line"),
+    chartInfoBase: document.getElementById("chart-info-base"),
+    chartInfoSeparator: document.getElementById("chart-info-separator"),
+    chartInfoOhlcv: document.getElementById("chart-info-ohlcv"),
+    chartRunnerStatus: document.getElementById("chart-runner-status"),
+    chartRunnerPopover: document.getElementById("chart-runner-popover"),
+    chartRunnerStatusText: document.getElementById("chart-runner-status-text"),
     chartInfoTitleRow: document.getElementById("chart-info-title-row"),
     chartInfoTitle: document.getElementById("chart-info-title"),
     alertsToggle: document.getElementById("alerts-toggle"),
@@ -40,12 +46,43 @@ App.ui = {
     sourcePanel: document.getElementById("source-panel"),
     sourceBackdrop: document.getElementById("source-backdrop"),
     sourceClose: document.getElementById("source-close"),
+    sourceUndo: document.getElementById("source-undo"),
+    sourceFind: document.getElementById("source-find-toggle"),
+    sourceFindPanel: document.getElementById("source-find-panel"),
+    sourceFindInput: document.getElementById("source-find-input"),
+    sourceFindCount: document.getElementById("source-find-count"),
+    sourceFindPrevious: document.getElementById("source-find-previous"),
+    sourceFindNext: document.getElementById("source-find-next"),
+    sourceFindClose: document.getElementById("source-find-close"),
+    sourceReplaceToggle: document.getElementById("source-replace-toggle"),
+    sourceReplaceRow: document.getElementById("source-replace-row"),
+    sourceReplaceInput: document.getElementById("source-replace-input"),
+    sourceReplaceOne: document.getElementById("source-replace-one"),
+    sourceReplaceAll: document.getElementById("source-replace-all"),
+    sourceNote: document.getElementById("source-note-toggle"),
+    sourceNoteEditor: document.getElementById("source-note-editor"),
+    sourceNoteInput: document.getElementById("source-note-input"),
+    sourceNoteClose: document.getElementById("source-note-close"),
+    sourceNoteSave: document.getElementById("source-note-save"),
+    sourceHistory: document.getElementById("source-history"),
     sourceSave: document.getElementById("source-save"),
     sourceResizeHandle: document.getElementById("source-resize-handle"),
     sourcePanelName: document.getElementById("source-panel-name"),
     sourceStatus: document.getElementById("source-status"),
-    sourceHighlight: document.getElementById("source-highlight"),
-    sourceCode: document.getElementById("source-code")
+    sourceNotice: document.getElementById("source-notice"),
+    sourceNoticeText: document.getElementById("source-notice-text"),
+    sourceReload: document.getElementById("source-reload"),
+    sourceCode: document.getElementById("source-code"),
+    sourceHistoryPanel: document.getElementById("source-history-panel"),
+    sourceHistoryPath: document.getElementById("source-history-path"),
+    sourceHistoryClose: document.getElementById("source-history-close"),
+    sourceHistoryState: document.getElementById("source-history-state"),
+    sourceHistoryContent: document.getElementById("source-history-content"),
+    sourceHistoryList: document.getElementById("source-history-list"),
+    sourceHistoryTitle: document.getElementById("source-history-title"),
+    sourceHistoryMeta: document.getElementById("source-history-meta"),
+    sourceHistoryDiff: document.getElementById("source-history-diff"),
+    sourceHistoryRestore: document.getElementById("source-history-restore")
   },
   manualAlertDragState: null,
   manualAlertPendingSend: null,
@@ -53,13 +90,23 @@ App.ui = {
   manualAlertTriggerSyncTimer: null,
   manualAlertArmedInputDirty: false,
   activeTemplatePlaceholder: null,
+  sourceDiffTimer: null,
+  sourceEditorController: null,
+  sourceUndoPointerType: "",
+  sourceHistoryRequestSeq: 0,
+  sourceHistoryDiffRequestSeq: 0,
   setChartInfo(ohlcvText = null) {
     const state = App.state;
-    const baseLine = ohlcvText
-      ? `${state.baseInfoTop} | <span class="info-ohlcv">${ohlcvText}</span>`
-      : state.baseInfoTop;
-    state.baseInfoText = baseLine;
-    this.elements.chartInfoLine.innerHTML = baseLine;
+    if (ohlcvText !== null) {
+      state.baseInfoText = ohlcvText || "";
+    }
+    this.elements.chartInfoBase.innerHTML = String(state.baseInfoTop || "")
+      .split(" | ")
+      .map((part) => this.escapeHtml(part))
+      .join('<span class="chart-info-sep chart-info-sep-strong" aria-hidden="true"></span>');
+    this.elements.chartInfoOhlcv.innerHTML = state.baseInfoText || "";
+    this.elements.chartInfoSeparator.classList.toggle("hidden", !state.baseInfoText);
+    this.updateRunnerStatus();
     if (state.scriptTitleVisible) {
       this.elements.chartInfoTitle.textContent = state.scriptTitle;
       this.elements.chartInfoTitleRow.classList.remove("hidden");
@@ -67,6 +114,63 @@ App.ui = {
       this.elements.chartInfoTitle.textContent = "";
       this.elements.chartInfoTitleRow.classList.add("hidden");
     }
+  },
+  runnerStatusText(now = Date.now()) {
+    const state = App.state;
+    if (!state.runnerConnected || state.runnerPhase === "stopped") return "stopped";
+    if (state.runnerPhase === "prerun_active") return "warming up";
+    if (state.runnerPhase === "prerun_scheduled" && Number.isFinite(state.nextPrerunAt)) {
+      const remaining = Math.ceil((state.nextPrerunAt - now) / 1000);
+      if (remaining >= 1 && remaining <= 5) return `warming up in ${remaining}s`;
+      if (remaining <= 0) return "warming up";
+    }
+    return "running";
+  },
+  updateRunnerStatus() {
+    const { chartRunnerStatus, chartRunnerStatusText } = this.elements;
+    const state = App.state;
+    const visible = Boolean(state.runnerConnected);
+    chartRunnerStatus.classList.toggle("hidden", !visible);
+    if (!visible) {
+      chartRunnerStatus.classList.remove("open");
+      chartRunnerStatus.setAttribute("aria-expanded", "false");
+      return;
+    }
+    const text = this.runnerStatusText();
+    chartRunnerStatusText.textContent = text;
+    chartRunnerStatus.setAttribute("aria-label", `Strategy status: ${text}`);
+    chartRunnerStatus.classList.toggle("warming", state.runnerPhase === "prerun_active");
+  },
+  positionRunnerStatusPopover() {
+    const { chartRunnerStatus: button, chartRunnerPopover: popover } = this.elements;
+    if (!button || !popover) return;
+    popover.style.left = "0px";
+    const rect = popover.getBoundingClientRect();
+    const viewportPadding = 12;
+    const minOffset = viewportPadding - rect.left;
+    const maxOffset = window.innerWidth - viewportPadding - rect.right;
+    const offset = Math.min(maxOffset, Math.max(minOffset, 0));
+    popover.style.left = `${Math.round(offset)}px`;
+  },
+  initRunnerStatus() {
+    const button = this.elements.chartRunnerStatus;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const open = !button.classList.contains("open");
+      if (open) this.positionRunnerStatusPopover();
+      button.classList.toggle("open", open);
+      button.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    document.addEventListener("pointerdown", (event) => {
+      if (button.contains(event.target)) return;
+      button.classList.remove("open");
+      button.setAttribute("aria-expanded", "false");
+    }, true);
+    window.addEventListener("resize", () => {
+      if (button.classList.contains("open")) this.positionRunnerStatusPopover();
+    });
+    window.setInterval(() => this.updateRunnerStatus(), 1000);
+    this.updateRunnerStatus();
   },
   toggleAlertsMenu(forceOpen = null) {
     const menu = this.elements.alertsMenu;
@@ -911,55 +1015,325 @@ App.ui = {
     const name = state.scriptSourceName || state.scriptTitle || "No source";
     const source = state.scriptSourceLoaded ? state.scriptSource : "No source loaded.";
     this.elements.sourcePanelName.textContent = name;
+    if (this.elements.sourceNoteInput.value !== state.sourceNote) {
+      this.elements.sourceNoteInput.value = state.sourceNote;
+    }
     if (!state.sourceDirty) {
-      this.elements.sourceCode.value = source;
+      this.elements.sourceCode._pyneCodeEditor.setValue(source);
+      this.resetSourceUndo();
     }
     this.renderSourceHighlight();
+    if (this.sourceEditorController && this.sourceEditorController.isOpen()) {
+      this.sourceEditorController.refresh();
+    }
+    this.setSourceNotice(state.sourceConflict
+      ? "This file changed outside this editor. Reload before saving again."
+      : "");
     this.updateSourceSaveState();
   },
-  renderSourceHighlight() {
-    const source = this.elements.sourceCode.value || "No source loaded.";
-    this.elements.sourceHighlight.innerHTML = this.highlightPython(source);
-    this.syncSourceScroll();
+  setSourceNotice(message = "") {
+    this.elements.sourceNoticeText.textContent = String(message || "");
+    this.elements.sourceNotice.classList.toggle("hidden", !message);
   },
-  syncSourceScroll() {
-    const editor = this.elements.sourceCode;
-    const highlight = this.elements.sourceHighlight;
-    highlight.scrollTop = editor.scrollTop;
-    highlight.scrollLeft = editor.scrollLeft;
+  renderSourceHighlight() {
+    const codeEditor = this.elements.sourceCode._pyneCodeEditor;
+    codeEditor.setLanguage("python");
+    this.scheduleSourceDiff();
+  },
+  clearSourceDiff() {
+    if (this.sourceDiffTimer !== null) {
+      clearTimeout(this.sourceDiffTimer);
+      this.sourceDiffTimer = null;
+    }
+    this.elements.sourceCode._pyneCodeEditor.setChangedLines();
+  },
+  scheduleSourceDiff() {
+    if (!App.state.sourceDirty) {
+      this.clearSourceDiff();
+      return;
+    }
+    if (this.sourceDiffTimer !== null) {
+      clearTimeout(this.sourceDiffTimer);
+    }
+    this.sourceDiffTimer = setTimeout(() => {
+      this.sourceDiffTimer = null;
+      requestAnimationFrame(() => this.renderSourceDiff());
+    }, 100);
+  },
+  sourceLineDiffOperations(before, after) {
+    const oldLines = String(before ?? "").replace(/\r\n?/g, "\n").split("\n");
+    const newLines = String(after ?? "").replace(/\r\n?/g, "\n").split("\n");
+    let prefix = 0;
+    while (
+      prefix < oldLines.length &&
+      prefix < newLines.length &&
+      oldLines[prefix] === newLines[prefix]
+    ) {
+      prefix += 1;
+    }
+
+    let suffix = 0;
+    while (
+      suffix < oldLines.length - prefix &&
+      suffix < newLines.length - prefix &&
+      oldLines[oldLines.length - suffix - 1] === newLines[newLines.length - suffix - 1]
+    ) {
+      suffix += 1;
+    }
+
+    const operations = Array(prefix).fill("equal");
+    const oldMiddle = oldLines.slice(prefix, oldLines.length - suffix);
+    const newMiddle = newLines.slice(prefix, newLines.length - suffix);
+    operations.push(...this.sourceLineMyersDiff(oldMiddle, newMiddle));
+    operations.push(...Array(suffix).fill("equal"));
+    return { operations, lineCount: newLines.length };
+  },
+  sourceLineMyersDiff(oldLines, newLines) {
+    if (!oldLines.length) return Array(newLines.length).fill("insert");
+    if (!newLines.length) return Array(oldLines.length).fill("delete");
+
+    const oldCount = oldLines.length;
+    const newCount = newLines.length;
+    const frontier = new Map([[1, 0]]);
+    const trace = [];
+    const maxDistance = Math.min(oldCount + newCount, 600);
+
+    for (let distance = 0; distance <= maxDistance; distance += 1) {
+      trace.push(new Map(frontier));
+      for (let diagonal = -distance; diagonal <= distance; diagonal += 2) {
+        const left = frontier.get(diagonal - 1) ?? Number.NEGATIVE_INFINITY;
+        const down = frontier.get(diagonal + 1) ?? Number.NEGATIVE_INFINITY;
+        let oldIndex;
+        if (diagonal === -distance || (diagonal !== distance && left < down)) {
+          oldIndex = Number.isFinite(down) ? down : 0;
+        } else {
+          oldIndex = (Number.isFinite(left) ? left : 0) + 1;
+        }
+        let newIndex = oldIndex - diagonal;
+        while (
+          oldIndex < oldCount &&
+          newIndex < newCount &&
+          oldLines[oldIndex] === newLines[newIndex]
+        ) {
+          oldIndex += 1;
+          newIndex += 1;
+        }
+        frontier.set(diagonal, oldIndex);
+        if (oldIndex >= oldCount && newIndex >= newCount) {
+          return this.backtrackSourceLineDiff(trace, oldLines, newLines);
+        }
+      }
+    }
+
+    return [
+      ...Array(oldCount).fill("delete"),
+      ...Array(newCount).fill("insert")
+    ];
+  },
+  backtrackSourceLineDiff(trace, oldLines, newLines) {
+    const operations = [];
+    let oldIndex = oldLines.length;
+    let newIndex = newLines.length;
+
+    for (let distance = trace.length - 1; distance >= 0; distance -= 1) {
+      const frontier = trace[distance];
+      const diagonal = oldIndex - newIndex;
+      const left = frontier.get(diagonal - 1) ?? Number.NEGATIVE_INFINITY;
+      const down = frontier.get(diagonal + 1) ?? Number.NEGATIVE_INFINITY;
+      const previousDiagonal = (
+        diagonal === -distance || (diagonal !== distance && left < down)
+      ) ? diagonal + 1 : diagonal - 1;
+      const previousOldIndex = frontier.get(previousDiagonal) ?? 0;
+      const previousNewIndex = previousOldIndex - previousDiagonal;
+
+      while (oldIndex > previousOldIndex && newIndex > previousNewIndex) {
+        operations.push("equal");
+        oldIndex -= 1;
+        newIndex -= 1;
+      }
+      if (distance === 0) break;
+      if (oldIndex === previousOldIndex) {
+        operations.push("insert");
+        newIndex -= 1;
+      } else {
+        operations.push("delete");
+        oldIndex -= 1;
+      }
+    }
+    return operations.reverse();
+  },
+  sourceDiffMarkers(before, after) {
+    const { operations, lineCount } = this.sourceLineDiffOperations(before, after);
+    const lines = new Map();
+    const deletions = new Set();
+    let currentLine = 0;
+    let index = 0;
+
+    while (index < operations.length) {
+      if (operations[index] === "equal") {
+        currentLine += 1;
+        index += 1;
+        continue;
+      }
+
+      const insertedLines = [];
+      let deletedCount = 0;
+      while (index < operations.length && operations[index] !== "equal") {
+        if (operations[index] === "insert") {
+          insertedLines.push(currentLine);
+          currentLine += 1;
+        } else {
+          deletedCount += 1;
+        }
+        index += 1;
+      }
+
+      const modifiedCount = Math.min(deletedCount, insertedLines.length);
+      insertedLines.forEach((line, insertedIndex) => {
+        lines.set(line, insertedIndex < modifiedCount ? "modified" : "added");
+      });
+      if (deletedCount > modifiedCount) {
+        deletions.add(Math.max(0, Math.min(currentLine, lineCount - 1)));
+      }
+    }
+    return { lines, deletions };
+  },
+  renderSourceDiff() {
+    const state = App.state;
+    if (!state.scriptSourceLoaded || !state.sourceDirty) {
+      this.clearSourceDiff();
+      return;
+    }
+
+    const current = this.elements.sourceCode._pyneCodeEditor.getValue();
+    if (current === state.scriptSource) {
+      this.clearSourceDiff();
+      return;
+    }
+
+    const changes = this.sourceDiffMarkers(state.scriptSource, current);
+    this.elements.sourceCode._pyneCodeEditor.setChangedLines({
+      lines: [...changes.lines.entries()].map(([line, type]) => ({ line, type })),
+      deletionLines: [...changes.deletions],
+    });
+  },
+  resetSourceUndo() {
+    this.elements.sourceCode._pyneCodeEditor.clearHistory();
+    this.updateSourceUndoState();
+  },
+  updateSourceUndoState() {
+    const button = this.elements.sourceUndo;
+    if (!button) return;
+    const codeEditor = this.elements.sourceCode._pyneCodeEditor;
+    button.disabled = !App.state.sourceDirty || !codeEditor.canUndo();
+  },
+  undoSourceEdit({ focusEditor = true } = {}) {
+    const codeEditor = this.elements.sourceCode._pyneCodeEditor;
+    codeEditor.undo();
+    if (focusEditor) codeEditor.focus({ preventScroll: true });
   },
   updateSourceSaveState() {
     const state = App.state;
-    this.elements.sourceSave.disabled = state.sourceSaving || !state.sourceDirty || !state.scriptSourceLoaded;
+    this.elements.sourceSave.disabled = state.sourceSaving
+      || state.sourceConflict
+      || !state.sourceDirty
+      || !state.scriptSourceLoaded;
     this.elements.sourceSave.classList.toggle("dirty", state.sourceDirty);
     this.elements.sourceSave.classList.toggle("saving", state.sourceSaving);
+    this.elements.sourceNote.disabled = !state.scriptSourceLoaded || state.sourceSaving;
+    this.elements.sourceFind.disabled = !state.scriptSourceLoaded;
+    this.elements.sourceNote.classList.toggle("note-active", Boolean(state.sourceNote.trim()));
+    this.elements.sourceNoteClose.disabled = !state.scriptSourceLoaded
+      || state.sourceSaving
+      || !state.sourceNote;
+    this.elements.sourceNoteSave.disabled = !state.scriptSourceLoaded
+      || state.sourceSaving
+      || state.sourceConflict
+      || !this.sourceNoteChanged();
     this.elements.sourceStatus.textContent = state.sourceSaving ? "Saving..." : (state.sourceSaveStatus || "");
+    this.elements.sourceHistory.disabled = !state.scriptSourceLoaded || !state.scriptSourcePath;
+    if (state.sourceHistoryOpen) {
+      this.elements.sourceHistoryRestore.disabled = state.sourceDirty
+        || this.sourceNoteChanged()
+        || state.sourceSaving
+        || state.sourceConflict
+        || !state.sourceHistoryCanRestore;
+    }
+    this.updateSourceUndoState();
+  },
+  setSourceNote(value = "") {
+    const note = String(value || "").slice(0, 240);
+    App.state.sourceNote = note;
+    if (this.sourceNoteChanged()) App.state.sourceSaveStatus = "";
+    if (this.elements.sourceNoteInput.value !== note) {
+      this.elements.sourceNoteInput.value = note;
+    }
+    this.updateSourceSaveState();
+  },
+  normalizeSourceNote(value) {
+    return String(value || "").trim().replace(/\s+/g, " ");
+  },
+  sourceNoteChanged() {
+    const state = App.state;
+    return this.normalizeSourceNote(state.sourceNote)
+      !== this.normalizeSourceNote(state.sourceBaseNote);
+  },
+  sourceHasUnsavedChanges() {
+    return App.state.sourceDirty || this.sourceNoteChanged();
+  },
+  setSourceNoteOpen(open) {
+    const state = App.state;
+    const resolved = Boolean(open) && state.scriptSourceLoaded;
+    state.sourceNoteOpen = resolved;
+    this.elements.sourceNoteEditor.classList.toggle("hidden", !resolved);
+    this.elements.sourceNote.setAttribute("aria-expanded", String(resolved));
+    if (resolved) {
+      requestAnimationFrame(() => this.elements.sourceNoteInput.focus());
+    }
   },
   handleSourceInput() {
     const state = App.state;
-    state.sourceDirty = state.scriptSourceLoaded && this.elements.sourceCode.value !== state.scriptSource;
+    state.sourceDirty = state.scriptSourceLoaded
+      && this.elements.sourceCode._pyneCodeEditor.getValue() !== state.scriptSource;
     state.sourceSaveStatus = "";
+    if (!state.sourceDirty && !state.sourceConflict) {
+      this.setSourceNotice();
+    }
     this.renderSourceHighlight();
+    if (this.sourceEditorController && this.sourceEditorController.isOpen()) {
+      this.sourceEditorController.refresh();
+    }
     this.updateSourceSaveState();
   },
   async saveSourcePanel() {
     const state = App.state;
-    if (state.sourceSaving || !state.sourceDirty) return;
+    if (state.sourceSaving || state.sourceConflict || !this.sourceHasUnsavedChanges()) return;
 
     state.sourceSaving = true;
     state.sourceSaveStatus = "";
     this.updateSourceSaveState();
-    const source = this.elements.sourceCode.value;
-    const result = await App.data.saveScriptSource(source);
+    const source = this.elements.sourceCode._pyneCodeEditor.getValue();
+    const result = await App.data.saveScriptSource(source, state.sourceNote);
     state.sourceSaving = false;
 
     if (result && result.ok) {
-      state.sourceSaveStatus = "Saved";
-      this.elements.sourceCode.value = state.scriptSource;
+      state.sourceSaveStatus = result.data.saved ? "Applies at next warm-up" : "Note saved";
+      state.sourceConflict = false;
+      this.setSourceNotice();
+      this.elements.sourceCode._pyneCodeEditor.setValue(state.scriptSource);
+      this.setSourceNote(state.sourceBaseNote);
+      this.setSourceNoteOpen(false);
+      this.resetSourceUndo();
       this.renderSourceHighlight();
       this.updateSourceSaveState();
+      if (state.sourceHistoryOpen) {
+        await this.openSourceHistory();
+      }
       setTimeout(() => {
-        if (!state.sourceDirty && state.sourceSaveStatus === "Saved") {
+        if (
+          !this.sourceHasUnsavedChanges()
+          && ["Applies at next warm-up", "Note saved"].includes(state.sourceSaveStatus)
+        ) {
           state.sourceSaveStatus = "";
           this.updateSourceSaveState();
         }
@@ -967,18 +1341,250 @@ App.ui = {
       return;
     }
 
-    state.sourceDirty = true;
     state.sourceSaveStatus = (result && result.error) || "Save failed";
+    if (result && result.status === 409) {
+      state.sourceConflict = true;
+      this.setSourceNotice("This file changed outside this editor. Reload before saving again.");
+      state.sourceSaveStatus = "Conflict";
+    }
     this.updateSourceSaveState();
   },
-  insertSourceText(text) {
-    const editor = this.elements.sourceCode;
-    const start = editor.selectionStart;
-    const end = editor.selectionEnd;
-    editor.value = editor.value.slice(0, start) + text + editor.value.slice(end);
-    editor.selectionStart = start + text.length;
-    editor.selectionEnd = start + text.length;
-    this.handleSourceInput();
+  async saveSourceNote() {
+    const state = App.state;
+    if (state.sourceSaving || state.sourceConflict || !this.sourceNoteChanged()) return;
+
+    state.sourceSaving = true;
+    state.sourceSaveStatus = "";
+    this.updateSourceSaveState();
+    const result = await App.data.saveScriptNote(state.sourceNote);
+    state.sourceSaving = false;
+
+    if (result && result.ok) {
+      state.sourceSaveStatus = "Note saved";
+      state.sourceConflict = false;
+      this.setSourceNotice();
+      this.setSourceNote(state.sourceBaseNote);
+      this.updateSourceSaveState();
+      if (state.sourceHistoryOpen) {
+        await this.openSourceHistory();
+      }
+      setTimeout(() => {
+        if (!this.sourceNoteChanged() && state.sourceSaveStatus === "Note saved") {
+          state.sourceSaveStatus = "";
+          this.updateSourceSaveState();
+        }
+      }, 1500);
+      return;
+    }
+
+    state.sourceSaveStatus = (result && result.error) || "Save failed";
+    if (result && result.status === 409) {
+      state.sourceConflict = true;
+      this.setSourceNotice("This file changed outside this editor. Reload before saving again.");
+      state.sourceSaveStatus = "Conflict";
+    }
+    this.updateSourceSaveState();
+  },
+  sourceRevisionLabel(source) {
+    return ({
+      baseline: "Baseline",
+      manual: "Manual save",
+      ai: "AI edit",
+      external: "External edit",
+      restore: "Restored version"
+    })[String(source || "")] || "Saved version";
+  },
+  sourceRevisionTime(value) {
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return String(value || "");
+    return date.toLocaleString([], {
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    });
+  },
+  setSourceHistoryState(message = "", error = false) {
+    this.elements.sourceHistoryState.textContent = String(message || "");
+    this.elements.sourceHistoryState.classList.toggle("hidden", !message);
+    this.elements.sourceHistoryState.classList.toggle("error", error);
+    this.elements.sourceHistoryContent.classList.toggle("hidden", Boolean(message));
+  },
+  renderSourceHistoryList({ preserveScroll = true } = {}) {
+    const state = App.state;
+    const scrollTop = preserveScroll ? this.elements.sourceHistoryList.scrollTop : 0;
+    const fragment = document.createDocumentFragment();
+    state.sourceHistoryRows.forEach((revision) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "source-history-item";
+      button.classList.toggle("selected", revision.id === state.sourceHistorySelectedId);
+      button.dataset.revisionId = String(revision.id);
+      const title = document.createElement("strong");
+      title.textContent = this.sourceRevisionLabel(revision.source);
+      const time = document.createElement("time");
+      time.textContent = this.sourceRevisionTime(revision.created_at);
+      const meta = document.createElement("span");
+      meta.textContent = `${String(revision.revision || "").slice(0, 8)} · ${revision.line_count || 0} lines`;
+      button.append(title, time, meta);
+      const note = String(revision.note || "").trim();
+      if (note) {
+        const noteRow = document.createElement("small");
+        noteRow.className = "source-history-item-note";
+        noteRow.textContent = note;
+        noteRow.title = note;
+        button.appendChild(noteRow);
+      }
+      fragment.appendChild(button);
+    });
+    this.elements.sourceHistoryList.replaceChildren(fragment);
+    this.elements.sourceHistoryList.scrollTop = scrollTop;
+  },
+  renderSourceHistoryDiff(diff) {
+    const fragment = document.createDocumentFragment();
+    String(diff || "").split("\n").forEach((line) => {
+      const row = document.createElement("span");
+      row.className = "history-diff-line";
+      if (line.startsWith("@@")) row.classList.add("hunk");
+      else if (line.startsWith("+++ ") || line.startsWith("--- ")) row.classList.add("file");
+      else if (line.startsWith("+")) row.classList.add("added");
+      else if (line.startsWith("-")) row.classList.add("removed");
+      else if (line.startsWith("\\ No newline")) row.classList.add("meta");
+      row.textContent = line;
+      fragment.appendChild(row);
+    });
+    this.elements.sourceHistoryDiff.replaceChildren(fragment);
+  },
+  async openSourceHistory() {
+    const state = App.state;
+    if (!state.scriptSourcePath) return;
+    state.sourceHistoryOpen = true;
+    state.sourceHistorySelectedId = null;
+    state.sourceHistoryCanRestore = false;
+    this.elements.sourceHistoryPath.textContent = state.scriptSourcePath;
+    this.elements.sourceHistoryPanel.classList.remove("hidden");
+    this.elements.sourceHistoryPanel.setAttribute("aria-hidden", "false");
+    this.elements.sourceHistoryTitle.textContent = "Select a version";
+    this.elements.sourceHistoryMeta.textContent = "";
+    this.elements.sourceHistoryDiff.textContent = "Select a version to review its changes.";
+    this.elements.sourceHistoryRestore.disabled = true;
+    this.setSourceHistoryState("Loading history...");
+    const seq = ++this.sourceHistoryRequestSeq;
+    const result = await App.data.loadScriptHistory();
+    if (seq !== this.sourceHistoryRequestSeq || !state.sourceHistoryOpen) return;
+    if (!result || !result.ok) {
+      this.setSourceHistoryState((result && result.error) || "Version history could not be loaded", true);
+      return;
+    }
+    state.sourceHistoryRows = Array.isArray(result.data.revisions) ? result.data.revisions : [];
+    if (
+      state.scriptSourceRevision
+      && result.data.current_revision
+      && result.data.current_revision !== state.scriptSourceRevision
+    ) {
+      state.sourceConflict = true;
+      state.sourceSaveStatus = "Conflict";
+      this.setSourceNotice("This file changed outside this editor. Reload before saving or restoring.");
+    }
+    this.renderSourceHistoryList({ preserveScroll: false });
+    if (!state.sourceHistoryRows.length) {
+      this.setSourceHistoryState("No saved versions.");
+      return;
+    }
+    this.setSourceHistoryState();
+    await this.selectSourceHistoryRevision(state.sourceHistoryRows[0].id);
+  },
+  closeSourceHistory() {
+    const state = App.state;
+    state.sourceHistoryOpen = false;
+    state.sourceHistorySelectedId = null;
+    state.sourceHistoryCanRestore = false;
+    this.sourceHistoryRequestSeq += 1;
+    this.sourceHistoryDiffRequestSeq += 1;
+    this.elements.sourceHistoryPanel.classList.add("hidden");
+    this.elements.sourceHistoryPanel.setAttribute("aria-hidden", "true");
+  },
+  async selectSourceHistoryRevision(revisionId) {
+    const state = App.state;
+    const resolvedId = Number(revisionId);
+    const revision = state.sourceHistoryRows.find((item) => item.id === resolvedId);
+    if (!revision) return;
+    state.sourceHistorySelectedId = resolvedId;
+    state.sourceHistoryCanRestore = false;
+    this.renderSourceHistoryList();
+    this.elements.sourceHistoryTitle.textContent = this.sourceRevisionLabel(revision.source);
+    this.elements.sourceHistoryMeta.textContent = this.sourceRevisionTime(revision.created_at);
+    this.elements.sourceHistoryDiff.textContent = "Loading diff...";
+    this.elements.sourceHistoryRestore.disabled = true;
+    const seq = ++this.sourceHistoryDiffRequestSeq;
+    const result = await App.data.loadScriptDiff(resolvedId);
+    if (seq !== this.sourceHistoryDiffRequestSeq || state.sourceHistorySelectedId !== resolvedId) return;
+    if (!result || !result.ok) {
+      this.elements.sourceHistoryDiff.textContent = (result && result.error) || "Diff could not be loaded";
+      return;
+    }
+    state.sourceHistoryCanRestore = Boolean(result.data.changed) && !state.sourceConflict;
+    if (result.data.changed) {
+      this.renderSourceHistoryDiff(result.data.diff || "No textual changes.");
+    } else {
+      this.elements.sourceHistoryDiff.textContent = "This is the current file content.";
+    }
+    this.updateSourceSaveState();
+  },
+  async restoreSourceHistoryRevision() {
+    const state = App.state;
+    if (
+      this.sourceHasUnsavedChanges()
+      || state.sourceSaving
+      || state.sourceConflict
+      || !state.sourceHistoryCanRestore
+      || state.sourceHistorySelectedId == null
+    ) return;
+    state.sourceSaving = true;
+    state.sourceSaveStatus = "";
+    this.updateSourceSaveState();
+    const result = await App.data.restoreScriptRevision(state.sourceHistorySelectedId);
+    state.sourceSaving = false;
+    if (!result || !result.ok) {
+      if (result && result.status === 409) {
+        state.sourceConflict = true;
+        state.sourceSaveStatus = "Conflict";
+        this.setSourceNotice("This file changed before restore. Reload and review the version again.");
+      } else {
+        state.sourceSaveStatus = (result && result.error) || "Restore failed";
+      }
+      this.updateSourceSaveState();
+      return;
+    }
+    state.sourceSaveStatus = "Applies at next warm-up";
+    this.elements.sourceCode._pyneCodeEditor.setValue(state.scriptSource);
+    this.setSourceNote(state.sourceBaseNote);
+    this.setSourceNoteOpen(false);
+    this.resetSourceUndo();
+    this.renderSourceHighlight();
+    this.setSourceNotice();
+    this.updateSourceSaveState();
+    await App.data.loadInfo();
+    await this.openSourceHistory();
+  },
+  async reloadSourceFromDisk() {
+    const loaded = await App.data.loadScriptSource();
+    if (!loaded) {
+      App.state.sourceSaveStatus = "Reload failed";
+      this.updateSourceSaveState();
+      return;
+    }
+    App.state.sourceConflict = false;
+    this.setSourceNote(App.state.sourceBaseNote);
+    this.setSourceNoteOpen(false);
+    this.setSourceNotice();
+    this.renderSourcePanel();
+  },
+  toggleSourceComments() {
+    this.elements.sourceCode._pyneCodeEditor.toggleComment();
   },
   escapeHtml(value) {
     return String(value).replace(/[&<>"']/g, (ch) => ({
@@ -988,116 +1594,6 @@ App.ui = {
       "\"": "&quot;",
       "'": "&#39;"
     })[ch]);
-  },
-  wrapPythonToken(className, value) {
-    return `<span class="${className}">${this.escapeHtml(value)}</span>`;
-  },
-  highlightPython(source) {
-    if (!source) {
-      return this.escapeHtml("No source loaded.");
-    }
-
-    const keywords = new Set([
-      "and", "as", "assert", "async", "await", "break", "class", "continue", "def",
-      "del", "elif", "else", "except", "finally", "for", "from", "global", "if",
-      "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise",
-      "return", "try", "while", "with", "yield"
-    ]);
-    const builtins = new Set([
-      "abs", "all", "any", "bool", "dict", "enumerate", "filter", "float", "int",
-      "len", "list", "map", "max", "min", "open", "print", "range", "reversed",
-      "round", "set", "sorted", "str", "sum", "super", "tuple", "type", "zip"
-    ]);
-    const constants = new Set(["False", "None", "True", "Ellipsis", "NotImplemented"]);
-    let html = "";
-    let i = 0;
-
-    const isIdentStart = (ch) => /[A-Za-z_]/.test(ch);
-    const isIdent = (ch) => /[A-Za-z0-9_]/.test(ch);
-    const stringPrefixMatch = (offset) => {
-      const part = source.slice(offset, offset + 3);
-      const match = /^(?:[rRuUbBfF]|[rR][fF]|[fF][rR]|[bB][rR]|[rR][bB])(?=['"])/.exec(part);
-      return match ? match[0] : "";
-    };
-
-    while (i < source.length) {
-      const ch = source[i];
-      const prefix = stringPrefixMatch(i);
-      const quoteOffset = i + prefix.length;
-
-      if ((prefix || ch === "\"" || ch === "'") && (source[quoteOffset] === "\"" || source[quoteOffset] === "'")) {
-        const quote = source[quoteOffset];
-        const triple = source.slice(quoteOffset, quoteOffset + 3) === quote.repeat(3);
-        let end = quoteOffset + (triple ? 3 : 1);
-        while (end < source.length) {
-          if (triple && source.slice(end, end + 3) === quote.repeat(3)) {
-            end += 3;
-            break;
-          }
-          if (!triple && source[end] === "\n") {
-            break;
-          }
-          if (!triple && source[end] === "\\") {
-            end += 2;
-          } else if (!triple && source[end] === quote) {
-            end += 1;
-            break;
-          } else {
-            end += 1;
-          }
-        }
-        html += this.wrapPythonToken("py-string", source.slice(i, end));
-        i = end;
-        continue;
-      }
-
-      if (ch === "#") {
-        let end = i;
-        while (end < source.length && source[end] !== "\n") end += 1;
-        html += this.wrapPythonToken("py-comment", source.slice(i, end));
-        i = end;
-        continue;
-      }
-
-      if (ch === "@" && (i === 0 || source[i - 1] === "\n")) {
-        let end = i + 1;
-        while (end < source.length && /[A-Za-z0-9_.]/.test(source[end])) end += 1;
-        html += this.wrapPythonToken("py-decorator", source.slice(i, end));
-        i = end;
-        continue;
-      }
-
-      if (/[0-9]/.test(ch)) {
-        const match = /^(?:0[xX][0-9A-Fa-f_]+|0[bB][01_]+|0[oO][0-7_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d[\d_]*)?j?)/.exec(source.slice(i));
-        if (match) {
-          html += this.wrapPythonToken("py-number", match[0]);
-          i += match[0].length;
-          continue;
-        }
-      }
-
-      if (isIdentStart(ch)) {
-        let end = i + 1;
-        while (end < source.length && isIdent(source[end])) end += 1;
-        const word = source.slice(i, end);
-        if (keywords.has(word)) {
-          html += this.wrapPythonToken("py-keyword", word);
-        } else if (builtins.has(word)) {
-          html += this.wrapPythonToken("py-builtin", word);
-        } else if (constants.has(word)) {
-          html += this.wrapPythonToken("py-constant", word);
-        } else {
-          html += this.escapeHtml(word);
-        }
-        i = end;
-        continue;
-      }
-
-      html += this.escapeHtml(ch);
-      i += 1;
-    }
-
-    return html;
   },
   async toggleSourcePanel(forceOpen = null) {
     const state = App.state;
@@ -1111,12 +1607,16 @@ App.ui = {
       this.toggleAlertsMenu(false);
       // 열 때마다 디스크 최신본을 다시 불러와 다른 기기에서 저장한 내용이 즉시 보이게 한다.
       // 단, 저장 안 한 로컬 편집(dirty)이 있으면 덮어쓰지 않는다.
-      if (!state.sourceDirty) {
+      if (!this.sourceHasUnsavedChanges()) {
         await App.data.loadScriptSource();
       }
       this.renderSourcePanel();
     } else if (this.elements.sourceCode) {
-      this.elements.sourceCode.blur();
+      this.closeSourceHistory();
+      if (this.sourceEditorController) {
+        this.sourceEditorController.close({ focusEditor: false });
+      }
+      this.elements.sourceCode._pyneCodeEditor.blur();
     }
     if (App.chart && App.chart.resizeToContainer) {
       requestAnimationFrame(() => App.chart.resizeToContainer());
@@ -1153,6 +1653,7 @@ App.ui = {
     const { min, max } = this.getSourcePaneBounds();
     const clamped = Math.max(min, Math.min(max, Math.round(width)));
     document.documentElement.style.setProperty("--source-pane-width", `${clamped}px`);
+    this.scheduleSourceDiff();
     if (App.chart && App.chart.resizeToContainer) {
       requestAnimationFrame(() => App.chart.resizeToContainer());
     }
@@ -1202,6 +1703,7 @@ App.ui = {
 
     window.addEventListener("resize", () => {
       if (window.matchMedia("(max-width: 640px), (hover: none) and (pointer: coarse)").matches) {
+        this.scheduleSourceDiff();
         return;
       }
       const panelWidth = this.elements.sourcePanel.getBoundingClientRect().width;
@@ -1240,9 +1742,44 @@ App.ui = {
       sourceToggle,
       sourceBackdrop,
       sourceClose,
+      sourceUndo,
+      sourceFind,
+      sourceNote,
+      sourceNoteInput,
+      sourceNoteClose,
+      sourceNoteSave,
+      sourceHistory,
       sourceSave,
-      sourceCode
+      sourceCode,
+      sourceReload,
+      sourceHistoryClose,
+      sourceHistoryList,
+      sourceHistoryRestore
     } = this.elements;
+    window.PyneCodeMirror.create(sourceCode, {
+      value: sourceCode.textContent || "No source loaded.",
+      language: "python",
+      ariaLabel: "Script source",
+    });
+    this.sourceEditorController = window.PyneEditor.create({
+      editor: sourceCode,
+      panel: this.elements.sourceFindPanel,
+      findInput: this.elements.sourceFindInput,
+      replaceInput: this.elements.sourceReplaceInput,
+      replaceRow: this.elements.sourceReplaceRow,
+      replaceToggle: this.elements.sourceReplaceToggle,
+      count: this.elements.sourceFindCount,
+      previousButton: this.elements.sourceFindPrevious,
+      nextButton: this.elements.sourceFindNext,
+      closeButton: this.elements.sourceFindClose,
+      replaceButton: this.elements.sourceReplaceOne,
+      replaceAllButton: this.elements.sourceReplaceAll,
+      afterReplace: () => this.handleSourceInput(),
+      onOpen: () => this.setSourceNoteOpen(false),
+    });
+    this.elements.sourcePanel.addEventListener("keydown", (event) => {
+      this.sourceEditorController.handleShortcut(event);
+    });
     alertsToggle.addEventListener("click", (e) => {
       e.stopPropagation();
       this.toggleAlertsMenu();
@@ -1379,37 +1916,131 @@ App.ui = {
       this.toggleSourcePanel(false);
     });
 
+    sourceUndo.addEventListener("pointerdown", (e) => {
+      this.sourceUndoPointerType = e.pointerType || "";
+    });
+
+    sourceUndo.addEventListener("pointercancel", () => {
+      this.sourceUndoPointerType = "";
+    });
+
+    sourceUndo.addEventListener("click", () => {
+      const focusEditor = this.sourceUndoPointerType !== "touch";
+      this.sourceUndoPointerType = "";
+      this.undoSourceEdit({ focusEditor });
+    });
+
+    sourceFind.addEventListener("click", () => {
+      this.sourceEditorController.toggle();
+    });
+
+    sourceHistory.addEventListener("click", () => {
+      this.openSourceHistory();
+    });
+
+    sourceHistoryClose.addEventListener("click", () => {
+      this.closeSourceHistory();
+    });
+
+    sourceHistoryList.addEventListener("click", (e) => {
+      const item = e.target && e.target.closest
+        ? e.target.closest("[data-revision-id]")
+        : null;
+      if (!item) return;
+      this.selectSourceHistoryRevision(Number(item.dataset.revisionId));
+    });
+
+    sourceHistoryRestore.addEventListener("click", () => {
+      this.restoreSourceHistoryRevision();
+    });
+
+    sourceReload.addEventListener("click", () => {
+      this.reloadSourceFromDisk();
+    });
+
     sourceSave.addEventListener("click", () => {
       this.saveSourcePanel();
+    });
+
+    sourceNote.addEventListener("click", () => {
+      const opening = !App.state.sourceNoteOpen;
+      if (opening) this.sourceEditorController.close({ focusEditor: false });
+      if (!opening) this.setSourceNote(App.state.sourceBaseNote);
+      this.setSourceNoteOpen(opening);
+    });
+
+    sourceNoteClose.addEventListener("click", () => {
+      this.setSourceNote("");
+      sourceNoteInput.focus({ preventScroll: true });
+    });
+
+    sourceNoteSave.addEventListener("click", () => {
+      this.saveSourceNote();
+    });
+
+    sourceNoteInput.addEventListener("input", (e) => {
+      this.setSourceNote(e.target.value);
+    });
+
+    sourceNoteInput.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" && e.key !== "Enter") return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.setSourceNoteOpen(false);
+      sourceCode._pyneCodeEditor.focus({ preventScroll: true });
     });
 
     sourceCode.addEventListener("input", () => {
       this.handleSourceInput();
     });
 
-    sourceCode.addEventListener("scroll", () => {
-      this.syncSourceScroll();
-    });
-
     sourceCode.addEventListener("keydown", (e) => {
+      if (this.sourceEditorController.handleShortcut(e)) return;
+      if (e.defaultPrevented) return;
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey &&
+        !e.shiftKey &&
+        e.key.toLowerCase() === "z"
+      ) {
+        e.preventDefault();
+        this.undoSourceEdit();
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
         this.saveSourcePanel();
         return;
       }
-      if (e.key === "Tab") {
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey &&
+        (e.key === "/" || e.code === "Slash")
+      ) {
         e.preventDefault();
-        this.insertSourceText("    ");
+        this.toggleSourceComments();
       }
     });
 
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
+        this.elements.chartRunnerStatus.classList.remove("open");
+        this.elements.chartRunnerStatus.setAttribute("aria-expanded", "false");
         this.closeManualAlertConfirm();
         this.closeManualAlertMenu();
         this.closeAlertTemplateModal();
-        this.toggleSourcePanel(false);
+        if (App.state.sourceHistoryOpen) {
+          this.closeSourceHistory();
+        } else {
+          this.toggleSourcePanel(false);
+        }
       }
+    });
+
+    window.addEventListener("beforeunload", (e) => {
+      if (!this.sourceHasUnsavedChanges()) return;
+      e.preventDefault();
+      e.returnValue = "";
     });
 
     document.addEventListener("click", (e) => {
@@ -1469,6 +2100,7 @@ App.ui = {
     });
 
     this.attachSourceResize();
+    this.initRunnerStatus();
   }
 };
 

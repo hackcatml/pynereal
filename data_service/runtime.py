@@ -17,16 +17,17 @@ from pynecore.core.exchange_policy import tradingview_hides_zero_volume
 from log_utils import log_with_time
 from manual_alerts import build_manual_alert_payload, send_manual_alert_payload
 from ohlcv_paths import make_ohlcv_paths, runtime_output_dir
+from prerun_scheduler import default_offset_seconds
+from market_data_diagnostics import log_session_diagnostic
 from state import DataState
 from tv_logos import static_logo_info
+from verification import VerificationCoordinator, VerificationDeliveryService
 from ws_manager import WSManager
 
 
 _MAX_AI_INSTRUCTION_CHARS = 4_000
 _MAX_PROCESSED_AI_INSTRUCTION_EVENTS = 500
 _MAX_RECENT_RAW_TRADE_KEYS = 10_000
-
-
 def _plot_wire_value(value: Any, kind: str) -> float | int | None:
     if value is None or str(value) == "":
         return None
@@ -76,6 +77,7 @@ class Feed:
         self.paths = FeedPaths.build(spec)
         self.state = DataState()
         self.tasks: Dict[str, Any] = {}
+        self.finalized_candle_probe: Any | None = None
         self.history_ready_event = asyncio.Event()
         self.data_integrity_lock = asyncio.Lock()
         self.collector_error: Optional[str] = None
@@ -85,8 +87,12 @@ class Feed:
         self._last_raw_trade_price: Optional[float] = None
         self._last_raw_trade_time_ms: Optional[int] = None
         self._raw_trade_stream_started = False
+        self.prerun_prepare_offset_seconds = default_offset_seconds(spec.timeframe)
         self._recent_raw_trade_keys: deque[tuple[Any, ...]] = deque()
         self._recent_raw_trade_key_set: set[tuple[Any, ...]] = set()
+        self._verification_dispatch_sequence = 0
+        self._verification_primary_results: dict[int, dict[str, Any]] = {}
+        self._verification_probe_lock = asyncio.Lock()
         # session_id -> Session
         self.subscribers: Dict[str, "Session"] = {}
 
@@ -185,20 +191,79 @@ class Feed:
         for session in list(self.subscribers.values()):
             if session.runner_count <= 0:
                 continue
-            session_payload = dict(payload)
-            if (
-                session.strategy_evaluation_enabled
-                and payload.get("type") in {
-                    "prerun_ready",
-                    "prerun_ready_after_history_download",
-                    "run_ready",
-                }
-            ):
-                generation_id = await session.begin_calculation(session_payload)
-                if generation_id is not None:
-                    session_payload["calculation_generation_id"] = generation_id
-                    session_payload["strategy_evaluation_enabled"] = True
-            await session.send_to_runners(session_payload)
+            await session.handle_feed_event(dict(payload))
+
+    def queue_verification_candle(self, payload: dict[str, Any]) -> None:
+        self._verification_dispatch_sequence += 1
+        key = f"verification_dispatch:{self._verification_dispatch_sequence}"
+        task = asyncio.create_task(self._dispatch_verification_candle(payload))
+        self.tasks[key] = task
+
+        def discard(_task: asyncio.Task) -> None:
+            self.tasks.pop(key, None)
+
+        task.add_done_callback(discard)
+
+    async def _dispatch_verification_candle(self, payload: dict[str, Any]) -> None:
+        for session in list(self.subscribers.values()):
+            if session.runner_count <= 0 or not session.verification.enabled:
+                continue
+            await session.verification.handle_candle(dict(payload))
+
+    def record_verification_primary_result(self, payload: dict[str, Any]) -> None:
+        try:
+            timestamp_ms = int(payload["candle_timestamp_ms"])
+        except (KeyError, TypeError, ValueError):
+            return
+        existing = self._verification_primary_results.get(timestamp_ms)
+        confirmed_bar = payload.get("confirmed_bar")
+        has_bar = (
+            isinstance(confirmed_bar, (list, tuple))
+            and len(confirmed_bar) >= 6
+        )
+        existing_bar = existing.get("confirmed_bar") if existing else None
+        existing_has_bar = (
+            isinstance(existing_bar, (list, tuple)) and len(existing_bar) >= 6
+        )
+        replace = existing is None or (has_bar and not existing_has_bar)
+        if has_bar and existing_has_bar:
+            try:
+                replace = float(confirmed_bar[5]) >= float(existing_bar[5])
+            except (TypeError, ValueError, OverflowError):
+                replace = False
+        if replace:
+            self._verification_primary_results[timestamp_ms] = dict(payload)
+        while len(self._verification_primary_results) > 128:
+            self._verification_primary_results.pop(
+                min(self._verification_primary_results)
+            )
+        probe = self.finalized_candle_probe
+        if probe is not None:
+            probe.record_primary_result(payload)
+
+    def seed_verification_primary_results(self, probe: Any) -> None:
+        for payload in self._verification_primary_results.values():
+            probe.record_primary_result(payload)
+
+    def clear_verification_primary_results(self) -> None:
+        self._verification_primary_results.clear()
+
+    def log_market_data_diagnostic(self, event: dict[str, Any]) -> None:
+        feed_data = {
+            "id": self.spec.id,
+            "provider": self.spec.provider,
+            "exchange": self.spec.exchange,
+            "symbol": self.spec.symbol,
+            "timeframe": self.spec.timeframe,
+            "market_type": self.spec.market_type,
+        }
+        for session in list(self.subscribers.values()):
+            log_session_diagnostic(
+                session.paths.plot_path.parent,
+                session.spec.id,
+                event,
+                feed=feed_data,
+            )
 
     def history_ready(self) -> bool:
         return self.history_ready_event.is_set()
@@ -257,6 +322,8 @@ class Session:
         feed: Feed,
         *,
         strategy_evaluation_enabled: bool = False,
+        verification_enabled: bool = False,
+        verification_delivery: VerificationDeliveryService | None = None,
     ) -> None:
         self.spec = spec
         self.feed = feed
@@ -269,10 +336,20 @@ class Session:
         self.plotchar_history: List[Dict[str, Any]] = []
         self.client_roles: Dict[WebSocket, Optional[str]] = {}
         self.runner_count = 0
+        self.verification = VerificationCoordinator(
+            self,
+            enabled=verification_enabled,
+            delivery=verification_delivery,
+        )
         # True only after the runner finishes its first pre_run (chart plots ready).
         # Drives the dashboard LED: connected-but-prerunning = "starting" (amber),
         # ready = "running" (green).
         self.runner_ready = False
+        self.runner_phase = "stopped"
+        self.next_prerun_at: int | None = None
+        self.prerun_effective_offset_seconds = default_offset_seconds(spec.timeframe)
+        self.prerun_duplicate = False
+        self._prerun_dispatch_task: asyncio.Task | None = None
         self.history_resync_pending = False
         self.calculation_generation_id = uuid.uuid4().hex
         self.calculation_status = "stopped"
@@ -303,6 +380,126 @@ class Session:
         self._manual_alert_trigger_gates: dict[str, dict[str, Any]] = {}
         self.reset_manual_alert_trigger_gate()
 
+    def set_prerun_assignment(self, offset_seconds: int, duplicate: bool) -> None:
+        self.prerun_effective_offset_seconds = max(0, int(offset_seconds))
+        self.prerun_duplicate = bool(duplicate)
+
+    def _runner_phase_payload(self) -> dict[str, Any]:
+        return {
+            "type": "runner_phase",
+            "phase": self.runner_phase,
+            "next_prerun_at": self.next_prerun_at,
+        }
+
+    async def _set_runner_phase(
+        self,
+        phase: str,
+        *,
+        next_prerun_at: int | None = None,
+    ) -> None:
+        changed = phase != self.runner_phase or next_prerun_at != self.next_prerun_at
+        self.runner_phase = phase
+        self.next_prerun_at = next_prerun_at
+        if not changed:
+            return
+        await self.send_to_charts(self._runner_phase_payload())
+        await self._notify_status()
+
+    def _cancel_prerun_dispatch(self) -> None:
+        task = self._prerun_dispatch_task
+        self._prerun_dispatch_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    @staticmethod
+    def _event_new_bar_time_ms(event: dict[str, Any]) -> int | None:
+        bars = event.get("confirmed_bar_and_new_bar")
+        if not isinstance(bars, list) or len(bars) < 2:
+            return None
+        new_bar = bars[1]
+        if not isinstance(new_bar, (list, tuple)) or not new_bar:
+            return None
+        try:
+            return int(new_bar[0])
+        except (TypeError, ValueError):
+            return None
+
+    async def _send_runner_event(self, payload: dict[str, Any]) -> None:
+        session_payload = dict(payload)
+        if (
+            session_payload.get("type") == "run_ready"
+            and self.verification.enabled
+        ):
+            session_payload["verification_generation_id"] = (
+                self.verification.generation_id
+            )
+        if (
+            self.strategy_evaluation_enabled
+            and session_payload.get("type") in {
+                "prerun_ready",
+                "prerun_ready_after_history_download",
+                "run_ready",
+            }
+        ):
+            generation_id = await self.begin_calculation(session_payload)
+            if generation_id is not None:
+                session_payload["calculation_generation_id"] = generation_id
+                session_payload["strategy_evaluation_enabled"] = True
+        await self.send_to_runners(session_payload)
+
+    async def _schedule_next_prerun(self, run_ready: dict[str, Any]) -> None:
+        new_bar_time_ms = self._event_new_bar_time_ms(run_ready)
+        if new_bar_time_ms is None:
+            await self._set_runner_phase("running")
+            return
+        target_ms = new_bar_time_ms + self.prerun_effective_offset_seconds * 1000
+        await self._set_runner_phase("prerun_scheduled", next_prerun_at=target_ms)
+
+    async def _dispatch_prerun(self, payload: dict[str, Any], target_ms: int) -> None:
+        try:
+            delay = max(0.0, (target_ms - int(time.time() * 1000)) / 1000)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            if self.runner_count <= 0:
+                return
+            await self._set_runner_phase("prerun_active")
+            await self._send_runner_event(payload)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if self._prerun_dispatch_task is asyncio.current_task():
+                self._prerun_dispatch_task = None
+
+    async def _start_prerun_dispatch(self, payload: dict[str, Any], target_ms: int) -> None:
+        if target_ms > int(time.time() * 1000):
+            await self._set_runner_phase(
+                "prerun_scheduled",
+                next_prerun_at=target_ms,
+            )
+        self._cancel_prerun_dispatch()
+        self._prerun_dispatch_task = asyncio.create_task(
+            self._dispatch_prerun(payload, target_ms),
+            name=f"prerun-dispatch:{self.spec.id}",
+        )
+
+    async def handle_feed_event(self, payload: dict[str, Any]) -> None:
+        event_type = payload.get("type")
+        if event_type == "prerun_ready":
+            new_bar_time_ms = self._event_new_bar_time_ms(payload)
+            if new_bar_time_ms is None:
+                target_ms = int(time.time() * 1000)
+            else:
+                target_ms = new_bar_time_ms + self.prerun_effective_offset_seconds * 1000
+            await self._start_prerun_dispatch(payload, target_ms)
+            return
+
+        if event_type == "run_ready":
+            await self._send_runner_event(payload)
+            await self._schedule_next_prerun(payload)
+            return
+
+        await self._send_runner_event(payload)
+
     def reconfigure_script(self, spec: SessionSpec) -> None:
         """Apply a stopped-session script change without replacing its identity."""
         self.spec = spec
@@ -310,6 +507,9 @@ class Session:
         self.plot_options.clear()
         self.plotchar_history.clear()
         self.runner_ready = False
+        self.runner_phase = "stopped"
+        self.next_prerun_at = None
+        self._cancel_prerun_dispatch()
         self.history_resync_pending = False
         self.calculation_generation_id = uuid.uuid4().hex
         self.calculation_status = "stopped"
@@ -323,6 +523,7 @@ class Session:
         self.chart_info["script_source"] = ""
         self._processed_ai_instruction_ids.clear()
         self._processed_ai_instruction_order.clear()
+        self.verification.reset_for_reconfigure()
 
     @property
     def ohlcv_path(self) -> Path:
@@ -476,9 +677,14 @@ class Session:
             if self.runner_count <= 0:
                 self.runner_count = 0
                 self.runner_ready = False
+                self._cancel_prerun_dispatch()
+                self.runner_phase = "stopped"
+                self.next_prerun_at = None
                 await self.set_calculation_stopped()
                 await self.send_to_charts({"type": "runner_disconnected"})
             await self._notify_status()
+        elif role == "verification_runner":
+            await self.verification.handle_disconnect()
 
     async def handle_text(self, ws: WebSocket, msg_text: str) -> None:
         try:
@@ -495,9 +701,15 @@ class Session:
         ohlcv_path = self.feed.paths.ohlcv_path
         plot_path = self.paths.plot_path
 
+        if await self.verification.handle_message(ws, event):
+            return
+
         if msg_type == "client_hello":
             role = event.get("role")
             if role == "runner":
+                if self.runner_count <= 0:
+                    self.verification.reset_generation()
+                self.runner_ready = False  # fresh runner: pre_run not done yet (amber)
                 if self.strategy_evaluation_enabled:
                     await self.begin_calculation({"type": "runner_start"})
                 # Replay the feed's pending after-history prerun only after the
@@ -518,9 +730,8 @@ class Session:
 
                 self.client_roles[ws] = role
                 self.runner_count += 1
-                self.runner_ready = False  # fresh runner: pre_run not done yet (amber)
+                await self._set_runner_phase("prerun_active")
                 await self.send_to_charts({"type": "runner_connected"})
-                await self._notify_status()
                 # Push this session's webhook/telegram config to the runner only
                 # (carries url/token — must not reach chart-page browsers).
                 await ws_manager.send(ws, self._webhook_config_payload())
@@ -528,6 +739,7 @@ class Session:
                 self.client_roles[ws] = role
                 if self.runner_count > 0:
                     await ws_manager.send(ws, {"type": "runner_connected"})
+                await ws_manager.send(ws, self._runner_phase_payload())
                 await ws_manager.send(ws, {
                     "type": "manual_alert_trigger",
                     "triggers": self.manual_alert_triggers_payload(),
@@ -536,10 +748,13 @@ class Session:
                 self.client_roles[ws] = None
 
         elif msg_type == "runner_ready":
+            if self.client_roles.get(ws) != "runner":
+                return
             # Runner finished its first pre_run -> flip the LED to green.
             self.runner_ready = True
             self.history_resync_pending = False
-            await self._notify_status()
+            await self._set_runner_phase("running")
+            await self.verification.on_primary_ready()
 
         elif msg_type == "strategy_snapshot":
             if self.client_roles.get(ws) != "runner":
@@ -663,6 +878,10 @@ class Session:
                     print(f"[{self.spec.id}] Failed to broadcast plot data: {e}")
 
         elif msg_type == "script_info":
+            # The runner sends script_info again after each pre_run. Its initial
+            # connection copy arrives before runner_ready and is ignored here.
+            if self.runner_ready and self.runner_phase == "prerun_active":
+                await self._set_runner_phase("running")
             title = event.get("title") or "No title"
             self.chart_info["script_title"] = title
             self.chart_info["script_source_name"] = (
@@ -676,8 +895,12 @@ class Session:
                 "source_name": self.chart_info.get("script_source_name"),
                 "source": self.chart_info.get("script_source") or "",
             })
+            if self.client_roles.get(ws) == "runner":
+                await self.verification.on_script_info()
 
         elif (msg_type == "reset_history") or (msg_type == "script_modified"):
+            if self.client_roles.get(ws) == "runner":
+                self.verification.on_primary_reset()
             self.trades_history.clear()
             self.plot_options.clear()
             self.plotchar_history.clear()
@@ -999,6 +1222,12 @@ class Session:
             "data_since_time": feed.history_start_time(),
             "runner_connected": self.runner_count > 0,
             "runner_ready": self.runner_ready,
+            "runner_phase": self.runner_phase,
+            "next_prerun_at": self.next_prerun_at,
+            "prerun_mode": self.spec.prerun_mode,
+            "prerun_offset_seconds": self.spec.prerun_offset_seconds,
+            "prerun_effective_offset_seconds": self.prerun_effective_offset_seconds,
+            "prerun_duplicate": self.prerun_duplicate,
             "calculation": self.calculation_state_payload(),
             "last_bar_time": feed.last_bar_time(),
             "last_price": feed.last_price(),

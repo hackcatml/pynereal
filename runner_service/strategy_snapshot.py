@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable
 
+from pynecore import lib
 from pynecore.core.strategy_stats import calculate_strategy_statistics
 from pynecore.types.na import NA
 
@@ -455,6 +456,9 @@ def build_strategy_snapshot(
             curve if curve else None,
             getattr(runner, "first_price", None),
             getattr(runner, "last_price", None),
+            last_time=lib._time,
+            timezone=getattr(runner, "tz", UTC),
+            risk_free_rate=script.risk_free_rate,
         ))
         statistics = _json_value(statistics)
     except Exception as exc:

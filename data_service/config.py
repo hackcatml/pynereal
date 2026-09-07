@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from pynecore.cli.app import app_state
+from prerun_scheduler import validate_prerun_schedule
 
 # Maximum number of concurrent sessions the hub will manage (decision 8-4).
 MAX_SESSIONS = 20
@@ -152,6 +153,8 @@ class SessionSpec:
     script_name: str
     webhook: dict  # {"enabled": bool, "telegram_notification": bool}  (decision 8-1)
     market_type: str = ""
+    prerun_mode: str = "auto"
+    prerun_offset_seconds: int | None = None
     manual_alert_templates: list[dict] = field(default_factory=list)
     manual_alert_triggers: list[dict] = field(default_factory=list)
 
@@ -168,6 +171,11 @@ class SessionSpec:
         script_name = (d.get("script_name") or "")
         sid = (d.get("id") or "").strip() or slugify_session_id(exchange, symbol, timeframe, script_name)
         webhook = d.get("webhook") or {}
+        prerun_mode, prerun_offset_seconds = validate_prerun_schedule(
+            timeframe,
+            d.get("prerun_mode", "auto"),
+            d.get("prerun_offset_seconds"),
+        )
         return cls(
             id=sid,
             provider=provider,
@@ -184,6 +192,8 @@ class SessionSpec:
                 "telegram_chat_id": (webhook.get("telegram_chat_id") or ""),
             },
             market_type=sanitize_market_type(d.get("market_type")),
+            prerun_mode=prerun_mode,
+            prerun_offset_seconds=prerun_offset_seconds,
             manual_alert_templates=sanitize_manual_alert_templates(d.get("manual_alert_templates")),
             manual_alert_triggers=sanitize_manual_alert_triggers(d.get("manual_alert_triggers")),
         )
@@ -210,6 +220,8 @@ class SessionSpec:
             history_since=self.history_since, script_name=self.script_name,
             webhook=wh,
             market_type=self.market_type,
+            prerun_mode=self.prerun_mode,
+            prerun_offset_seconds=self.prerun_offset_seconds,
             manual_alert_templates=[dict(t) for t in self.manual_alert_templates],
             manual_alert_triggers=[dict(t) for t in self.manual_alert_triggers],
         )
@@ -221,6 +233,8 @@ class SessionSpec:
             history_since=history_since, script_name=self.script_name,
             webhook=dict(self.webhook),
             market_type=self.market_type,
+            prerun_mode=self.prerun_mode,
+            prerun_offset_seconds=self.prerun_offset_seconds,
             manual_alert_templates=[dict(t) for t in self.manual_alert_templates],
             manual_alert_triggers=[dict(t) for t in self.manual_alert_triggers],
         )
@@ -232,6 +246,8 @@ class SessionSpec:
             history_since=self.history_since, script_name=self.script_name,
             webhook=dict(self.webhook),
             market_type=self.market_type,
+            prerun_mode=self.prerun_mode,
+            prerun_offset_seconds=self.prerun_offset_seconds,
             manual_alert_templates=sanitize_manual_alert_templates(templates),
             manual_alert_triggers=[dict(t) for t in self.manual_alert_triggers],
         )
@@ -243,6 +259,8 @@ class SessionSpec:
             history_since=self.history_since, script_name=self.script_name,
             webhook=dict(self.webhook),
             market_type=self.market_type,
+            prerun_mode=self.prerun_mode,
+            prerun_offset_seconds=self.prerun_offset_seconds,
             manual_alert_templates=[dict(t) for t in self.manual_alert_templates],
             manual_alert_triggers=sanitize_manual_alert_triggers(triggers),
         )
@@ -262,7 +280,32 @@ class SessionSpec:
         }
         if self.market_type:
             data["market_type"] = self.market_type
+        data["prerun_mode"] = self.prerun_mode
+        if self.prerun_offset_seconds is not None:
+            data["prerun_offset_seconds"] = self.prerun_offset_seconds
         return data
+
+    def with_prerun_schedule(self, mode: object, offset_seconds: object = None) -> "SessionSpec":
+        prerun_mode, prerun_offset = validate_prerun_schedule(
+            self.timeframe,
+            mode,
+            offset_seconds,
+        )
+        return SessionSpec(
+            id=self.id,
+            provider=self.provider,
+            exchange=self.exchange,
+            symbol=self.symbol,
+            timeframe=self.timeframe,
+            history_since=self.history_since,
+            script_name=self.script_name,
+            webhook=dict(self.webhook),
+            market_type=self.market_type,
+            prerun_mode=prerun_mode,
+            prerun_offset_seconds=prerun_offset,
+            manual_alert_templates=[dict(t) for t in self.manual_alert_templates],
+            manual_alert_triggers=[dict(t) for t in self.manual_alert_triggers],
+        )
 
     @property
     def feed_id(self) -> str:

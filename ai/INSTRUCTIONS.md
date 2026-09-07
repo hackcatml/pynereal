@@ -171,6 +171,50 @@ internals when an existing script already provides the required data.
   once. Reuse the returned evidence instead of refreshing it during the same
   evaluation. Recollect only when the tool explicitly rejects a stale or
   changed generation.
+- Classify requests by meaning and conversation context, not by a fixed list of
+  words or languages. A user who reports an observed mismatch, asks for deeper
+  verification, or challenges a previous claim is requesting diagnosis even if
+  the message is a short reaction such as doubt or disagreement. If the target
+  claim cannot be identified from the conversation, ask what should be checked.
+- Use `detail_level=standard` for normal session evaluation. For mismatch
+  diagnosis or verification, use `detail_level=compact`, then call
+  `compare_session_evidence` with the exact session and generation from that
+  same user turn. Call the comparison at most once and omit `max_events` unless
+  a smaller result is specifically required. Also call it when
+  `evidence_summary.diagnostic_recommended` is true. The comparison reuses
+  cached evidence and must not be replaced with another context call or ad hoc
+  account collector.
+- Separate observations from interpretations. Find the earliest chronological
+  divergence before explaining the final value, test evidence that would
+  disprove each plausible hypothesis, and lower confidence in a prior claim
+  when the user challenges it. `first_divergence` is an observation, not a root
+  cause by itself.
+- Before diagnosing a reported historical value, compare the user's stated
+  price, quantity, time, or state with the current snapshot. If the key reported
+  state is not reproduced, say so before any explanation. Do not call the cause
+  clear or diagnose the historical discrepancy from a different current
+  lifecycle; report current observations separately and request the matching
+  historical snapshot or execution records.
+- State a cause as confirmed only when the divergence is reproduced, source
+  execution logic directly accounts for it, or two independent evidence
+  sources support the same explanation. Otherwise label it as a hypothesis and
+  state what evidence is missing.
+- Treat an unmatched account event as an account-only execution, not proof of a
+  strategy, webhook, or engine action. It may be a manual or other external
+  order. Confirm its origin from the conversation or execution records before
+  using it as a cause; otherwise present the possible origins and ask for the
+  missing fact when it changes the conclusion.
+- Honor `investigation_constraints` from the comparison. When the earliest
+  divergence is an account-only execution with unknown origin, stop strategy-side
+  attribution: do not inspect unrelated source branches, rerun the strategy,
+  capture the chart, or rank repainting, webhook, or engine hypotheses. Report
+  the unmatched execution and request its order origin or corresponding
+  alert/webhook record.
+- Read the returned structured events and `source_excerpts` before using shell
+  searches. Use repository search only when the cached source is unavailable or
+  the excerpt shows that another local file is required. Do not rerun a strategy
+  or browse the web to invent missing historical execution evidence; report the
+  required alert, webhook, or order-origin record instead.
 - Use only one ready calculation generation in an evaluation. If the generation
   changes, recollect the context instead of combining old plots or trades with
   new OHLCV.
@@ -197,8 +241,10 @@ internals when an existing script already provides the required data.
   settled, even when Pine FIFO attribution leaves a trade row carrying that ID.
   Do not describe an entry-specific close as partial or "mostly" closed unless
   this ledger or another structured quantity shows a positive remainder.
-- The exact-session context call automatically reads current positions and
-  recent order history from configured `providers.toml` accounts. Use the
+- The exact-session context call reads Account Center's cached current positions,
+  order history, and position history for configured accounts on the session
+  exchange. Missing or stale scopes are refreshed only for that exchange and
+  symbol. Use the
   returned `account_match` evidence; do not rerun those collectors through shell.
 - When the user explicitly names an account, pass that human-readable name in
   the context tool's `account` argument. The user-selected account takes

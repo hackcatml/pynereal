@@ -55,6 +55,10 @@ _MANUAL_REFRESH_TIMING: ContextVar[bool] = ContextVar(
     "account_manual_refresh_timing",
     default=False,
 )
+_IMMEDIATE_HISTORY_TIMING: ContextVar[bool] = ContextVar(
+    "account_immediate_history_timing",
+    default=False,
+)
 
 
 @contextmanager
@@ -64,6 +68,15 @@ def manual_history_refresh_timing() -> Iterator[None]:
         yield
     finally:
         _MANUAL_REFRESH_TIMING.reset(token)
+
+
+@contextmanager
+def immediate_history_refresh_timing() -> Iterator[None]:
+    token = _IMMEDIATE_HISTORY_TIMING.set(True)
+    try:
+        yield
+    finally:
+        _IMMEDIATE_HISTORY_TIMING.reset(token)
 
 
 @dataclass(frozen=True)
@@ -352,6 +365,7 @@ def normalize_historical_position(
     info = info if isinstance(info, dict) else {}
     symbol = str(position.get("symbol") or "").strip()
     side = str(position.get("side") or "").strip().lower()
+    identity_side = side
     if not symbol:
         return None
 
@@ -373,6 +387,13 @@ def normalize_historical_position(
         return None
 
     contracts = _number(position.get("contracts"))
+    identity_contracts = contracts
+    if exchange_id == "okx":
+        direction = str(info.get("direction") or "").strip().lower()
+        if side in {"", "net"} and direction in {"long", "short"}:
+            side = direction
+        if contracts is None:
+            contracts = _first_number(info, ("closeTotalPos",))
     contract_size = _number(position.get("contractSize"))
     quantity = contracts
     if contracts is not None and contract_size is not None:
@@ -396,12 +417,12 @@ def normalize_historical_position(
         market_scope,
         native_id,
         symbol,
-        side,
+        identity_side,
         opened_at,
         closed_at,
         position.get("entryPrice"),
         position.get("lastPrice"),
-        contracts,
+        identity_contracts,
     ]
     digest = hashlib.sha256(
         json.dumps(identity, ensure_ascii=True, default=str).encode("utf-8")
@@ -558,6 +579,8 @@ def _scope_symbols(
 
 
 async def _wait_for_history_slot(stop: asyncio.Event) -> None:
+    if _IMMEDIATE_HISTORY_TIMING.get():
+        return
     delay = (
         seconds_until_manual_refresh_guard_end()
         if _MANUAL_REFRESH_TIMING.get()
@@ -1179,7 +1202,7 @@ async def _fetch_position_window(
         account,
         f"{scope.name} position history",
         lambda: exchange.fetch_positions_history(
-            symbol,
+            [symbol] if symbol else None,
             since,
             POSITION_PAGE_LIMIT,
             params,
@@ -1229,7 +1252,7 @@ async def _fetch_okx_position_pages(
             account,
             f"{scope.name} position history",
             lambda params=params: exchange.fetch_positions_history(
-                symbol,
+                [symbol] if symbol else None,
                 None,
                 POSITION_PAGE_LIMIT,
                 params,

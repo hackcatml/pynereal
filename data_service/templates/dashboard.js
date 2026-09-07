@@ -79,7 +79,6 @@
     bitget: new Set(["spot", "swap", "margin", "funding", "earn"]),
     bybit: new Set(["spot", "swap", "margin", "funding"]),
     okx: new Set(["spot", "funding"]),
-    hyperliquid: new Set(["spot", "swap"]),
   };
   let assetsRequestSeq = 0;
   const assetsRefreshIntervalMs = 10000;
@@ -144,6 +143,11 @@
   let assetTransferReview = null;
   let assetTransferMode = "options";
   let assetTransferSubmitting = false;
+  let assetTransferHistoryRequestSeq = 0;
+  let assetTransferHistoryPortfolio = null;
+  let assetTransferHistoryRows = [];
+  let assetTransferHistoryCursor = null;
+  let assetTransferHistoryLoading = false;
   let updateConfirmationToken = "";
   let updatePollTimer = null;
   let updateMessageTimer = null;
@@ -1467,6 +1471,7 @@
 
   function closeAssets(options = {}) {
     if (!isAssetsOpen()) return;
+    closeAssetTransferHistory();
     closeAssetTransfer();
     closePositionPnlPopover();
     const modal = el("assets-modal");
@@ -2286,6 +2291,201 @@
     }
   }
 
+  function isAssetTransferHistoryOpen() {
+    return !el("asset-transfer-history-modal").classList.contains("hidden");
+  }
+
+  function closeAssetTransferHistory() {
+    if (!isAssetTransferHistoryOpen()) return;
+    assetTransferHistoryRequestSeq += 1;
+    assetTransferHistoryPortfolio = null;
+    assetTransferHistoryRows = [];
+    assetTransferHistoryCursor = null;
+    assetTransferHistoryLoading = false;
+    const modal = el("asset-transfer-history-modal");
+    const box = modal.querySelector(".asset-transfer-history-box");
+    modal.classList.remove("asset-transfer-history-dragging");
+    modal.classList.add("hidden");
+    box.style.transform = "";
+    box.style.transition = "";
+    modal.setAttribute("aria-hidden", "true");
+    el("asset-transfer-history-refresh").classList.remove("assets-refreshing");
+  }
+
+  function transferHistoryRoute(record, exchangeId) {
+    const sourceAccount = String(record.from_account || record.account || "");
+    const targetAccount = String(record.to_account || record.account || "");
+    const sourceAccountLabel = transferHistoryAccountLabel(
+      sourceAccount,
+      record.from_account_label,
+    );
+    const targetAccountLabel = transferHistoryAccountLabel(
+      targetAccount,
+      record.to_account_label,
+    );
+    const sourceType = assetAccountTypeLabel(record.from_account_type, exchangeId);
+    const targetType = assetAccountTypeLabel(record.to_account_type, exchangeId);
+    const accountTransfer = String(record.transfer_kind || "wallet") === "account";
+    const crossAccount = accountTransfer
+      || (sourceAccount && targetAccount && sourceAccount !== targetAccount);
+    if (crossAccount) {
+      return `Account transfer · ${sourceAccountLabel} · ${sourceType} → ${targetAccountLabel} · ${targetType}`;
+    }
+    return `${sourceType} → ${targetType}`;
+  }
+
+  function transferHistoryAccountLabel(value, label) {
+    const explicit = String(label || "").trim();
+    if (explicit) return explicit;
+    const raw = String(value || "").trim();
+    if (!raw) return "Account";
+    const normalized = raw.toLowerCase();
+    if (normalized === "main_account") return "Main account";
+    if (normalized === "sub_account") return "Sub account";
+    return raw;
+  }
+
+  function renderAssetTransferHistory(payload, append = false) {
+    const incoming = Array.isArray(payload.results) ? payload.results : [];
+    if (append) {
+      const byId = new Map(assetTransferHistoryRows.map((row) => [String(row.id), row]));
+      incoming.forEach((row) => byId.set(String(row.id), row));
+      assetTransferHistoryRows = Array.from(byId.values());
+    } else {
+      assetTransferHistoryRows = incoming;
+    }
+    assetTransferHistoryCursor = payload.next_cursor || null;
+    const list = el("asset-transfer-history-list");
+    list.replaceChildren();
+    const exchangeId = String(payload.exchange || "");
+    assetTransferHistoryRows.forEach((record) => {
+      const row = document.createElement("article");
+      row.className = "asset-transfer-history-row";
+
+      const top = document.createElement("div");
+      top.className = "asset-transfer-history-row-top";
+      const amount = document.createElement("strong");
+      amount.className = "asset-transfer-history-amount mono";
+      const direction = String(record.direction || "internal");
+      const prefix = direction === "out" ? "-" : direction === "in" ? "+" : "";
+      amount.textContent = `${prefix}${formatAssetAmount(record.amount)} ${record.currency || ""}`;
+      const status = document.createElement("span");
+      const statusText = String(record.status || "unknown");
+      const statusClass = statusText.toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
+      status.className = `asset-transfer-history-status status-${statusClass}`;
+      status.textContent = statusText;
+      top.append(amount, status);
+
+      const route = document.createElement("div");
+      route.className = "asset-transfer-history-route";
+      route.textContent = transferHistoryRoute(record, exchangeId);
+
+      const meta = document.createElement("div");
+      meta.className = "asset-transfer-history-meta";
+      const occurred = document.createElement("time");
+      occurred.textContent = formatAccountHistoryDate(record.datetime, true, true);
+      const identifier = document.createElement("span");
+      identifier.className = "mono";
+      const rawId = String(record.id || "");
+      identifier.textContent = rawId ? `ID ${rawId.length > 18 ? `${rawId.slice(0, 8)}…${rawId.slice(-6)}` : rawId}` : "";
+      identifier.title = rawId;
+      meta.append(occurred, identifier);
+      row.append(top, route, meta);
+      list.appendChild(row);
+    });
+
+    const sync = payload.sync && typeof payload.sync === "object" ? payload.sync : {};
+    const warnings = Array.isArray(sync.warnings) ? [...sync.warnings] : [];
+    if (sync.last_error) warnings.push(String(sync.last_error));
+    const notice = el("asset-transfer-history-notice");
+    notice.textContent = warnings.join(" ");
+    notice.classList.toggle("hidden", warnings.length === 0);
+    list.classList.toggle("hidden", assetTransferHistoryRows.length === 0);
+    el("asset-transfer-history-empty").classList.toggle(
+      "hidden",
+      assetTransferHistoryRows.length !== 0,
+    );
+    el("asset-transfer-history-more").classList.toggle(
+      "hidden",
+      !assetTransferHistoryCursor,
+    );
+  }
+
+  async function loadAssetTransferHistory({ append = false, force = false } = {}) {
+    if (!assetTransferHistoryPortfolio || assetTransferHistoryLoading) return;
+    const requestId = ++assetTransferHistoryRequestSeq;
+    const firstLoad = !assetTransferHistoryRows.length && !append;
+    assetTransferHistoryLoading = true;
+    el("asset-transfer-history-loading").classList.toggle("hidden", !firstLoad);
+    el("asset-transfer-history-error").classList.add("hidden");
+    el("asset-transfer-history-refresh").classList.add("assets-refreshing");
+    el("asset-transfer-history-more").disabled = true;
+    const portfolio = assetTransferHistoryPortfolio;
+    const assets = (Array.isArray(portfolio.assets) ? portfolio.assets : [])
+      .map((item) => String(item.currency || "").toUpperCase())
+      .filter(Boolean);
+    const accountTypes = (Array.isArray(portfolio.account_type_statuses)
+      ? portfolio.account_type_statuses
+      : [])
+      .filter((item) => item.status === "ok")
+      .map((item) => String(item.account_type || "").toLowerCase())
+      .filter(Boolean);
+    const query = new URLSearchParams({
+      exchange: String(portfolio.exchange || ""),
+      account: String(portfolio.account || ""),
+      limit: "50",
+      force: force ? "true" : "false",
+      assets: Array.from(new Set(assets)).join(","),
+      account_types: Array.from(new Set(accountTypes)).join(","),
+    });
+    if (append && assetTransferHistoryCursor) {
+      query.set("cursor", assetTransferHistoryCursor);
+    }
+    try {
+      const payload = await api(`/api/assets/transfer/history?${query}`);
+      if (requestId !== assetTransferHistoryRequestSeq || !isAssetTransferHistoryOpen()) return;
+      renderAssetTransferHistory(payload, append);
+    } catch (error) {
+      if (requestId !== assetTransferHistoryRequestSeq || !isAssetTransferHistoryOpen()) return;
+      const errorElement = el("asset-transfer-history-error");
+      errorElement.textContent = error.message || String(error);
+      errorElement.classList.remove("hidden");
+      if (!assetTransferHistoryRows.length) {
+        el("asset-transfer-history-empty").classList.add("hidden");
+      }
+    } finally {
+      if (requestId === assetTransferHistoryRequestSeq) {
+        assetTransferHistoryLoading = false;
+        el("asset-transfer-history-loading").classList.add("hidden");
+        el("asset-transfer-history-refresh").classList.remove("assets-refreshing");
+        el("asset-transfer-history-more").disabled = false;
+      }
+    }
+  }
+
+  function openAssetTransferHistory(portfolio) {
+    assetTransferHistoryPortfolio = portfolio;
+    assetTransferHistoryRows = [];
+    assetTransferHistoryCursor = null;
+    assetTransferHistoryLoading = false;
+    el("asset-transfer-history-title").textContent = "Transfer History";
+    el("asset-transfer-history-subtitle").textContent =
+      `${portfolio.account} · ${assetExchangeLabel(portfolio.exchange)}`;
+    el("asset-transfer-history-list").replaceChildren();
+    el("asset-transfer-history-list").classList.add("hidden");
+    el("asset-transfer-history-empty").classList.add("hidden");
+    el("asset-transfer-history-notice").classList.add("hidden");
+    el("asset-transfer-history-error").classList.add("hidden");
+    el("asset-transfer-history-loading").classList.remove("hidden");
+    const modal = el("asset-transfer-history-modal");
+    const box = modal.querySelector(".asset-transfer-history-box");
+    modal.classList.remove("asset-transfer-history-dragging", "hidden");
+    box.style.transform = "";
+    box.style.transition = "";
+    modal.setAttribute("aria-hidden", "false");
+    loadAssetTransferHistory();
+  }
+
   function assetExchangeLabel(exchange) {
     const value = String(exchange || "Exchange");
     const labels = {
@@ -2542,7 +2742,22 @@
     statusText.textContent = availableTypes.length
       ? `Included: ${availableTypes.join(", ")}`
       : "No account balance type was available.";
-    footer.appendChild(statusText);
+    const primaryFooter = document.createElement("div");
+    primaryFooter.className = "assets-portfolio-footer-primary";
+    const historyLink = document.createElement("button");
+    historyLink.type = "button";
+    historyLink.className = "assets-transfer-history-link";
+    historyLink.textContent = "Transfer History";
+    historyLink.setAttribute(
+      "aria-label",
+      `Show transfer history for ${portfolio.account}`,
+    );
+    historyLink.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openAssetTransferHistory(portfolio);
+    });
+    primaryFooter.append(statusText, historyLink);
+    footer.appendChild(primaryFooter);
 
     const accountNames = Array.isArray(portfolio.account_names)
       ? portfolio.account_names
@@ -5672,6 +5887,70 @@
     header.addEventListener("pointercancel", (event) => endAssetsCloseDrag(event, true));
   }
 
+  function initMobileAssetTransferHistoryGestures() {
+    const modal = el("asset-transfer-history-modal");
+    const box = modal.querySelector(".asset-transfer-history-box");
+    const header = modal.querySelector(".asset-transfer-history-header");
+    let closeDrag = null;
+
+    header.addEventListener("pointerdown", (event) => {
+      if (!mobileHubQuery.matches || !event.isPrimary) return;
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      closeDrag = {
+        id: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        dy: 0,
+        active: false,
+      };
+      try { header.setPointerCapture(event.pointerId); } catch {}
+    });
+    header.addEventListener("pointermove", (event) => {
+      if (!closeDrag || event.pointerId !== closeDrag.id) return;
+      const dx = event.clientX - closeDrag.startX;
+      const dy = event.clientY - closeDrag.startY;
+      if (!closeDrag.active) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < 8) return;
+        if (dy <= 0 || Math.abs(dy) <= Math.abs(dx)) {
+          closeDrag = null;
+          return;
+        }
+        closeDrag.active = true;
+        modal.classList.add("asset-transfer-history-dragging");
+      }
+      event.preventDefault();
+      closeDrag.dy = Math.max(0, dy);
+      box.style.transform = `translateY(${closeDrag.dy}px)`;
+    }, { passive: false });
+    function endCloseDrag(event, cancelled = false) {
+      if (!closeDrag || (event && event.pointerId !== closeDrag.id)) return;
+      const current = closeDrag;
+      closeDrag = null;
+      try { header.releasePointerCapture(current.id); } catch {}
+      modal.classList.remove("asset-transfer-history-dragging");
+      if (!cancelled && current.active && current.dy > 100) {
+        box.style.transition = "transform 220ms cubic-bezier(0.55, 0, 1, 0.45)";
+        box.style.transform = "translateY(100dvh)";
+        window.setTimeout(() => {
+          if (isAssetTransferHistoryOpen()) closeAssetTransferHistory();
+        }, 220);
+        return;
+      }
+      if (!current.active) return;
+      box.style.transition = "transform 180ms ease";
+      box.style.transform = "translateY(0)";
+      window.setTimeout(() => {
+        if (
+          !isAssetTransferHistoryOpen()
+        ) return;
+        box.style.transition = "";
+        box.style.transform = "";
+      }, 190);
+    }
+    header.addEventListener("pointerup", (event) => endCloseDrag(event));
+    header.addEventListener("pointercancel", (event) => endCloseDrag(event, true));
+  }
+
   function initMobileWatchlistGestures() {
     const modal = el("watchlist-modal");
     const box = modal.querySelector(".watchlist-modal-box");
@@ -6451,6 +6730,20 @@
     window.addEventListener("resize", closePositionPnlPopover, { passive: true });
     window.addEventListener("resize", schedulePnlListSizing, { passive: true });
     el("asset-transfer-close").addEventListener("click", closeAssetTransfer);
+    el("asset-transfer-history-close").addEventListener(
+      "click",
+      closeAssetTransferHistory,
+    );
+    el("asset-transfer-history-refresh").addEventListener("click", () => {
+      loadAssetTransferHistory({ force: true });
+    });
+    el("asset-transfer-history-more").addEventListener("click", () => {
+      loadAssetTransferHistory({ append: true });
+    });
+    const transferHistoryModal = el("asset-transfer-history-modal");
+    transferHistoryModal.addEventListener("click", (event) => {
+      if (event.target === transferHistoryModal) closeAssetTransferHistory();
+    });
     el("asset-transfer-back").addEventListener("click", () => {
       if (assetTransferMode === "review") {
         assetTransferReview = null;
@@ -6535,6 +6828,7 @@
       );
     }
     initMobileAssetsGestures();
+    initMobileAssetTransferHistoryGestures();
     initMobileAccountPager();
   }
 
@@ -6684,16 +6978,92 @@
     if (isCalendarOpen() && calendarSelectedDate) renderCalendarAddControls();
   }
 
+  // Lucide line-art icons for the runner/chart action buttons (viewBox 0 0 24 24,
+  // stroke-width 2 via .btn-icon .icon). Defined before runnerButtons so they are
+  // initialized before any render-time call.
+  const runnerPlayIcon =
+    `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">`
+    + `<polygon points="6 3 20 12 6 21 6 3"></polygon>`
+    + `</svg>`;
+  const runnerStopIcon =
+    `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">`
+    + `<rect x="3" y="3" width="18" height="18" rx="2"></rect>`
+    + `</svg>`;
+  const runnerRestartIcon =
+    `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">`
+    + `<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"></path>`
+    + `<path d="M21 3v5h-5"></path>`
+    + `</svg>`;
+  const runnerLogsIcon =
+    `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">`
+    + `<polyline points="4 17 10 11 4 5"></polyline>`
+    + `<line x1="12" y1="19" x2="20" y2="19"></line>`
+    + `</svg>`;
+  const magnifierIcon =
+    `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">`
+    + `<circle cx="11" cy="11" r="8"></circle>`
+    + `<path d="m21 21-4.3-4.3"></path>`
+    + `</svg>`;
+  const runnerOpenIcon =
+    `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">`
+    + `<path d="M15 3h6v6"></path>`
+    + `<path d="M10 14 21 3"></path>`
+    + `<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h6"></path>`
+    + `</svg>`;
+
   function runnerButtons(s) {
     const r = s.runner || "stopped";
     const dataReady = !!s.history_ready;
     if (r === "running" || r === "starting") {
-      return `<button class="btn" data-runner="stop">Stop</button>` +
-             `<button class="btn" data-runner="restart"${dataReady ? "" : " disabled"}>Restart</button>`;
+      return `<button class="btn btn-icon" data-runner="stop" data-tooltip="Stop" aria-label="Stop">${runnerStopIcon}</button>` +
+             `<button class="btn btn-icon" data-runner="restart" data-tooltip="Restart"${dataReady ? "" : " disabled"} aria-label="Restart">${runnerRestartIcon}</button>`;
     }
-    const canStart = dataReady && Boolean(s.script_name);
-    const title = s.script_name ? "" : ' title="Select a script first"';
-    return `<button class="btn btn-primary" data-runner="start"${canStart ? "" : " disabled"}${title}>Start</button>`;
+    const canStart = dataReady && Boolean(s.script_name) && !s.script_missing;
+    return `<button class="btn btn-icon" data-runner="start" data-tooltip="Start"${canStart ? "" : " disabled"} aria-label="Start">${runnerPlayIcon}</button>`;
+  }
+
+  function verificationControls(s) {
+    const verification = s && s.verification && typeof s.verification === "object"
+      ? s.verification
+      : {};
+    const runner = String((s && s.runner) || "stopped");
+    if (!verification.enabled || (runner !== "running" && runner !== "starting")) return "";
+    return (
+        `<span data-field="verification-status-wrap" class="verification-status-wrap">` +
+        `<button type="button" class="btn btn-icon verification-inspect-button" ` +
+        `data-act="verification-status" data-tooltip="Verification runner" ` +
+        `aria-label="Verification runner" aria-expanded="false">` +
+          magnifierIcon +
+        `</button>` +
+        `<span class="verification-status-popover" role="dialog" ` +
+        `aria-label="Verification runner status">` +
+          `<span class="verification-popover-header">` +
+            `<span class="verification-popover-heading">` +
+              `<span data-field="verification-led" class="verification-led" aria-hidden="true"></span>` +
+              `<span class="verification-popover-title">Verification runner</span>` +
+            `</span>` +
+            `<button type="button" class="verification-restart-button" ` +
+            `data-act="verification-restart" title="Restart verification runner" ` +
+            `aria-label="Restart verification runner">` +
+              runnerRestartIcon +
+            `</button>` +
+          `</span>` +
+          `<span class="verification-status-description">` +
+            `Independently recalculates finalized candles to detect missed or false signals.` +
+          `</span>` +
+          `<span class="verification-latest-finding">` +
+            `<span class="verification-finding-heading">Latest finding</span>` +
+            `<span data-field="verification-finding-empty" class="verification-finding-empty">None detected</span>` +
+            `<span data-field="verification-finding-details" class="verification-finding-details" hidden>` +
+              `<span data-field="verification-finding-kind" class="verification-finding-kind"></span>` +
+              `<span data-field="verification-finding-order" class="verification-finding-order"></span>` +
+              `<span data-field="verification-finding-candle" class="verification-finding-meta"></span>` +
+              `<span data-field="verification-finding-detected" class="verification-finding-meta"></span>` +
+            `</span>` +
+          `</span>` +
+        `</span>` +
+      `</span>`
+    );
   }
 
   function esc(s) {
@@ -6733,6 +7103,202 @@
   function closeDataSinceTooltips(exceptWrap) {
     document.querySelectorAll(".data-badge-wrap.show-since").forEach((wrap) => {
       if (wrap !== exceptWrap) wrap.classList.remove("show-since");
+    });
+  }
+
+  function positionDataSincePopover(wrap) {
+    const popover = wrap && wrap.querySelector(".data-since-popover");
+    if (!popover) return;
+    const carousel = wrap.closest("#sessions > tbody");
+    const carouselRect = carousel ? carousel.getBoundingClientRect() : null;
+    const viewportPadding = 12;
+    const leftBoundary = Math.max(
+      viewportPadding,
+      carouselRect ? carouselRect.left + 2 : viewportPadding,
+    );
+    const rightBoundary = Math.min(
+      window.innerWidth - viewportPadding,
+      carouselRect ? carouselRect.right - 2 : window.innerWidth - viewportPadding,
+    );
+    popover.style.right = "auto";
+    popover.style.left = "0px";
+    popover.style.maxWidth = `${Math.max(120, rightBoundary - leftBoundary)}px`;
+    const rect = popover.getBoundingClientRect();
+    const minOffset = leftBoundary - rect.left;
+    const maxOffset = rightBoundary - rect.right;
+    const offset = Math.min(maxOffset, Math.max(minOffset, 0));
+    popover.style.left = `${Math.round(offset)}px`;
+  }
+
+  function runnerStatusText(session, now = Date.now()) {
+    const runner = String((session && session.runner) || "stopped");
+    const phase = String((session && session.runner_phase) || "");
+    if (session && session.script_missing) {
+      return "script missing";
+    }
+    if (runner === "stopped" || runner === "crashed") return runner;
+    if (phase === "prerun_active") return "warming up";
+    if (phase === "prerun_scheduled") {
+      const target = Number(session && session.next_prerun_at);
+      if (Number.isFinite(target) && target > 0) {
+        const remaining = Math.ceil((target - now) / 1000);
+        if (remaining <= 0) return "warming up";
+        if (remaining <= 5) return `warming up in ${remaining}s`;
+      }
+      return "running";
+    }
+    if (runner === "starting") return "warming up";
+    return "running";
+  }
+
+  function renderRunnerStatusTooltip(tooltip, session, now = Date.now()) {
+    const text = runnerStatusText(session, now);
+    if (session && session.script_missing) {
+      const path = String(session.script_name || "unknown");
+      setHTML(
+        tooltip,
+        `<span>${esc(text)}</span><span class="runner-status-tooltip-path">${esc(path)}</span>`,
+      );
+    } else {
+      setText(tooltip, text);
+    }
+    return text;
+  }
+
+  function positionRunnerStatusTooltip(anchor) {
+    const tooltip = anchor && anchor.querySelector(".runner-status-tooltip");
+    if (!tooltip) return;
+    tooltip.style.removeProperty("left");
+    tooltip.style.removeProperty("right");
+    tooltip.style.removeProperty("max-width");
+    if (!mobileHubQuery.matches && !isTouchTooltipMode()) return;
+
+    const card = anchor.closest("#sessions > tbody > tr");
+    const cardRect = card ? card.getBoundingClientRect() : null;
+    const viewportPadding = 12;
+    const leftBoundary = Math.max(
+      viewportPadding,
+      cardRect ? cardRect.left + 2 : viewportPadding,
+    );
+    const rightBoundary = Math.min(
+      window.innerWidth - viewportPadding,
+      cardRect ? cardRect.right - 2 : window.innerWidth - viewportPadding,
+    );
+    tooltip.style.right = "auto";
+    tooltip.style.left = "0px";
+    tooltip.style.maxWidth = `${Math.max(120, rightBoundary - leftBoundary)}px`;
+    const rect = tooltip.getBoundingClientRect();
+    const minOffset = leftBoundary - rect.left;
+    const maxOffset = rightBoundary - rect.right;
+    const offset = Math.min(maxOffset, Math.max(minOffset, 0));
+    tooltip.style.left = `${Math.round(offset)}px`;
+  }
+
+  function verificationStatusText(session, now = Date.now()) {
+    const verification = session && session.verification && typeof session.verification === "object"
+      ? session.verification
+      : {};
+    const status = String(verification.status || "stopped");
+    if (status === "recovering") {
+      const retryAt = Number(verification.next_retry_at);
+      const attempt = Number(verification.attempt || 0);
+      if (Number.isFinite(retryAt) && retryAt > now) {
+        const remaining = Math.max(1, Math.ceil((retryAt - now) / 1000));
+        return `Verification: recovering in ${remaining}s${attempt > 0 ? ` (attempt ${attempt})` : ""}`;
+      }
+      return `Verification: recovering${attempt > 0 ? ` (attempt ${attempt})` : ""}`;
+    }
+    if (status === "reconnecting") return "Verification: reconnecting";
+    if (status === "warming_up") return "Verification: warming up";
+    if (status === "starting") return "Verification: starting";
+    if (status === "running") return "Verification: running";
+    if (status === "crashed") return "Verification: crashed";
+    return "Verification: stopped";
+  }
+
+  function verificationFindingTime(value) {
+    const timestamp = typeof value === "number" ? value : Date.parse(String(value || ""));
+    const date = new Date(timestamp);
+    if (!Number.isFinite(timestamp) || Number.isNaN(date.getTime())) return "Unknown";
+    return date.toLocaleString("en-US", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    });
+  }
+
+  function updateVerificationFinding(tr, finding) {
+    const empty = tr.querySelector('[data-field="verification-finding-empty"]');
+    const details = tr.querySelector('[data-field="verification-finding-details"]');
+    const available = finding && typeof finding === "object";
+    if (empty) empty.hidden = Boolean(available);
+    if (details) details.hidden = !available;
+    if (!available) return;
+
+    const discrepancy = String(finding.discrepancy || "");
+    const kind = discrepancy === "missing" ? "Missed signal" : "Possible false signal";
+    const kindNode = tr.querySelector('[data-field="verification-finding-kind"]');
+    setText(kindNode, kind);
+    if (kindNode) {
+      setClass(kindNode, `verification-finding-kind verification-finding-kind-${discrepancy || "unknown"}`);
+    }
+
+    const action = String(finding.action || "signal").toUpperCase();
+    const orderId = String(finding.exit_id || finding.order_id || "-");
+    const occurrence = Number(finding.occurrence_index || 0);
+    setText(
+      tr.querySelector('[data-field="verification-finding-order"]'),
+      `${action} · ${orderId}${occurrence > 0 ? ` · #${occurrence + 1}` : ""}`,
+    );
+    setText(
+      tr.querySelector('[data-field="verification-finding-candle"]'),
+      `Candle ${verificationFindingTime(Number(finding.candle_timestamp_ms))}`,
+    );
+    setText(
+      tr.querySelector('[data-field="verification-finding-detected"]'),
+      `Detected ${verificationFindingTime(finding.detected_at)}`,
+    );
+  }
+
+  function closeRunnerStatusTooltips(exceptAnchor = null) {
+    document.querySelectorAll(".runner-status-anchor.show-runner-status").forEach((anchor) => {
+      if (anchor !== exceptAnchor) anchor.classList.remove("show-runner-status");
+    });
+  }
+
+  function closeVerificationStatusPopovers(exceptWrap = null) {
+    document.querySelectorAll(".verification-status-wrap.show-verification-status").forEach((wrap) => {
+      if (wrap === exceptWrap) return;
+      wrap.classList.remove("show-verification-status");
+      const button = wrap.querySelector('[data-act="verification-status"]');
+      if (button) button.setAttribute("aria-expanded", "false");
+    });
+  }
+
+  function updateRunnerStatusTooltips() {
+    const now = Date.now();
+    document.querySelectorAll("#sessions tbody tr[data-session-id]").forEach((tr) => {
+      const session = sessions.find((item) => sessionId(item) === tr.dataset.sessionId);
+      if (!session) return;
+      const anchor = tr.querySelector('[data-act="runner-status"]');
+      const tooltip = tr.querySelector('[data-field="runner-status-tooltip"]');
+      const text = renderRunnerStatusTooltip(tooltip, session, now);
+      const led = tr.querySelector('[data-field="runner-led"]');
+      if (led) led.classList.toggle("led-warming", session.runner_phase === "prerun_active");
+      if (anchor) anchor.setAttribute("aria-label", `Runner status: ${text}`);
+      if (anchor && anchor.classList.contains("show-runner-status")) {
+        positionRunnerStatusTooltip(anchor);
+      }
+      const verification = session.verification || {};
+      const verificationWrap = tr.querySelector('[data-field="verification-status-wrap"]');
+      const verificationText = verificationStatusText(session, now);
+      if (verificationWrap) verificationWrap.hidden = !verification.enabled;
+      const verificationAnchor = tr.querySelector('[data-act="verification-status"]');
+      if (verificationAnchor) verificationAnchor.setAttribute("aria-label", verificationText);
     });
   }
 
@@ -6973,6 +7539,7 @@
   async function saveScriptChange() {
     if (!scriptChangeSessionId || !scriptChangeSelected || scriptChangePending) return;
     const id = scriptChangeSessionId;
+    const assignedScript = scriptChangeSelected;
     setScriptChangePending(true);
     closeScriptChangeOptions();
     el("script-change-error").textContent = "";
@@ -6982,6 +7549,9 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ script_name: scriptChangeSelected }),
       });
+      if (window.PyneScripting && typeof window.PyneScripting.selectAssignedFile === "function") {
+        window.PyneScripting.selectAssignedFile(assignedScript);
+      }
       setScriptChangePending(false);
       closeScriptChange();
       await refresh();
@@ -6998,8 +7568,16 @@
     if (!wrap) return;
     const show = !wrap.classList.contains("show-since");
     closeDataSinceTooltips(wrap);
+    if (show) positionDataSincePopover(wrap);
     wrap.classList.toggle("show-since", show);
   }
+
+  // gear/cog line icon (matches the pencil/magnifier .icon line-icon style)
+  const settingsGearIcon =
+    `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">`
+    + `<circle cx="12" cy="12" r="3"></circle>`
+    + `<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>`
+    + `</svg>`;
 
   function createSessionRow(id) {
     const tr = document.createElement("tr");
@@ -7018,7 +7596,11 @@
               `<circle cx="15" cy="19" r="1.5"></circle>` +
             `</svg>` +
           `</button>` +
-          `<span data-field="runner-led" class="led"></span>` +
+          `<button type="button" class="runner-status-anchor" data-act="runner-status" ` +
+          `aria-label="Runner status">` +
+            `<span data-field="runner-led" class="led" aria-hidden="true"></span>` +
+            `<span data-field="runner-status-tooltip" class="runner-status-tooltip" role="status"></span>` +
+          `</button>` +
         `</span></td>` +
       `<td data-label="Symbol" class="mono"><span data-field="symbol-cell" class="symbol-cell"></span></td>` +
       `<td data-label="TF" data-field="timeframe"></td>` +
@@ -7030,6 +7612,11 @@
             `<path d="M12 20h9"></path>` +
             `<path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path>` +
           `</svg>` +
+          `<svg class="session-script-missing-icon" viewBox="0 0 24 24" aria-hidden="true">` +
+            `<circle cx="12" cy="12" r="9"></circle>` +
+            `<path d="M12 7v6"></path>` +
+            `<path d="M12 17h.01"></path>` +
+          `</svg>` +
         `</button>` +
       `</td>` +
       `<td data-label="Data" class="data-cell"><span class="data-controls">` +
@@ -7038,30 +7625,24 @@
           `data-act="data-since"></span>` +
           `<span data-field="data-since-popover" class="data-since-popover"></span></span>` +
         `<button class="btn btn-icon data-edit-btn" data-act="data-edit" ` +
-        `title="Edit data start" aria-label="Edit data start">` +
-          `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">` +
-            `<path d="M12 20h9"></path>` +
-            `<path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path>` +
-          `</svg>` +
+        `data-tooltip="Data settings" aria-label="Data settings">` +
+          settingsGearIcon +
         `</button>` +
         `<button class="btn btn-icon data-integrity-btn" data-act="data-integrity" ` +
-        `title="Verify OHLCV data" aria-label="Verify OHLCV data">` +
-          `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">` +
-            `<circle cx="11" cy="11" r="8"></circle>` +
-            `<path d="m21 21-4.3-4.3"></path>` +
-          `</svg>` +
+        `data-tooltip="Verify OHLCV data" aria-label="Verify OHLCV data">` +
+          magnifierIcon +
         `</button>` +
         `<span data-field="history-loading" class="muted">loading</span>` +
         `</span></td>` +
       `<td data-label="Last bar" class="muted">${lastBarCell({})}</td>` +
       `<td data-label="Webhook"><span class="cell-inline">` +
         `<input type="checkbox" data-act="webhook">` +
-        `<button class="btn btn-icon" data-act="webhook-settings" title="Webhook URL">&#9881;</button></span></td>` +
+        `<button class="btn btn-icon" data-act="webhook-settings" title="Webhook URL">` + settingsGearIcon + `</button></span></td>` +
       `<td data-label="Telegram"><span class="cell-inline">` +
         `<input type="checkbox" data-act="telegram">` +
-        `<button class="btn btn-icon" data-act="telegram-settings" title="Telegram bot">&#9881;</button></span></td>` +
+        `<button class="btn btn-icon" data-act="telegram-settings" title="Telegram bot">` + settingsGearIcon + `</button></span></td>` +
       `<td data-label="Runner" class="runner-cell" data-field="runner-cell"></td>` +
-      `<td data-label="Chart"><a data-field="chart-link" class="btn btn-chart" target="_blank">Open</a></td>` +
+      `<td data-label="Chart"><a data-field="chart-link" class="btn btn-chart btn-icon" target="_blank" title="Open chart" aria-label="Open chart">${runnerOpenIcon}</a></td>` +
       `<td data-label="Remove"><button class="btn btn-danger btn-icon" data-act="delete" title="Delete session">&times;</button></td>`;
 
     tr.addEventListener("change", (e) => {
@@ -7095,6 +7676,34 @@
         }
       } else if (act === "data-edit") openSettings(id, "data-since");
       else if (act === "data-integrity") openSettings(id, "data-integrity");
+      else if (act === "runner-status") {
+        e.preventDefault();
+        e.stopPropagation();
+        const anchor = target.closest(".runner-status-anchor");
+        const show = anchor && !anchor.classList.contains("show-runner-status");
+        closeRunnerStatusTooltips(anchor);
+        closeVerificationStatusPopovers();
+        if (anchor) {
+          anchor.classList.toggle("show-runner-status", Boolean(show));
+          if (show) positionRunnerStatusTooltip(anchor);
+        }
+      }
+      else if (act === "verification-status") {
+        e.preventDefault();
+        e.stopPropagation();
+        const wrap = target.closest(".verification-status-wrap");
+        const show = wrap && !wrap.classList.contains("show-verification-status");
+        closeRunnerStatusTooltips();
+        closeVerificationStatusPopovers(wrap);
+        if (wrap) wrap.classList.toggle("show-verification-status", Boolean(show));
+        target.setAttribute("aria-expanded", String(Boolean(show)));
+      }
+      else if (act === "verification-restart") {
+        e.preventDefault();
+        e.stopPropagation();
+        closeVerificationStatusPopovers();
+        restartVerificationRunner(id);
+      }
       else if (act === "script-edit") openScriptChange(id);
       else if (act === "delete") openRemoveConfirm(id);
       else if (act === "logs") openLogs(id);
@@ -7107,14 +7716,50 @@
   function patchSessionRow(tr, s) {
     const id = sessionId(s);
     const runner = s.runner || "stopped";
-    const runnerControlsKey = `${runner}:${s.history_ready ? "ready" : "preparing"}:${s.script_name ? "script" : "no-script"}`;
+    const verificationEnabled = Boolean(s.verification && s.verification.enabled);
+    const runnerControlsKey = `${runner}:${s.history_ready ? "ready" : "preparing"}:${s.script_name ? "script" : "no-script"}:${s.script_missing ? "missing" : "present"}:${verificationEnabled ? "verification" : "no-verification"}`;
     const collector = s.collector || "stopped";
     const wh = s.webhook || {};
     const exchange = (s.exchange || "").toUpperCase();
 
     const led = tr.querySelector('[data-field="runner-led"]');
     setClass(led, `led led-${runner}`);
-    if (led && led.title !== runner) led.title = runner;
+    const statusText = renderRunnerStatusTooltip(
+      tr.querySelector('[data-field="runner-status-tooltip"]'),
+      s,
+    );
+    if (led) led.classList.toggle("led-warming", s.runner_phase === "prerun_active");
+    const statusAnchor = tr.querySelector('[data-act="runner-status"]');
+    if (statusAnchor) statusAnchor.setAttribute("aria-label", `Runner status: ${statusText}`);
+
+    if (tr.dataset.runnerControlsKey !== runnerControlsKey) {
+      setHTML(
+        tr.querySelector('[data-field="runner-cell"]'),
+        `<span class="runner-actions">${runnerButtons(s)}` +
+          `<button class="btn btn-icon" data-act="logs" data-tooltip="Logs" aria-label="Logs">${runnerLogsIcon}</button>` +
+          `${verificationControls(s)}</span>`,
+      );
+      tr.dataset.runnerControlsKey = runnerControlsKey;
+    }
+
+    const verification = s.verification && typeof s.verification === "object"
+      ? s.verification
+      : {};
+    const verificationStatus = String(verification.status || "stopped");
+    const verificationWrap = tr.querySelector('[data-field="verification-status-wrap"]');
+    if (verificationWrap) verificationWrap.hidden = !verification.enabled;
+    setClass(
+      tr.querySelector('[data-field="verification-led"]'),
+      `verification-led verification-led-${verificationStatus}`,
+    );
+    const verificationText = verificationStatusText(s);
+    const verificationAnchor = tr.querySelector('[data-act="verification-status"]');
+    if (verificationAnchor) verificationAnchor.setAttribute("aria-label", `Verification runner: ${verificationText}`);
+    updateVerificationFinding(tr, verification.latest_finding);
+    const verificationRestart = tr.querySelector('[data-act="verification-restart"]');
+    if (verificationRestart) {
+      verificationRestart.disabled = !(runner === "running" || runner === "starting");
+    }
 
     const symbolKey = JSON.stringify([s.symbol || "", s.tv_symbol || "", s.symbol_logo_url || ""]);
     if (tr.dataset.symbolKey !== symbolKey) {
@@ -7140,16 +7785,24 @@
     const scriptButton = tr.querySelector('[data-act="script-edit"]');
     const scriptEditable = runner !== "running" && runner !== "starting";
     const scriptName = String(s.script_name || "");
-    setText(tr.querySelector('[data-field="script-name"]'), scriptName || "Select script");
+    const scriptMissing = Boolean(s.script_missing);
+    setText(
+      tr.querySelector('[data-field="script-name"]'),
+      scriptName || "Select script",
+    );
     if (scriptButton) {
       setClass(
         scriptButton,
-        `session-script-button${scriptName ? "" : " empty"}`,
+        `session-script-button${scriptName ? "" : " empty"}${scriptMissing ? " missing" : ""}`,
       );
       scriptButton.disabled = !scriptEditable;
-      scriptButton.title = scriptEditable
-        ? (scriptName ? "Change script" : "Select script")
-        : "Stop runner to change script";
+      scriptButton.title = scriptMissing
+        ? (scriptEditable
+          ? `Script file not found: ${scriptName}. Select another script.`
+          : `Script file not found: ${scriptName}. Stop runner to change script.`)
+        : (scriptEditable
+          ? (scriptName ? "Change script" : "Select script")
+          : "Stop runner to change script");
       scriptButton.setAttribute("aria-label", scriptButton.title);
     }
 
@@ -7169,14 +7822,6 @@
 
     setChecked(tr.querySelector('[data-act="webhook"]'), !!wh.enabled);
     setChecked(tr.querySelector('[data-act="telegram"]'), !!wh.telegram_notification);
-
-    if (tr.dataset.runnerControlsKey !== runnerControlsKey) {
-      setHTML(
-        tr.querySelector('[data-field="runner-cell"]'),
-        `<span class="runner-actions">${runnerButtons(s)}<button class="btn" data-act="logs">Logs</button></span>`,
-      );
-      tr.dataset.runnerControlsKey = runnerControlsKey;
-    }
 
     const chart = tr.querySelector('[data-field="chart-link"]');
     const href = `/s/${encodeURIComponent(id)}`;
@@ -7215,7 +7860,13 @@
   async function api(path, opts) {
     const resp = await fetch(path, opts);
     const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    if (!resp.ok) {
+      const error = new Error(data.error || `HTTP ${resp.status}`);
+      error.status = resp.status;
+      error.code = data.code || "";
+      error.currentRevision = data.current_revision || "";
+      throw error;
+    }
     return data;
   }
 
@@ -7718,6 +8369,7 @@
     if (aiEnabled && reclampAiFab) reclampAiFab();
     if (aiEnabled) loadAiModels();
     if (!aiEnabled && isAiChatOpen()) closeAiChat();
+    if (window.PyneScriptingAi) window.PyneScriptingAi.setAvailable(aiEnabled);
     if (isCalendarOpen() && calendarSelectedDate) renderCalendarDetails();
   }
 
@@ -8726,6 +9378,27 @@
     }
   }
 
+  async function restartVerificationRunner(id) {
+    const session = sessions.find((item) => sessionId(item) === id);
+    if (session && session.verification) {
+      session.verification = {
+        ...session.verification,
+        status: "recovering",
+        reason: "manual restart",
+        next_retry_at: Date.now(),
+      };
+      render();
+    }
+    try {
+      await api(`/api/sessions/${encodeURIComponent(id)}/verification/restart`, {
+        method: "POST",
+      });
+    } catch (e) {
+      alert(`verification restart failed: ${e.message}`);
+      await refresh();
+    }
+  }
+
   async function toggleWebhook(id, payload) {
     try {
       await api(`/api/${encodeURIComponent(id)}/webhook-config`, {
@@ -9027,6 +9700,8 @@
   let settingsSession = null;
   let settingsMode = null; // "webhook" | "telegram" | "data-since" | "data-integrity"
   let settingsOriginalHistorySince = null;
+  let settingsOriginalPrerunMode = "auto";
+  let settingsOriginalPrerunOffset = null;
   let settingsIntegrityAction = null;
   let settingsIntegrityReport = null;
   let settingsIntegrityRunning = null; // "check" | "repair"
@@ -9059,6 +9734,50 @@
     const value = Number(match[1]);
     const multiplier = match[2] === "m" ? 60 : match[2] === "h" ? 3600 : 86400;
     return value * multiplier;
+  }
+
+  function formatPrerunOffset(value) {
+    const total = Math.max(0, Number(value) || 0);
+    const minutes = Math.floor(total / 60);
+    const seconds = Math.floor(total % 60);
+    return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+
+  function parsePrerunOffset(value) {
+    const match = /^(\d+):([0-5]\d)$/.exec(String(value || "").trim());
+    if (!match) return null;
+    return Number(match[1]) * 60 + Number(match[2]);
+  }
+
+  function prerunScheduleRange(timeframe) {
+    const value = String(timeframe || "").trim();
+    if (value === "1m") return { min: 10, max: 30 };
+    if (value === "5m") return { min: 15, max: 150 };
+    const match = /^(\d+)([smhdwM])$/.exec(value);
+    if (!match) return null;
+    const amount = Number(match[1]);
+    const unit = match[2];
+    const multiplier = unit === "s" ? 1
+      : unit === "m" ? 60
+        : unit === "h" ? 3600
+          : unit === "d" ? 86400
+            : unit === "w" ? 604800
+              : 30 * 86400;
+    const duration = amount * multiplier;
+    return duration > 300 ? { min: 15, max: duration - 300 } : null;
+  }
+
+  function setPrerunSettingsMode(mode) {
+    const normalized = mode === "custom" ? "custom" : "auto";
+    const modeInput = el("settings-prerun-mode");
+    if (modeInput) modeInput.value = normalized;
+    document.querySelectorAll("[data-prerun-mode]").forEach((button) => {
+      const selected = button.dataset.prerunMode === normalized;
+      button.classList.toggle("active", selected);
+      button.setAttribute("aria-pressed", String(selected));
+    });
+    const customRow = el("settings-prerun-custom-row");
+    if (customRow) customRow.hidden = normalized !== "custom";
   }
 
   function renderDataIntegrityIntro(id) {
@@ -9188,6 +9907,8 @@
     settingsSession = id;
     settingsMode = mode;
     settingsOriginalHistorySince = null;
+    settingsOriginalPrerunMode = "auto";
+    settingsOriginalPrerunOffset = null;
     settingsIntegrityAction = null;
     settingsIntegrityReport = null;
     settingsIntegrityRunning = null;
@@ -9203,7 +9924,7 @@
       (mode === "webhook" ? "Webhook URL — "
         : mode === "telegram" ? "Telegram bot — "
         : mode === "data-integrity" ? "Data integrity — "
-        : "Data since — ") + id;
+        : "Data settings — ") + id;
     el("settings-fields").innerHTML = "loading…";
     el("settings-modal").classList.remove("hidden");
     lockBodyScroll();
@@ -9226,8 +9947,19 @@
         initial = String(s.history_since);
       }
       settingsOriginalHistorySince = initial;
+      settingsOriginalPrerunMode = s.prerun_mode === "custom" ? "custom" : "auto";
+      settingsOriginalPrerunOffset = s.prerun_offset_seconds == null
+        ? null
+        : Number(s.prerun_offset_seconds);
+      const effectiveOffset = Number(s.prerun_effective_offset_seconds) || 0;
+      const prerunRange = prerunScheduleRange(s.timeframe);
+      const supportsCustom = Boolean(prerunRange);
+      const customInitial = settingsOriginalPrerunOffset == null
+        ? effectiveOffset
+        : settingsOriginalPrerunOffset;
       el("settings-fields").innerHTML =
-        `<label class="settings-label">Data start (UTC)</label>` +
+        `<div class="settings-section-title">Data start</div>` +
+        `<label class="settings-label" for="settings-history-since">UTC date and time</label>` +
         `<input id="settings-history-since" type="text" ` +
         `placeholder="YYYY-MM-DD or YYYY-MM-DD HH:MM" value="${esc(initial)}">` +
         `<div class="muted">UTC date or datetime, e.g. 2026-05-01 or 2026-06-01 07:30.</div>` +
@@ -9236,10 +9968,35 @@
           ? `<div class="muted">Shares this market's data, so it changes too: ` +
             `<span class="mono">${esc(shared.join(", "))}</span></div>`
           : "") +
+        `<div class="settings-section-title settings-prerun-title">Warm-up schedule</div>` +
+        `<div class="muted">Warm-up recalculates the strategy over historical candles before processing the next confirmed candle.</div>` +
+        (supportsCustom
+          ? `<input id="settings-prerun-mode" type="hidden" value="${esc(settingsOriginalPrerunMode)}">` +
+            `<div class="settings-segmented" role="group" aria-label="Warm-up schedule mode">` +
+              `<button type="button" data-prerun-mode="auto">Auto</button>` +
+              `<button type="button" data-prerun-mode="custom">Custom</button>` +
+            `</div>` +
+            `<div class="settings-prerun-assigned">Assigned time ` +
+              `<strong>${esc(formatPrerunOffset(effectiveOffset))}</strong>` +
+              (s.prerun_duplicate ? `<span>shared slot</span>` : "") +
+            `</div>` +
+            `<label id="settings-prerun-custom-row" class="settings-prerun-custom" hidden>` +
+              `<span>Start after candle open</span>` +
+              `<input id="settings-prerun-offset" type="text" inputmode="numeric" ` +
+              `value="${esc(formatPrerunOffset(customInitial))}" placeholder="MM:SS">` +
+              `<small>${formatPrerunOffset(prerunRange.min)} - ${formatPrerunOffset(prerunRange.max)}</small>` +
+            `</label>`
+          : `<div class="muted">This timeframe uses the default midpoint schedule.</div>`) +
         `<div id="settings-loading" class="settings-loading" hidden>` +
           `<span class="settings-spinner" aria-hidden="true"></span>` +
           `<span class="settings-loading-text">Re-syncing data…</span>` +
         `</div>`;
+      if (supportsCustom) {
+        document.querySelectorAll("[data-prerun-mode]").forEach((button) => {
+          button.addEventListener("click", () => setPrerunSettingsMode(button.dataset.prerunMode));
+        });
+        setPrerunSettingsMode(settingsOriginalPrerunMode);
+      }
       return;
     }
     try {
@@ -9274,13 +10031,15 @@
     settingsSession = null;
     settingsMode = null;
     settingsOriginalHistorySince = null;
+    settingsOriginalPrerunMode = "auto";
+    settingsOriginalPrerunOffset = null;
     settingsIntegrityAction = null;
     settingsIntegrityReport = null;
     settingsIntegrityRunning = null;
     settingsIntegrityCancelRequested = false;
   }
 
-  function setDataSinceLoading(on) {
+  function setDataSettingsLoading(on, reSyncing = false) {
     const saveBtn = el("settings-save");
     const inputEl = el("settings-history-since");
     const status = el("settings-loading");
@@ -9289,6 +10048,13 @@
       saveBtn.textContent = on ? "Applying…" : "Save";
     }
     if (inputEl) inputEl.disabled = on;
+    const offsetInput = el("settings-prerun-offset");
+    if (offsetInput) offsetInput.disabled = on;
+    document.querySelectorAll("[data-prerun-mode]").forEach((button) => {
+      button.disabled = on;
+    });
+    const loadingText = status && status.querySelector(".settings-loading-text");
+    if (loadingText) loadingText.textContent = reSyncing ? "Re-syncing data…" : "Applying settings…";
     if (status) status.hidden = !on;
   }
 
@@ -9339,25 +10105,52 @@
       const inputEl = el("settings-history-since");
       const value = (inputEl ? inputEl.value : "").trim();
       const sid = settingsSession;
-      if (isSameUtcDateInput(value, settingsOriginalHistorySince)) {
+      const session = sessions.find((item) => sessionId(item) === sid) || {};
+      const historyChanged = !isSameUtcDateInput(value, settingsOriginalHistorySince);
+      const modeInput = el("settings-prerun-mode");
+      const prerunMode = modeInput && modeInput.value === "custom" ? "custom" : "auto";
+      let prerunOffset = null;
+      if (prerunMode === "custom") {
+        prerunOffset = parsePrerunOffset(el("settings-prerun-offset")?.value);
+        const range = prerunScheduleRange(session.timeframe);
+        if (!range || prerunOffset == null || prerunOffset < range.min || prerunOffset > range.max) {
+          el("settings-error").textContent =
+            range
+              ? `Warm-up time must be between ${formatPrerunOffset(range.min)} and ${formatPrerunOffset(range.max)}.`
+              : "Custom warm-up timing is not available for this timeframe.";
+          return;
+        }
+      }
+      const scheduleChanged = prerunMode !== settingsOriginalPrerunMode ||
+        (prerunMode === "custom" && prerunOffset !== settingsOriginalPrerunOffset);
+      if (!historyChanged && !scheduleChanged) {
         closeSettings();
         return;
       }
       el("settings-error").textContent = "";
-      setDataSinceLoading(true); // feed + runner restart takes a moment; no double-submit
+      setDataSettingsLoading(true, historyChanged);
       try {
-        await api(`/api/sessions/${encodeURIComponent(sid)}/history-since`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ history_since: value }),
-        });
+        if (scheduleChanged) {
+          await api(`/api/sessions/${encodeURIComponent(sid)}/prerun-schedule`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ mode: prerunMode, offset_seconds: prerunOffset }),
+          });
+        }
+        if (historyChanged) {
+          await api(`/api/sessions/${encodeURIComponent(sid)}/history-since`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ history_since: value }),
+          });
+        }
       } catch (e) {
         el("settings-error").textContent = e.message;
-        setDataSinceLoading(false);
+        setDataSettingsLoading(false);
         return;
       }
       if (settingsSession === sid && settingsMode === "data-since") {
-        setDataSinceLoading(false);
+        setDataSettingsLoading(false);
         closeSettings();
       }
       return;
@@ -9471,7 +10264,8 @@
     }
     closeHubMenu();
     if (isCalendarOpen()) closeCalendar();
-    if (isAssetTransferOpen()) closeAssetTransfer();
+    if (isAssetTransferHistoryOpen()) closeAssetTransferHistory();
+    else if (isAssetTransferOpen()) closeAssetTransfer();
     else if (isAssetsOpen()) closeAssets();
     closeScriptDropdown();
     closeDataSinceTooltips();
@@ -9485,10 +10279,18 @@
     if (scriptControl && e.target && !scriptControl.contains(e.target)) {
       closeScriptDropdown();
     }
+    if (!e.target || !e.target.closest || !e.target.closest(".runner-status-anchor")) {
+      closeRunnerStatusTooltips();
+    }
+    if (!e.target || !e.target.closest || !e.target.closest(".verification-status-wrap")) {
+      closeVerificationStatusPopovers();
+    }
     if (!isTouchTooltipMode()) return;
     if (!e.target || !e.target.closest || e.target.closest(".data-badge-wrap")) return;
     closeDataSinceTooltips();
   });
+
+  setInterval(updateRunnerStatusTooltips, 1000);
 
   // ---- collapsible "Add session" card (collapsed by default) ---------------
   let addCardAnimation = null;
@@ -9913,6 +10715,16 @@
   });
 
   initHubMenuCalendar();
+  window.PyneScripting.init({
+    api,
+    closeAiChat,
+    closeHubMenu,
+    esc,
+    lockBodyScroll,
+    mobileQuery: mobileHubQuery,
+    streamSse,
+    unlockBodyScroll,
+  });
   initSessionReordering();
   initDesktopCardCarousel();
   initAiChat();

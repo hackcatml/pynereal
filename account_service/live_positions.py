@@ -7,9 +7,10 @@ import queue
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import ccxt
 import ccxt.pro as ccxtpro
@@ -43,6 +44,7 @@ from account_service.backfill import (  # noqa: E402
     account_history_symbols,
     backfill_account_once,
     hyperliquid_dexes,
+    immediate_history_refresh_timing,
     manual_history_refresh_timing,
 )
 from account_service.cache import AccountCache  # noqa: E402
@@ -57,6 +59,11 @@ from account_service.history import (  # noqa: E402
     okx_history_market_scope,
 )
 from account_service.positions import collect_positions_snapshot  # noqa: E402
+from account_service.transfers import (  # noqa: E402
+    TRANSFER_INITIAL_DAYS,
+    TRANSFER_REFRESH_OVERLAP_MS,
+    collect_transfer_history,
+)
 from data_service.schedule_utils import (  # noqa: E402
     seconds_until_manual_refresh_guard_end,
     seconds_until_post_bar_task_window,
@@ -66,6 +73,9 @@ from data_service.schedule_utils import (  # noqa: E402
 EMIT_INTERVAL_SECONDS = 0.25
 PERSIST_INTERVAL_SECONDS = 1.0
 RECONCILE_INTERVAL_SECONDS = 300.0
+CLOSED_POSITION_REFRESH_INTERVAL_SECONDS = 60.0
+CLOSED_POSITION_REFRESH_ATTEMPTS = 5
+CLOSED_POSITION_MATCH_TOLERANCE_SECONDS = 300.0
 
 
 def _position_key(position: dict[str, Any]) -> tuple[str, str, str, str]:
@@ -85,6 +95,142 @@ def _number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return result if math.isfinite(result) else None
+
+
+def _timestamp_seconds(value: Any) -> float | None:
+    number = _number(value)
+    if number is not None:
+        return number / 1000.0 if number > 10_000_000_000 else number
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.timestamp()
+
+
+def _closed_position_history_matches(
+    record: dict[str, Any],
+    closed_position: dict[str, Any],
+) -> bool:
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    if str(payload.get("symbol") or "").upper() != str(
+        closed_position.get("symbol") or ""
+    ).upper():
+        return False
+
+    record_scope = str(record.get("market_scope") or "")
+    closed_scope = str(closed_position.get("market_scope") or "")
+    if record_scope and closed_scope and record_scope != closed_scope:
+        return False
+    record_side = str(payload.get("side") or "").lower()
+    closed_side = str(closed_position.get("side") or "").lower()
+    if (
+        record_side not in {"", "net"}
+        and closed_side not in {"", "net"}
+        and record_side != closed_side
+    ):
+        return False
+
+    record_closed_at = _timestamp_seconds(record.get("closed_at"))
+    if record_closed_at is None:
+        return False
+    last_active_update = _timestamp_seconds(
+        closed_position.get("last_update_timestamp")
+    )
+    if (
+        last_active_update is not None
+        and record_closed_at <= last_active_update + 1.0
+    ):
+        return False
+    detected_at = _timestamp_seconds(closed_position.get("_closed_detected_at"))
+    if (
+        last_active_update is None
+        and detected_at is not None
+        and abs(record_closed_at - detected_at)
+        > CLOSED_POSITION_MATCH_TOLERANCE_SECONDS
+    ):
+        return False
+
+    if payload.get("opened_at_known") is not False:
+        record_opened_at = _timestamp_seconds(record.get("opened_at"))
+        position_opened_at = _timestamp_seconds(
+            closed_position.get("datetime") or closed_position.get("timestamp")
+        )
+        if (
+            record_opened_at is not None
+            and position_opened_at is not None
+            and abs(record_opened_at - position_opened_at) > 2.0
+        ):
+            return False
+    return True
+
+
+async def _retry_closed_position_history(
+    exchange: Any,
+    account: ExchangeAccount,
+    history: "AccountHistoryBuffer",
+    closed_position: dict[str, Any],
+    cursors: dict[tuple[str, str, str, str], str],
+    backfill_semaphore: asyncio.Semaphore,
+    backfill_lock: asyncio.Lock,
+    stop: asyncio.Event,
+    *,
+    retry_interval: float = CLOSED_POSITION_REFRESH_INTERVAL_SECONDS,
+    max_attempts: int = CLOSED_POSITION_REFRESH_ATTEMPTS,
+) -> None:
+    if not exchange.has.get("fetchPositionsHistory"):
+        return
+    symbol = str(closed_position.get("symbol") or "").strip()
+    if not symbol:
+        return
+    secrets = secret_values(account.config)
+    for _ in range(max_attempts):
+        if retry_interval > 0:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=retry_interval)
+                return
+            except TimeoutError:
+                pass
+        try:
+            refreshed_cursors = dict(cursors)
+            async with backfill_semaphore:
+                async with backfill_lock:
+                    with immediate_history_refresh_timing():
+                        batch = await backfill_account_once(
+                            exchange,
+                            account,
+                            {symbol},
+                            refreshed_cursors,
+                            stop,
+                            include_orders=False,
+                            include_fills=False,
+                            include_positions=True,
+                            include_pnl_events=False,
+                            target_symbol=symbol,
+                            discover_symbols=False,
+                        )
+            batch["cursors"] = []
+            history.add_backfill(**batch)
+            if any(
+                _closed_position_history_matches(record, closed_position)
+                for record in batch["positions"]
+            ):
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            eprint(
+                f"[account] {account.name} {symbol} closed position history "
+                f"refresh failed: {type(exc).__name__}: "
+                f"{redact_error(exc, secrets)}"
+            )
 
 
 class LivePositionState:
@@ -135,12 +281,13 @@ class LivePositionState:
         exchange_id: str,
         market_scope: str | None = None,
         dex: str | None = None,
-    ) -> None:
+    ) -> list[dict[str, Any]]:
         result = self.result(account_name)
         if result is None:
-            return
+            return []
         previous_positions = copy.deepcopy(self.positions(account_name))
         previous_stream_status = result.get("stream_status")
+        closed_positions: list[dict[str, Any]] = []
         current = {
             _position_key(position): position
             for position in self.positions(account_name)
@@ -192,7 +339,11 @@ class LivePositionState:
             if is_open_position(normalized):
                 current[key] = normalized
             else:
-                current.pop(key, None)
+                closed = current.pop(key, None)
+                if isinstance(closed, dict):
+                    closed = copy.deepcopy(closed)
+                    closed["_closed_detected_at"] = time.time()
+                    closed_positions.append(closed)
         positions = sorted(
             current.values(),
             key=lambda item: (
@@ -206,6 +357,7 @@ class LivePositionState:
         result["stream_status"] = "live"
         if positions != previous_positions or previous_stream_status != "live":
             self.mark_dirty()
+        return closed_positions
 
     def apply_mark(
         self,
@@ -786,6 +938,7 @@ async def _watch_private_positions(
     market_scope: str | None,
     dex: str | None,
     stop: asyncio.Event,
+    on_position_closed: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     delay = 1.0
     secrets = secret_values(account.config)
@@ -793,13 +946,16 @@ async def _watch_private_positions(
         try:
             positions = await exchange.watch_positions(symbols, params=params)
             if isinstance(positions, list):
-                state.merge_positions(
+                closed_positions = state.merge_positions(
                     account.name,
                     positions,
                     exchange_id=account.exchange_id,
                     market_scope=market_scope,
                     dex=dex,
                 )
+                if on_position_closed is not None:
+                    for closed_position in closed_positions:
+                        on_position_closed(closed_position)
             delay = 1.0
         except asyncio.CancelledError:
             raise
@@ -910,6 +1066,7 @@ async def _watch_account(
 ) -> None:
     exchange = None
     tasks: list[asyncio.Task[None]] = []
+    closed_history_tasks: set[asyncio.Task[None]] = set()
     secrets = secret_values(account.config)
     try:
         exchange = _build_live_exchange(account)
@@ -927,6 +1084,23 @@ async def _watch_account(
         await exchange.load_markets()
         if not exchange.has.get("watchPositions"):
             raise ccxt.NotSupported(f"{account.exchange_id} does not support watchPositions")
+
+        def refresh_closed_position(position: dict[str, Any]) -> None:
+            task = asyncio.create_task(
+                _retry_closed_position_history(
+                    exchange,
+                    account,
+                    history,
+                    position,
+                    cursors,
+                    backfill_semaphore,
+                    backfill_lock,
+                    stop,
+                )
+            )
+            closed_history_tasks.add(task)
+            task.add_done_callback(closed_history_tasks.discard)
+
         for symbols, params, market_scope, dex in _subscriptions(
             account.exchange_id,
             state.positions(account.name),
@@ -942,6 +1116,7 @@ async def _watch_account(
                         market_scope,
                         dex,
                         stop,
+                        refresh_closed_position,
                     )
                 )
             )
@@ -996,7 +1171,13 @@ async def _watch_account(
     finally:
         for task in tasks:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        for task in closed_history_tasks:
+            task.cancel()
+        await asyncio.gather(
+            *tasks,
+            *closed_history_tasks,
+            return_exceptions=True,
+        )
         if exchange is not None:
             try:
                 await exchange.close()
@@ -1273,6 +1454,151 @@ async def _put_control_message(output_queue: Any, payload: dict[str, Any]) -> No
         pass
 
 
+async def _refresh_transfers_from_parent(
+    request: dict[str, Any],
+    *,
+    accounts: list[ExchangeAccount],
+    cursors: dict[tuple[str, str, str, str], str],
+    backfill_semaphore: asyncio.Semaphore,
+    backfill_locks: dict[str, asyncio.Lock],
+    cache: AccountCache,
+    cache_executor: ThreadPoolExecutor,
+    stop: asyncio.Event,
+) -> dict[str, Any]:
+    account_name = str(request.get("account") or "").strip()
+    exchange_id = str(request.get("exchange") or "").strip().lower()
+    account = next(
+        (
+            item
+            for item in accounts
+            if item.name == account_name and item.exchange_id == exchange_id
+        ),
+        None,
+    )
+    if account is None:
+        raise ValueError("configured transfer account was not found")
+    if exchange_id not in TRANSFER_INITIAL_DAYS:
+        raise ValueError(f"transfer history is not supported for {exchange_id}")
+
+    now_ms = int(time.time() * 1000)
+    cursor_key = (account.name, exchange_id, "transfers", "")
+    previous_cursor = cursors.get(cursor_key, "")
+    try:
+        previous_ms = int(previous_cursor)
+    except (TypeError, ValueError):
+        previous_ms = 0
+    initial_since = now_ms - TRANSFER_INITIAL_DAYS[exchange_id] * 24 * 60 * 60 * 1000
+    since_ms = max(
+        initial_since,
+        previous_ms - TRANSFER_REFRESH_OVERLAP_MS if previous_ms else initial_since,
+    )
+    assets = request.get("assets")
+    assets = assets if isinstance(assets, list) else []
+    account_types = request.get("account_types")
+    account_types = account_types if isinstance(account_types, list) else []
+
+    try:
+        async with backfill_semaphore:
+            async with backfill_locks[account.name]:
+                result = await asyncio.to_thread(
+                    collect_transfer_history,
+                    account,
+                    since_ms=since_ms,
+                    until_ms=now_ms,
+                    asset_hints=assets,
+                    account_type_hints=account_types,
+                )
+                post_bar_delay = seconds_until_manual_refresh_guard_end()
+                if post_bar_delay > 0.0:
+                    try:
+                        await asyncio.wait_for(stop.wait(), timeout=post_bar_delay)
+                        raise asyncio.CancelledError
+                    except TimeoutError:
+                        pass
+                status = "partial" if result.get("partial") else "ok"
+                await asyncio.get_running_loop().run_in_executor(
+                    cache_executor,
+                    partial(
+                        cache.apply_transfer_batch,
+                        result.get("records") or [],
+                        account=account.name,
+                        exchange=exchange_id,
+                        cursor=str(now_ms),
+                        warnings=result.get("warnings") or [],
+                        status=status,
+                    ),
+                )
+                cursors[cursor_key] = str(now_ms)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        message = redact_error(exc, secret_values(account.config))
+        post_bar_delay = seconds_until_manual_refresh_guard_end()
+        if post_bar_delay > 0.0:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=post_bar_delay)
+                raise asyncio.CancelledError
+            except TimeoutError:
+                pass
+        await asyncio.get_running_loop().run_in_executor(
+            cache_executor,
+            partial(
+                cache.apply_transfer_batch,
+                [],
+                account=account.name,
+                exchange=exchange_id,
+                status="error",
+                error=str(message)[:500],
+            ),
+        )
+        raise RuntimeError(str(message)[:500] or type(exc).__name__) from exc
+    return {
+        "status": "ok",
+        "account": account.name,
+        "exchange": exchange_id,
+        "records": len(result.get("records") or []),
+        "partial": bool(result.get("partial")),
+        "warnings": result.get("warnings") or [],
+    }
+
+
+async def _record_transfer_from_parent(
+    request: dict[str, Any],
+    *,
+    cache: AccountCache,
+    cache_executor: ThreadPoolExecutor,
+) -> dict[str, Any]:
+    records = request.get("records")
+    records = records if isinstance(records, list) else []
+    if not records:
+        return {"status": "ok", "stored": 0}
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        key = (
+            str(record.get("account") or "").strip(),
+            str(record.get("exchange") or "").strip().lower(),
+        )
+        if all(key):
+            grouped.setdefault(key, []).append(record)
+    stored = 0
+    loop = asyncio.get_running_loop()
+    for (account, exchange), account_records in grouped.items():
+        result = await loop.run_in_executor(
+            cache_executor,
+            partial(
+                cache.apply_transfer_batch,
+                account_records,
+                account=account,
+                exchange=exchange,
+                update_sync=False,
+            ),
+        )
+        stored += int(result.get("stored") or 0)
+    return {"status": "ok", "stored": stored}
+
+
 async def _import_history_from_parent(
     request: dict[str, Any],
     *,
@@ -1514,6 +1840,59 @@ async def _apply_parent_messages(
         except queue.Empty:
             continue
         if not isinstance(message, dict):
+            continue
+        if message.get("type") == "transfer.refresh":
+            request_id = str(message.get("request_id") or "")
+            try:
+                result = await _refresh_transfers_from_parent(
+                    message,
+                    accounts=accounts,
+                    cursors=cursors,
+                    backfill_semaphore=backfill_semaphore,
+                    backfill_locks=backfill_locks,
+                    cache=cache,
+                    cache_executor=cache_executor,
+                    stop=stop,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                result = {
+                    "status": "error",
+                    "error": {
+                        "type": type(exc).__name__,
+                        "message": str(exc).replace("\n", " ")[:500],
+                    },
+                }
+            await _put_control_message(control_output_queue, {
+                "type": "transfer.refresh.result",
+                "request_id": request_id,
+                "payload": result,
+            })
+            continue
+        if message.get("type") == "transfer.record":
+            request_id = str(message.get("request_id") or "")
+            try:
+                result = await _record_transfer_from_parent(
+                    message,
+                    cache=cache,
+                    cache_executor=cache_executor,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                result = {
+                    "status": "error",
+                    "error": {
+                        "type": type(exc).__name__,
+                        "message": str(exc).replace("\n", " ")[:500],
+                    },
+                }
+            await _put_control_message(control_output_queue, {
+                "type": "transfer.record.result",
+                "request_id": request_id,
+                "payload": result,
+            })
             continue
         if message.get("type") == "history.refresh":
             request_id = str(message.get("request_id") or "")

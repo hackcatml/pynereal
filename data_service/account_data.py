@@ -25,7 +25,14 @@ from account_service.csv_import import (
     preview_history_files,
 )
 from account_service.live_positions import run_positions_stream
-from account_service.positions import collect_positions_snapshot
+from account_service.positions import (
+    collect_positions_snapshot,
+    collect_positions_snapshot_scope,
+)
+from account_service.transfers import (
+    TRANSFER_CACHE_TTL_SECONDS,
+    records_from_transfer_result,
+)
 from ai.scripts.asset import (
     ExchangeAccount,
     build_exchange,
@@ -38,6 +45,25 @@ from ws_manager import WSManager
 
 class AccountDataError(RuntimeError):
     pass
+
+
+_EVALUATION_POSITION_MAX_AGE_SECONDS = 6 * 60.0
+_EVALUATION_HISTORY_MAX_AGE_SECONDS = 35 * 60.0
+
+
+def _evaluation_position_account_type(
+    exchange: str,
+    symbol: str,
+    market_type: str,
+) -> str:
+    if market_type == "inverse":
+        return "delivery"
+    if market_type == "spot":
+        return "spot"
+    settlement = symbol.rsplit(":", 1)[1].split("-", 1)[0].upper() if ":" in symbol else ""
+    if exchange == "bitget" and settlement == "USDC":
+        return "usdc"
+    return "swap"
 
 
 def _fetch_okx_account_uid(account: ExchangeAccount) -> str:
@@ -104,6 +130,8 @@ class AccountDataService:
         self._live_control_reader: asyncio.Task[None] | None = None
         self._history_refresh_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._history_import_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._transfer_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._transfer_refresh_locks: dict[str, asyncio.Lock] = {}
         self._history_import_previews: dict[str, dict[str, Any]] = {}
         self._history_import_jobs: dict[str, dict[str, Any]] = {}
         self._history_import_tasks: dict[str, asyncio.Task[None]] = {}
@@ -201,6 +229,166 @@ class AccountDataService:
             output = copy.deepcopy(result)
             output["cached"] = False
             return output
+
+    async def session_evaluation_evidence(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        market_type: str,
+        account: str | None = None,
+    ) -> dict[str, Any]:
+        """Return cache-first evidence, refreshing only stale session scope."""
+
+        normalized_exchange = exchange.strip().lower()
+        normalized_symbol = symbol.strip()
+        data = await asyncio.to_thread(read_provider_config, self.config_path)
+        candidates = [
+            item
+            for item in configured_accounts(data)
+            if item.exchange_id == normalized_exchange
+            and (account is None or item.name == account)
+        ]
+        account_names = [item.name for item in candidates]
+        cache = AccountCache(self.cache_path)
+
+        async def read_cache() -> dict[str, Any]:
+            return await asyncio.to_thread(
+                cache.session_evaluation_evidence,
+                accounts=account_names,
+                exchange=normalized_exchange,
+                symbol=normalized_symbol,
+                position_max_age_seconds=_EVALUATION_POSITION_MAX_AGE_SECONDS,
+                history_max_age_seconds=_EVALUATION_HISTORY_MAX_AGE_SECONDS,
+            )
+
+        evidence = await read_cache()
+        freshness = evidence.get("freshness") or {}
+        refreshes: list[dict[str, Any]] = []
+
+        stale_position_accounts = list(
+            (freshness.get("positions") or {}).get("stale_accounts") or []
+        )
+        if stale_position_accounts and market_type != "spot":
+            loop = asyncio.get_running_loop()
+            try:
+                snapshot = await loop.run_in_executor(
+                    self._ensure_executor(),
+                    collect_positions_snapshot_scope,
+                    str(self.config_path),
+                    normalized_exchange,
+                    tuple(stale_position_accounts),
+                    normalized_symbol,
+                    _evaluation_position_account_type(
+                        normalized_exchange,
+                        normalized_symbol,
+                        market_type,
+                    ),
+                )
+                failed_accounts = [
+                    str(row.get("account") or "")
+                    for row in snapshot.get("results", [])
+                    if isinstance(row, dict) and row.get("status") != "ok"
+                ]
+                refreshes.append({
+                    "source": "positions",
+                    "status": "ok" if not failed_accounts else "partial",
+                    "accounts": stale_position_accounts,
+                    "failed_accounts": failed_accounts,
+                })
+                fresh_rows = {
+                    str(row.get("account") or ""): row
+                    for row in snapshot.get("results", [])
+                    if isinstance(row, dict)
+                }
+                cached_rows = {
+                    str(row.get("account") or ""): row
+                    for row in evidence["positions"].get("results", [])
+                    if isinstance(row, dict)
+                }
+                cached_rows.update(fresh_rows)
+                evidence["positions"] = snapshot
+                evidence["positions"]["results"] = [
+                    cached_rows[name]
+                    for name in account_names
+                    if name in cached_rows
+                ]
+                position_results = evidence["positions"]["results"]
+                evidence["positions"]["summary"] = {
+                    "requested": len(position_results),
+                    "succeeded": sum(
+                        row.get("status") == "ok" for row in position_results
+                    ),
+                    "failed": sum(
+                        row.get("status") != "ok" for row in position_results
+                    ),
+                }
+            except Exception as exc:
+                refreshes.append({
+                    "source": "positions",
+                    "status": "error",
+                    "accounts": stale_position_accounts,
+                    "error": {"type": type(exc).__name__, "message": str(exc)[:500]},
+                })
+
+        for source, kind in (("orders", "order"), ("position_history", "position")):
+            stale_accounts = list(
+                (freshness.get(source) or {}).get("stale_accounts") or []
+            )
+            if not stale_accounts:
+                continue
+            try:
+                await self.refresh_history(
+                    kind=kind,
+                    exchange=normalized_exchange,
+                    symbol=normalized_symbol,
+                    accounts=stale_accounts,
+                )
+                refreshes.append({
+                    "source": source,
+                    "status": "ok",
+                    "accounts": stale_accounts,
+                })
+            except Exception as exc:
+                refreshes.append({
+                    "source": source,
+                    "status": "error",
+                    "accounts": stale_accounts,
+                    "error": {"type": type(exc).__name__, "message": str(exc)[:500]},
+                })
+
+        if any(item["source"] != "positions" and item["status"] == "ok" for item in refreshes):
+            refreshed = await read_cache()
+            for source in ("orders", "position_history"):
+                successful_accounts = {
+                    account_name
+                    for item in refreshes
+                    if item["source"] == source and item["status"] == "ok"
+                    for account_name in item["accounts"]
+                }
+                if not successful_accounts:
+                    continue
+                evidence[source] = refreshed[source]
+                rows = evidence[source].get("results", [])
+                for row in rows:
+                    if isinstance(row, dict) and row.get("account") in successful_accounts:
+                        row["status"] = "ok"
+                evidence[source]["summary"] = {
+                    "requested": len(rows),
+                    "succeeded": sum(
+                        isinstance(row, dict) and row.get("status") == "ok"
+                        for row in rows
+                    ),
+                    "failed": sum(
+                        not isinstance(row, dict) or row.get("status") != "ok"
+                        for row in rows
+                    ),
+                }
+
+        evidence["account_candidates"] = account_names
+        evidence["refreshes"] = refreshes
+        evidence["source"] = "account_center_cache"
+        return evidence
 
     def _sync_live_snapshot(self, snapshot: dict[str, Any]) -> None:
         input_queue = self._live_input
@@ -302,6 +490,180 @@ class AccountDataService:
             message = str(exc).replace("\n", " ").strip()
             raise AccountDataError(message[:500] or type(exc).__name__) from exc
         return self._history_group_response(groups, exchange=exchange)
+
+    async def transfer_history(
+        self,
+        *,
+        account: str,
+        exchange: str,
+        cursor: str | None = None,
+        limit: int = 50,
+        force: bool = False,
+        assets: list[str] | None = None,
+        account_types: list[str] | None = None,
+    ) -> dict[str, Any]:
+        normalized_account = account.strip()
+        normalized_exchange = exchange.strip().lower()
+        if not normalized_account or not normalized_exchange:
+            raise AccountDataError("transfer account and exchange are required")
+        asset_hints = list(dict.fromkeys(
+            str(value).strip().upper()
+            for value in (assets or [])
+            if str(value).strip()
+        ))[:20]
+        type_hints = list(dict.fromkeys(
+            str(value).strip().lower()
+            for value in (account_types or [])
+            if str(value).strip()
+        ))[:10]
+
+        lock = self._transfer_refresh_locks.setdefault(
+            f"{normalized_exchange}:{normalized_account}",
+            asyncio.Lock(),
+        )
+        refresh_error = ""
+        async with lock:
+            state = await asyncio.to_thread(
+                AccountCache(self.cache_path).transfer_sync_state,
+                normalized_account,
+                normalized_exchange,
+            )
+            last_success = str(state.get("last_success_at") or "")
+            stale = True
+            if last_success:
+                try:
+                    age = datetime.now(UTC).timestamp() - datetime.fromisoformat(
+                        last_success.replace("Z", "+00:00")
+                    ).timestamp()
+                    stale = age >= TRANSFER_CACHE_TTL_SECONDS
+                except ValueError:
+                    stale = True
+            if force or stale:
+                try:
+                    await self._refresh_transfers(
+                        normalized_account,
+                        normalized_exchange,
+                        asset_hints,
+                        type_hints,
+                    )
+                except AccountDataError as exc:
+                    refresh_error = str(exc)
+
+        try:
+            page, state = await asyncio.gather(
+                asyncio.to_thread(
+                    AccountCache(self.cache_path).transfer_history_page,
+                    account=normalized_account,
+                    exchange=normalized_exchange,
+                    cursor=cursor,
+                    limit=limit,
+                ),
+                asyncio.to_thread(
+                    AccountCache(self.cache_path).transfer_sync_state,
+                    normalized_account,
+                    normalized_exchange,
+                ),
+            )
+        except ValueError:
+            raise
+        except Exception as exc:
+            message = str(exc).replace("\n", " ").strip()
+            raise AccountDataError(message[:500] or type(exc).__name__) from exc
+        results = page.get("results") if isinstance(page, dict) else []
+        results = results if isinstance(results, list) else []
+        if refresh_error and not results:
+            raise AccountDataError(refresh_error)
+        if refresh_error:
+            state = {**state, "status": "error", "last_error": refresh_error}
+        return {
+            "schema_version": "1.0",
+            "collected_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "read_only": True,
+            "cached": True,
+            "account": normalized_account,
+            "exchange": normalized_exchange,
+            "results": results,
+            "next_cursor": page.get("next_cursor"),
+            "sync": state,
+            "summary": {
+                "total": int(page.get("total") or 0),
+                "returned": len(results),
+                "has_more": bool(page.get("next_cursor")),
+            },
+        }
+
+    async def _refresh_transfers(
+        self,
+        account: str,
+        exchange: str,
+        assets: list[str],
+        account_types: list[str],
+    ) -> dict[str, Any]:
+        await self._ensure_live_stream()
+        process = self._live_process
+        input_queue = self._live_input
+        if process is None or not process.is_alive() or input_queue is None:
+            raise AccountDataError("account worker is not available")
+        request_id = uuid4().hex
+        waiter = asyncio.get_running_loop().create_future()
+        self._transfer_waiters[request_id] = waiter
+        try:
+            await asyncio.to_thread(input_queue.put, {
+                "type": "transfer.refresh",
+                "request_id": request_id,
+                "account": account,
+                "exchange": exchange,
+                "assets": assets,
+                "account_types": account_types,
+            }, True, 5.0)
+            result = await asyncio.wait_for(asyncio.shield(waiter), timeout=300.0)
+        except (queue.Full, ValueError, OSError) as exc:
+            raise AccountDataError("account worker request queue is unavailable") from exc
+        except TimeoutError as exc:
+            raise AccountDataError("transfer history refresh timed out") from exc
+        finally:
+            self._transfer_waiters.pop(request_id, None)
+            if not waiter.done():
+                waiter.cancel()
+        if result.get("status") == "error":
+            error = result.get("error")
+            error = error if isinstance(error, dict) else {}
+            raise AccountDataError(
+                str(error.get("message") or "transfer history refresh failed")[:500]
+            )
+        return result
+
+    async def record_transfer_result(self, result: dict[str, Any]) -> None:
+        records = records_from_transfer_result(result)
+        if not records:
+            return
+        await self._ensure_live_stream()
+        process = self._live_process
+        input_queue = self._live_input
+        if process is None or not process.is_alive() or input_queue is None:
+            raise AccountDataError("account worker is not available")
+        request_id = uuid4().hex
+        waiter = asyncio.get_running_loop().create_future()
+        self._transfer_waiters[request_id] = waiter
+        try:
+            await asyncio.to_thread(input_queue.put, {
+                "type": "transfer.record",
+                "request_id": request_id,
+                "records": records,
+                "account": str(result.get("account") or ""),
+                "exchange": str(result.get("exchange") or ""),
+            }, True, 5.0)
+            response = await asyncio.wait_for(asyncio.shield(waiter), timeout=30.0)
+            if response.get("status") == "error":
+                error = response.get("error")
+                error = error if isinstance(error, dict) else {}
+                raise AccountDataError(
+                    str(error.get("message") or "transfer history write failed")[:500]
+                )
+        finally:
+            self._transfer_waiters.pop(request_id, None)
+            if not waiter.done():
+                waiter.cancel()
 
     async def pnl(
         self,
@@ -829,24 +1191,26 @@ class AccountDataService:
         account: str = "",
         exchange: str = "",
         symbol: str = "",
+        accounts: list[str] | None = None,
     ) -> dict[str, Any]:
         normalized_kind = kind.strip().lower()
         if normalized_kind not in {"order", "position"}:
             raise AccountDataError("history kind must be order or position")
 
         account_filter = account.strip()
-        account_names: list[str] = []
+        account_names = list(dict.fromkeys(accounts or []))
         if not account_filter:
-            try:
-                account_names = await asyncio.to_thread(
-                    AccountCache(self.cache_path).history_accounts,
-                    kind=normalized_kind,
-                    exchange=exchange,
-                    symbol=symbol,
-                )
-            except Exception as exc:
-                message = str(exc).replace("\n", " ").strip()
-                raise AccountDataError(message[:500] or type(exc).__name__) from exc
+            if not account_names:
+                try:
+                    account_names = await asyncio.to_thread(
+                        AccountCache(self.cache_path).history_accounts,
+                        kind=normalized_kind,
+                        exchange=exchange,
+                        symbol=symbol,
+                    )
+                except Exception as exc:
+                    message = str(exc).replace("\n", " ").strip()
+                    raise AccountDataError(message[:500] or type(exc).__name__) from exc
             if not account_names:
                 raise AccountDataError(
                     "no cached accounts match the selected history scope"
@@ -1026,6 +1390,7 @@ class AccountDataService:
                 waiters = [
                     *self._history_refresh_waiters.values(),
                     *self._history_import_waiters.values(),
+                    *self._transfer_waiters.values(),
                 ]
                 for waiter in waiters:
                     if not waiter.done():
@@ -1042,6 +1407,11 @@ class AccountDataService:
                 "history.import.delete.result",
             }:
                 waiter_map = self._history_import_waiters
+            elif message_type in {
+                "transfer.refresh.result",
+                "transfer.record.result",
+            }:
+                waiter_map = self._transfer_waiters
             else:
                 continue
             request_id = str(message.get("request_id") or "")
@@ -1070,9 +1440,11 @@ class AccountDataService:
         waiters = [
             *self._history_refresh_waiters.values(),
             *self._history_import_waiters.values(),
+            *self._transfer_waiters.values(),
         ]
         self._history_refresh_waiters.clear()
         self._history_import_waiters.clear()
+        self._transfer_waiters.clear()
         for waiter in waiters:
             if not waiter.done():
                 waiter.set_exception(AccountDataError("account worker stopped"))
