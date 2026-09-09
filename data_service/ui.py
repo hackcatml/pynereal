@@ -32,6 +32,8 @@ _STATIC_FILES = {
     "main.js": "text/javascript",
     "dashboard.js": "text/javascript",
     "dashboard.css": "text/css",
+    "notifications.js": "text/javascript",
+    "notifications.css": "text/css",
 }
 
 

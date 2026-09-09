@@ -786,6 +786,7 @@ def build_session_api_router(
                 spec=rt.spec,
                 script_title=script_title,
                 payload=payload,
+                notify=rt.notifications.publish if rt.notifications else None,
             )
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=400)

@@ -74,11 +74,17 @@ class SessionRegistry:
         port: int,
         *,
         verification_delivery_path: Path | None = None,
+        notification_path: Path | None = None,
     ) -> None:
         self.feeds: Dict[str, Feed] = {}
         self.sessions: Dict[str, Session] = {}
         self.hub_ws = WSManager()  # dashboard clients on /ws/hub
         self.supervisor = RunnerSupervisor(port=port, on_change=self.notify_hub)
+        from data_service.notifications import NotificationService
+        self.notifications = NotificationService(notification_path, self.hub_ws.broadcast_json) if notification_path else None
+        if self.notifications:
+            self.notifications.start()
+            self.supervisor.notification_token = self.notifications.token
         self.logo_resolver = TradingViewLogoResolver()
         self.logo_tasks: Dict[str, asyncio.Task] = {}
         self.ai_instruction_handler: Optional[
@@ -443,6 +449,7 @@ class SessionRegistry:
             strategy_evaluation_enabled=self.strategy_evaluation_enabled,
             verification_enabled=self.supervisor.verification_enabled,
             verification_delivery=self.verification_delivery,
+            notifications=self.notifications,
         )
         session.on_status_change = self.notify_hub
         session.on_spec_change = self._persist_and_notify
@@ -873,6 +880,8 @@ class SessionRegistry:
             t.cancel()
         if all_tasks:
             await asyncio.gather(*all_tasks, return_exceptions=True)
+        if self.notifications:
+            await self.notifications.close()
 
     # ------------------------------------------------------------------
     # Persistence + dashboard push

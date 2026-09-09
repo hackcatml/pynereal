@@ -55,6 +55,9 @@ def build_app(
     update_service: UpdateService,
 ) -> FastAPI:
     app = FastAPI()
+    from data_service.notifications import build_notification_router
+    if registry.notifications:
+        app.include_router(build_notification_router(registry.notifications, registry))
     scripting_executor = ScriptingExecutor()
     app.state.scripting_executor = scripting_executor
     scripting_workspace = ScriptingWorkspace(
@@ -239,6 +242,7 @@ async def main() -> None:
     specs = load_initial_sessions()
     registry = SessionRegistry(
         port=cfg.port,
+        notification_path=_PROJECT_ROOT / "workdir" / "data" / "cache" / "notifications.sqlite",
         verification_delivery_path=(
             _PROJECT_ROOT
             / "workdir"

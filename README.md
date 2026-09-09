@@ -402,6 +402,24 @@ BOT_TOKEN=your_bot_token
 CHAT_ID=your_chat_id
 ```
 
+## Notification Center
+
+The bell to the right of the Hub clock opens saved strategy/manual alert results
+and verification-runner order-signal findings. A red dot indicates unread items.
+Expand an item to read its details; the broom marks all unread items as read.
+Once all items are read, click the broom again to confirm clearing the list.
+Cleared items stay hidden after a refresh or restart; saved history is not deleted.
+
+Webhook results appear after the request completes. Telegram results update the
+same item separately, so a Telegram timeout does not delay the webhook result.
+A webhook response is not proof that a trade executed; receiver statuses such
+as `pending` are shown separately. Response timeouts are shown as delivery unknown.
+Existing sending toggles and retry policies are unchanged.
+
+History and read state are stored in `workdir/data/cache/notifications.sqlite`.
+Notification transport and database writes run outside the strategy calculation
+thread. Events not yet saved can be lost if the process is forcibly terminated.
+
 ## Manual Alerts
 
 Manual alerts let you send one-off webhook messages directly from the chart.

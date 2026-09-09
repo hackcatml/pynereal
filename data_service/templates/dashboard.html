@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
   <link rel="stylesheet" href="/static/dashboard.css?v=198" />
+  <link rel="stylesheet" href="/static/notifications.css?v=4" />
   <link rel="stylesheet" href="/static/scripting_backtest.css?v=38" />
   <link rel="stylesheet" href="/static/scripting_ai.css?v=6" />
   <link rel="stylesheet" href="/static/editor.css?v=5" />
@@ -20,13 +21,44 @@
     </button>
     <h1>PyneReal&nbsp;Hub</h1>
     <span id="conn-status" class="conn">connecting…</span>
+    <div class="hub-header-tools">
     <div id="hub-clock" class="hub-clock" aria-label="Local time">
       <span class="clock-hand clock-hour" aria-hidden="true"></span>
       <span class="clock-hand clock-minute" aria-hidden="true"></span>
       <span class="clock-hand clock-second" aria-hidden="true"></span>
       <span class="clock-center" aria-hidden="true"></span>
     </div>
+    <button id="notification-bell" type="button" class="notification-icon" aria-label="Notifications"
+            aria-expanded="false" aria-controls="notification-panel" data-n-tooltip="Notifications">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <defs><mask id="notification-dot-gap"><rect width="24" height="24" fill="white"/><circle cx="20" cy="4" r="4.4" fill="black"/></mask></defs>
+        <g class="notification-bell-lines"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21a2 2 0 0 0 4 0"/></g>
+        <circle class="notification-dot" cx="20" cy="4" r="3"/>
+      </svg>
+    </button>
+    </div>
   </header>
+  <div id="notification-overlay" hidden>
+    <section id="notification-panel" role="dialog" aria-modal="true" aria-label="Notifications" tabindex="-1">
+      <header class="notification-header">
+        <h2>Notifications</h2>
+        <button id="notification-read-all" class="notification-icon" type="button" aria-label="Mark all as read" data-n-tooltip="Mark all as read"
+                aria-haspopup="dialog" aria-expanded="false" aria-controls="notification-clear-popover" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5.5" x2="12" y2="10"/><path d="M8 10 L16 10 L17 13.5 L7 13.5 Z"/><line x1="8.2" y1="13.5" x2="7.1" y2="18"/><line x1="10.7" y1="13.5" x2="10.25" y2="18"/><line x1="13.3" y1="13.5" x2="13.75" y2="18"/><line x1="15.8" y1="13.5" x2="16.9" y2="18"/></svg>
+        </button>
+      </header>
+      <div id="notification-clear-popover" role="dialog" aria-modal="true" aria-label="Clear notification list?" hidden>
+        <strong>Clear notification list?</strong>
+        <p>Messages will be hidden from the list. Saved history stays in the database.</p>
+        <div class="notification-clear-actions">
+          <button id="notification-clear-cancel" class="btn" type="button">Cancel</button>
+          <button id="notification-clear-confirm" class="btn btn-danger-primary" type="button">Clear</button>
+        </div>
+      </div>
+      <p id="notification-status" role="status" hidden></p>
+      <div id="notification-scroll"><div id="notification-list"></div><button id="notification-more" type="button" hidden>Load more</button></div>
+    </section>
+  </div>
 
   <div id="hub-edge-swipe" class="hub-edge-swipe" aria-hidden="true"></div>
   <div id="hub-menu-backdrop" class="hub-menu-backdrop" aria-hidden="true"></div>
@@ -1842,6 +1874,7 @@
   <script src="/static/scripting_backtest.js?v=41"></script>
   <script src="/static/scripting_ai.js?v=12"></script>
   <script src="/static/scripting.js?v=52"></script>
-  <script src="/static/dashboard.js?v=179"></script>
+  <script src="/static/notifications.js?v=4"></script>
+  <script src="/static/dashboard.js?v=180"></script>
 </body>
 </html>

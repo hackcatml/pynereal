@@ -10611,6 +10611,7 @@
     }, 5000);
     ws.onopen = () => {
       if (ws !== hubWs || generation !== hubGeneration) return;
+      window.PyneRealNotifications?.sync();
       clearTimeout(connectGuard);
       setHubStatus("syncing…");
       if (!aiPending) syncAiChatState({ allowImport: false });
@@ -10633,7 +10634,9 @@
       setHubStatus("live", true);
       try {
         const msg = JSON.parse(ev.data);
-        if (msg.type === "sessions") {
+        if (msg.type === "notifications") {
+          window.PyneRealNotifications?.update(msg);
+        } else if (msg.type === "sessions") {
           applyAiAvailability(msg.ai_enabled);
           applySessions(msg.sessions || []);
         } else if (msg.type === "ai_chat_updated" && !aiPending) {
