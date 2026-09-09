@@ -2,7 +2,7 @@
   "name": "pynereal-ui-assets",
   "private": true,
   "scripts": {
-    "build:codemirror": "node frontend/build-codemirror.mjs"
+    "build:codemirror": "node data_service/codemirror_build/build-codemirror.mjs"
   },
   "devDependencies": {
     "@codemirror/commands": "6.11.0",

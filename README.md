@@ -193,6 +193,8 @@ versions. Revision history is stored locally in
 Use `Cmd/Ctrl + F` to find, `Cmd/Ctrl + R` to find and replace, and
 `Cmd/Ctrl + /` to toggle comments. Toolbar controls are also available on mobile.
 CodeMirror is bundled; normal setup and Update do not require Node.js or npm.
+Editable CodeMirror source and build tooling live in `data_service/codemirror_build/`;
+the browser bundle is generated in `data_service/templates/codemirror.js`.
 
 Opening or saving a Python file runs static validation, with cached results for
 an unchanged revision. Errors are underlined, and the error navigation buttons

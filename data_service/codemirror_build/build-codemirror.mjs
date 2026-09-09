@@ -1,7 +1,7 @@
 import { build } from "esbuild";
 
 await build({
-  entryPoints: ["frontend/codemirror.js"],
+  entryPoints: ["data_service/codemirror_build/codemirror.js"],
   bundle: true,
   format: "iife",
   target: ["es2020"],
