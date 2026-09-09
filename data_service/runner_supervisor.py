@@ -37,6 +37,7 @@ class RunnerSupervisor:
     def __init__(self, port: int, on_change: Callable[[], Awaitable[None]]) -> None:
         # Runner connects back to the hub locally regardless of bind host.
         self.port = port
+        self.notification_token = ""
         self._on_change = on_change
         self.handles: Dict[str, RunnerProcessHandle] = {}
         self.verification_handles: Dict[str, RunnerProcessHandle] = {}
@@ -151,8 +152,15 @@ class RunnerSupervisor:
         ]
 
         try:
+            env = os.environ.copy()
+            if self.notification_token and role == "primary":
+                env["PYNEREAL_NOTIFICATION_URL"] = f"http://127.0.0.1:{self.port}/internal/notifications"
+                env["PYNEREAL_NOTIFICATION_TOKEN"] = self.notification_token
+            else:
+                env.pop("PYNEREAL_NOTIFICATION_URL", None)
+                env.pop("PYNEREAL_NOTIFICATION_TOKEN", None)
             proc = await asyncio.create_subprocess_exec(
-                *args, stdout=log_fh, stderr=log_fh, cwd=str(REPO_ROOT),
+                *args, stdout=log_fh, stderr=log_fh, cwd=str(REPO_ROOT), env=env,
             )
         except Exception:
             log_fh.close()

@@ -53,6 +53,7 @@ class VerificationDeliveryRequest:
     notification_toggles: dict[str, bool]
     webhook_config: dict[str, Any]
     on_result: Callable[[dict[str, Any]], None] | None = None
+    on_channel_result: Callable[[str, dict[str, Any]], None] | None = None
 
 
 def verification_event_id(request: VerificationDeliveryRequest) -> str:
@@ -297,6 +298,7 @@ class VerificationDeliveryService:
 
         if missing and bool(toggles.get("webhook")):
             webhook_outcome = self._deliver_webhook(request, event_id)
+            self._report_channel(request, "webhook", webhook_outcome)
 
         if bool(toggles.get("telegram")):
             telegram_outcome = self._deliver_telegram(
@@ -304,6 +306,7 @@ class VerificationDeliveryService:
                 event_id,
                 webhook_outcome,
             )
+            self._report_channel(request, "telegram", telegram_outcome)
 
         return {
             "event": "verification_delivery_completed",
@@ -314,6 +317,16 @@ class VerificationDeliveryService:
             "webhook": webhook_outcome,
             "telegram": telegram_outcome,
         }
+
+    @staticmethod
+    def _report_channel(request, channel, outcome):
+        if request.on_channel_result is None or outcome.get("status") == "duplicate":
+            return
+        try:
+            request.on_channel_result(channel, outcome)
+        except Exception:
+            from data_service.notification_events import notification_error
+            notification_error("verification result enqueue failed")
 
     def _deliver_webhook(
         self,
