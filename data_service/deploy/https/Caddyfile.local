@@ -1,0 +1,62 @@
+{
+	admin 127.0.0.1:2020
+	auto_https disable_redirects
+	skip_install_trust
+	default_sni {$PYNE_LOCAL_HOST}
+	# Isolate local Safari/PWA WebSocket negotiation from HTTP/3.
+	servers {
+		protocols h1 h2
+	}
+	pki {
+		ca local {
+			name "PyneReal Local Test CA"
+		}
+	}
+}
+
+# Trusted LAN testing only. Do not forward these ports from the Internet.
+https://{$PYNE_LOCAL_HOST}:8443 {
+	bind {$PYNE_LOCAL_HOST}
+	tls internal
+	# Clear any HTTP/3 alternative cached before this configuration was applied.
+	header Alt-Svc clear
+	log pwa_connections {
+		output file .runtime/pwa-https/connections.jsonl {
+			roll_size 2mb
+			roll_keep 2
+		}
+		format filter {
+			request>headers delete
+			request>uri delete
+			resp_headers delete
+			wrap json
+		}
+	}
+	@notConnectionProbe not path / /static/dashboard.js /ws/hub /ws/watchlist
+	log_skip @notConnectionProbe
+	log_append path {http.request.uri.path}
+	log_append browser {http.request.header.User-Agent}
+	@outside not remote_ip private_ranges
+	respond @outside 403
+	reverse_proxy 127.0.0.1:{$PYNE_HTTP_PORT:9001} {
+		transport http {
+			keepalive 4s
+		}
+	}
+}
+
+# Only the public CA certificate is downloadable here, never its private key.
+http://{$PYNE_LOCAL_HOST}:8444 {
+	bind {$PYNE_LOCAL_HOST}
+	@outside not remote_ip private_ranges
+	respond @outside 403
+	handle /pynereal-local-ca.cer {
+		root * {$PYNE_LOCAL_TRUST_DIR}
+		header Content-Type application/x-x509-ca-cert
+		header Cache-Control no-store
+		file_server
+	}
+	handle {
+		respond 404
+	}
+}

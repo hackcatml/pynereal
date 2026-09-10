@@ -783,6 +783,51 @@ http://<server-ip>:9001
 The mobile dashboard provides the same session controls as the desktop view:
 start or stop runners, open charts, inspect logs, and manage alert settings.
 
+### Install as an App
+
+PyneReal includes an app manifest and home-screen icons. On supported browsers,
+use a trusted **HTTPS** address for consistent PWA installation across browsers.
+Safari's home-screen web-app feature is separate: iOS 26 can open any added site
+as a web app, including sites that do not meet Chromium's PWA installation
+requirements. A remote HTTP IP does not qualify for Chromium's localhost
+development exception.
+
+1. Expose the existing Hub through an HTTPS reverse proxy or your existing secure
+   access layer. Forward WebSocket upgrades as well as HTTP requests, and retain
+   authentication or private-network access controls. HTTPS alone is not authentication.
+2. Open that HTTPS address in Safari on iPhone/iPad or Chrome on Android.
+3. On iOS, use **Share > Add to Home Screen**, enabling **Open as Web App** when
+   offered. On Android, use Chrome's **Install app** or **Add to Home screen** option.
+   Available actions depend on the browser and OS version.
+
+An optional same-server **Caddy HTTPS configuration** is included under
+[`data_service/deploy/https`](data_service/deploy/https/README.md). It supports
+**public IPv4 addresses without a domain**, automatic Let's Encrypt certificate
+renewal, and password-protected access. The backend remains HTTP on port 9001;
+clients use `https://<public-ip>/` on port 443. Follow the setup guide and restrict
+direct access to 9001 to prevent bypassing the proxy login. Caddy is installed
+and managed separately, not automatically by PyneReal Setup or Update.
+
+The installed app still needs the server and a network connection. This version
+does not add offline caching, queued trading commands, OS push notifications, or
+an app-icon unread badge. The Hub bell remains an in-app notification list.
+Backgrounding the app may suspend its connections; server-side runners continue
+independently. In the mobile installed app, session charts and backtest equity
+charts open in the same window. The bottom navigation button returns to the
+originating screen, restoring the selected backtest result and log/summary view
+when returning from an equity chart. Directly opened charts fall back to the Hub.
+Other new-window links may open in the browser depending on the operating system.
+
+After a server Update, use the existing refresh flow or reopen/reload the app.
+There is no Service Worker cache to update, and no additional Python or Node.js
+dependency is required. Deploying the new server routes requires a data-service
+restart; later template/icon-only changes follow the existing Updater behavior.
+App-icon changes can require reinstalling the home-screen app.
+
+Installation references: [iOS](https://support.apple.com/en-gb/guide/iphone/iphea86e5236/ios),
+[Android](https://support.google.com/chrome/answer/9658361?co=GENIE.Platform%3DAndroid&hl=en),
+and [browser requirements](https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Guides/Making_PWAs_installable).
+
 ## Risk Warning
 
 This project is under active development.<br>

@@ -1,0 +1,117 @@
+.pwa-chart-navigation {
+  display: none;
+}
+
+html.pwa-mobile {
+  --pwa-safe-area-bottom: calc(env(safe-area-inset-bottom, 0px) / 2);
+  --pwa-chart-navigation-height: calc(48px + var(--pwa-safe-area-bottom));
+  touch-action: manipulation;
+}
+
+html.pwa-mobile body.dashboard-page {
+  min-height: 100dvh;
+  padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) var(--pwa-safe-area-bottom) env(safe-area-inset-left, 0px);
+}
+
+html.pwa-mobile .hub-menu {
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: var(--pwa-safe-area-bottom);
+}
+
+html.pwa-mobile #chart {
+  top: env(safe-area-inset-top, 0px);
+  bottom: var(--pwa-chart-navigation-height);
+  height: auto;
+}
+
+html.pwa-mobile :is(#chart, #backtest-price-chart),
+html.pwa-mobile :is(#chart, #backtest-price-chart) canvas {
+  touch-action: none;
+}
+
+html.pwa-mobile .nav-btn {
+  bottom: calc(var(--pwa-chart-navigation-height) + 65px);
+}
+
+html.pwa-mobile body.backtest-chart-page {
+  position: fixed;
+  inset: 0;
+  height: auto;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: var(--pwa-chart-navigation-height);
+}
+
+html.pwa-mobile .pwa-chart-navigation {
+  position: fixed;
+  z-index: 18;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--pwa-chart-navigation-height);
+  padding: 1px max(12px, env(safe-area-inset-right)) var(--pwa-safe-area-bottom) max(12px, env(safe-area-inset-left));
+  border-top: 1px solid #262626;
+  background: #000000;
+  color: #ffffff;
+}
+
+.pwa-chart-home {
+  position: relative;
+  box-sizing: border-box;
+  display: inline-flex;
+  flex: 0 0 36px;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid #2a313c;
+  border-radius: 6px;
+  background: #21262d;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 2px 4px rgba(0, 0, 0, 0.35);
+  color: #d7dde5;
+  text-decoration: none;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.pwa-chart-home svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.pwa-chart-home:active {
+  background: #161b22;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+
+.pwa-chart-home:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: -2px;
+}
+
+@media (hover: hover) {
+  .pwa-chart-home:hover {
+    border-color: #2962ff;
+  }
+
+  .pwa-chart-home:hover::after {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 0;
+    padding: 5px 8px;
+    border-radius: 4px;
+    background: #111827;
+    color: #ffffff;
+    font-size: 12px;
+    white-space: nowrap;
+    content: attr(aria-label);
+  }
+}

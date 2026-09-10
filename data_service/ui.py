@@ -4,12 +4,21 @@ import json
 from pathlib import Path
 
 from fastapi import APIRouter
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 
 _TEMPLATES = Path(__file__).parent / "templates"
 
+_STATIC_IMAGES = {
+    "pwa-icon-192.png",
+    "pwa-icon-512.png",
+    "pwa-icon-maskable-512.png",
+    "apple-touch-icon.png",
+}
+
 _STATIC_FILES = {
     "styles.css": "text/css",
+    "pwa_chart.css": "text/css",
+    "pwa_chart.js": "text/javascript",
     "editor.css": "text/css",
     "codemirror.css": "text/css",
     "state.js": "text/javascript",
@@ -42,7 +51,18 @@ def build_ui_router() -> APIRouter:
 
     @r.get("/", response_class=HTMLResponse)
     def dashboard() -> HTMLResponse:
-        return HTMLResponse(content=(_TEMPLATES / "dashboard.html").read_text(encoding="utf-8"))
+        return HTMLResponse(
+            content=(_TEMPLATES / "dashboard.html").read_text(encoding="utf-8"),
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    @r.get("/manifest.webmanifest")
+    def manifest() -> Response:
+        return Response(
+            content=(_TEMPLATES / "manifest.webmanifest").read_text(encoding="utf-8"),
+            media_type="application/manifest+json",
+            headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"},
+        )
 
     @r.get("/s/{session_id}", response_class=HTMLResponse)
     def chart_page(session_id: str) -> HTMLResponse:
@@ -55,7 +75,7 @@ def build_ui_router() -> APIRouter:
             "</script>"
         )
         html = html.replace("<!--RUNTIME_CONFIG-->", config_script)
-        return HTMLResponse(content=html)
+        return HTMLResponse(content=html, headers={"Cache-Control": "no-cache"})
 
     @r.get("/backtests/{job_id}", response_class=HTMLResponse)
     def backtest_chart_page(job_id: str) -> HTMLResponse:
@@ -65,15 +85,24 @@ def build_ui_router() -> APIRouter:
             f"  window.BACKTEST_JOB_ID = {json.dumps(job_id)};\n"
             "</script>"
         )
-        return HTMLResponse(content=html.replace("<!--BACKTEST_CONFIG-->", config_script))
+        return HTMLResponse(
+            content=html.replace("<!--BACKTEST_CONFIG-->", config_script),
+            headers={"Cache-Control": "no-cache"},
+        )
 
     @r.get("/static/{filename}")
     def static_file(filename: str) -> Response:
-        if filename not in _STATIC_FILES:
+        if filename not in _STATIC_FILES and filename not in _STATIC_IMAGES:
             return Response(status_code=404)
         file_path = _TEMPLATES / filename
         if not file_path.exists():
             return Response(status_code=404)
+        if filename in _STATIC_IMAGES:
+            return FileResponse(
+                file_path,
+                media_type="image/png",
+                headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"},
+            )
         return Response(
             content=file_path.read_text(encoding="utf-8"),
             media_type=_STATIC_FILES[filename],

@@ -1375,7 +1375,7 @@
 
   function syncMobileViewportHeight() {
     const compact = window.matchMedia("(max-width: 720px)").matches;
-    if (!compact) {
+    if (!compact || document.documentElement.classList.contains("pwa-mobile")) {
       document.documentElement.style.removeProperty("--backtest-viewport-height");
       return;
     }

@@ -1,0 +1,36 @@
+{
+	admin 127.0.0.1:2019
+	# IP-address clients may omit SNI, including behind a cloud NAT.
+	default_sni {$PYNE_HTTPS_HOST}
+	# Match the Safari/PWA WebSocket-compatible local configuration.
+	servers {
+		protocols h1 h2
+	}
+}
+
+https://{$PYNE_HTTPS_HOST} {
+	# Discard HTTP/3 alternatives cached before this configuration was applied.
+	header Alt-Svc clear
+
+	# Explicit ACME avoids Caddy's default private CA for IP addresses.
+	tls {
+		issuer acme {
+			dir https://acme-v02.api.letsencrypt.org/directory
+			profile shortlived
+			disable_tlsalpn_challenge
+		}
+	}
+
+	basic_auth {
+		{$PYNE_HTTPS_USER} {$PYNE_HTTPS_PASSWORD_HASH}
+	}
+
+	reverse_proxy 127.0.0.1:{$PYNE_HTTP_PORT:9001} {
+		header_up -Authorization
+		header_up -Proxy-Authorization
+		transport http {
+			# Stay below Uvicorn's default five-second idle timeout.
+			keepalive 4s
+		}
+	}
+}

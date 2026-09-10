@@ -1,5 +1,6 @@
 (function () {
   let summaryRiskGradientSequence = 0;
+  const pwaReturnStateKey = "pynerealBacktestReturn";
 
   function createBacktestInstance(root, instanceOptions = {}) {
   let initialized = false;
@@ -535,8 +536,23 @@
 
   function openEquityChart() {
     if (!equityAvailable()) return;
+    const url = `/backtests/${encodeURIComponent(job.id)}`;
+    if (document.documentElement.classList.contains("pwa-mobile")) {
+      window.history.replaceState({
+        ...window.history.state,
+        [pwaReturnStateKey]: {
+          context,
+          jobId: job.id,
+          summaryOpen,
+          summaryCompareOpen,
+          summaryRiskRatio,
+        },
+      }, "");
+      window.location.assign(url);
+      return;
+    }
     window.open(
-      `/backtests/${encodeURIComponent(job.id)}`,
+      url,
       "_blank",
       "noopener",
     );
@@ -1733,7 +1749,7 @@
     };
   }
 
-  async function loadJobs(sequence = contextSequence, connectSelected = true) {
+  async function loadJobs(sequence = contextSequence, connectSelected = true, preferredJobId = "") {
     const scriptPath = context && context.path;
     if (!scriptPath) return;
     try {
@@ -1747,7 +1763,7 @@
         || !context
         || context.path !== scriptPath
       ) return;
-      const selectedId = job && job.id;
+      const selectedId = job && job.id || preferredJobId;
       jobs = latestJobsByRunKey(payload.jobs);
       const selected = jobs.find((item) => item.id === selectedId) || jobs[0] || null;
       if (selected) {
@@ -2186,7 +2202,7 @@
     saveDesktopGeometry();
   }
 
-  function open(nextContext) {
+  function open(nextContext, returnView = null) {
     activate();
     const sequence = ++contextSequence;
     if (closeTimer !== null) {
@@ -2269,7 +2285,16 @@
     setStatus("loading", "");
     updateActionState();
     openTimer = window.setTimeout(finishOpening, 230);
-    void Promise.all([loadData("", sequence), loadJobs(sequence)]);
+    void Promise.all([
+      loadData("", sequence),
+      loadJobs(sequence, true, returnView?.jobId || ""),
+    ]).then(() => {
+      if (!returnView || sequence !== contextSequence || !isOpen()) return;
+      summaryRiskRatio = returnView.summaryRiskRatio === "sortino" ? "sortino" : "sharpe";
+      summaryCompareOpen = Boolean(returnView.summaryCompareOpen) && summaryJobs().length > 1;
+      renderSummary();
+      setSummaryOpen(Boolean(returnView.summaryOpen));
+    });
   }
 
   function finishOpening() {
@@ -2813,17 +2838,27 @@
     });
     mobileInstance.init({ api: managerApi, mobileQuery: managerMobileQuery });
     managerInitialized = true;
+    window.addEventListener("pageshow", (event) => {
+      if (!document.documentElement.classList.contains("pwa-mobile")) return;
+      const returnView = window.history.state?.[pwaReturnStateKey];
+      if (!returnView) return;
+      const state = { ...window.history.state };
+      delete state[pwaReturnStateKey];
+      window.history.replaceState(state, "");
+      // BFCache already retains the open menu; recreate it only after a full page load.
+      if (!event.persisted && returnView.context?.path) open(returnView.context, returnView);
+    });
   }
 
-  function open(nextContext) {
+  function open(nextContext, returnView = null) {
     if (!managerInitialized) return;
     if (managerMobileQuery.matches) {
-      mobileInstance.open(nextContext);
+      mobileInstance.open(nextContext, returnView);
       return;
     }
     const path = String(nextContext && nextContext.path || "");
     const instance = desktopInstances.get(path) || createDesktopInstance(path);
-    instance.open(nextContext);
+    instance.open(nextContext, returnView);
   }
 
   function close(options = {}) {
