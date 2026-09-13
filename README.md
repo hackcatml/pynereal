@@ -412,6 +412,8 @@ Expand an item to read its details; the broom marks all unread items as read.
 Once all items are read, click the broom again to confirm clearing the list.
 Cleared items stay hidden after a refresh or restart; saved history is not deleted.
 
+Strategy alert results are recorded only when the webhook toggle is enabled at
+the time of the alert. Previously saved items remain unchanged.
 Webhook results appear after the request completes. Telegram results update the
 same item separately, so a Telegram timeout does not delay the webhook result.
 A webhook response is not proof that a trade executed; receiver statuses such
