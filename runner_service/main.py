@@ -407,7 +407,8 @@ def on_alert_event(message: str, runner: ScriptRunner):
     do_telegram = TELEGRAM_ENABLED and bool(telegram_token) and bool(telegram_chat_id)
     syminfo = getattr(runner, "syminfo", None)
     report = alert_callback(
-        (NOTIFICATION_SENDER.publish if NOTIFICATION_SENDER and CURRENT_EVALUATION_TIMESTAMP is not None
+        (NOTIFICATION_SENDER.publish if WEBHOOK_ENABLED and NOTIFICATION_SENDER
+         and CURRENT_EVALUATION_TIMESTAMP is not None
          and not getattr(script, "pre_run", False) else None),
         session_id=SESSION_ID, origin="primary", signal=message,
         context={"script_title": script.title, "symbol": getattr(syminfo, "ticker", None),
