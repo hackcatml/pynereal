@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="/static/scripting_backtest.css?v=38" />
   <link rel="stylesheet" href="/static/scripting_ai.css?v=6" />
   <link rel="stylesheet" href="/static/editor.css?v=5" />
-  <link rel="stylesheet" href="/static/codemirror.css?v=1" />
+  <link rel="stylesheet" href="/static/codemirror.css?v=2" />
 </head>
 <body>
   <header class="topbar">
@@ -409,6 +409,13 @@
                 <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
                   <circle cx="11" cy="11" r="7" />
                   <path d="m20 20-4-4" />
+                </svg>
+              </button>
+              <button id="scripting-word-wrap" class="btn btn-icon editor-word-wrap" type="button"
+                      aria-label="Word wrap" aria-pressed="false" data-tooltip="Word wrap">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M3 6h18M3 12h15a3 3 0 1 1 0 6h-4" />
+                  <path d="m16 16-2 2 2 2M3 18h7" />
                 </svg>
               </button>
               <button id="scripting-backtest" class="btn btn-icon" type="button"
@@ -1869,11 +1876,11 @@
     </form>
   </div>
 
-  <script src="/static/codemirror.js?v=3"></script>
+  <script src="/static/codemirror.js?v=5"></script>
   <script src="/static/editor.js?v=8"></script>
   <script src="/static/scripting_backtest.js?v=41"></script>
   <script src="/static/scripting_ai.js?v=12"></script>
-  <script src="/static/scripting.js?v=52"></script>
+  <script src="/static/scripting.js?v=53"></script>
   <script src="/static/notifications.js?v=4"></script>
   <script src="/static/dashboard.js?v=180"></script>
 </body>

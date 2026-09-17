@@ -1760,6 +1760,7 @@ App.ui = {
       value: sourceCode.textContent || "No source loaded.",
       language: "python",
       ariaLabel: "Script source",
+      wrapButton: document.getElementById("source-word-wrap"),
     });
     this.sourceEditorController = window.PyneEditor.create({
       editor: sourceCode,

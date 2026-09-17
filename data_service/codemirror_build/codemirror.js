@@ -2,6 +2,7 @@ import {
   Compartment,
   EditorSelection,
   EditorState,
+  Prec,
   RangeSet,
   RangeSetBuilder,
   StateEffect,
@@ -19,7 +20,9 @@ import {
   gutter,
   highlightActiveLine,
   keymap,
+  lineNumbers,
   rectangularSelection,
+  tooltips,
 } from "@codemirror/view";
 import {
   defaultKeymap,
@@ -36,10 +39,21 @@ import {
   HighlightStyle,
   bracketMatching,
   indentOnInput,
+  indentUnit,
   syntaxHighlighting,
 } from "@codemirror/language";
 import { python } from "@codemirror/lang-python";
+import {
+  acceptCompletion,
+  autocompletion,
+  clearSnippet,
+  completionKeymap,
+  nextSnippetField,
+  prevSnippetField,
+  snippetKeymap,
+} from "@codemirror/autocomplete";
 import { tags } from "@lezer/highlight";
+import { pyneCompletion } from "./completions.js";
 
 const setSearchEffect = StateEffect.define();
 const setDiagnosticsEffect = StateEffect.define();
@@ -213,7 +227,24 @@ const pyneHighlightStyle = HighlightStyle.define([
 ]);
 
 function languageExtension(language) {
-  return String(language || "").toLowerCase() === "python" ? python() : [];
+  return String(language || "").toLowerCase() === "python" ? [
+    python(),
+    autocompletion({
+      override: [pyneCompletion],
+      defaultKeymap: false,
+      activateOnTypingDelay: 120,
+      maxRenderedOptions: 40,
+      tooltipClass: () => "pyne-completion-list",
+    }),
+    Prec.highest(keymap.of([
+      ...completionKeymap.map(binding => ({ ...binding, stopPropagation: true })),
+      { key: "Tab", run: view => acceptCompletion(view) || nextSnippetField(view), shift: prevSnippetField },
+    ])),
+    snippetKeymap.of([
+      { key: "Tab", run: nextSnippetField, shift: prevSnippetField, stopPropagation: true },
+      { key: "Escape", run: clearSnippet, stopPropagation: true },
+    ]),
+  ] : [];
 }
 
 function editableExtension(readOnly) {
@@ -231,8 +262,10 @@ function create(container, options = {}) {
 
   const languageCompartment = new Compartment();
   const editableCompartment = new Compartment();
+  const wrappingCompartment = new Compartment();
   let language = String(options.language || "python");
   let readOnly = Boolean(options.readOnly);
+  let wordWrap = Boolean(options.wordWrap);
   let suppressInput = 0;
   let inputScheduled = false;
   let destroyed = false;
@@ -248,10 +281,14 @@ function create(container, options = {}) {
     crosshairCursor(),
     highlightActiveLine(),
     indentOnInput(),
+    indentUnit.of("    "),
+    EditorState.tabSize.of(4),
     bracketMatching(),
     syntaxHighlighting(pyneHighlightStyle),
     EditorState.allowMultipleSelections.of(true),
-    EditorView.lineWrapping,
+    wrappingCompartment.of(wordWrap ? EditorView.lineWrapping : []),
+    EditorView.theme({}, { dark: true }),
+    tooltips({ parent: document.body }),
     keymap.of([
       indentWithTab,
       ...historyKeymap,
@@ -262,6 +299,7 @@ function create(container, options = {}) {
     diagnosticState,
     changedLineState,
     changedLineGutter,
+    lineNumbers(),
     languageCompartment.of(languageExtension(language)),
     editableCompartment.of(editableExtension(readOnly)),
     EditorView.contentAttributes.of({
@@ -432,6 +470,14 @@ function create(container, options = {}) {
       readOnly = next;
       view.dispatch({ effects: editableCompartment.reconfigure(editableExtension(readOnly)) });
     },
+    setWordWrap(value) {
+      const next = Boolean(value);
+      if (next === wordWrap) return;
+      wordWrap = next;
+      view.dispatch({ effects: wrappingCompartment.reconfigure(wordWrap ? EditorView.lineWrapping : []) });
+      if (wordWrap) view.scrollDOM.scrollLeft = 0;
+      updateWrapButton();
+    },
     canUndo() {
       return undoDepth(view.state) > 0;
     },
@@ -482,6 +528,7 @@ function create(container, options = {}) {
       if (destroyed) return;
       destroyed = true;
       view.scrollDOM.removeEventListener("scroll", forwardScroll);
+      options.wrapButton?.removeEventListener("click", toggleWordWrap);
       view.destroy();
       container.classList.remove("pyne-codemirror-host");
       delete container._pyneCodeEditor;
@@ -490,6 +537,10 @@ function create(container, options = {}) {
 
   const forwardScroll = () => container.dispatchEvent(new Event("scroll"));
   view.scrollDOM.addEventListener("scroll", forwardScroll, { passive: true });
+  const updateWrapButton = () => options.wrapButton?.setAttribute("aria-pressed", String(wordWrap));
+  const toggleWordWrap = () => adapter.setWordWrap(!wordWrap);
+  options.wrapButton?.addEventListener("click", toggleWordWrap);
+  updateWrapButton();
 
   container._pyneCodeEditor = adapter;
   return adapter;
