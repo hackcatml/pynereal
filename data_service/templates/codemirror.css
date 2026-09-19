@@ -51,6 +51,95 @@
   min-width: 6px;
 }
 
+.pyne-codemirror-host .cm-lineNumbers {
+  color: #788391;
+  font-variant-numeric: tabular-nums;
+}
+
+.pyne-codemirror-host .cm-lineNumbers .cm-gutterElement {
+  padding-right: 6px;
+  padding-left: 6px;
+}
+
+.editor-word-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: manipulation;
+}
+
+.editor-word-wrap svg { width: 14px; height: 14px; }
+.editor-word-wrap[aria-pressed="true"] {
+  color: #79c0ff;
+  border-color: rgba(121, 192, 255, 0.55);
+  background: rgba(31, 111, 235, 0.16);
+}
+
+@media (hover: hover) {
+  .editor-word-wrap:hover::after,
+  .editor-word-wrap:focus-visible::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 20;
+    padding: 5px 8px;
+    border-radius: 4px;
+    background: #f0f3f6;
+    color: #15191f;
+    font: 12px/1.4 system-ui, sans-serif;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+}
+
+.cm-tooltip.pyne-completion-list,
+.cm-tooltip.cm-completionInfo {
+  z-index: 20000;
+  box-sizing: border-box;
+  max-width: min(520px, calc(100vw - 16px));
+  border: 1px solid #3a4350;
+  border-radius: 4px;
+  background: #171d25;
+  color: #e6edf3;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  box-shadow: 0 6px 18px #0005;
+}
+
+.cm-tooltip.pyne-completion-list > ul {
+  max-height: 220px;
+  max-width: min(480px, calc(100vw - 24px));
+  scrollbar-width: thin;
+  scrollbar-color: #3a4350 #171d25;
+}
+.cm-tooltip.pyne-completion-list > ul > li {
+  display: flex;
+  align-items: baseline;
+  padding: 4px 7px;
+  touch-action: manipulation;
+}
+.cm-tooltip.pyne-completion-list > ul > li[aria-selected] {
+  background: #253b53;
+  color: #fff;
+}
+.pyne-completion-list .cm-completionLabel { flex: 0 0 auto; }
+.pyne-completion-list .cm-completionDetail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #a2adba;
+  font-style: normal;
+}
+.cm-tooltip.cm-completionInfo {
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
 .pyne-codemirror-host .cm-pyne-diff-gutter .cm-gutterElement {
   width: 6px;
   padding: 0;

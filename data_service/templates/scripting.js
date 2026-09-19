@@ -3090,6 +3090,7 @@
         value: "",
         language: "python",
         ariaLabel: "Script source",
+        wrapButton: el("scripting-word-wrap"),
       });
       window.PyneScriptingBacktest.init({ api, mobileQuery: mobileHubQuery });
       window.PyneScriptingAi.init({
