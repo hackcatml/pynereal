@@ -22,6 +22,10 @@ _STATIC_FILES = {
     "scripting_backtest.css": "text/css",
     "scripting_backtest_chart.js": "text/javascript",
     "scripting_backtest_chart.css": "text/css",
+    "scripting_backtest_workspace.js": "text/javascript",
+    "scripting_backtest_workspace.css": "text/css",
+    "scripting_backtest_chart_embed.js": "text/javascript",
+    "scripting_backtest_chart_embed.css": "text/css",
     "ui.js": "text/javascript",
     "bgcolor.js": "text/javascript",
     "chart.js": "text/javascript",
@@ -56,6 +60,12 @@ def build_ui_router() -> APIRouter:
         )
         html = html.replace("<!--RUNTIME_CONFIG-->", config_script)
         return HTMLResponse(content=html)
+
+    @r.get("/backtests", response_class=HTMLResponse)
+    def backtest_workspace_page() -> HTMLResponse:
+        return HTMLResponse(
+            content=(_TEMPLATES / "scripting_backtest_workspace.html").read_text(encoding="utf-8")
+        )
 
     @r.get("/backtests/{job_id}", response_class=HTMLResponse)
     def backtest_chart_page(job_id: str) -> HTMLResponse:

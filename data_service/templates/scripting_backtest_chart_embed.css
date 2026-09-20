@@ -1,0 +1,23 @@
+html.backtest-embedded { height: 100%; }
+.backtest-embedded body { grid-template-rows: 34px minmax(0, 1fr); }
+.backtest-embedded .backtest-chart-header { min-height: 0; padding: 0 8px; gap: 8px; }
+.backtest-embedded #backtest-chart-script { display: none; }
+.backtest-embedded .backtest-chart-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.backtest-embedded .backtest-chart-range { min-width: 0; font-size: 9px; }
+.backtest-embedded .backtest-price-pane,
+.backtest-embedded .backtest-equity-pane { min-height: 0; }
+.backtest-embedded .backtest-chart-layout { --equity-pane-height: 40%; }
+.backtest-embedded .backtest-pane-resizer { height: 5px; flex-basis: 5px; }
+.backtest-embedded .backtest-equity-metrics { left: 8px; top: 5px; }
+html.backtest-compact body { grid-template-rows: minmax(0, 1fr); }
+.backtest-compact .backtest-chart-header,
+.backtest-compact .backtest-pane-header,
+.backtest-compact .backtest-equity-metrics,
+.backtest-compact .backtest-nav-btn,
+.backtest-compact .drawing-toolbar,
+.backtest-compact .backtest-drawdown-popover { display: none !important; }
+.backtest-compact .backtest-chart-layout { --equity-pane-height: 38%; }
+.backtest-compact .backtest-equity-stage,
+.backtest-compact .backtest-price-chart { inset: 0; }
+.backtest-compact .backtest-pane-resizer { height: 9px; flex-basis: 9px; }
+.backtest-compact .backtest-pane-state { font-size: 10px; padding: 4px; }
