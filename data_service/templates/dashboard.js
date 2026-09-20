@@ -9494,6 +9494,23 @@
   let savedScrollY = 0;
   const MAX_LOG_CHARS = 600000;
 
+  function initModalBackdropGuard() {
+    let pointerStartTarget = null;
+    document.addEventListener("pointerdown", (event) => {
+      pointerStartTarget = event.target;
+    }, true);
+    const reset = () => { pointerStartTarget = null; };
+    document.addEventListener("pointercancel", reset, true);
+    window.addEventListener("blur", reset);
+    document.addEventListener("click", (event) => {
+      const startTarget = pointerStartTarget;
+      reset();
+      if (event.detail === 0 || !event.target?.classList?.contains("modal")) return;
+      // A drag from modal content can produce a click on its backdrop ancestor.
+      if (startTarget !== event.target) event.stopPropagation();
+    }, true);
+  }
+
   // Lock the page behind the modal (iOS-safe position:fixed technique) so
   // scrolling inside the log panel doesn't bleed through to the dashboard.
   function lockBodyScroll() {
@@ -10717,6 +10734,7 @@
     }
   });
 
+  initModalBackdropGuard();
   initHubMenuCalendar();
   window.PyneScripting.init({
     api,
