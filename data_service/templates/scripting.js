@@ -1985,6 +1985,7 @@
       return {
         lines,
         deletionLines,
+        hunks: window.PyneCodeMirror.buildChangeHunks(before, after, operations),
       };
     }
 
@@ -3091,6 +3092,7 @@
         language: "python",
         ariaLabel: "Script source",
         wrapButton: el("scripting-word-wrap"),
+        minimap: true,
       });
       window.PyneScriptingBacktest.init({ api, mobileQuery: mobileHubQuery });
       window.PyneScriptingAi.init({

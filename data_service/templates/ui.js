@@ -1196,7 +1196,7 @@ App.ui = {
         deletions.add(Math.max(0, Math.min(currentLine, lineCount - 1)));
       }
     }
-    return { lines, deletions };
+    return { lines, deletions, hunks: window.PyneCodeMirror.buildChangeHunks(before, after, operations) };
   },
   renderSourceDiff() {
     const state = App.state;
@@ -1215,6 +1215,7 @@ App.ui = {
     this.elements.sourceCode._pyneCodeEditor.setChangedLines({
       lines: [...changes.lines.entries()].map(([line, type]) => ({ line, type })),
       deletionLines: [...changes.deletions],
+      hunks: changes.hunks,
     });
   },
   resetSourceUndo() {
@@ -1761,6 +1762,7 @@ App.ui = {
       language: "python",
       ariaLabel: "Script source",
       wrapButton: document.getElementById("source-word-wrap"),
+      minimap: true,
     });
     this.sourceEditorController = window.PyneEditor.create({
       editor: sourceCode,

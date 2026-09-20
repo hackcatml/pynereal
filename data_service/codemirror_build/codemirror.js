@@ -54,6 +54,8 @@ import {
 } from "@codemirror/autocomplete";
 import { tags } from "@lezer/highlight";
 import { pyneCompletion } from "./completions.js";
+import { desktopMinimap } from "./minimap.js";
+import { buildChangeHunks, changeActionState, openChangeAtLine, setChangeHunks } from "./change_actions.js";
 
 const setSearchEffect = StateEffect.define();
 const setDiagnosticsEffect = StateEffect.define();
@@ -214,6 +216,15 @@ const changedLineState = StateField.define({
 const changedLineGutter = gutter({
   class: "cm-pyne-diff-gutter",
   markers: (view) => view.state.field(changedLineState),
+  domEventHandlers: {
+    mousedown(view, line, event) {
+      if (event.button !== 0) return false;
+      return openChangeAtLine(view, view.state.doc.lineAt(line.from).number);
+    },
+    touchstart(view, line) {
+      return openChangeAtLine(view, view.state.doc.lineAt(line.from).number);
+    },
+  },
 });
 
 const pyneHighlightStyle = HighlightStyle.define([
@@ -298,8 +309,10 @@ function create(container, options = {}) {
     searchDecorations,
     diagnosticState,
     changedLineState,
-    changedLineGutter,
+    changeActionState,
     lineNumbers(),
+    changedLineGutter,
+    options.minimap ? desktopMinimap(changedLineState, openChangeAtLine) : [],
     languageCompartment.of(languageExtension(language)),
     editableCompartment.of(editableExtension(readOnly)),
     EditorView.contentAttributes.of({
@@ -456,7 +469,10 @@ function create(container, options = {}) {
         lines: Array.isArray(value.lines) ? value.lines : [],
         deletionLines: Array.isArray(value.deletionLines) ? value.deletionLines : [],
       };
-      view.dispatch({ effects: setChangedLinesEffect.of(changedLines) });
+      view.dispatch({ effects: [
+        setChangedLinesEffect.of(changedLines),
+        setChangeHunks.of(Array.isArray(value.hunks) ? value.hunks : []),
+      ] });
     },
     setLanguage(value) {
       const next = String(value || "");
@@ -546,4 +562,4 @@ function create(container, options = {}) {
   return adapter;
 }
 
-window.PyneCodeMirror = { create };
+window.PyneCodeMirror = { create, buildChangeHunks };
