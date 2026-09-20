@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Backtest charts</title>
+  <link rel="stylesheet" href="/static/scripting_backtest_workspace.css?v=5" />
+</head>
+<body>
+  <header class="workspace-toolbar">
+    <strong id="workspace-title">Backtest charts</strong>
+    <span id="workspace-count" aria-live="polite"></span>
+    <div class="workspace-modes" role="group" aria-label="Chart layout">
+      <button class="icon-button" type="button" data-layout="focus" data-tooltip="Main chart and previews"
+              aria-label="Main chart and previews" aria-pressed="true">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18m0-12h6m-6 6h6"/></svg>
+      </button>
+      <button class="icon-button" type="button" data-layout="grid" data-tooltip="Equal layout"
+              aria-label="Equal layout" aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 12h18M9 3v18M15 3v18"/></svg>
+      </button>
+      <button class="icon-button" type="button" data-layout="single" data-tooltip="Expand selected chart"
+              aria-label="Expand selected chart" aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/></svg>
+      </button>
+    </div>
+    <button id="workspace-sync" class="icon-button" type="button" data-tooltip="Sync chart time"
+            aria-label="Sync chart time" aria-pressed="false" disabled>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 13 4-4m-6 7-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0m2 10a4 4 0 0 0 6 0l4-4a4 4 0 0 0-6-6l-1 1"/></svg>
+    </button>
+    <div class="workspace-add">
+      <button id="workspace-add" class="icon-button" type="button" data-tooltip="Add chart"
+              aria-label="Add chart" aria-expanded="false" aria-controls="workspace-picker" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+      <div id="workspace-picker" class="workspace-picker" role="dialog" aria-label="Add chart" hidden></div>
+    </div>
+  </header>
+  <main id="workspace-charts" class="workspace-charts" aria-label="Backtest chart comparison">
+    <div id="workspace-splitters" class="workspace-splitters" hidden></div>
+  </main>
+  <div id="workspace-status" class="workspace-status" role="status">
+    <span id="workspace-message">Loading results...</span>
+    <button id="workspace-retry" type="button" hidden>Retry</button>
+  </div>
+  <script type="module" src="/static/scripting_backtest_workspace.js?v=5"></script>
+</body>
+</html>

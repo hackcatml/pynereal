@@ -388,7 +388,7 @@ body {
 }
 
 .backtest-drawdown-list {
-  max-height: 280px;
+  max-height: 140px;
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-color: #94a3b8 transparent;

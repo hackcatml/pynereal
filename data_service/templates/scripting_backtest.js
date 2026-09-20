@@ -535,8 +535,13 @@
 
   function openEquityChart() {
     if (!equityAvailable()) return;
+    const scriptPath = job.script_path || context?.path;
+    const multiple = !isMobile() && scriptPath && jobs.filter(equityAvailable).length > 1;
+    const url = multiple
+      ? `/backtests?${new URLSearchParams({ script_path: scriptPath })}`
+      : `/backtests/${encodeURIComponent(job.id)}`;
     window.open(
-      `/backtests/${encodeURIComponent(job.id)}`,
+      url,
       "_blank",
       "noopener",
     );
