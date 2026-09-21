@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Backtest charts</title>
-  <link rel="stylesheet" href="/static/scripting_backtest_workspace.css?v=5" />
+  <link rel="stylesheet" href="/static/scripting_backtest_workspace.css?v=7" />
 </head>
 <body>
   <header class="workspace-toolbar">
@@ -38,11 +38,12 @@
   </header>
   <main id="workspace-charts" class="workspace-charts" aria-label="Backtest chart comparison">
     <div id="workspace-splitters" class="workspace-splitters" hidden></div>
+    <div id="workspace-drop-preview" class="workspace-drop-preview" aria-hidden="true" hidden><div></div></div>
   </main>
   <div id="workspace-status" class="workspace-status" role="status">
     <span id="workspace-message">Loading results...</span>
     <button id="workspace-retry" type="button" hidden>Retry</button>
   </div>
-  <script type="module" src="/static/scripting_backtest_workspace.js?v=5"></script>
+  <script type="module" src="/static/scripting_backtest_workspace.js?v=7"></script>
 </body>
 </html>

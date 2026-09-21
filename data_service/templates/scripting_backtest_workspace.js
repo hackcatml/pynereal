@@ -15,12 +15,54 @@ export function chartJobs(values) {
     .filter(value => value.artifacts && value.artifacts.equity);
 }
 
+export function defaultChartRows(visible) {
+  const ids = visible.slice(0, MAX_CHARTS);
+  const columns = ids.length === 4 ? 2 : 3;
+  const rows = [];
+  for (let index = 0; index < ids.length; index += columns) rows.push(ids.slice(index, index + columns));
+  return rows;
+}
+
+export function moveChartRows(rows, source, target, placement) {
+  const ids = rows.flat();
+  if (source === target || !ids.includes(source) || !ids.includes(target)
+    || !["center", "left", "right", "top", "bottom"].includes(placement)) return null;
+  let next;
+  if (placement === "center") {
+    next = rows.map(row => row.map(id => id === source ? target : id === target ? source : id));
+  } else {
+    next = rows.map(row => row.filter(id => id !== source)).filter(row => row.length);
+    const row = next.findIndex(items => items.includes(target));
+    if (placement === "left" || placement === "right") {
+      const column = next[row].indexOf(target) + (placement === "right" ? 1 : 0);
+      next[row].splice(column, 0, source);
+    } else {
+      next.splice(row + (placement === "bottom" ? 1 : 0), 0, [source]);
+    }
+  }
+  return JSON.stringify(next) === JSON.stringify(rows) ? null : next;
+}
+
+export function chartDropPlacement(rect, x, y) {
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !rect.width || !rect.height) return "center";
+  const horizontal = Math.min(64, rect.width * 0.22);
+  const vertical = Math.min(48, rect.height * 0.22);
+  const edges = [
+    ["left", (x - rect.left) / horizontal],
+    ["right", (rect.left + rect.width - x) / horizontal],
+    ["top", (y - rect.top) / vertical],
+    ["bottom", (rect.top + rect.height - y) / vertical],
+  ].sort((a, b) => a[1] - b[1]);
+  return edges[0][1] < 1 ? edges[0][0] : "center";
+}
+
 export class ChartSelection {
   constructor(jobs) {
     this.jobs = jobs;
     this.visible = jobs.slice(0, MAX_CHARTS).map(job => job.id);
     this.selected = this.visible[0] || null;
     this.mode = "focus";
+    this.gridRows = null;
   }
 
   select(id) {
@@ -40,6 +82,17 @@ export class ChartSelection {
     const to = this.visible.indexOf(target);
     if (from < 0 || to < 0 || from === to) return false;
     [this.visible[from], this.visible[to]] = [this.visible[to], this.visible[from]];
+    if (this.gridRows) this.gridRows = moveChartRows(this.gridRows, source, target, "center");
+    return true;
+  }
+
+  arrange(source, target, placement) {
+    if (this.mode !== "grid") return false;
+    if (placement === "center") return this.swap(source, target);
+    const rows = moveChartRows(this.gridRows || defaultChartRows(this.visible), source, target, placement);
+    if (!rows) return false;
+    this.gridRows = rows;
+    this.visible = rows.flat();
     return true;
   }
 
@@ -47,6 +100,7 @@ export class ChartSelection {
     const index = this.visible.indexOf(id);
     if (index < 0) return false;
     this.visible.splice(index, 1);
+    if (this.gridRows) this.gridRows = this.gridRows.map(row => row.filter(value => value !== id)).filter(row => row.length);
     if (this.selected === id) this.selected = this.visible[Math.min(index, this.visible.length - 1)] || null;
     return true;
   }
@@ -55,12 +109,29 @@ export class ChartSelection {
     if (this.visible.length >= MAX_CHARTS || this.visible.includes(id)
       || !this.jobs.some(job => job.id === id)) return false;
     this.visible.push(id);
+    if (this.gridRows) {
+      if (!this.gridRows.length) this.gridRows.push([]);
+      this.gridRows[this.gridRows.length - 1].push(id);
+    }
     this.selected = id;
     return true;
   }
 }
 
-export function chartLayout(visible, selected, mode) {
+export function gridChartSizes(rows, previous = {}) {
+  const fit = (shares, count) => shares?.length === count ? shares : Array(count).fill(1 / Math.max(1, count));
+  return {
+    rows: fit(previous.rows, rows.length),
+    columns: rows.map((row, index) => fit(previous.columns?.[index], row.length)),
+  };
+}
+
+function gridTrackOffset(shares, index) {
+  const before = shares.slice(0, index).reduce((sum, value) => sum + value, 0);
+  return `calc(${before * 100}% + ${index} * var(--chart-gap) - ${(shares.length - 1) * before} * var(--chart-gap))`;
+}
+
+export function chartLayout(visible, selected, mode, gridRows = null, gridSizes = {}) {
   const ids = visible.slice(0, MAX_CHARTS);
   const count = ids.length;
   if (!count) return { columns: "1fr", rows: "1fr", cells: [] };
@@ -78,13 +149,21 @@ export function chartLayout(visible, selected, mode) {
       ],
     };
   }
-  const columns = count === 5 ? 6 : count === 4 ? 2 : Math.min(count, 3);
+  const rows = gridRows || defaultChartRows(ids);
+  const sizes = gridChartSizes(rows, gridSizes);
+  // Share one full-width grid cell per row so widths can vary independently,
+  // without reparenting iframe elements when a chart changes rows.
   return {
-    columns: `repeat(${columns}, minmax(0, 1fr))`,
-    rows: `repeat(${count > 3 ? 2 : 1}, minmax(0, 1fr))`,
-    cells: ids.map((id, index) => count === 5
-      ? { id, column: index < 3 ? `${index * 2 + 1} / span 2` : `${(index - 3) * 3 + 1} / span 3`, row: index < 3 ? "1" : "2" }
-      : { id, column: String(index % columns + 1), row: String(Math.floor(index / columns) + 1) }),
+    columns: "minmax(0, 1fr)",
+    rows: sizes.rows.map(value => `minmax(0, ${value}fr)`).join(" "),
+    cells: rows.flatMap((items, row) => items.map((id, column) => {
+      const share = sizes.columns[row][column];
+      return {
+        id, column: "1", row: String(row + 1),
+        width: `calc(${share * 100}% - ${(items.length - 1) * share} * var(--chart-gap))`,
+        marginLeft: gridTrackOffset(sizes.columns[row], column),
+      };
+    })),
   };
 }
 
@@ -107,6 +186,8 @@ function startWorkspace() {
   const el = id => document.getElementById(id);
   const container = el("workspace-charts");
   const splitters = el("workspace-splitters");
+  const dropPreview = el("workspace-drop-preview");
+  const dropMarker = dropPreview.querySelector("div");
   const picker = el("workspace-picker");
   const addButton = el("workspace-add");
   const syncButton = el("workspace-sync");
@@ -115,6 +196,7 @@ function startWorkspace() {
   let selection = new ChartSelection([]);
   let draggedId = null;
   const splitSizes = { columns: [0.73, 0.27], rows: [] };
+  let gridSizes = {};
   let resizing = null;
   let syncEnabled = false;
   let lastSyncView = null;
@@ -138,17 +220,39 @@ function startWorkspace() {
     for (const id of tiles.keys()) sendSyncState(id);
   }
 
-  function applyFocusSizes() {
-    if (selection.mode !== "focus" || selection.visible.length < 2) return;
-    for (const axis of ["columns", "rows"]) {
-      const property = axis === "columns" ? "gridTemplateColumns" : "gridTemplateRows";
-      const tracks = splitSizes[axis].map(value => `minmax(0, ${value}fr)`).join(" ");
-      container.style[property] = tracks;
-      splitters.style[property] = tracks;
+  function placeCell(node, cell) {
+    node.style.gridColumn = cell.column;
+    node.style.gridRow = cell.row;
+    node.style.width = cell.width || "";
+    node.style.marginLeft = cell.marginLeft || "";
+  }
+
+  function splitShares(axis, row) {
+    if (selection.mode !== "grid") return splitSizes[axis];
+    return axis === "columns" ? gridSizes.columns[row] : gridSizes.rows;
+  }
+
+  function applySplitSizes() {
+    if (selection.mode === "single" || selection.visible.length < 2) return;
+    const grid = selection.mode === "grid";
+    if (grid) {
+      const layout = chartLayout(selection.visible, selection.selected, "grid", selection.gridRows, gridSizes);
+      container.style.gridTemplateColumns = splitters.style.gridTemplateColumns = layout.columns;
+      container.style.gridTemplateRows = splitters.style.gridTemplateRows = layout.rows;
+      for (const cell of layout.cells) placeCell(tiles.get(cell.id).node, cell);
+    } else {
+      for (const axis of ["columns", "rows"]) {
+        const property = axis === "columns" ? "gridTemplateColumns" : "gridTemplateRows";
+        const tracks = splitSizes[axis].map(value => `minmax(0, ${value}fr)`).join(" ");
+        container.style[property] = splitters.style[property] = tracks;
+      }
     }
     for (const handle of splitters.children) {
-      const shares = splitSizes[handle.dataset.axis];
+      const shares = splitShares(handle.dataset.axis, Number(handle.dataset.row));
       const index = Number(handle.dataset.index);
+      if (grid && handle.dataset.axis === "columns") {
+        handle.style.marginLeft = gridTrackOffset(shares, index + 1);
+      }
       handle.setAttribute("aria-valuenow", String(Math.round(shares[index] / (shares[index] + shares[index + 1]) * 100)));
     }
   }
@@ -162,28 +266,40 @@ function startWorkspace() {
     if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
   }
 
-  function splitSpace(axis) {
+  function splitSpace(axis, count) {
     const rect = container.getBoundingClientRect();
     const styles = getComputedStyle(container);
     const gap = parseFloat(axis === "columns" ? styles.columnGap : styles.rowGap) || 0;
-    return (axis === "columns" ? rect.width : rect.height) - gap * (splitSizes[axis].length - 1);
+    return (axis === "columns" ? rect.width : rect.height) - gap * (count - 1);
   }
 
-  function createSplitter(axis, index) {
+  function createSplitter(axis, index, row = null) {
     const vertical = axis === "columns";
+    const grid = selection.mode === "grid";
     const handle = splitters.appendChild(document.createElement("div"));
-    handle.className = `workspace-splitter ${vertical ? "split-columns" : "split-rows"}`;
+    handle.className = `workspace-splitter ${vertical ? "split-columns" : "split-rows"}${grid && vertical ? " grid-split-columns" : ""}`;
     handle.dataset.axis = axis;
     handle.dataset.index = String(index);
+    if (row !== null) handle.dataset.row = String(row);
     handle.tabIndex = 0;
     handle.setAttribute("role", "separator");
     handle.setAttribute("aria-orientation", vertical ? "vertical" : "horizontal");
-    handle.setAttribute("aria-label", vertical ? "Main chart width" : `Preview ${index + 1} and ${index + 2} height`);
+    handle.setAttribute("aria-label", grid
+      ? vertical ? `Row ${row + 1}: chart ${index + 1} and ${index + 2} width` : `Row ${index + 1} and ${index + 2} height`
+      : vertical ? "Main chart width" : `Preview ${index + 1} and ${index + 2} height`);
     handle.setAttribute("aria-valuemin", "0");
     handle.setAttribute("aria-valuemax", "100");
-    handle.style.gridColumn = vertical ? "1" : "2";
-    handle.style.gridRow = vertical ? `1 / span ${splitSizes.rows.length}` : String(index + 1);
+    handle.style.gridColumn = grid || vertical ? "1" : "2";
+    handle.style.gridRow = grid && vertical ? String(row + 1)
+      : vertical ? `1 / span ${splitSizes.rows.length}` : String(index + 1);
     const minimum = vertical ? 190 : 60;
+    const resize = (shares, delta, available) => {
+      const next = resizeSplit(shares, index, delta, available, minimum);
+      if (grid && vertical) gridSizes.columns[row] = next;
+      else (grid ? gridSizes : splitSizes)[axis] = next;
+      // Resize existing elements only; preserve chart state and time ranges.
+      applySplitSizes();
+    };
     handle.addEventListener("pointerdown", event => {
       if (event.button !== 0 || draggedId || resizing) return;
       event.preventDefault();
@@ -193,7 +309,7 @@ function startWorkspace() {
       resizing = {
         handle, pointerId: event.pointerId,
         start: vertical ? event.clientX : event.clientY,
-        shares: [...splitSizes[axis]], available: splitSpace(axis),
+        shares: [...splitShares(axis, row)], available: splitSpace(axis, splitShares(axis, row).length),
       };
       container.classList.add("resizing");
       handle.classList.add("active");
@@ -202,9 +318,7 @@ function startWorkspace() {
       if (resizing?.handle !== handle || resizing.pointerId !== event.pointerId) return;
       event.preventDefault();
       const delta = (vertical ? event.clientX : event.clientY) - resizing.start;
-      splitSizes[axis] = resizeSplit(resizing.shares, index, delta, resizing.available, minimum);
-      // Only resize grid tracks; retain every chart and its selection/viewport.
-      applyFocusSizes();
+      resize(resizing.shares, delta, resizing.available);
     });
     for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) {
       handle.addEventListener(type, event => {
@@ -216,34 +330,59 @@ function startWorkspace() {
         : event.key === (vertical ? "ArrowRight" : "ArrowDown") ? 1 : 0;
       if (!direction || resizing || draggedId) return;
       event.preventDefault();
-      splitSizes[axis] = resizeSplit(splitSizes[axis], index, direction * 20, splitSpace(axis), minimum);
-      applyFocusSizes();
+      const shares = splitShares(axis, row);
+      resize(shares, direction * 20, splitSpace(axis, shares.length));
     });
   }
 
   function renderSplitters() {
     const count = Math.max(0, selection.visible.length - 1);
-    if (splitSizes.rows.length !== count) splitSizes.rows = Array(count).fill(1 / Math.max(1, count));
     splitters.replaceChildren();
-    splitters.hidden = selection.mode !== "focus" || !count;
+    splitters.hidden = selection.mode === "single" || !count;
     if (splitters.hidden) return;
-    createSplitter("columns", 0);
-    for (let index = 0; index < count - 1; index++) createSplitter("rows", index);
-    applyFocusSizes();
+    if (selection.mode === "grid") {
+      gridSizes.columns.forEach((shares, row) => {
+        for (let index = 0; index < shares.length - 1; index++) createSplitter("columns", index, row);
+      });
+      for (let index = 0; index < gridSizes.rows.length - 1; index++) createSplitter("rows", index);
+    } else {
+      if (splitSizes.rows.length !== count) splitSizes.rows = Array(count).fill(1 / count);
+      createSplitter("columns", 0);
+      for (let index = 0; index < count - 1; index++) createSplitter("rows", index);
+    }
+    applySplitSizes();
   }
 
   function clearDrag() {
     draggedId = null;
     container.classList.remove("reordering");
+    dropPreview.hidden = true;
     for (const item of tiles.values()) {
       item.node.classList.remove("drag-source", "drop-target");
     }
   }
 
-  function dropTarget(event) {
+  function dropPlan(event) {
     const node = event.target.closest(".workspace-tile");
     const id = node?.dataset.jobId;
-    return id && id !== draggedId && tiles.get(id)?.node === node && !node.hidden ? id : null;
+    if (!id || id === draggedId || tiles.get(id)?.node !== node || node.hidden) return null;
+    if (selection.mode !== "grid") return { target: id, placement: "center" };
+    const placement = chartDropPlacement(node.getBoundingClientRect(), event.clientX, event.clientY);
+    const rows = moveChartRows(selection.gridRows || defaultChartRows(selection.visible), draggedId, id, placement);
+    return rows ? { target: id, placement, rows } : null;
+  }
+
+  function showDropPreview(plan) {
+    dropPreview.hidden = !plan?.rows;
+    for (const [id, item] of tiles) {
+      item.node.classList.toggle("drop-target", !plan?.rows && id === plan?.target);
+    }
+    if (!plan?.rows) return;
+    const layout = chartLayout(selection.visible, selection.selected, "grid", plan.rows, gridSizes);
+    const cell = layout.cells.find(value => value.id === draggedId);
+    dropPreview.style.gridTemplateColumns = layout.columns;
+    dropPreview.style.gridTemplateRows = layout.rows;
+    placeCell(dropMarker, cell);
   }
 
   function status(message, retry = false) {
@@ -347,20 +486,22 @@ function startWorkspace() {
     for (const id of selection.visible) {
       if (!tiles.has(id)) createTile(selection.jobs.find(job => job.id === id));
     }
-    const layout = chartLayout(selection.visible, selection.selected, selection.mode);
+    if (selection.mode === "grid") {
+      gridSizes = gridChartSizes(selection.gridRows || defaultChartRows(selection.visible), gridSizes);
+    }
+    const layout = chartLayout(selection.visible, selection.selected, selection.mode, selection.gridRows, gridSizes);
     container.style.gridTemplateColumns = layout.columns;
     container.style.gridTemplateRows = layout.rows;
-    renderSplitters();
     for (const [id, item] of tiles) {
       const cell = layout.cells.find(value => value.id === id);
       item.node.hidden = !cell;
       item.title.draggable = selection.mode !== "single" && selection.visible.length > 1;
       if (cell) {
-        item.node.style.gridColumn = cell.column;
-        item.node.style.gridRow = cell.row;
+        placeCell(item.node, cell);
       }
       sendLayout(id);
     }
+    renderSplitters();
     updateSelection();
     updateSyncState();
     document.querySelectorAll("[data-layout]").forEach(button => {
@@ -419,22 +560,26 @@ function startWorkspace() {
   container.addEventListener("dragover", event => {
     if (!draggedId) return;
     event.preventDefault();
-    const target = dropTarget(event);
-    event.dataTransfer.dropEffect = target ? "move" : "none";
-    for (const [id, item] of tiles) item.node.classList.toggle("drop-target", id === target);
+    const plan = dropPlan(event);
+    event.dataTransfer.dropEffect = plan ? "move" : "none";
+    showDropPreview(plan);
   });
   container.addEventListener("dragleave", event => {
     if (container.contains(event.relatedTarget)) return;
-    for (const item of tiles.values()) item.node.classList.remove("drop-target");
+    showDropPreview(null);
   });
   container.addEventListener("drop", event => {
     if (!draggedId) return;
     event.preventDefault();
-    const changed = selection.swap(draggedId, dropTarget(event));
+    const plan = dropPlan(event);
+    const changed = plan && (selection.mode === "grid"
+      ? selection.arrange(draggedId, plan.target, plan.placement)
+      : selection.swap(draggedId, plan.target));
     clearDrag();
     if (changed) render();
   });
   window.addEventListener("blur", clearDrag);
+  window.addEventListener("resize", clearDrag);
   window.addEventListener("blur", finishResize);
   window.addEventListener("resize", finishResize);
   addButton.addEventListener("click", openPicker);

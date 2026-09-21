@@ -95,6 +95,8 @@ button:focus-visible { outline: 2px solid #2563eb; outline-offset: -2px; }
 .workspace-picker span { min-width: 0; overflow-wrap: anywhere; }
 .workspace-charts { --chart-gap: 3px; position: relative; min-width: 0; min-height: 0; display: grid; gap: var(--chart-gap); background: #d8dee8; }
 .workspace-splitters { position: absolute; inset: 0; z-index: 5; display: grid; gap: inherit; pointer-events: none; }
+.workspace-drop-preview { position: absolute; inset: 0; z-index: 6; display: grid; gap: inherit; pointer-events: none; }
+.workspace-drop-preview > div { min-width: 0; min-height: 0; background: #64748b40; border: 2px dashed #64748b; }
 .workspace-splitter { position: relative; min-width: 0; min-height: 0; outline: none; pointer-events: auto; touch-action: none; user-select: none; }
 .workspace-splitter::after { position: absolute; content: ""; background: #cbd5e1; }
 .workspace-splitter:hover::after,
@@ -102,6 +104,7 @@ button:focus-visible { outline: 2px solid #2563eb; outline-offset: -2px; }
 .workspace-splitter:focus-visible::after { background: #2563eb; }
 .split-columns { width: 9px; justify-self: end; transform: translateX(calc(50% + var(--chart-gap) / 2)); cursor: col-resize; }
 .split-columns::after { inset: 0 3px; }
+.grid-split-columns { justify-self: start; transform: translateX(calc(-50% - var(--chart-gap) / 2)); }
 .split-rows { height: 9px; align-self: end; transform: translateY(calc(50% + var(--chart-gap) / 2)); cursor: row-resize; }
 .split-rows::after { inset: 3px 0; }
 .resizing { user-select: none; }
