@@ -176,7 +176,114 @@
   function defaultDataHistorySince() {
     const date = new Date();
     date.setUTCMonth(date.getUTCMonth() - 2);
-    return dateKey(date);
+    return `${dateKey(date)} 00:00`;
+  }
+
+  function normalizeDataHistorySince(value) {
+    if (!/\d/.test(value) || value === "____-__-__ 00:00") return "";
+    if (/^\d{4}-\d{2}-\d{2}(?: __:__)?$/.test(value)) return `${value.slice(0, 10)} 00:00`;
+    return value;
+  }
+
+  function initDataHistoryInput() {
+    const input = el("scripting-backtest-data-history-since");
+    const mask = "____-__-__ __:__";
+    const slots = Array.from(mask, (char, index) => char === "_" ? index : -1).filter(index => index >= 0);
+    const reverseSlots = [...slots].reverse();
+    let pendingEdit = null;
+    const nextSlot = position => slots.find(index => index >= position) ?? mask.length;
+    const maskedValue = value => Array.from(mask, (char, index) => (
+      char === "_" && /\d/.test(value[index] || "") ? value[index] : char
+    )).join("");
+    const render = ({ value, caret }) => {
+      input.value = value;
+      input.setSelectionRange(caret, caret);
+    };
+    const edit = (type, text = "") => {
+      const start = input.selectionStart ?? 0;
+      const end = input.selectionEnd ?? start;
+      const digits = text.replace(/\D/g, "");
+      if (type.startsWith("insert") && !digits) return null;
+      const chars = Array.from(maskedValue(input.value));
+      let caret = nextSlot(start);
+      for (const index of slots) {
+        if (index >= start && index < end) chars[index] = "_";
+      }
+      if (type.startsWith("delete") && start === end) {
+        const index = type.endsWith("Backward")
+          ? reverseSlots.find(position => position < start)
+          : slots.find(position => position >= start);
+        if (index !== undefined) {
+          chars[index] = "_";
+          caret = index;
+        }
+      } else if (type.startsWith("insert")) {
+        for (const digit of digits) {
+          if (caret >= mask.length) break;
+          chars[caret] = digit;
+          caret = nextSlot(caret + 1);
+        }
+      }
+      return { value: normalizeDataHistorySince(chars.join("")) || mask, caret };
+    };
+    input.addEventListener("focus", () => {
+      const start = input.selectionStart ?? 0;
+      const end = input.selectionEnd ?? start;
+      input.value = maskedValue(normalizeDataHistorySince(input.value));
+      input.setSelectionRange(nextSlot(start), end > start ? end : nextSlot(start));
+    });
+    input.addEventListener("beforeinput", (event) => {
+      pendingEdit = null;
+      if (!/^(insert|delete)/.test(event.inputType)) return;
+      if (event.inputType.startsWith("insert") && event.data === null) return;
+      const change = edit(event.inputType, event.data || "");
+      if (event.cancelable) {
+        event.preventDefault();
+        if (change) render(change);
+      } else {
+        // Some mobile keyboards/autofill cannot cancel beforeinput.
+        pendingEdit = change;
+      }
+    });
+    input.addEventListener("input", () => {
+      if (pendingEdit) {
+        render(pendingEdit);
+        pendingEdit = null;
+        return;
+      }
+      const raw = input.value;
+      if (/^[\d_]{4}-[\d_]{2}-[\d_]{2} [\d_]{2}:[\d_]{2}$/.test(raw)) return;
+      const count = raw.slice(0, input.selectionStart ?? raw.length).replace(/\D/g, "").length;
+      const digits = raw.replace(/\D/g, "");
+      const chars = Array.from(mask);
+      slots.forEach((index, offset) => { chars[index] = digits[offset] || "_"; });
+      render({ value: normalizeDataHistorySince(chars.join("")) || mask, caret: slots[count] ?? mask.length });
+    });
+    input.addEventListener("paste", (event) => {
+      event.preventDefault();
+      const change = edit("insertFromPaste", event.clipboardData.getData("text"));
+      if (change) render(change);
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+      if (input.selectionStart !== input.selectionEnd) return;
+      const caret = input.selectionStart ?? 0;
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault();
+        const position = event.key === "ArrowLeft"
+          ? reverseSlots.find(index => index < caret) ?? 0
+          : nextSlot(caret + 1);
+        input.setSelectionRange(position, position);
+      }
+    });
+    input.addEventListener("click", () => {
+      if (input.selectionStart !== input.selectionEnd) return;
+      const caret = input.value === mask ? 0 : nextSlot(input.selectionStart ?? 0);
+      input.setSelectionRange(caret, caret);
+    });
+    input.addEventListener("blur", () => {
+      input.value = normalizeDataHistorySince(input.value);
+    });
   }
 
   function setError(message = "") {
@@ -1375,6 +1482,36 @@
     }
   }
 
+  function pollDataProgress(progressId, sequence) {
+    let stopped = false;
+    let timer = null;
+    let percent = -1;
+    const controller = new AbortController();
+    const active = () => !stopped && dataBusy && sequence === contextSequence && isOpen();
+    const poll = async () => {
+      if (!active()) return;
+      try {
+        const result = await api(
+          `/api/scripting/backtest/data/progress?progress_id=${encodeURIComponent(progressId)}`,
+          { signal: controller.signal, cache: "no-store" },
+        );
+        if (active() && Number.isInteger(result.percent) && result.percent >= 0 && result.percent <= 99) {
+          percent = Math.max(percent, result.percent);
+          el("scripting-backtest-data-download").querySelector("span").textContent = `Downloading... ${percent}%`;
+        }
+      } catch {
+        // A progress request failure must not interrupt the download itself.
+      }
+      if (active()) timer = window.setTimeout(poll, 1000);
+    };
+    timer = window.setTimeout(poll, 1000);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }
+
   async function syncBacktestData(action) {
     if (dataBusy || actionBusy || isActiveJob()) return;
     const sequence = contextSequence;
@@ -1388,6 +1525,7 @@
       if (!await checkDataSymbol(true)) return;
     }
     const previousJob = job;
+    const progressId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
     const payload = action === "update"
       ? { action, data_path: selectedDataPath }
       : {
@@ -1395,18 +1533,21 @@
         exchange: selectedDataExchange(),
         symbol: el("scripting-backtest-data-symbol").value,
         timeframe: el("scripting-backtest-data-timeframe").value,
-        history_since: el("scripting-backtest-data-history-since").value,
+        history_since: normalizeDataHistorySince(el("scripting-backtest-data-history-since").value),
         file_name: el("scripting-backtest-data-file-name").value,
+        progress_id: progressId,
       };
     setDataMessage();
     setDataBusy(true, action);
     setStatus("loading", action === "update" ? "Updating OHLCV data" : "Downloading OHLCV data");
+    const stopProgress = action === "download" ? pollDataProgress(progressId, sequence) : () => {};
     try {
       const result = await api("/api/scripting/backtest/data/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+      stopProgress();
       if (sequence !== contextSequence || !isOpen()) return;
       setDataBusy(false);
       await loadData(String(result.data_path || ""), sequence);
@@ -1428,6 +1569,8 @@
       if (previousJob) setStatus(previousJob.status, statusSummary(previousJob));
       else setStatus("ready", `${dataRows.length} data source${dataRows.length === 1 ? "" : "s"}`);
       setDataBusy(false);
+    } finally {
+      stopProgress();
     }
   }
 
@@ -2423,6 +2566,7 @@
       if (isMobile() && event.target === el("scripting-backtest-modal")) close();
     });
     el("scripting-backtest-data-manage").addEventListener("click", openDataManager);
+    initDataHistoryInput();
     el("scripting-backtest-data-exchange-button").addEventListener("click", () => {
       const nodes = dataExchangeNodes();
       if (nodes.button.disabled) return;

@@ -6,8 +6,10 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import traceback
 import uuid
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,49 @@ def _write_result(path: Path, payload: dict[str, Any]) -> None:
         encoding="utf-8",
     )
     os.replace(temporary, path)
+
+
+@contextmanager
+def _report_download_progress(path: Path | None):
+    if path is None:
+        yield
+        return
+
+    from pynecore.providers.ccxt import CCXTProvider
+
+    original = CCXTProvider.download_ohlcv
+
+    def download(provider, time_from, time_to, on_progress=None, limit=None):
+        start = time_from.replace(tzinfo=None)
+        end = (time_to or datetime.now(UTC)).replace(tzinfo=None)
+        total = (end - start).total_seconds()
+        last_percent = -1
+        last_update = 0.0
+
+        def progress(current):
+            nonlocal last_percent, last_update
+            if on_progress is not None:
+                on_progress(current)
+            elapsed = (current.replace(tzinfo=None) - start).total_seconds()
+            # Installation of the downloaded files still follows the provider call.
+            percent = min(99, max(0, int(elapsed / total * 100))) if total > 0 else 99
+            now = time.monotonic()
+            if percent <= last_percent or (last_percent >= 0 and now - last_update < 1 and percent != 99):
+                return
+            try:
+                _write_result(path, {"percent": percent})
+            except OSError:
+                return
+            last_percent, last_update = percent, now
+
+        return original(provider, time_from, time_to, on_progress=progress, limit=limit)
+
+    # This hook exists only in the isolated data worker, never in data_service.
+    CCXTProvider.download_ohlcv = download
+    try:
+        yield
+    finally:
+        CCXTProvider.download_ohlcv = original
 
 
 def _record_download_source(
@@ -241,10 +286,12 @@ def main() -> int:
     parser.add_argument("--timeframe", required=True)
     parser.add_argument("--history-since", default="")
     parser.add_argument("--data-path", default="")
+    parser.add_argument("--progress-path", default="")
     args = parser.parse_args()
     result_path = Path(args.result_path).resolve()
     try:
-        result = _run(args)
+        with _report_download_progress(Path(args.progress_path) if args.progress_path else None):
+            result = _run(args)
     except BaseException as exc:
         traceback.print_exc(file=sys.stderr)
         result = {
