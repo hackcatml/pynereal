@@ -21,7 +21,7 @@
 }
 
 .pyne-codemirror-host .cm-editor.cm-pyne-has-minimap > .cm-scroller {
-  width: calc(100% - var(--pyne-minimap-width));
+  width: calc(100% - var(--pyne-minimap-width) - 6px);
   min-width: 0;
   box-sizing: border-box;
 }
@@ -59,9 +59,51 @@
   pointer-events: none;
 }
 
+.cm-pyne-minimap-resizer {
+  position: absolute;
+  top: 0;
+  right: var(--pyne-minimap-width);
+  bottom: 0;
+  width: 6px;
+  z-index: 2;
+  background: #0e131a;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.cm-pyne-minimap-resizer:hover,
+.cm-pyne-minimap-resizer:focus-visible,
+.cm-pyne-minimap-resizer[data-resizing] { background: #3c526b; }
+.cm-pyne-minimap-resizer:focus-visible { outline: none; }
+.cm-pyne-minimap-regions { position: absolute; inset: 0; pointer-events: none; }
+.cm-pyne-minimap-region {
+  position: absolute;
+  left: 9px;
+  right: 1px;
+  display: block;
+  height: 12px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 0;
+  overflow: hidden;
+  color: #8fd477;
+  background: #0e131a;
+  font: 600 9px/12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0;
+  text-align: left;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.cm-pyne-minimap-region:hover,
+.cm-pyne-minimap-region:focus-visible { background: #243529; color: #b2efa0; }
+.cm-pyne-minimap-region:focus-visible { outline: 1px solid #8fd477; outline-offset: -1px; }
+
 @media (max-width: 720px), (hover: none) and (pointer: coarse) {
   .pyne-codemirror-host .cm-editor.cm-pyne-has-minimap > .cm-scroller { width: 100%; }
-  .cm-pyne-minimap { display: none; }
+  .cm-pyne-minimap, .cm-pyne-minimap-resizer { display: none; }
 }
 
 .pyne-codemirror-host .cm-scroller {
