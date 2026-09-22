@@ -103,7 +103,12 @@ def manual_alert_telegram_text(*, script_title: str | None, timeframe: str,
 
 
 def send_manual_alert_payload(*, spec: SessionSpec, script_title: str | None,
-                              payload: dict) -> dict[str, Any]:
+                              payload: dict, notify=None) -> dict[str, Any]:
+    from data_service.notification_events import alert_callback, recorded_result
+    report = alert_callback(notify, session_id=spec.id, origin="manual",
+                            context={"script_title": script_title, "symbol": spec.symbol,
+                                     "exchange": spec.exchange, "timeframe": spec.timeframe},
+                            signal=payload.get("message"))
     if "message" not in payload:
         raise ValueError("message is required")
 
@@ -128,6 +133,7 @@ def send_manual_alert_payload(*, spec: SessionSpec, script_title: str | None,
         if webhook_result.get("sent")
         else webhook_delivery_status(str(webhook_result.get("error") or "unknown error"))
     )
+    report("webhook", recorded_result(webhook_result))
 
     token = (wh.get("telegram_token") or "").strip() or default_telegram_token()
     chat_id = (wh.get("telegram_chat_id") or "").strip() or default_telegram_chat_id()
@@ -147,6 +153,7 @@ def send_manual_alert_payload(*, spec: SessionSpec, script_title: str | None,
             }
         except Exception as e:
             telegram_result = {"sent": False, "error": str(e)}
+        report("telegram", recorded_result(telegram_result))
 
     return {"ok": True, "webhook": webhook_result, "telegram": telegram_result}
 

@@ -99,6 +99,8 @@ class ScriptingBacktestManager:
         self._plot_index_cache: dict[str, PlotCsvIndex] = {}
         self._lock = asyncio.Lock()
         self._data_process: asyncio.subprocess.Process | None = None
+        self._data_progress_id = ""
+        self._data_progress_path: Path | None = None
         self._closed = False
         self.output_root.mkdir(parents=True, exist_ok=True)
         self._recover_jobs()
@@ -465,6 +467,16 @@ class ScriptingBacktestManager:
                 self._plot_index_cache.pop(job_id, None)
         return {"ok": True, "deleted": len(job_ids), "script_path": normalized}
 
+    async def data_progress(self, progress_id: str) -> dict[str, int | None]:
+        path = self._data_progress_path
+        if self._closed or not progress_id or progress_id != self._data_progress_id or path is None:
+            return {"percent": None}
+        payload = await self.run_io(self._read_json_file, path)
+        percent = payload.get("percent")
+        if path != self._data_progress_path or progress_id != self._data_progress_id:
+            return {"percent": None}
+        return {"percent": percent if type(percent) is int and 0 <= percent <= 99 else None}
+
     async def sync_data(
         self,
         *,
@@ -475,6 +487,7 @@ class ScriptingBacktestManager:
         timeframe: str = "",
         history_since: str = "",
         file_name: str = "",
+        progress_id: str = "",
     ) -> dict[str, Any]:
         process: asyncio.subprocess.Process | None = None
         sync_dir: Path | None = None
@@ -540,6 +553,9 @@ class ScriptingBacktestManager:
                 command.extend(["--history-since", request["history_since"]])
             if request.get("absolute_data_path"):
                 command.extend(["--data-path", request["absolute_data_path"]])
+            progress_path = sync_dir / "progress.json" if progress_id and request["action"] == "download" else None
+            if progress_path is not None:
+                command.extend(["--progress-path", str(progress_path)])
             process_options: dict[str, Any] = {
                 "cwd": str(self.repo_root),
                 "stdin": asyncio.subprocess.DEVNULL,
@@ -563,6 +579,8 @@ class ScriptingBacktestManager:
                     status_code=500,
                 ) from exc
             self._data_process = process
+            self._data_progress_id = progress_id if progress_path is not None else ""
+            self._data_progress_path = progress_path
 
         try:
             exit_code = await process.wait()
@@ -574,6 +592,8 @@ class ScriptingBacktestManager:
             async with self._lock:
                 if self._data_process is process:
                     self._data_process = None
+                    self._data_progress_id = ""
+                    self._data_progress_path = None
             if self._closed:
                 shutil.rmtree(sync_dir, ignore_errors=True)
             else:

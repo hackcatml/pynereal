@@ -185,6 +185,7 @@ three-dot menu and drag the sheet down to close it.
 ### Editing and Version History
 
 The CodeMirror 6 editor is shared with the chart Source editor. It provides
+line numbers, Python/PyneCore autocompletion, optional word wrap,
 undo, comment toggling, find and replace, change
 markers, optional revision notes, color-coded diffs, and restoration of earlier
 versions. Revision history is stored locally in
@@ -192,7 +193,18 @@ versions. Revision history is stored locally in
 
 Use `Cmd/Ctrl + F` to find, `Cmd/Ctrl + R` to find and replace, and
 `Cmd/Ctrl + /` to toggle comments. Toolbar controls are also available on mobile.
+Code is unwrapped by default; the Word wrap toolbar button toggles soft wrapping
+without changing the file. Completion suggestions support imported PyneCore APIs
+(including aliases), Python built-ins, and locally declared names. Use
+`Ctrl + Space` to request suggestions, `Enter` or `Tab` to accept, and `Escape`
+to dismiss; suggestions can also be selected by touch. Required function arguments
+are inserted as editable snippet fields. This is not full Python type inference.
 CodeMirror is bundled; normal setup and Update do not require Node.js or npm.
+Editable CodeMirror source and build tooling live in `data_service/codemirror_build/`;
+the browser bundle is generated in `data_service/templates/codemirror.js`.
+`npm run build:codemirror` also extracts the bundled PyneCore API names, signatures,
+and documentation using Python's AST, without importing or executing strategies.
+Completion runs in the browser, without per-keystroke server or AI requests.
 
 Opening or saving a Python file runs static validation, with cached results for
 an unchanged revision. Errors are underlined, and the error navigation buttons
@@ -401,6 +413,26 @@ not define its own Telegram credentials.
 BOT_TOKEN=your_bot_token
 CHAT_ID=your_chat_id
 ```
+
+## Notification Center
+
+The bell to the right of the Hub clock opens saved strategy/manual alert results
+and verification-runner order-signal findings. A red dot indicates unread items.
+Expand an item to read its details; the broom marks all unread items as read.
+Once all items are read, click the broom again to confirm clearing the list.
+Cleared items stay hidden after a refresh or restart; saved history is not deleted.
+
+Strategy alert results are recorded only when the webhook toggle is enabled at
+the time of the alert. Previously saved items remain unchanged.
+Webhook results appear after the request completes. Telegram results update the
+same item separately, so a Telegram timeout does not delay the webhook result.
+A webhook response is not proof that a trade executed; receiver statuses such
+as `pending` are shown separately. Response timeouts are shown as delivery unknown.
+Existing sending toggles and retry policies are unchanged.
+
+History and read state are stored in `workdir/data/cache/notifications.sqlite`.
+Notification transport and database writes run outside the strategy calculation
+thread. Events not yet saved can be lost if the process is forcibly terminated.
 
 ## Manual Alerts
 

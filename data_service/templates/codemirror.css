@@ -16,6 +16,96 @@
 
 .pyne-codemirror-host .cm-editor.cm-focused { outline: none; }
 
+.pyne-codemirror-host .cm-editor.cm-pyne-has-minimap {
+  --pyne-minimap-width: 104px;
+}
+
+.pyne-codemirror-host .cm-editor.cm-pyne-has-minimap > .cm-scroller {
+  width: calc(100% - var(--pyne-minimap-width) - 6px);
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.pyne-codemirror-host .cm-editor.cm-pyne-has-minimap .cm-lineWrapping {
+  min-width: 0;
+}
+
+.cm-pyne-minimap {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--pyne-minimap-width);
+  overflow: hidden;
+  border-left: 1px solid #242b34;
+  box-sizing: border-box;
+  background: #0e131a;
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.cm-pyne-minimap[hidden] { display: none; }
+.cm-pyne-minimap:focus-visible { outline: 1px solid #79c0ff; outline-offset: -1px; }
+.cm-pyne-minimap canvas { display: block; width: 100%; height: 100%; pointer-events: none; }
+.cm-pyne-minimap-viewport {
+  position: absolute;
+  right: 0;
+  left: 7px;
+  box-sizing: border-box;
+  border: 1px solid #8a9bad55;
+  background: #8a9bad22;
+  pointer-events: none;
+}
+
+.cm-pyne-minimap-resizer {
+  position: absolute;
+  top: 0;
+  right: var(--pyne-minimap-width);
+  bottom: 0;
+  width: 6px;
+  z-index: 2;
+  background: #0e131a;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.cm-pyne-minimap-resizer:hover,
+.cm-pyne-minimap-resizer:focus-visible,
+.cm-pyne-minimap-resizer[data-resizing] { background: #3c526b; }
+.cm-pyne-minimap-resizer:focus-visible { outline: none; }
+.cm-pyne-minimap-regions { position: absolute; inset: 0; pointer-events: none; }
+.cm-pyne-minimap-region {
+  position: absolute;
+  left: 9px;
+  right: 1px;
+  display: block;
+  height: 12px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 0;
+  overflow: hidden;
+  color: #8fd477;
+  background: #0e131a;
+  font: 600 9px/12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0;
+  text-align: left;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.cm-pyne-minimap-region:hover,
+.cm-pyne-minimap-region:focus-visible { background: #243529; color: #b2efa0; }
+.cm-pyne-minimap-region:focus-visible { outline: 1px solid #8fd477; outline-offset: -1px; }
+
+@media (max-width: 720px), (hover: none) and (pointer: coarse) {
+  .pyne-codemirror-host .cm-editor.cm-pyne-has-minimap > .cm-scroller { width: 100%; }
+  .cm-pyne-minimap, .cm-pyne-minimap-resizer { display: none; }
+}
+
 .pyne-codemirror-host .cm-scroller {
   overflow: auto;
   scrollbar-gutter: stable;
@@ -47,20 +137,113 @@
 }
 
 .pyne-codemirror-host .cm-pyne-diff-gutter {
-  width: 6px;
-  min-width: 6px;
+  width: 12px;
+  min-width: 12px;
+}
+
+.pyne-codemirror-host .cm-lineNumbers {
+  color: #788391;
+  font-variant-numeric: tabular-nums;
+}
+
+.pyne-codemirror-host .cm-lineNumbers .cm-gutterElement {
+  padding-right: 6px;
+  padding-left: 6px;
+}
+
+.editor-word-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: manipulation;
+}
+
+.editor-word-wrap svg { width: 14px; height: 14px; }
+.editor-word-wrap[aria-pressed="true"] {
+  color: #79c0ff;
+  border-color: rgba(121, 192, 255, 0.55);
+  background: rgba(31, 111, 235, 0.16);
+}
+
+@media (hover: hover) {
+  .editor-word-wrap:hover::after,
+  .editor-word-wrap:focus-visible::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 20;
+    padding: 5px 8px;
+    border-radius: 4px;
+    background: #f0f3f6;
+    color: #15191f;
+    font: 12px/1.4 system-ui, sans-serif;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+}
+
+.cm-tooltip.pyne-completion-list,
+.cm-tooltip.cm-completionInfo {
+  z-index: 20000;
+  box-sizing: border-box;
+  max-width: min(520px, calc(100vw - 16px));
+  border: 1px solid #3a4350;
+  border-radius: 4px;
+  background: #171d25;
+  color: #e6edf3;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  box-shadow: 0 6px 18px #0005;
+}
+
+.cm-tooltip.pyne-completion-list > ul {
+  max-height: 220px;
+  max-width: min(480px, calc(100vw - 24px));
+  scrollbar-width: thin;
+  scrollbar-color: #3a4350 #171d25;
+}
+.cm-tooltip.pyne-completion-list > ul > li {
+  display: flex;
+  align-items: baseline;
+  padding: 4px 7px;
+  touch-action: manipulation;
+}
+.cm-tooltip.pyne-completion-list > ul > li[aria-selected] {
+  background: #253b53;
+  color: #fff;
+}
+.pyne-completion-list .cm-completionLabel { flex: 0 0 auto; }
+.pyne-completion-list .cm-completionDetail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #a2adba;
+  font-style: normal;
+}
+.cm-tooltip.cm-completionInfo {
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 200px;
+  overflow-y: auto;
 }
 
 .pyne-codemirror-host .cm-pyne-diff-gutter .cm-gutterElement {
-  width: 6px;
+  width: 12px;
   padding: 0;
+  cursor: pointer;
 }
 
 .cm-pyne-diff-marker {
   display: block;
+  cursor: pointer;
   width: 3px;
   height: 100%;
   min-height: 1.55em;
+  margin-inline: auto;
+  transition: width 0.14s ease, border-left-width 0.14s ease;
 }
 
 .cm-pyne-diff-marker.added { background: #2ea043; }
@@ -74,6 +257,105 @@
   border-bottom: 4px solid transparent;
   border-left: 5px solid #f85149;
 }
+
+@media (hover: hover) {
+  .cm-pyne-diff-gutter .cm-gutterElement:hover .cm-pyne-diff-marker:not(.deleted) { width: 8px; }
+  .cm-pyne-diff-gutter .cm-gutterElement:hover .cm-pyne-diff-marker.deleted { border-left-width: 9px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cm-pyne-diff-marker { transition: none; }
+}
+
+.cm-tooltip.cm-pyne-change-tooltip {
+  z-index: 20000;
+  width: min(620px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #3a4350;
+  border-radius: 4px;
+  background: #10161e;
+  color: #e6edf3;
+  box-shadow: 0 6px 18px #0005;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.cm-pyne-change-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border-bottom: 1px solid #3a4350;
+  background: #171d25;
+}
+.cm-pyne-change-header > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cm-pyne-change-controls { display: flex; flex: 0 0 auto; gap: 4px; }
+.cm-pyne-change-controls button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid #3a4350;
+  border-radius: 4px;
+  background: #202833;
+  color: #c9d1d9;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.cm-pyne-change-controls button:disabled { opacity: 0.35; cursor: default; }
+.cm-pyne-change-controls button:focus-visible { outline: 1px solid #79c0ff; }
+.cm-pyne-change-controls svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+@media (hover: hover) {
+  .cm-pyne-change-controls button:not(:disabled):hover::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    z-index: 1;
+    top: calc(100% + 6px);
+    right: 0;
+    padding: 4px 7px;
+    border-radius: 4px;
+    background: #f0f3f6;
+    color: #15191f;
+    font: 12px/1.4 system-ui, sans-serif;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+}
+.cm-pyne-change-preview {
+  min-height: 0;
+  max-height: min(240px, 40vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #3a4350 #10161e;
+}
+.cm-pyne-change-preview pre {
+  box-sizing: border-box;
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
+  padding: 3px 10px;
+  font: inherit;
+  white-space: pre;
+  tab-size: 4;
+}
+.cm-pyne-change-preview .removed { color: #ffdcd7; background: #f851491a; }
+.cm-pyne-change-preview .added { color: #aff5b4; background: #2ea0431a; }
 
 .cm-pyne-search-match {
   border-radius: 2px;

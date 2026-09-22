@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -9,7 +11,8 @@ from fastapi import WebSocket
 
 from market_data_diagnostics import log_session_diagnostic
 
-from .delivery import VerificationDeliveryRequest, VerificationDeliveryService
+from .delivery import VerificationDeliveryRequest, VerificationDeliveryService, verification_event_id
+from data_service.notification_events import recorded_result
 from .protocol import compare_results
 
 if TYPE_CHECKING:
@@ -671,8 +674,7 @@ class VerificationCoordinator:
         timestamp_ms: int,
     ) -> None:
         if (
-            self.delivery is None
-            or not comparison.get("primary_result_available")
+            not comparison.get("primary_result_available")
             or not comparison.get("source_hashes_matched")
             or self._rewarm_pending
             or self.connection_lost
@@ -719,14 +721,32 @@ class VerificationCoordinator:
                 )
             else:
                 enabled = bool(common["notification_toggles"]["telegram"])
-            if not enabled:
-                continue
             for signal in comparison.get(key) or []:
-                self.delivery.enqueue(VerificationDeliveryRequest(
+                request = VerificationDeliveryRequest(
                     discrepancy=discrepancy,
                     order_signal=dict(signal),
                     **common,
-                ))
+                )
+                notifications = getattr(self.session, "notifications", None)
+                if notifications is not None:
+                    event = {
+                        "event_key": "verification:" + verification_event_id(request),
+                        "kind": "verification", "origin": "verification",
+                        "session_id": request.session_id, "occurred_at": time.time(),
+                        "candle_timestamp_ms": timestamp_ms,
+                        "context": {"script_title": request.script_title, "exchange": request.exchange,
+                                    "symbol": request.symbol, "timeframe": request.timeframe},
+                        "signal": dict(signal),
+                        "finding": {"discrepancy": discrepancy, "primary_bar": request.primary_bar,
+                                    "finalized_bar": request.finalized_bar, "bar_difference": request.bar_difference,
+                                    "authoritative_source": authoritative_source},
+                    }
+                    notifications.publish(event)
+                    def report(channel, outcome, base=event, publish=notifications.publish):
+                        publish({**base, channel: recorded_result(outcome)})
+                    request = replace(request, on_channel_result=report)
+                if enabled and self.delivery is not None:
+                    self.delivery.enqueue(request)
 
     def _resolve_initial_primary_pending(
         self,

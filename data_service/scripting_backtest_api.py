@@ -75,10 +75,18 @@ def build_scripting_backtest_router(
                 timeframe=str(payload.get("timeframe") or ""),
                 history_since=str(payload.get("history_since") or ""),
                 file_name=str(payload.get("file_name") or ""),
+                progress_id=str(payload.get("progress_id") or ""),
             )
         except ScriptingBacktestError as exc:
             return _error_response(exc)
         return JSONResponse(result)
+
+    @router.get("/api/scripting/backtest/data/progress")
+    async def backtest_data_progress(progress_id: str) -> JSONResponse:
+        return JSONResponse(
+            await manager.data_progress(progress_id),
+            headers={"Cache-Control": "no-store"},
+        )
 
     @router.delete("/api/scripting/backtest/data")
     async def delete_backtest_data(data_path: str) -> JSONResponse:

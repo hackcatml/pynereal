@@ -3265,6 +3265,8 @@
           positions.push({
             ...position,
             account: result.account || "",
+            account_uid: result.account_uid ?? null,
+            account_address: result.account_address ?? null,
             exchange: result.exchange || "",
             exchange_logo_url: result.exchange_logo_url || "",
           });
@@ -3339,6 +3341,7 @@
     const side = document.createElement("span");
     symbolLine.append(symbol, side);
     const account = document.createElement("small");
+    account.className = "account-position-live-account";
     copy.append(symbolLine, account);
     identity.append(logo, copy);
     const trailing = document.createElement("div");
@@ -3394,7 +3397,10 @@
       ? "account-position-long"
       : sideText.toLowerCase() === "short" ? "account-position-short" : "";
     const scope = String(position.market_scope || position.dex || "");
-    nodes.account.textContent = [position.account || "—", scope].filter(Boolean).join(" · ");
+    const accountIdentity = position.exchange === "hyperliquid"
+      ? `Wallet: ${String(position.account_address || "—")}`
+      : String(position.account_uid ?? "").trim() || "—";
+    nodes.account.textContent = [position.account || "—", accountIdentity, scope].filter(Boolean).join(" · ");
 
     const pnl = position.unrealized_pnl === null || position.unrealized_pnl === undefined
       ? Number.NaN : Number(position.unrealized_pnl);
@@ -9494,6 +9500,23 @@
   let savedScrollY = 0;
   const MAX_LOG_CHARS = 600000;
 
+  function initModalBackdropGuard() {
+    let pointerStartTarget = null;
+    document.addEventListener("pointerdown", (event) => {
+      pointerStartTarget = event.target;
+    }, true);
+    const reset = () => { pointerStartTarget = null; };
+    document.addEventListener("pointercancel", reset, true);
+    window.addEventListener("blur", reset);
+    document.addEventListener("click", (event) => {
+      const startTarget = pointerStartTarget;
+      reset();
+      if (event.detail === 0 || !event.target?.classList?.contains("modal")) return;
+      // A drag from modal content can produce a click on its backdrop ancestor.
+      if (startTarget !== event.target) event.stopPropagation();
+    }, true);
+  }
+
   // Lock the page behind the modal (iOS-safe position:fixed technique) so
   // scrolling inside the log panel doesn't bleed through to the dashboard.
   function lockBodyScroll() {
@@ -10611,6 +10634,7 @@
     }, 5000);
     ws.onopen = () => {
       if (ws !== hubWs || generation !== hubGeneration) return;
+      window.PyneRealNotifications?.sync();
       clearTimeout(connectGuard);
       setHubStatus("syncing…");
       if (!aiPending) syncAiChatState({ allowImport: false });
@@ -10633,7 +10657,9 @@
       setHubStatus("live", true);
       try {
         const msg = JSON.parse(ev.data);
-        if (msg.type === "sessions") {
+        if (msg.type === "notifications") {
+          window.PyneRealNotifications?.update(msg);
+        } else if (msg.type === "sessions") {
           applyAiAvailability(msg.ai_enabled);
           applySessions(msg.sessions || []);
         } else if (msg.type === "ai_chat_updated" && !aiPending) {
@@ -10714,6 +10740,7 @@
     }
   });
 
+  initModalBackdropGuard();
   initHubMenuCalendar();
   window.PyneScripting.init({
     api,

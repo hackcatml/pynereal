@@ -324,8 +324,10 @@ class Session:
         strategy_evaluation_enabled: bool = False,
         verification_enabled: bool = False,
         verification_delivery: VerificationDeliveryService | None = None,
+        notifications=None,
     ) -> None:
         self.spec = spec
+        self.notifications = notifications
         self.feed = feed
         self.strategy_evaluation_enabled = strategy_evaluation_enabled
         self.paths = SessionPaths.build(spec.id)
@@ -1047,6 +1049,7 @@ class Session:
                 spec=self.spec,
                 script_title=self._manual_alert_script_title(),
                 payload=payload,
+                notify=self.notifications.publish if self.notifications else None,
             )
             webhook = result.get("webhook") if isinstance(result, dict) else None
             if isinstance(webhook, dict) and webhook.get("error"):

@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import ssl
 import sys
 import time
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 import certifi
@@ -51,6 +53,73 @@ BYBIT_TRANSACTION_MAX_RANGE_MS = 7 * 24 * 60 * 60 * 1000
 BYBIT_BREAKDOWN_MAX_AGE_MS = 31 * 24 * 60 * 60 * 1000
 BINANCE_TRADE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 BINANCE_POSITION_TRADE_WINDOWS = 14
+_ACCOUNT_UID_CACHE: dict[tuple[str, str], tuple[float, str | None]] = {}
+_ACCOUNT_UID_LOCK = Lock()
+_ACCOUNT_UID_TTL_SECONDS = 24 * 60 * 60.0
+_ACCOUNT_UID_RETRY_SECONDS = 300.0
+
+
+def _identity_text(value: Any) -> str | None:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    text = str(value).strip()
+    return text if text and len(text) <= 128 else None
+
+
+def account_identity(
+    exchange: ccxt.Exchange,
+    config: dict[str, Any],
+    account_name: str,
+) -> dict[str, str | None]:
+    """Resolve display identity once per account, outside realtime WS updates."""
+    if exchange.id == "hyperliquid":
+        return {"account_address": _identity_text(config.get("walletAddress"))}
+    configured_uid = _identity_text(config.get("uid"))
+    if configured_uid:
+        return {"account_uid": configured_uid}
+    if exchange.id not in {"binance", "bitget", "bybit", "okx", "gate", "gateio"}:
+        return {"account_uid": None}
+
+    # Credential/environment changes must not reuse another account's identity.
+    fingerprint = hashlib.sha256(
+        json.dumps(config, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+    key = (exchange.id, fingerprint)
+    with _ACCOUNT_UID_LOCK:
+        cached = _ACCOUNT_UID_CACHE.get(key)
+        if cached and cached[0] > time.monotonic():
+            return {"account_uid": cached[1]}
+
+    uid = None
+    original_timeout = exchange.timeout
+    try:
+        exchange.timeout = min(original_timeout, 8_000)
+        if exchange.id == "binance":
+            data = exchange.privateGetAccount({"omitZeroBalances": True})
+            uid = _identity_text(data.get("uid"))
+        elif exchange.id == "bitget":
+            data = exchange.privateSpotGetV2SpotAccountInfo({}).get("data") or {}
+            uid = _identity_text(data.get("userId"))
+        elif exchange.id == "bybit":
+            data = exchange.privateGetV5UserQueryApi({}).get("result") or {}
+            uid = _identity_text(data.get("userID") or data.get("userId"))
+        elif exchange.id == "okx":
+            rows = exchange.privateGetAccountConfig({}).get("data") or []
+            uid = _identity_text(rows[0].get("uid")) if rows else None
+        else:
+            data = exchange.privateAccountGetDetail({})
+            uid = _identity_text(data.get("user_id"))
+    except Exception as exc:
+        eprint(
+            f"[position] {account_name}/{exchange.id} UID unavailable: "
+            f"{type(exc).__name__}: {redact_error(exc, secret_values(config))}"
+        )
+    finally:
+        exchange.timeout = original_timeout
+    ttl = _ACCOUNT_UID_TTL_SECONDS if uid else _ACCOUNT_UID_RETRY_SECONDS
+    with _ACCOUNT_UID_LOCK:
+        _ACCOUNT_UID_CACHE[key] = (time.monotonic() + ttl, uid)
+    return {"account_uid": uid}
 
 
 def normalized_side(position: dict[str, Any], contracts: int | float | None) -> str | None:
@@ -929,6 +998,7 @@ def collect_one(
     args: argparse.Namespace,
     *,
     log_progress: bool = True,
+    include_account_identity: bool = False,
 ) -> dict[str, Any]:
     secrets = secret_values(config)
     exchange: ccxt.Exchange | None = None
@@ -1042,7 +1112,7 @@ def collect_one(
                 str(item.get("side")),
             )
         )
-        return {
+        result = {
             "account": account_name,
             "exchange": exchange_id,
             "account_type": account_type,
@@ -1058,6 +1128,9 @@ def collect_one(
             "position_count": len(normalized),
             "status": "ok",
         }
+        if include_account_identity:
+            result.update(account_identity(exchange, config, account_name))
+        return result
     except Exception as exc:
         message = redact_error(exc, secrets)
         eprint(

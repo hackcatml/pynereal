@@ -5,6 +5,8 @@ tests
 __pycache__
 .claude
 test*.py
+/test*.cjs
+/data_service/codemirror_build/test*
 ai/scripts/*_test.py
 .env
 /tmp/
@@ -19,6 +21,9 @@ workdir/config/calendar_events.json
 workdir/config/watchlist_favorites.json
 workdir/config/update_request.json
 workdir/config/update_state.json
+workdir/data/notifications.sqlite
+workdir/data/notifications.sqlite-shm
+workdir/data/notifications.sqlite-wal
 workdir/output/realtime/
 workdir/output/backtests/
 

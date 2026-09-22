@@ -19,6 +19,12 @@ from typing import Any, Iterator, Optional
 import numpy as np
 import websockets
 
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+from data_service.notification_events import alert_callback, delivery_result, notification_error
+from notification_sender import NotificationSender
+
 from appendable_iter import AppendableIterable
 from evaluation_intents import EvaluationIntentRecorder
 from strategy_snapshot import build_strategy_snapshot
@@ -56,6 +62,7 @@ HYPERLIQUID_WEBHOOK_REQUEST_TIMEOUT = (5, 30)
 TELEGRAM_REQUEST_TIMEOUT = (5, 10)
 TELEGRAM_CONNECT_ATTEMPTS = 3
 TELEGRAM_CONNECT_RETRY_DELAYS = (1, 2)
+NOTIFICATION_SENDER: NotificationSender | None = None
 
 # Event queue for trade events
 trade_event_queue = deque()
@@ -145,12 +152,19 @@ def send_webhook_message(webhook_url: str, message: str, *, script_title: str | 
                          exchange: str | None,
                          webhook_enabled: bool,
                          telegram_notification: bool, telegram_token: str | None,
-                         telegram_chat_id: str | None) -> None:
+                         telegram_chat_id: str | None, notification_callback=None) -> None:
     import json
     import re
     import datetime
     import time
     import requests
+
+    def report(channel, result):
+        if notification_callback is not None:
+            try:
+                notification_callback(channel, result)
+            except Exception as exc:
+                notification_error(f"enqueue failed: {type(exc).__name__}")
 
     def is_connection_stage_error(error: BaseException) -> bool:
         pending: list[BaseException] = [error]
@@ -182,11 +196,17 @@ def send_webhook_message(webhook_url: str, message: str, *, script_title: str | 
     s = re.sub(r'"message"\s*:\s*(?![{["0-9])([A-Za-z][A-Za-z0-9 ]*)',
                r'"message": "\1"',
                message)
-    parsed = json.loads(s)
-    json_alert_message = parsed.get('message', '')
+    try:
+        parsed = json.loads(s)
+        json_alert_message = parsed.get('message', '')
+    except (ValueError, AttributeError) as exc:
+        report("webhook", {"status": "configuration_error", "error_type": type(exc).__name__})
+        raise
     webhook_status = "Disabled"
+    outcome = {"status": "disabled"}
     if webhook_enabled:
         webhook_status = "Failed(missing URL)"
+        outcome = {"status": "configuration_error"}
     if webhook_enabled and webhook_url:
         if json_alert_message == '':
             webhook_status = "Failed(empty message)"
@@ -200,9 +220,13 @@ def send_webhook_message(webhook_url: str, message: str, *, script_title: str | 
                 except ValueError:
                     print("Webhook response:", response.text[:500])
                 webhook_status = "Sent"
+                outcome = delivery_result(response=response)
             except Exception as e:
                 webhook_status = _webhook_failed_status(e)
                 print(f"Webhook error: {e}")
+                outcome = delivery_result(error=e)
+
+    report("webhook", outcome)
 
     if telegram_notification and telegram_token and telegram_chat_id:
         # Wall-clock time at which the notification is sent.
@@ -232,10 +256,12 @@ def send_webhook_message(webhook_url: str, message: str, *, script_title: str | 
                 response = requests.get(url, params=payload, timeout=TELEGRAM_REQUEST_TIMEOUT)
                 response.raise_for_status()
                 print("Telegram response:", response.json())
+                report("telegram", delivery_result(response=response))
                 break
             except Exception as e:
                 if not is_connection_stage_error(e) or attempt == TELEGRAM_CONNECT_ATTEMPTS:
                     print(f"Telegram notification error: {e}")
+                    report("telegram", delivery_result(error=e))
                     break
                 delay = TELEGRAM_CONNECT_RETRY_DELAYS[attempt - 1]
                 print(
@@ -379,10 +405,28 @@ def on_alert_event(message: str, runner: ScriptRunner):
 
     do_webhook = WEBHOOK_ENABLED and bool(webhook_url)
     do_telegram = TELEGRAM_ENABLED and bool(telegram_token) and bool(telegram_chat_id)
+    syminfo = getattr(runner, "syminfo", None)
+    report = alert_callback(
+        (NOTIFICATION_SENDER.publish if WEBHOOK_ENABLED and NOTIFICATION_SENDER
+         and CURRENT_EVALUATION_TIMESTAMP is not None
+         and not getattr(script, "pre_run", False) else None),
+        session_id=SESSION_ID, origin="primary", signal=message,
+        context={"script_title": script.title, "symbol": getattr(syminfo, "ticker", None),
+                 "exchange": getattr(syminfo, "prefix", None),
+                 "timeframe": format_timeframe(getattr(syminfo, "period", None))},
+        candle_timestamp_ms=CURRENT_EVALUATION_TIMESTAMP * 1000 if CURRENT_EVALUATION_TIMESTAMP is not None else None,
+    )
+    if TELEGRAM_ENABLED and not do_telegram:
+        # Report after the webhook outcome below, so the first visible item is never "sending".
+        original_report = report
+        def report(channel, result):
+            original_report(channel, result)
+            if channel == "webhook":
+                original_report("telegram", {"status": "configuration_error"})
     if not do_webhook and not do_telegram:
+        report("webhook", {"status": "configuration_error" if WEBHOOK_ENABLED else "disabled"})
         return
 
-    syminfo = getattr(runner, "syminfo", None)
     send_webhook_message(
         webhook_url=webhook_url if do_webhook else "",
         message=message,
@@ -394,6 +438,7 @@ def on_alert_event(message: str, runner: ScriptRunner):
         telegram_notification=do_telegram,
         telegram_token=telegram_token,
         telegram_chat_id=telegram_chat_id,
+        notification_callback=report,
     )
 
 
@@ -874,9 +919,12 @@ async def main():
     global WEBHOOK_ENABLED, TELEGRAM_ENABLED, WEBHOOK_URL, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
     global SUPPRESS_EXTERNAL_NOTIFICATIONS, ALWAYS_SUPPRESS_EXTERNAL_NOTIFICATIONS
     global CURRENT_EVALUATION_TIMESTAMP, ACTIVE_SOURCE_HASHES
+    global NOTIFICATION_SENDER
     SCRIPT_PATH = script_path
     SESSION_ID = _resolve(args.session_id, "PYNEREAL_SESSION_ID", None, default="default")
     RUNNER_ROLE = str(args.role or "primary")
+    if RUNNER_ROLE == "primary":
+        NOTIFICATION_SENDER = NotificationSender.from_environment()
     ALWAYS_SUPPRESS_EXTERNAL_NOTIFICATIONS = RUNNER_ROLE == "verification"
     SUPPRESS_EXTERNAL_NOTIFICATIONS = ALWAYS_SUPPRESS_EXTERNAL_NOTIFICATIONS
 

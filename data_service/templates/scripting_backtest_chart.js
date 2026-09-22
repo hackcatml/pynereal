@@ -32,6 +32,7 @@
     priceSelectionRequest: 0,
     pricePaging: false,
     priceWindowReplacing: false,
+    priceSync: null,
     maxDrawdownIndex: -1,
     maxDrawdownPercentIndex: -1,
     drawdownIndices: [],
@@ -59,8 +60,8 @@
     node.classList.remove("hidden");
   }
 
-  async function json(url) {
-    const response = await fetch(url, { cache: "no-store" });
+  async function json(url, options = {}) {
+    const response = await fetch(url, { cache: "no-store", ...options });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
     return payload;
@@ -630,7 +631,7 @@
     const list = el("backtest-drawdown-list");
     if (popover.classList.contains("hidden")) return;
     const compact = window.matchMedia("(max-width: 720px)").matches;
-    const maximumListHeight = compact ? 112 : 280;
+    const maximumListHeight = compact ? 112 : 140;
     list.style.maxHeight = `${maximumListHeight}px`;
     const toggleRect = toggle.getBoundingClientRect();
     const margin = 8;
@@ -825,6 +826,7 @@
       }
     });
     const observer = new ResizeObserver(() => {
+      if (!container.clientWidth || !container.clientHeight) return;
       state.priceChart.resize(container.clientWidth, container.clientHeight);
       syncPriceToolsLayout();
       drawEquity();
@@ -840,6 +842,8 @@
       startButton.classList.add("visible");
       endButton.classList.add("visible");
       endButton.style.right = "";
+      startButton.style.bottom = "";
+      endButton.style.bottom = "";
       return;
     }
     startButton.classList.remove("visible");
@@ -848,6 +852,13 @@
       const width = state.priceChart.priceScale("right").width();
       if (width > 0) endButton.style.right = `${width + 12}px`;
     } catch {}
+    const container = el("backtest-price-chart");
+    const logo = container.querySelector('#tv-attr-logo, a[href*="tradingview"]');
+    const bottom = logo
+      ? `${container.getBoundingClientRect().bottom - logo.getBoundingClientRect().top + 8}px`
+      : "";
+    startButton.style.bottom = bottom;
+    endButton.style.bottom = bottom;
   }
 
   function bindPriceNavigation() {
@@ -860,20 +871,21 @@
     endButton.addEventListener("click", () => {
       if (state.equity && state.equity.length) void loadPriceAt(state.equity.length - 1);
     });
-    if (window.matchMedia("(max-width: 720px)").matches) {
-      startButton.classList.add("visible");
-      endButton.classList.add("visible");
-      return;
-    }
+    // Embedded charts can change between narrow previews and wide main panes.
     pane.addEventListener("pointermove", (event) => {
+      if (window.matchMedia("(max-width: 720px)").matches) return;
       const rect = pane.getBoundingClientRect();
       const x = event.clientX - rect.left;
       const y = event.clientY - rect.top;
       const nearBottom = y >= rect.height - 110;
-      startButton.classList.toggle("visible", nearBottom && x <= 160);
-      endButton.classList.toggle("visible", nearBottom && x >= rect.width - 160);
+      const showStart = nearBottom && x <= 160;
+      const showEnd = nearBottom && x >= rect.width - 160;
+      if (showStart || showEnd) positionPriceNavButtons();
+      startButton.classList.toggle("visible", showStart);
+      endButton.classList.toggle("visible", showEnd);
     });
     pane.addEventListener("pointerleave", () => {
+      if (window.matchMedia("(max-width: 720px)").matches) return;
       startButton.classList.remove("visible");
       endButton.classList.remove("visible");
     });
@@ -1118,17 +1130,18 @@
       showError(error.message || "Earlier price data could not be loaded.");
     } finally {
       state.pricePaging = false;
+      window.BacktestChartLink?.notify();
     }
   }
 
-  function updatePriceSelection(index) {
+  function updatePriceSelection(index, synchronizedRange = null) {
     const equity = state.equity;
     const selectionRequest = ++state.priceSelectionRequest;
     state.selectedIndex = index;
     const timestamp = equity.timestamps[index];
     el("backtest-equity-selection-time").textContent = formatTimestamp(timestamp);
     el("backtest-equity-selection-value").textContent = formatAmount(equity.equities[index]);
-    renderPriceMarkers();
+    if (!synchronizedRange) renderPriceMarkers();
     const bars = state.priceBars.length;
     const localIndex = state.priceBars.findIndex(
       (bar) => Number(bar.bar_index) === Number(equity.barIndices[index]),
@@ -1138,7 +1151,7 @@
       const from = Math.max(0, Math.floor(localIndex - visible / 2));
       const to = Math.min(bars - 1, Math.ceil(localIndex + visible / 2));
       const candle = state.priceBars[localIndex];
-      const visibleRange = {
+      const visibleRange = synchronizedRange || {
         from: Number(state.priceBars[from].time),
         to: Number(state.priceBars[to].time),
       };
@@ -1159,6 +1172,20 @@
     drawEquity();
   }
 
+  function replacePriceWindow(payload) {
+    const bars = Array.isArray(payload.bars) ? payload.bars : [];
+    if (!bars.length) throw new Error("Price chart window is empty.");
+    state.priceBars = bars;
+    state.priceRowCount = Number(payload.row_count) || bars.length;
+    state.plotDefinitions = [];
+    clearPlotSeries();
+    updatePlotDefinitions(payload.plots);
+    state.priceStart = Number(payload.start_index);
+    state.priceEnd = Number(payload.end_index);
+    state.priceMarkers = normalizedPriceMarkers(payload.markers);
+    applyPriceData();
+  }
+
   async function loadPriceAt(index) {
     const equity = state.equity;
     const barIndex = Math.round(equity.barIndices[index]);
@@ -1175,6 +1202,7 @@
       if (request !== state.priceRequest) return;
       state.priceWindowReplacing = false;
       loading.classList.add("hidden");
+      window.BacktestChartLink?.notify();
       return;
     }
     const start = Math.max(0, barIndex - 1000);
@@ -1186,23 +1214,14 @@
         `/api/scripting/backtests/${encodeURIComponent(jobId)}/chart?start_index=${start}&end_index=${end}`,
       );
       if (request !== state.priceRequest) return;
-      const bars = Array.isArray(payload.bars) ? payload.bars : [];
-      if (!bars.length) throw new Error("Price chart window is empty.");
-      state.priceBars = bars;
-      state.priceRowCount = Number(payload.row_count) || bars.length;
-      state.plotDefinitions = [];
-      clearPlotSeries();
-      updatePlotDefinitions(payload.plots);
-      state.priceStart = Number(payload.start_index);
-      state.priceEnd = Number(payload.end_index);
-      state.priceMarkers = normalizedPriceMarkers(payload.markers);
-      applyPriceData();
+      replacePriceWindow(payload);
       updatePriceSelection(index);
       await nextAnimationFrame();
       await nextAnimationFrame();
       if (request !== state.priceRequest) return;
       state.priceWindowReplacing = false;
       loading.classList.add("hidden");
+      window.BacktestChartLink?.notify();
     } catch (error) {
       if (request !== state.priceRequest) return;
       state.priceWindowReplacing = false;
@@ -1210,7 +1229,140 @@
     }
   }
 
+  function equityIndexForTime(timestamp) {
+    const times = state.equity.timestamps;
+    let low = 0;
+    let high = times.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (times[middle] < timestamp) low = middle + 1;
+      else high = middle;
+    }
+    return Math.min(low, times.length - 1);
+  }
+
+  function readSynchronizedView() {
+    if (!state.priceChart || !state.equity || state.priceWindowReplacing || state.pricePaging) return null;
+    const range = state.priceChart.timeScale().getVisibleRange();
+    if (!range || !Number.isFinite(range.from) || !Number.isFinite(range.to) || range.from >= range.to) return null;
+    const selectedTime = state.equity.timestamps[state.selectedIndex];
+    const time = selectedTime >= range.from && selectedTime <= range.to
+      ? selectedTime : (range.from + range.to) / 2;
+    return { from: range.from, to: range.to, time };
+  }
+
+  function cancelSynchronizedView() {
+    const sync = state.priceSync;
+    if (!sync) return;
+    state.priceSync = null;
+    sync.controller.abort();
+    if (sync.request === state.priceRequest) {
+      state.priceRequest++;
+      state.priceSelectionRequest++;
+      state.priceWindowReplacing = false;
+      el("backtest-price-loading").classList.add("hidden");
+    }
+  }
+
+  async function applySynchronizedView(view, current) {
+    if (!current() || !state.equity) return;
+    const equity = state.equity;
+    const from = Math.max(view.from, equity.timestamps[0]);
+    const to = Math.min(view.to, equity.timestamps[equity.length - 1]);
+    if (from >= to) throw new Error("No data for synchronized time range.");
+    const fromIndex = Math.max(0, equityIndexForTime(from) - 1);
+    const toIndex = equityIndexForTime(to);
+    const firstBar = Number(equity.barIndices[fromIndex]);
+    const lastBar = Number(equity.barIndices[toIndex]);
+    const index = equityIndexForTime(Math.max(from, Math.min(to, view.time)));
+    const sync = { request: ++state.priceRequest, controller: new AbortController() };
+    state.priceSync = sync;
+    state.priceSelectionRequest++;
+    state.priceWindowReplacing = true;
+    const loading = el("backtest-price-loading");
+    try {
+      if (!state.priceBars.length || state.priceStart > firstBar || state.priceEnd < lastBar) {
+        loading.textContent = "Loading price chart...";
+        loading.classList.remove("hidden");
+        const start = Math.max(0, firstBar - 1000);
+        const end = lastBar + 1000;
+        const payload = await json(
+          `/api/scripting/backtests/${encodeURIComponent(jobId)}/chart?start_index=${start}&end_index=${end}`,
+          { signal: sync.controller.signal },
+        );
+        if (sync.controller.signal.aborted || sync.request !== state.priceRequest) return;
+        // Keep a fetched window for the newest queued pan even if its viewport changed.
+        replacePriceWindow(payload);
+      }
+      if (!current() || sync.request !== state.priceRequest) return;
+      updatePriceSelection(index, { from, to });
+      focusSynchronizedEquity(index);
+      await nextAnimationFrame();
+      await nextAnimationFrame();
+      if (sync.request === state.priceRequest) loading.classList.add("hidden");
+    } finally {
+      if (state.priceSync === sync) state.priceSync = null;
+      if (sync.request === state.priceRequest) state.priceWindowReplacing = false;
+    }
+  }
+
+  function focusSynchronizedEquity(index) {
+    const span = state.viewEnd - state.viewStart;
+    if (index < state.viewStart || index > state.viewEnd) {
+      state.viewStart = Math.max(0, Math.min(state.equity.length - 1 - span, index - span / 2));
+      state.viewEnd = state.viewStart + span;
+      drawEquity();
+    }
+  }
+
   function bindEquityInteractions() {
+    const touches = new Map();
+    let pinch = null;
+    let touchSelection = false;
+    const previewTouch = (event) => {
+      state.hoverIndex = equityIndexAt(event.clientX);
+      showEquityTooltip(state.hoverIndex, event.clientX, event.clientY);
+      drawEquity();
+    };
+    const clearHover = () => {
+      state.hoverIndex = -1;
+      tooltip.classList.add("hidden");
+      drawEquity();
+    };
+    const pinchGeometry = () => {
+      const [first, second] = touches.values();
+      const rect = canvas.getBoundingClientRect();
+      const layout = chartLayout(rect.width, rect.height);
+      return {
+        distance: Math.max(1, Math.hypot(first.x - second.x, first.y - second.y)),
+        ratio: Math.max(0, Math.min(1,
+          ((first.x + second.x) / 2 - rect.left - layout.left) / layout.width)),
+      };
+    };
+    const beginPinch = () => {
+      pinch = null;
+      if (touches.size < 2) return;
+      const { distance, ratio } = pinchGeometry();
+      const span = Math.max(1, state.viewEnd - state.viewStart);
+      pinch = { distance, span, anchor: state.viewStart + span * ratio };
+      touchSelection = false;
+      clearHover();
+    };
+    const finishTouch = (event, cancelled = false) => {
+      if (!touches.has(event.pointerId)) return;
+      const navigate = !cancelled && touchSelection && touches.size === 1;
+      const index = navigate ? equityIndexAt(event.clientX) : -1;
+      // Keep the touched marker while its candle window is loading.
+      if (navigate) state.selectedIndex = index;
+      touches.delete(event.pointerId);
+      if (cancelled) touchSelection = false;
+      beginPinch();
+      if (!touches.size) {
+        touchSelection = false;
+        clearHover();
+      }
+      if (navigate) void loadPriceAt(index);
+    };
     canvas.addEventListener("wheel", (event) => {
       event.preventDefault();
       const rect = canvas.getBoundingClientRect();
@@ -1219,6 +1371,17 @@
       zoomEquity(event.deltaY < 0 ? 0.78 : 1.28, ratio);
     }, { passive: false });
     canvas.addEventListener("pointerdown", (event) => {
+      if (!state.equity?.length) return;
+      if (event.pointerType === "touch") {
+        event.preventDefault();
+        if (!touches.size) touchSelection = true;
+        touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+        canvas.setPointerCapture(event.pointerId);
+        if (touches.size > 1) beginPinch();
+        else previewTouch(event);
+        return;
+      }
+      if (event.button !== 0) return;
       canvas.setPointerCapture(event.pointerId);
       state.pointer = {
         id: event.pointerId,
@@ -1229,6 +1392,20 @@
       };
     });
     canvas.addEventListener("pointermove", (event) => {
+      if (!state.equity?.length) return;
+      if (event.pointerType === "touch") {
+        if (!touches.has(event.pointerId)) return;
+        touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+        if (pinch) {
+          const { distance, ratio } = pinchGeometry();
+          const full = Math.max(1, state.equity.length - 1);
+          const span = Math.min(full, Math.max(10, pinch.span * pinch.distance / distance));
+          state.viewStart = Math.max(0, Math.min(full - span, pinch.anchor - span * ratio));
+          state.viewEnd = state.viewStart + span;
+          drawEquity();
+        } else if (touchSelection) previewTouch(event);
+        return;
+      }
       if (state.pointer && state.pointer.id === event.pointerId) {
         const rect = canvas.getBoundingClientRect();
         const layout = chartLayout(rect.width, rect.height);
@@ -1248,18 +1425,26 @@
       drawEquity();
     });
     canvas.addEventListener("pointerup", (event) => {
+      if (event.pointerType === "touch") {
+        finishTouch(event);
+        return;
+      }
       const pointer = state.pointer;
+      if (!pointer || pointer.id !== event.pointerId) return;
       state.pointer = null;
-      if (!pointer || pointer.moved) return;
+      if (pointer.moved) return;
       const index = equityIndexAt(event.clientX);
       void loadPriceAt(index);
     });
-    canvas.addEventListener("pointercancel", () => { state.pointer = null; });
+    const cancelPointer = (event) => {
+      finishTouch(event, true);
+      if (state.pointer?.id === event.pointerId) state.pointer = null;
+    };
+    canvas.addEventListener("pointercancel", cancelPointer);
+    canvas.addEventListener("lostpointercapture", cancelPointer);
     canvas.addEventListener("pointerleave", () => {
-      if (state.pointer) return;
-      state.hoverIndex = -1;
-      tooltip.classList.add("hidden");
-      drawEquity();
+      if (state.pointer || touches.size) return;
+      clearHover();
     });
     el("backtest-equity-zoom-in").addEventListener("click", () => zoomEquity(0.65));
     el("backtest-equity-zoom-out").addEventListener("click", () => zoomEquity(1.55));
@@ -1333,8 +1518,11 @@
     const resize = (clientY) => {
       const rect = layout.getBoundingClientRect();
       const compact = window.matchMedia("(max-width: 720px)").matches;
-      const minimumPrice = compact ? 150 : 260;
-      const minimumEquity = compact ? 160 : 190;
+      const embedded = document.documentElement.classList.contains("backtest-embedded");
+      // Grid tiles can be shorter than the standalone pane minimums combined.
+      const minimumLimit = embedded ? Math.max(0, rect.height - resizer.offsetHeight) / 4 : Infinity;
+      const minimumPrice = Math.min(compact ? 150 : 260, minimumLimit);
+      const minimumEquity = Math.min(compact ? 160 : 190, minimumLimit);
       const maximumEquity = Math.max(
         minimumEquity,
         rect.height - minimumPrice - resizer.offsetHeight,
@@ -1343,7 +1531,10 @@
         minimumEquity,
         Math.min(maximumEquity, rect.bottom - clientY - resizer.offsetHeight / 2),
       );
-      layout.style.setProperty("--equity-pane-height", `${Math.round(height)}px`);
+      const paneHeight = embedded
+        ? `${height / Math.max(1, rect.height) * 100}%`
+        : `${Math.round(height)}px`;
+      layout.style.setProperty("--equity-pane-height", paneHeight);
       const percent = Math.round((height / Math.max(1, rect.height)) * 100);
       resizer.setAttribute("aria-valuenow", String(percent));
       resizer.setAttribute("aria-valuetext", `Equity curve ${percent}%`);
@@ -1481,6 +1672,17 @@
       state.selectedIndex = lastIndex;
       drawEquity();
       await loadPriceAt(lastIndex);
+      window.BacktestChartLink?.attach({
+        read: readSynchronizedView,
+        apply: applySynchronizedView,
+        cancel: cancelSynchronizedView,
+        subscribe: callback => state.priceChart.timeScale().subscribeVisibleTimeRangeChange(callback),
+        error: message => {
+          const loading = el("backtest-price-loading");
+          loading.textContent = message;
+          loading.classList.remove("hidden");
+        },
+      });
     } catch (error) {
       el("backtest-equity-loading").classList.add("hidden");
       showError(error.message || "Backtest chart could not be loaded.");
