@@ -5,6 +5,8 @@ tests
 __pycache__
 .claude
 test*.py
+/test*.cjs
+/data_service/codemirror_build/test*
 ai/scripts/*_test.py
 .env
 /tmp/

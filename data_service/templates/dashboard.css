@@ -4425,6 +4425,11 @@ tr:last-child td { border-bottom: none; }
 }
 /* Positions render as a plain vertical record list (desktop + mobile) */
 .account-position-live-logo { display: inline-flex; }
+.account-history-record-copy small.account-position-live-account {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+}
 .account-table {
   width: 100%;
   min-width: 1000px;

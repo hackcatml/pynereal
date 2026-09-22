@@ -3265,6 +3265,8 @@
           positions.push({
             ...position,
             account: result.account || "",
+            account_uid: result.account_uid ?? null,
+            account_address: result.account_address ?? null,
             exchange: result.exchange || "",
             exchange_logo_url: result.exchange_logo_url || "",
           });
@@ -3339,6 +3341,7 @@
     const side = document.createElement("span");
     symbolLine.append(symbol, side);
     const account = document.createElement("small");
+    account.className = "account-position-live-account";
     copy.append(symbolLine, account);
     identity.append(logo, copy);
     const trailing = document.createElement("div");
@@ -3394,7 +3397,10 @@
       ? "account-position-long"
       : sideText.toLowerCase() === "short" ? "account-position-short" : "";
     const scope = String(position.market_scope || position.dex || "");
-    nodes.account.textContent = [position.account || "—", scope].filter(Boolean).join(" · ");
+    const accountIdentity = position.exchange === "hyperliquid"
+      ? `Wallet: ${String(position.account_address || "—")}`
+      : String(position.account_uid ?? "").trim() || "—";
+    nodes.account.textContent = [position.account || "—", accountIdentity, scope].filter(Boolean).join(" · ");
 
     const pnl = position.unrealized_pnl === null || position.unrealized_pnl === undefined
       ? Number.NaN : Number(position.unrealized_pnl);

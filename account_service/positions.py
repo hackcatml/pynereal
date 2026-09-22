@@ -72,6 +72,7 @@ def _collect_positions_snapshot(
                 account.config,
                 args,
                 log_progress=False,
+                include_account_identity=True,
             )
             for account in group
         ]
