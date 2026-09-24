@@ -2,15 +2,15 @@
   padding: 0 !important;
   overflow: hidden !important;
   white-space: normal !important;
-  color: #d4d4d4 !important;
+  color: var(--ui-text, #d4d4d4) !important;
   -webkit-text-fill-color: currentColor !important;
 }
 
 .pyne-codemirror-host .cm-editor {
   width: 100%;
   height: 100%;
-  background: #0b0f14;
-  color: #d4d4d4;
+  background: var(--ui-inset, #0b0f14);
+  color: var(--ui-text, #d4d4d4);
   font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
@@ -37,9 +37,9 @@
   bottom: 0;
   width: var(--pyne-minimap-width);
   overflow: hidden;
-  border-left: 1px solid #242b34;
+  border-left: 1px solid var(--ui-border, #242b34);
   box-sizing: border-box;
-  background: #0e131a;
+  background: var(--ui-inset, #0e131a);
   cursor: pointer;
   touch-action: none;
   user-select: none;
@@ -47,7 +47,7 @@
 }
 
 .cm-pyne-minimap[hidden] { display: none; }
-.cm-pyne-minimap:focus-visible { outline: 1px solid #79c0ff; outline-offset: -1px; }
+.cm-pyne-minimap:focus-visible { outline: 1px solid var(--ui-focus, #79c0ff); outline-offset: -1px; }
 .cm-pyne-minimap canvas { display: block; width: 100%; height: 100%; pointer-events: none; }
 .cm-pyne-minimap-viewport {
   position: absolute;
@@ -66,7 +66,7 @@
   bottom: 0;
   width: 6px;
   z-index: 2;
-  background: #0e131a;
+  background: var(--ui-inset, #0e131a);
   cursor: col-resize;
   touch-action: none;
   user-select: none;
@@ -87,8 +87,8 @@
   border: 0;
   border-radius: 0;
   overflow: hidden;
-  color: #8fd477;
-  background: #0e131a;
+  color: var(--ui-positive, #8fd477);
+  background: var(--ui-inset, #0e131a);
   font: 600 9px/12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   letter-spacing: 0;
   text-align: left;
@@ -98,7 +98,7 @@
   pointer-events: auto;
 }
 .cm-pyne-minimap-region:hover,
-.cm-pyne-minimap-region:focus-visible { background: #243529; color: #b2efa0; }
+.cm-pyne-minimap-region:focus-visible { background: var(--ui-positive-bg, #243529); color: var(--ui-positive, #b2efa0); }
 .cm-pyne-minimap-region:focus-visible { outline: 1px solid #8fd477; outline-offset: -1px; }
 
 @media (max-width: 720px), (hover: none) and (pointer: coarse) {
@@ -115,24 +115,24 @@
 .pyne-codemirror-host .cm-content {
   min-height: 100%;
   padding: 14px 16px 24px;
-  caret-color: #f2f5f8;
+  caret-color: var(--ui-heading, #f2f5f8);
 }
 
 .pyne-codemirror-host .cm-line { padding: 0; }
 
 .pyne-codemirror-host .cm-cursor,
-.pyne-codemirror-host .cm-dropCursor { border-left-color: #f2f5f8; }
+.pyne-codemirror-host .cm-dropCursor { border-left-color: var(--ui-heading, #f2f5f8); }
 
 .pyne-codemirror-host .cm-selectionBackground,
 .pyne-codemirror-host .cm-content ::selection {
   background: rgba(86, 156, 214, 0.32) !important;
 }
 
-.pyne-codemirror-host .cm-activeLine { background: rgba(255, 255, 255, 0.025); }
+.pyne-codemirror-host .cm-activeLine { background: var(--ui-hover-overlay, rgba(255, 255, 255, 0.025)); }
 
 .pyne-codemirror-host .cm-gutters {
   border: 0;
-  background: #0b0f14;
+  background: var(--ui-inset, #0b0f14);
   color: transparent;
 }
 
@@ -142,7 +142,7 @@
 }
 
 .pyne-codemirror-host .cm-lineNumbers {
-  color: #788391;
+  color: var(--ui-subtle, #788391);
   font-variant-numeric: tabular-nums;
 }
 
@@ -161,7 +161,7 @@
 
 .editor-word-wrap svg { width: 14px; height: 14px; }
 .editor-word-wrap[aria-pressed="true"] {
-  color: #79c0ff;
+  color: var(--ui-link, #79c0ff);
   border-color: rgba(121, 192, 255, 0.55);
   background: rgba(31, 111, 235, 0.16);
 }
@@ -176,8 +176,8 @@
     z-index: 20;
     padding: 5px 8px;
     border-radius: 4px;
-    background: #f0f3f6;
-    color: #15191f;
+    background: var(--ui-tooltip-bg, #f0f3f6);
+    color: var(--ui-tooltip-text, #15191f);
     font: 12px/1.4 system-ui, sans-serif;
     white-space: nowrap;
     pointer-events: none;
@@ -189,19 +189,19 @@
   z-index: 20000;
   box-sizing: border-box;
   max-width: min(520px, calc(100vw - 16px));
-  border: 1px solid #3a4350;
+  border: 1px solid var(--ui-border, #3a4350);
   border-radius: 4px;
-  background: #171d25;
-  color: #e6edf3;
+  background: var(--ui-raised, #171d25);
+  color: var(--ui-heading, #e6edf3);
   font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  box-shadow: 0 6px 18px #0005;
+  box-shadow: 0 6px 18px rgb(0 0 0 / calc(0.33 * var(--ui-shadow-scale, 1)));
 }
 
 .cm-tooltip.pyne-completion-list > ul {
   max-height: 220px;
   max-width: min(480px, calc(100vw - 24px));
   scrollbar-width: thin;
-  scrollbar-color: #3a4350 #171d25;
+  scrollbar-color: var(--ui-scrollbar, #3a4350) var(--ui-raised, #171d25);
 }
 .cm-tooltip.pyne-completion-list > ul > li {
   display: flex;
@@ -210,8 +210,8 @@
   touch-action: manipulation;
 }
 .cm-tooltip.pyne-completion-list > ul > li[aria-selected] {
-  background: #253b53;
-  color: #fff;
+  background: var(--ui-selected, #253b53);
+  color: var(--ui-heading, #fff);
 }
 .pyne-completion-list .cm-completionLabel { flex: 0 0 auto; }
 .pyne-completion-list .cm-completionDetail {
@@ -219,7 +219,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: #a2adba;
+  color: var(--ui-muted, #a2adba);
   font-style: normal;
 }
 .cm-tooltip.cm-completionInfo {
@@ -274,11 +274,11 @@
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  border: 1px solid #3a4350;
+  border: 1px solid var(--ui-border, #3a4350);
   border-radius: 4px;
-  background: #10161e;
-  color: #e6edf3;
-  box-shadow: 0 6px 18px #0005;
+  background: var(--ui-inset, #10161e);
+  color: var(--ui-heading, #e6edf3);
+  box-shadow: 0 6px 18px rgb(0 0 0 / calc(0.33 * var(--ui-shadow-scale, 1)));
   font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
@@ -289,8 +289,8 @@
   justify-content: space-between;
   gap: 8px;
   padding: 5px 8px;
-  border-bottom: 1px solid #3a4350;
-  background: #171d25;
+  border-bottom: 1px solid var(--ui-border, #3a4350);
+  background: var(--ui-raised, #171d25);
 }
 .cm-pyne-change-header > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cm-pyne-change-controls { display: flex; flex: 0 0 auto; gap: 4px; }
@@ -302,15 +302,15 @@
   width: 26px;
   height: 26px;
   padding: 0;
-  border: 1px solid #3a4350;
+  border: 1px solid var(--ui-border, #3a4350);
   border-radius: 4px;
-  background: #202833;
-  color: #c9d1d9;
+  background: var(--ui-hover, #202833);
+  color: var(--ui-text, #c9d1d9);
   cursor: pointer;
   touch-action: manipulation;
 }
 .cm-pyne-change-controls button:disabled { opacity: 0.35; cursor: default; }
-.cm-pyne-change-controls button:focus-visible { outline: 1px solid #79c0ff; }
+.cm-pyne-change-controls button:focus-visible { outline: 1px solid var(--ui-focus, #79c0ff); }
 .cm-pyne-change-controls svg {
   width: 14px;
   height: 14px;
@@ -329,8 +329,8 @@
     right: 0;
     padding: 4px 7px;
     border-radius: 4px;
-    background: #f0f3f6;
-    color: #15191f;
+    background: var(--ui-tooltip-bg, #f0f3f6);
+    color: var(--ui-tooltip-text, #15191f);
     font: 12px/1.4 system-ui, sans-serif;
     white-space: nowrap;
     pointer-events: none;
@@ -342,7 +342,7 @@
   overflow: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
-  scrollbar-color: #3a4350 #10161e;
+  scrollbar-color: var(--ui-scrollbar, #3a4350) var(--ui-inset, #10161e);
 }
 .cm-pyne-change-preview pre {
   box-sizing: border-box;
@@ -354,8 +354,8 @@
   white-space: pre;
   tab-size: 4;
 }
-.cm-pyne-change-preview .removed { color: #ffdcd7; background: #f851491a; }
-.cm-pyne-change-preview .added { color: #aff5b4; background: #2ea0431a; }
+.cm-pyne-change-preview .removed { color: var(--ui-negative, #ffdcd7); background: #f851491a; }
+.cm-pyne-change-preview .added { color: var(--ui-positive, #aff5b4); background: #2ea0431a; }
 
 .cm-pyne-search-match {
   border-radius: 2px;
@@ -373,23 +373,23 @@
 }
 
 .cm-pyne-diagnostic-warning {
-  text-decoration: underline wavy #d29922 1px;
+  text-decoration: underline wavy var(--ui-warning-accent, #d29922) 1px;
   text-decoration-skip-ink: none;
 }
 
 @media (min-width: 721px) {
   .pyne-codemirror-host .cm-scroller {
-    scrollbar-color: #3a4350 #0b0f14;
+    scrollbar-color: var(--ui-scrollbar, #3a4350) var(--ui-inset, #0b0f14);
     scrollbar-width: thin;
   }
   .pyne-codemirror-host .cm-scroller::-webkit-scrollbar { width: 10px; height: 10px; }
-  .pyne-codemirror-host .cm-scroller::-webkit-scrollbar-track { background: #0b0f14; }
+  .pyne-codemirror-host .cm-scroller::-webkit-scrollbar-track { background: var(--ui-inset, #0b0f14); }
   .pyne-codemirror-host .cm-scroller::-webkit-scrollbar-thumb {
-    border: 2px solid #0b0f14;
+    border: 2px solid var(--ui-border, #0b0f14);
     border-radius: 999px;
-    background: #3a4350;
+    background: var(--ui-scrollbar, #3a4350);
   }
-  .pyne-codemirror-host .cm-scroller::-webkit-scrollbar-thumb:hover { background: #4a5565; }
+  .pyne-codemirror-host .cm-scroller::-webkit-scrollbar-thumb:hover { background: var(--ui-scrollbar, #4a5565); }
 }
 
 @media (max-width: 720px) {

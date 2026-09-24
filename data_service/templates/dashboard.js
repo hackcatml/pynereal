@@ -444,6 +444,28 @@
     el("hub-menu-button").setAttribute("aria-expanded", "false");
   }
 
+  function initHubTheme() {
+    const key = "pyne.hub.theme";
+    const root = document.documentElement;
+    const button = el("hub-theme-toggle");
+    function applyTheme(value) {
+      const light = value === "light";
+      root.dataset.theme = light ? "light" : "dark";
+      button.setAttribute("aria-label", `Switch to ${light ? "dark" : "light"} theme`);
+      button.dataset.tooltip = light ? "Dark theme" : "Light theme";
+    }
+    applyTheme(root.dataset.theme);
+    // Keep the drawer's swipe capture from taking a tap intended for this button.
+    button.addEventListener("pointerdown", (event) => event.stopPropagation());
+    button.addEventListener("click", () => {
+      applyTheme(root.dataset.theme === "light" ? "dark" : "light");
+      try { localStorage.setItem(key, root.dataset.theme); } catch {}
+    });
+    window.addEventListener("storage", (event) => {
+      if (event.key === key || event.key === null) applyTheme(event.newValue);
+    });
+  }
+
   const watchlistExchangeNames = {
     binance: "Binance",
     bitget: "Bitget",
@@ -2613,7 +2635,7 @@
       });
       donut.style.background = stops.length
         ? `conic-gradient(${stops.join(", ")})`
-        : "#29313c";
+        : "var(--ui-hover, #29313c)";
       donut.classList.toggle("showing-account-types", showAccountTypes);
       donut.setAttribute("aria-pressed", String(showAccountTypes));
       donut.setAttribute(
@@ -6039,7 +6061,7 @@
     }, { passive: false });
 
     el("hub-menu-button").addEventListener("click", openHubMenu);
-    el("hub-menu-close").addEventListener("click", closeHubMenu);
+    initHubTheme();
     el("hub-menu-backdrop").addEventListener("click", closeHubMenu);
     el("hub-watchlist-open").addEventListener("click", openWatchlist);
     el("hub-calendar-open").addEventListener("click", openCalendar);

@@ -4,12 +4,18 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>PyneReal Hub</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=199" />
-  <link rel="stylesheet" href="/static/notifications.css?v=4" />
-  <link rel="stylesheet" href="/static/scripting_backtest.css?v=38" />
-  <link rel="stylesheet" href="/static/scripting_ai.css?v=6" />
-  <link rel="stylesheet" href="/static/editor.css?v=5" />
-  <link rel="stylesheet" href="/static/codemirror.css?v=8" />
+  <script>
+    // Restore before styles load to avoid flashing the other theme.
+    try {
+      document.documentElement.dataset.theme = localStorage.getItem("pyne.hub.theme") === "light" ? "light" : "dark";
+    } catch { document.documentElement.dataset.theme = "dark"; }
+  </script>
+  <link rel="stylesheet" href="/static/dashboard.css?v=202" />
+  <link rel="stylesheet" href="/static/notifications.css?v=6" />
+  <link rel="stylesheet" href="/static/scripting_backtest.css?v=40" />
+  <link rel="stylesheet" href="/static/scripting_ai.css?v=8" />
+  <link rel="stylesheet" href="/static/editor.css?v=7" />
+  <link rel="stylesheet" href="/static/codemirror.css?v=10" />
 </head>
 <body>
   <header class="topbar">
@@ -65,7 +71,16 @@
   <aside id="hub-menu" class="hub-menu" aria-hidden="true">
     <div class="hub-menu-header">
       <span>PyneReal Hub</span>
-      <button id="hub-menu-close" class="hub-menu-close" type="button" aria-label="Close menu">&times;</button>
+      <button id="hub-theme-toggle" class="hub-theme-toggle" type="button"
+              aria-label="Switch to light theme" data-tooltip="Light theme">
+        <svg class="hub-theme-sun" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="4" />
+          <path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42" />
+        </svg>
+        <svg class="hub-theme-moon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.463.402.807a6.25 6.25 0 0 0 8.268 8.268c.344-.215.829-.004.803.397" />
+        </svg>
+      </button>
     </div>
     <nav class="hub-menu-nav" aria-label="Hub menu">
       <button id="hub-account-toggle" class="hub-menu-item hub-menu-parent" type="button"
@@ -844,12 +859,7 @@
               <button id="scripting-backtest-delete" class="btn btn-icon" type="button"
                       data-tooltip="Clear" aria-label="Clear backtest results"
                       aria-haspopup="dialog" aria-expanded="false">
-                <svg class="icon scripting-backtest-broom-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M20 4 13 11" />
-                  <path d="M11 9 15 13" />
-                  <path d="M11 9 4.5 14.5 10 20 15 13" />
-                  <path d="M13 11 7 17" />
-                </svg>
+                <svg class="icon scripting-backtest-broom-icon" viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5.5" x2="12" y2="10"/><path d="M8 10 L16 10 L17 13.5 L7 13.5 Z"/><line x1="8.2" y1="13.5" x2="7.1" y2="18"/><line x1="10.7" y1="13.5" x2="10.25" y2="18"/><line x1="13.3" y1="13.5" x2="13.75" y2="18"/><line x1="15.8" y1="13.5" x2="16.9" y2="18"/></svg>
               </button>
               <div id="scripting-backtest-clear-popover"
                    class="scripting-backtest-clear-popover hidden" role="dialog"
@@ -1723,8 +1733,10 @@
       <div class="modal-header">
         <span id="log-title" class="mono"></span>
         <div class="modal-actions">
-          <button id="log-clear" class="btn btn-danger" title="Clear log">&#x1f5d1;&#xfe0f;</button>
-          <button id="log-close" class="btn" title="Close">&times;</button>
+          <button id="log-clear" class="btn btn-icon" type="button" title="Clear log" aria-label="Clear log">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5.5" x2="12" y2="10"/><path d="M8 10 L16 10 L17 13.5 L7 13.5 Z"/><line x1="8.2" y1="13.5" x2="7.1" y2="18"/><line x1="10.7" y1="13.5" x2="10.25" y2="18"/><line x1="13.3" y1="13.5" x2="13.75" y2="18"/><line x1="15.8" y1="13.5" x2="16.9" y2="18"/></svg>
+          </button>
+          <button id="log-close" class="btn btn-icon" type="button" title="Close" aria-label="Close">&times;</button>
         </div>
       </div>
       <pre id="log-content" class="log-content"></pre>
@@ -1852,8 +1864,10 @@
         <span>PyneReal Ai</span><span class="ai-chat-title-chevron" aria-hidden="true">&gt;</span>
       </button>
       <div class="modal-actions">
-        <button id="ai-chat-clear" class="btn btn-danger" title="Clear chat">&#x1f5d1;&#xfe0f;</button>
-        <button id="ai-chat-close" class="btn" title="Close">&times;</button>
+        <button id="ai-chat-clear" class="btn btn-icon" type="button" title="Clear chat" aria-label="Clear chat">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5.5" x2="12" y2="10"/><path d="M8 10 L16 10 L17 13.5 L7 13.5 Z"/><line x1="8.2" y1="13.5" x2="7.1" y2="18"/><line x1="10.7" y1="13.5" x2="10.25" y2="18"/><line x1="13.3" y1="13.5" x2="13.75" y2="18"/><line x1="15.8" y1="13.5" x2="16.9" y2="18"/></svg>
+        </button>
+        <button id="ai-chat-close" class="btn btn-icon" type="button" title="Close" aria-label="Close">&times;</button>
       </div>
     </div>
     <div id="ai-model-menu" class="ai-model-menu hidden" role="listbox" aria-label="AI model and reasoning effort"></div>
@@ -1876,12 +1890,12 @@
     </form>
   </div>
 
-  <script src="/static/codemirror.js?v=12"></script>
+  <script src="/static/codemirror.js?v=13"></script>
   <script src="/static/editor.js?v=8"></script>
   <script src="/static/scripting_backtest.js?v=44"></script>
   <script src="/static/scripting_ai.js?v=12"></script>
   <script src="/static/scripting.js?v=55"></script>
   <script src="/static/notifications.js?v=4"></script>
-  <script src="/static/dashboard.js?v=183"></script>
+  <script src="/static/dashboard.js?v=184"></script>
 </body>
 </html>

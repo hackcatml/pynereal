@@ -11,7 +11,7 @@
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--panel);
-  box-shadow: 0 14px 38px rgb(0 0 0 / 52%);
+  box-shadow: 0 14px 38px rgb(0 0 0 / calc(0.52 * var(--ui-shadow-scale, 1)));
   overscroll-behavior: contain;
 }
 
@@ -31,7 +31,7 @@
   cursor: inherit;
 }
 
-.scripting-ai-messages { background: #0b0e13; }
+.scripting-ai-messages { background: var(--ui-inset, #0b0e13); }
 
 .scripting-ai-send {
   flex: 0 0 auto;
@@ -61,7 +61,7 @@
   z-index: 5;
   width: 18px;
   height: 18px;
-  color: #66717f;
+  color: var(--ui-subtle, #66717f);
   cursor: nwse-resize;
   touch-action: none;
 }
@@ -90,7 +90,7 @@
     min-height: 220px;
     max-height: calc(100dvh - 120px);
     border-radius: 13px 13px 8px 8px;
-    box-shadow: 0 -12px 32px rgb(0 0 0 / 52%);
+    box-shadow: 0 -12px 32px rgb(0 0 0 / calc(0.52 * var(--ui-shadow-scale, 1)));
   }
 
   .scripting-ai-panel.opening {

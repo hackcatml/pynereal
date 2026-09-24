@@ -228,13 +228,13 @@ const changedLineGutter = gutter({
 });
 
 const pyneHighlightStyle = HighlightStyle.define([
-  { tag: tags.comment, color: "#6a9955" },
-  { tag: [tags.string, tags.special(tags.string)], color: "#ce9178" },
-  { tag: [tags.number, tags.bool, tags.null], color: "#b5cea8" },
-  { tag: [tags.keyword, tags.operatorKeyword], color: "#569cd6" },
-  { tag: [tags.typeName, tags.className], color: "#4ec9b0" },
-  { tag: [tags.function(tags.variableName), tags.definition(tags.variableName)], color: "#dcdcaa" },
-  { tag: tags.meta, color: "#c586c0" },
+  { tag: tags.comment, color: "var(--syntax-comment, #6a9955)" },
+  { tag: [tags.string, tags.special(tags.string)], color: "var(--syntax-string, #ce9178)" },
+  { tag: [tags.number, tags.bool, tags.null], color: "var(--syntax-number, #b5cea8)" },
+  { tag: [tags.keyword, tags.operatorKeyword], color: "var(--syntax-keyword, #569cd6)" },
+  { tag: [tags.typeName, tags.className], color: "var(--syntax-type, #4ec9b0)" },
+  { tag: [tags.function(tags.variableName), tags.definition(tags.variableName)], color: "var(--syntax-function, #dcdcaa)" },
+  { tag: tags.meta, color: "var(--syntax-meta, #c586c0)" },
 ]);
 
 function languageExtension(language) {
