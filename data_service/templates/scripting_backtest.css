@@ -749,6 +749,14 @@
   height: 14px;
 }
 
+/* the broom glyph fills less of its viewBox than the other icons; enlarge the
+   box and thin the stroke so its visible size and line weight match */
+.scripting-backtest-status-actions .scripting-backtest-broom-icon {
+  width: 19px;
+  height: 19px;
+  stroke-width: 1.5;
+}
+
 .scripting-backtest-clear-wrap {
   position: relative;
   flex: 0 0 auto;
