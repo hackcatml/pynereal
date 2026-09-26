@@ -2792,6 +2792,9 @@ tr:last-child td { border-bottom: none; }
   .watchlist-row:hover { background: var(--ui-surface, #151c24); }
 }
 .watchlist-favorite {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 28px;
   height: 28px;
   padding: 0;
@@ -2804,6 +2807,19 @@ tr:last-child td { border-bottom: none; }
 }
 .watchlist-favorite:hover { color: var(--ui-warning, #d7a928); }
 .watchlist-favorite.active { color: var(--ui-warning, #f2cc60); }
+.watchlist-favorite svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linejoin: round;
+}
+:root[data-theme="light"] .watchlist-favorite { color: var(--ui-border-strong); }
+:root[data-theme="light"] .watchlist-favorite:hover { color: var(--ui-subtle); }
+:root[data-theme="light"] .watchlist-favorite svg { fill: none; }
+:root[data-theme="light"] .watchlist-favorite.active { color: #b77906; }
+:root[data-theme="light"] .watchlist-favorite.active svg { fill: currentColor; }
 .watchlist-market {
   min-width: 0;
   display: flex;
