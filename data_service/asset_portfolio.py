@@ -582,8 +582,8 @@ class AssetPortfolioService:
         self.attempts = attempts
         self.market_refresh_interval_seconds = market_refresh_interval_seconds
         self._lock = asyncio.Lock()
-        self._cached: dict[str, Any] | None = None
-        self._cached_at = 0.0
+        self._cached: dict[str | None, dict[str, Any]] = {}
+        self._cached_at: dict[str | None, float] = {}
         self._market_cache = _AssetMarketCache(timeout_ms)
         self._market_ready = asyncio.Event()
         self._market_stop = asyncio.Event()
@@ -613,6 +613,9 @@ class AssetPortfolioService:
             account.exchange_id
             for account in configured_accounts(data)
         }
+
+    async def configured_exchanges(self) -> list[str]:
+        return sorted(await asyncio.to_thread(self._configured_exchange_ids))
 
     async def _refresh_market_cache(self) -> None:
         exchange_ids = await asyncio.to_thread(self._configured_exchange_ids)
@@ -672,52 +675,58 @@ class AssetPortfolioService:
             await self.start()
         await self._market_ready.wait()
 
-    def _cache_valid(self) -> bool:
+    def _cache_valid(self, exchange: str | None = None) -> bool:
         return (
-            self._cached is not None
-            and time.monotonic() - self._cached_at < self.cache_ttl_seconds
+            exchange in self._cached
+            and time.monotonic() - self._cached_at[exchange] < self.cache_ttl_seconds
         )
 
     async def invalidate(self) -> None:
         async with self._lock:
-            self._cached = None
-            self._cached_at = 0.0
+            self._cached.clear()
+            self._cached_at.clear()
 
-    async def snapshot(self, *, force: bool = False) -> dict[str, Any]:
+    async def snapshot(self, *, force: bool = False, exchange: str | None = None) -> dict[str, Any]:
+        if exchange is not None:
+            exchange = exchange.strip().lower()
+            if not exchange:
+                raise AssetPortfolioError("Exchange must not be empty")
         requested_at = time.monotonic()
-        if not force and self._cache_valid():
-            result = copy.deepcopy(self._cached)
+        if not force and self._cache_valid(exchange):
+            result = copy.deepcopy(self._cached[exchange])
             result["cached"] = True
             return result
 
         async with self._lock:
             if (
                 force
-                and self._cached is not None
-                and self._cached_at >= requested_at
+                and exchange in self._cached
+                and self._cached_at[exchange] >= requested_at
             ):
-                result = copy.deepcopy(self._cached)
+                result = copy.deepcopy(self._cached[exchange])
                 result["cached"] = True
                 return result
-            if not force and self._cache_valid():
-                result = copy.deepcopy(self._cached)
+            if not force and self._cache_valid(exchange):
+                result = copy.deepcopy(self._cached[exchange])
                 result["cached"] = True
                 return result
             await self._wait_for_market_cache()
             try:
-                result = await asyncio.to_thread(self._collect_snapshot)
+                result = await asyncio.to_thread(self._collect_snapshot, exchange)
             except Exception as exc:
                 message = str(exc).replace("\n", " ").strip()
                 raise AssetPortfolioError(message[:500] or type(exc).__name__) from exc
-            self._cached = result
-            self._cached_at = time.monotonic()
+            self._cached[exchange] = result
+            self._cached_at[exchange] = time.monotonic()
             output = copy.deepcopy(result)
             output["cached"] = False
             return output
 
-    def _collect_snapshot(self) -> dict[str, Any]:
+    def _collect_snapshot(self, exchange: str | None = None) -> dict[str, Any]:
         data = read_provider_config(self.config_path)
         accounts = configured_accounts(data)
+        if exchange is not None:
+            accounts = [account for account in accounts if account.exchange_id == exchange]
         if not accounts:
             return {
                 "collected_at": _utc_now(),

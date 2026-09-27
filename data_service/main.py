@@ -337,7 +337,7 @@ async def main() -> None:
         telegram_config,
         path=_PROJECT_ROOT / "workdir" / "data" / "telegram_ai.sqlite",
         agent=TelegramAgent(codex_service, account_data_service, asset_portfolio_service,
-                            workspace=app.state.scripting_workspace, executor=app.state.scripting_executor),
+                            workspace=app.state.scripting_workspace, executor=app.state.scripting_executor, registry=registry),
         notifications=registry.notifications,
     )
 

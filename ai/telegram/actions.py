@@ -12,11 +12,14 @@ import time
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ai.scripts.manual_alert_tool import ManualAlertToolError
+
 from .attachments import TEXT_LIMIT
 
 MUTATION_TOOLS = {
     "propose_manual_alert_trigger": "set_manual_alert_trigger",
     "propose_manual_alert_deletion": "delete_manual_alert_triggers",
+    "propose_manual_alert_template_update": "update_manual_alert_template",
     "propose_calendar_event": "add_calendar_event",
     "propose_calendar_replacement": "replace_calendar_events",
 }
@@ -137,6 +140,11 @@ def action_summary(kind: str, result: dict) -> str:
                 f"{result.get('timeframe', '')}\nPrice: {result.get('price')}\n{result.get('template_title', '')}").strip()
     if kind == "delete_manual_alert_triggers":
         return f"Manual Alerts deleted: {result.get('deleted_count', 0)}."
+    if kind == "update_manual_alert_template":
+        action = "updated" if result.get("changed") else "unchanged"
+        return (f"Manual Alert template {action}.\n{result.get('exchange', '')} {result.get('symbol', '')} "
+                f"{result.get('timeframe', '')}\n{result.get('template_title', '')}"
+                "\nExisting price triggers unchanged.")
     if kind == "add_calendar_event":
         event = result.get("event") or {}
         return f"Calendar event added.\n{event.get('date', '')} {event.get('title', '')}".strip()
@@ -199,10 +207,14 @@ class TelegramActions:
             return "script", request.model_dump(), {}, preview, review
 
         original = MUTATION_TOOLS[name]
-        manual = original in {"set_manual_alert_trigger", "delete_manual_alert_triggers"}
+        manual = original in {"set_manual_alert_trigger", "delete_manual_alert_triggers", "update_manual_alert_template"}
         if manual:
             tool = self.tools.manual_alert
-            validator = tool._validate_set_arguments if original == "set_manual_alert_trigger" else tool._validate_delete_arguments
+            validator = {
+                "set_manual_alert_trigger": tool._validate_set_arguments,
+                "delete_manual_alert_triggers": tool._validate_delete_arguments,
+                "update_manual_alert_template": tool._validate_update_template_arguments,
+            }[original]
             payload = validator(arguments)
         else:
             tool = self.tools.calendar
@@ -227,6 +239,26 @@ class TelegramActions:
         # Snapshot and comparison run on the registry's loop, never the Codex reader thread.
         state = self._state(original, payload)
         guard = {"fingerprint": _fingerprint(state)}
+        if original == "update_manual_alert_template":
+            session = state["preview"][0]
+            review = json.dumps({
+                "operation": original,
+                "session": {key: session[key] for key in ("session_id", "exchange", "symbol", "timeframe")},
+                "template_index": payload["template_index"],
+                **state["template_change"],
+                "existing_price_triggers": "unchanged",
+            }, ensure_ascii=False, indent=2)
+            before, after = state["template_change"]["before"], state["template_change"]["after"]
+            preview = (f"Edit Manual Alert template: {before['title']}\n"
+                       f"{session['exchange']} {session['symbol']} {session['timeframe']}\n"
+                       f"Before:\n{json.dumps(before, ensure_ascii=False, indent=2)}\n"
+                       f"After:\n{json.dumps(after, ensure_ascii=False, indent=2)}")
+            if len(preview) > 1500:
+                preview = (f"Edit Manual Alert template: {before['title']}\n"
+                           f"{session['exchange']} {session['symbol']} {session['timeframe']}\n"
+                           "Review changes.txt for the complete before/after values.")
+            preview += "\nExisting price triggers unchanged."
+            return original, payload, guard, preview, review.encode()
         review = json.dumps({"operation": original, "requested": payload, "current": state["preview"]},
                             ensure_ascii=False, indent=2)
         if len(review.encode()) > 1024 * 1024:
@@ -242,7 +274,7 @@ class TelegramActions:
         return original, payload, guard, preview, review.encode()
 
     def _state(self, kind: str, payload: dict) -> dict:
-        if kind in {"set_manual_alert_trigger", "delete_manual_alert_triggers"}:
+        if kind in {"set_manual_alert_trigger", "delete_manual_alert_triggers", "update_manual_alert_template"}:
             registry = self.tools.manual_alert.bridge._registry
             ids = [payload["session_id"]] if payload.get("session_id") else sorted(registry.sessions)
             sessions = []
@@ -267,7 +299,14 @@ class TelegramActions:
                         raise ValueError("Select one current template or supply a custom template")
                 elif not payload.get("custom_template_title") or not payload.get("custom_template_message"):
                     raise ValueError("A template or custom title and message are required")
-            return {"preview": sessions, "identities": identities}
+            state = {"preview": sessions, "identities": identities}
+            if kind == "update_manual_alert_template":
+                try:
+                    _, before, after = self.tools.manual_alert.bridge._prepare_template_update(payload)
+                except ManualAlertToolError as exc:
+                    raise ProposalConflict(str(exc)) from None
+                state["template_change"] = {"before": before, "after": after}
+            return state
         registry = self.tools.calendar.bridge._registry
         context = self.tools.calendar.bridge._context()
         ids = (payload["session_ids"] if kind == "add_calendar_event"
@@ -311,8 +350,12 @@ class TelegramActions:
                     "warmups": warmups}
         if _fingerprint(self._state(kind, payload)) != proposal["guard"]["fingerprint"]:
             raise ProposalConflict("The session, templates, triggers or calendar changed after the preview. Request a new proposal.")
-        if kind in {"set_manual_alert_trigger", "delete_manual_alert_triggers"}:
-            operation = "set_trigger" if kind == "set_manual_alert_trigger" else "delete_triggers"
+        if kind in {"set_manual_alert_trigger", "delete_manual_alert_triggers", "update_manual_alert_template"}:
+            operation = {
+                "set_manual_alert_trigger": "set_trigger",
+                "delete_manual_alert_triggers": "delete_triggers",
+                "update_manual_alert_template": "update_template",
+            }[kind]
             return await self.tools.manual_alert.bridge._execute_on_loop(operation, payload)
         if kind in {"add_calendar_event", "replace_calendar_events"}:
             operation = "add" if kind == "add_calendar_event" else "replace"

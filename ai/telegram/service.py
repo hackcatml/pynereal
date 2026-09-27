@@ -14,6 +14,8 @@ from .store import TelegramStore
 from .transport import TelegramError, TelegramTransport
 from .attachments import validate_attachment
 from .actions import ProposalConflict, action_summary
+from .commands import BOT_COMMANDS
+from .session_control import SessionCommandError
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +34,10 @@ class TelegramAIService:
         self._executor: ThreadPoolExecutor | None = None
         self._task: asyncio.Task | None = None
         self._active: tuple[dict, asyncio.Task] | None = None
+        self._direct_active: dict[str, tuple[dict, asyncio.Task]] = {}
         self._jobs_lock = asyncio.Lock()
         self._job_ready = asyncio.Event()
+        self._direct_ready = {kind: asyncio.Event() for kind in ("screenshot", "account", "session")}
         self._send_ready = asyncio.Event()
         self._started_at = 0.0
         self._username = ""
@@ -80,7 +84,11 @@ class TelegramAIService:
             tasks = [
                 asyncio.create_task(self._poll(), name="telegram-ai-receiver"),
                 asyncio.create_task(self._work(), name="telegram-ai-worker"),
+                asyncio.create_task(self._direct_work("screenshot"), name="telegram-screenshot-worker"),
+                asyncio.create_task(self._direct_work("account"), name="telegram-account-worker"),
+                asyncio.create_task(self._direct_work("session"), name="telegram-session-worker"),
                 asyncio.create_task(self._send(), name="telegram-ai-sender"),
+                asyncio.create_task(self._register_commands(), name="telegram-command-menu"),
             ]
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
@@ -113,6 +121,18 @@ class TelegramAIService:
                 await asyncio.sleep(max(delay, exc.retry_after))
                 delay = min(delay * 2, 30)
 
+    async def _register_commands(self) -> None:
+        for attempt in range(3):
+            try:
+                await self.transport.call("setMyCommands", commands=BOT_COMMANDS,
+                    scope={"type": "chat", "chat_id": self.config.chat_id}, language_code="")
+                return
+            except TelegramError as exc:
+                _log(logging.WARNING, "command registration failed (code=%s error=%s)", exc.code, exc.error_type)
+                if attempt == 2 or (400 <= exc.code < 500 and exc.code != 429):
+                    return
+                await asyncio.sleep(max(2 ** attempt, exc.retry_after))
+
     async def _poll(self) -> None:
         offset = await self._db("offset")
         while True:
@@ -133,6 +153,8 @@ class TelegramAIService:
                             _log(logging.WARNING, "callback acknowledgement failed (code=%s error=%s)", exc.code, exc.error_type)
                     offset = max(offset, update["update_id"] + 1)
                     self._job_ready.set()
+                    for event in self._direct_ready.values():
+                        event.set()
                     self._send_ready.set()
                     continue
                 message = update.get("message")
@@ -142,11 +164,25 @@ class TelegramAIService:
                     # Do not turn stale offline messages into fresh remote commands.
                     message = None
                 catalog = None
-                if message is not None and self.agent.available:
+                sessions = None
+                exchanges = None
+                if message is not None:
                     text = str(message.get("text") or message.get("caption") or "").strip()
                     head = text.split(maxsplit=1)[0] if text else ""
                     command, _, target = head.partition("@")
-                    if command == "/model" and (not target or target.lower() == self._username.lower()):
+                    if command == "/screenshot" and (not target or target.lower() == self._username.lower()):
+                        try:
+                            async with asyncio.timeout(5):
+                                sessions = await self.agent.screenshot_sessions()
+                        except Exception as exc:
+                            _log(logging.WARNING, "screenshot sessions unavailable (%s)", type(exc).__name__)
+                    elif command == "/assets" and len(text.split()) == 1 and (not target or target.lower() == self._username.lower()):
+                        try:
+                            async with asyncio.timeout(5):
+                                exchanges = await self.agent.asset_exchanges()
+                        except Exception as exc:
+                            _log(logging.WARNING, "asset exchange options unavailable (%s)", type(exc).__name__)
+                    elif command == "/model" and self.agent.available and (not target or target.lower() == self._username.lower()):
                         try:
                             async with asyncio.timeout(5):
                                 catalog = await self.agent.model_catalog()
@@ -158,14 +194,90 @@ class TelegramAIService:
                         idle=self.config.idle_timeout_seconds, username=self._username,
                         ai_enabled=self.agent.available,
                         model_catalog=catalog,
+                        screenshot_sessions=sessions,
+                        asset_exchanges=exchanges,
                     )
-                    if cancel and self._active is not None:
-                        job, task = self._active
-                        if job["chat"] == message["chat"]["id"] and job["actor"] == message["from"]["id"]:
-                            task.cancel()
+                    if cancel:
+                        for active in (self._active, *self._direct_active.values()):
+                            if active is not None:
+                                job, task = active
+                                if job["chat"] == message["chat"]["id"] and job["actor"] == message["from"]["id"]:
+                                    if job["kind"] == "session" and await self._db("session_command_executing", job):
+                                        continue
+                                    task.cancel()
                 offset = max(offset, update["update_id"] + 1)
                 self._job_ready.set()
+                for event in self._direct_ready.values():
+                    event.set()
                 self._send_ready.set()
+
+    async def _direct_work(self, kind: str) -> None:
+        ready = self._direct_ready[kind]
+        handler = {"screenshot": self._take_screenshot, "account": self._account_snapshot,
+                   "session": self._session_command}[kind]
+        while True:
+            ready.clear()
+            async with self._jobs_lock:
+                job = await self._db("claim", kind)
+                if job is not None:
+                    task = asyncio.create_task(handler(job), name=f"telegram-{kind}")
+                    self._direct_active[kind] = (job, task)
+            if job is None:
+                await ready.wait()
+                continue
+            try:
+                await task
+            except asyncio.CancelledError:
+                if asyncio.current_task().cancelling():
+                    raise
+            finally:
+                self._direct_active.pop(kind, None)
+                self._send_ready.set()
+
+    async def _account_snapshot(self, job: dict) -> None:
+        try:
+            request = json.loads(job["input"])
+            view = request["view"]
+            async with asyncio.timeout(120):
+                options = ({"days": request["days"]} if view == "pnl" else
+                           {"exchange": request.get("exchange")} if view == "assets" else {})
+                report = await self.agent.account_snapshot(view, **options)
+            await self._db("finish", job, report)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log(logging.ERROR, "account command failed (%s)", type(exc).__name__)
+            await self._db("finish", job, "Account lookup failed or timed out. Please retry the command.", "failed")
+
+    async def _session_command(self, job: dict) -> None:
+        try:
+            async with self._jobs_lock:
+                await self._db("begin_session_command", job)
+            payload = await self.agent.session_command(json.loads(job["input"]))
+            await self._db("finish_session_command", job, payload)
+        except asyncio.CancelledError:
+            raise
+        except SessionCommandError as exc:
+            await self._db("finish_session_command", job, None, str(exc))
+        except Exception as exc:
+            _log(logging.ERROR, "session command failed (%s)", type(exc).__name__)
+            await self._db("finish_session_command", job, None,
+                           "Session request failed. Check /sessions for current state before retrying; changes were not retried.")
+
+    async def _take_screenshot(self, job: dict) -> None:
+        try:
+            target = json.loads(job["input"])
+            sessions = await self.agent.screenshot_sessions()
+            if not any(all(item.get(key) == value for key, value in target.items()) for item in sessions):
+                await self._db("finish", job, "The selected session changed or was removed. Use /screenshot again.", "failed")
+                return
+            data = await self.agent.capture_screenshot(target["session_id"])
+            await self._db("finish_screenshot", job, data)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log(logging.ERROR, "screenshot failed (%s)", type(exc).__name__)
+            await self._db("finish", job, "Chart capture failed or the chart is not ready. Check the session and retry /screenshot.", "failed")
 
     async def _work(self) -> None:
         while True:
@@ -277,7 +389,11 @@ class TelegramAIService:
                 await self._db("delivery_failed", item["id"], 0, True)
                 continue
             valid_buttons = (item.get("proposal_state") == "pending" and (item.get("proposal_expires") or 0) > time.time()
-                             or item.get("menu_stage") in {"model", "effort"} and (item.get("menu_expires") or 0) > time.time())
+                             or item.get("menu_stage") in {"model", "effort"} and (item.get("menu_expires") or 0) > time.time()
+                             or (item.get("screenshot_expires") or 0) > time.time()
+                             or (item.get("session_menu_expires") or 0) > time.time()
+                             or (item.get("pnl_menu_expires") or 0) > time.time()
+                             or (item.get("asset_menu_expires") or 0) > time.time())
             if (item.get("requires_id") is not None and item.get("required_state") != "sent"
                     or item.get("markup") and not valid_buttons):
                 await self._db("delivery_failed", item["id"], 0, True)

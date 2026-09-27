@@ -404,7 +404,7 @@ class SessionEvaluationBridge:
         }
 
     async def _current_chart(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Screenshot-only path: no strategy evidence collection or account lookup."""
+        """Capture the visible chart, without requiring a strategy calculation."""
         session_id = arguments.get("session_id")
         if session_id is None:
             sessions = self._session_summaries()
@@ -416,12 +416,23 @@ class SessionEvaluationBridge:
         session = self._registry.get(session_id)
         if session is None:
             raise SessionEvaluationToolError(f"Unknown active session: {session_id}")
-        return await self._capture({
+        if not session.feed.history_ready():
+            raise SessionEvaluationToolError("Chart OHLCV data is not ready yet; retry after data loading completes")
+        capture_path = await asyncio.to_thread(
+            self._capture_chart,
+            session_id,
+            int(arguments["width"]),
+            int(arguments["height"]),
+        )
+        if self._registry.get(session_id) is not session or not session.feed.history_ready():
+            capture_path.unlink(missing_ok=True)
+            raise SessionEvaluationToolError("The session or chart data changed while the chart was being captured")
+        return {
             "session_id": session_id,
-            "generation_id": session.calculation_generation_id,
-            "width": arguments["width"],
-            "height": arguments["height"],
-        })
+            "width": int(arguments["width"]),
+            "height": int(arguments["height"]),
+            "image_path": str(capture_path),
+        }
 
     async def _capture(self, arguments: dict[str, Any]) -> dict[str, Any]:
         session_id = arguments["session_id"]
@@ -493,7 +504,7 @@ class SessionEvaluationBridge:
         safe_name = "".join(char if char.isalnum() else "_" for char in session_id)[:80]
         output_path = output_dir / f"{safe_name}-{int(now * 1000)}.png"
         port = int(self._registry.supervisor.port)
-        url = f"http://127.0.0.1:{port}/s/{quote(session_id, safe='')}"
+        url = f"http://127.0.0.1:{port}/s/{quote(session_id, safe='')}?chart_capture=1"
         command = [
             browser,
             "--headless=new",

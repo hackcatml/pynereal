@@ -762,6 +762,15 @@ App.chart = {
   },
   applyInitialVisibleRange(dataLength) {
     const ts = this.chart.timeScale();
+    if (dataLength > 0 && new URLSearchParams(window.location.search).get("chart_capture") === "1") {
+      const width = ts.width();
+      if (width > 0) {
+        // Reserve pixels for price labels even when fitting thousands of candles.
+        ts.applyOptions({ rightOffsetPixels: Math.min(140, width * 0.12) });
+      }
+      ts.fitContent();
+      return;
+    }
     if (!this.isMobileViewport() || dataLength <= 0) {
       ts.fitContent();
       return;

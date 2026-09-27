@@ -651,7 +651,9 @@ user within that chat. **AI answers in a group are visible to all its members**,
 even those not allowed to give instructions. Enable it on **one server per bot**;
 an existing Telegram webhook or another `getUpdates` receiver must not share
 the bot. No incoming public port or Telegram webhook endpoint is required.
-Restart data-service after configuration changes, with Codex AI enabled.
+Restart data-service after configuration changes. Codex AI must be enabled for
+AI conversations; `/screenshot`, `/assets`, `/positions`, `/sessions`, `/pnl`
+and `/alerts` do not require it.
 
 In a group, send `/ai@YourBot current positions` as a new message, using the
 bot's actual username. `/end@YourBot` and `/cancel@YourBot` also work. Commands
@@ -663,6 +665,82 @@ workflow. See [Telegram's Privacy Mode documentation](https://core.telegram.org/
 If a group is migrated to a supergroup, update `CHAT_ID` to the new ID and restart;
 the receiver does not automatically authorize a different destination.
 
+At startup, PyneReal registers `/ai`, `/screenshot`, `/assets`, `/positions`,
+`/sessions`, `/pnl`, `/alerts`, `/model`, `/new`, `/cancel`, `/end` and `/help`
+for the configured chat via Telegram's
+[`setMyCommands`](https://core.telegram.org/bots/api#setmycommands).
+Typing `/` shows their descriptions without manual BotFather configuration.
+Registration does not grant access: the same chat/user checks apply to all
+commands and selection buttons. A menu-registration failure is logged and does
+not disable command reception.
+
+- `/screenshot` shows all registered sessions as selection buttons, with 10
+  sessions per page and Previous/Next buttons when needed. This also applies
+  when there is only one session.
+- `/screenshot mrvl` or `/screenshot btc` captures and sends the matching session
+  chart **without enabling AI conversation mode or calling the model**. Add an
+  exchange/timeframe, such as `/screenshot okx mrvl 5m`, or use an exact session ID.
+  Multiple matches show session-selection buttons; only the requester can select,
+  once, within 10 minutes. In groups, `/screenshot@YourBot mrvl` also works.
+  Capture runs separately from the AI request queue and requires ready OHLCV data,
+  not a running runner or completed strategy calculation. It captures the current
+  visible chart, including any available plots. Captures reserve space to the
+  right of the latest candle for price labels, without changing ordinary chart
+  views. Browser rendering and Telegram delivery limits still
+  apply; unavailable charts are reported rather than substituted. `/cancel` cancels
+  unfinished captures and selections. Restart invalidates old selections and does
+  not replay unfinished captures. This command does not enter AI conversation history.
+- `/assets` first shows **All** and configured-exchange selection buttons; no
+  balance lookup runs until selection. Only the requester can select within
+  10 minutes. The result replaces the menu with the selected accounts and their
+  totals; selecting an exchange does not include other exchanges' balances.
+  Totals remain separated
+  by quote currency, such as USDT and USDC; unavailable accounts or prices are
+  marked as partial data, not zero balances. Individual holdings valued below
+  10 USD equivalent are omitted, while account and overall totals stay unchanged.
+  USD-pegged quote currencies use the existing valuation convention; other quote
+  currencies need an available conversion price. Holdings with unavailable
+  valuations are also omitted; partial-data and account-lookup failure notices remain.
+- `/positions` reports open positions, including account, symbol, side, size,
+  entry/mark price, unrealized PnL, return and realized PnL when available.
+  Failed account lookups are distinguished from accounts with no positions.
+  Both account commands work without AI mode or model inference and use the
+  existing Account Center services: valid cached snapshots are reused, and
+  missing or expired snapshots follow their existing refresh behavior. Reports
+  include the snapshot time in UTC. These commands take no arguments: `/assets`
+  lets you select the scope, while `/positions` covers all configured accounts.
+  Selecting an exchange queries only its configured accounts when that scope's
+  cache is missing or expired. All and each exchange have separate 30-second
+  caches; a partial lookup never replaces the full-account snapshot. Existing
+  background market-metadata refresh is unchanged. Neither command places
+  orders or modifies account settings.
+  They run independently of AI requests, do not enter AI conversation history,
+  and retain the same authorization, cancellation and delivery safeguards.
+- `/sessions` shows session-selection buttons, 10 per page. `/sessions mrvl` or
+  `/sessions okx mrvl` narrows the list. Selecting a session shows runner,
+  calculation, data/feed, webhook and Telegram notification state, with buttons
+  to start/stop its runner or enable/disable its webhook and Telegram alerts.
+  **Control buttons apply the displayed action immediately** using the same
+  operations as the dashboard. Runner start follows normal warm-up; stopping
+  does not close exchange positions. The Telegram switch controls this session's
+  alert notifications, not the bot's command reception. Refresh reloads state;
+  there is no background status polling. Only the requester can use the current
+  buttons; expired, repeated or replaced-session selections are rejected.
+  Changes already started may finish after `/cancel`; failed or interrupted
+  controls are not automatically retried or replayed after a server restart.
+- `/pnl` shows period-selection buttons: 7D, 30D, 90D, 6M, 1Y and All. No PnL
+  query runs until you select a period; the report then replaces the menu.
+  Only the requester can select, once, within 10 minutes. Cancel closes the menu.
+  You can still specify `/pnl 7d`, `30d`, `90d`, `6m` (180 days), `1y` (365 days),
+  or `all` directly. Reports are grouped by account and settlement currency.
+  This reuses Account Center's PnL: Net PnL includes realized PnL
+  and current cached unrealized PnL. `all` means all stored history, not a new
+  full exchange backfill. Missing history can still make the report partial.
+- `/alerts` lists active Manual Alert price triggers across sessions, with
+  symbol, exchange, timeframe, template title and trigger price. It does not
+  fire, delete or change alerts, and excludes templates with no active trigger.
+  These three commands also work without AI mode or model inference; AI tools
+  do not gain access to the session-control buttons' mutation operations.
 - `/ai` or `/ai your request` starts AI conversation mode; subsequent text
   continues the conversation. Responses and notices are prefixed with 🤖.
 - Accepted requests show `🤖 Think...` in a pending message; the server
@@ -692,12 +770,14 @@ the receiver does not automatically authorize a different destination.
   Position/asset refresh uses those services; history refresh is restricted to
   one specified account and symbol, not a full-account backfill.
 - Ask for a session chart screenshot to receive a photo. This uses the existing
-  local Chrome/Chromium capture path and requires a ready session generation.
+  local Chrome/Chromium capture path once OHLCV data is ready, even if the runner
+  is stopped. It does not wait for or require a completed strategy calculation.
   Screenshot-only requests resolve the session without collecting account,
   order-history or strategy-evaluation evidence. The photo enters the send queue
   as soon as capture finishes, without waiting for the final AI answer or image
   analysis. Browser rendering and Telegram delivery limits still apply. Explicit
-  analysis requests retain the existing evaluation flow.
+  analysis requests retain the existing evaluation flow, including calculation
+  readiness and generation-consistency checks for analysis captures.
 - Send a PNG/JPEG/WebP image (up to 5 MB) or a UTF-8 `.py`, `.pine`, `.txt` or
   `.md` attachment (up to 256 KB), with your question in the caption while AI
   mode is active, or start the caption with `/ai`. Attachments are not executed
@@ -727,6 +807,14 @@ the receiver does not automatically authorize a different destination.
   Live web search can verify public information and calendar dates with source
   URLs. Calendar changes still require approval; shell/network access for
   arbitrary commands remains disabled.
+- Existing Manual Alert templates can also be edited. Specify the session,
+  template and replacement message, title or AI instruction; no trigger price
+  is required. Telegram shows the complete before/after values for **Apply / Cancel**
+  approval. Unspecified fields and placeholders such as `{{market}}` are preserved.
+  Existing price triggers retain their original template snapshots; editing a
+  template does not change those triggers or send an alert. Stale template
+  revisions are rejected. The web AI supports the same template-editing operation
+  through its dedicated tool when explicitly requested.
 - Only the original requester can approve, in the original chat and approval
   message, within 10 minutes. Duplicate clicks cannot reapply the operation.
   `/cancel`, `/end` and `/new` invalidate pending proposals; an already-started approved

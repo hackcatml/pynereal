@@ -9,6 +9,8 @@ from pathlib import Path
 
 from .transport import PENDING_TEXT, message_chunks
 from .attachments import attachment_descriptor
+from .commands import match_sessions, session_label, pnl_days, PNL_PERIODS
+from .session_menus import SessionMenuStore
 
 
 COMMAND_HELP = (
@@ -16,12 +18,20 @@ COMMAND_HELP = (
     "/model selects model and effort\n"
     "/new starts a new chat\n"
     "/end ends the conversation\n"
-    "/cancel cancels work"
+    "/cancel cancels work\n"
+    "/screenshot [session] selects or captures a chart\n"
+    "/assets selects all assets or an exchange\n"
+    "/positions shows open positions\n"
+    "/sessions selects a session and controls runner/alerts\n"
+    "/pnl [7d, 30d, 90d, 6m, 1y, all] shows PnL\n"
+    "/alerts lists active Manual Alerts\n"
+    "These direct commands do not require AI mode."
 )
 AI_MODE_NOTICE = "AI mode on. Send text, images or scripts.\nChanges require your approval.\n\n" + COMMAND_HELP
+SCREENSHOT_PAGE_SIZE = 10
 
 
-class TelegramStore:
+class TelegramStore(SessionMenuStore):
     """All methods run on the service's dedicated single-thread executor."""
 
     def __init__(self, path: Path) -> None:
@@ -84,6 +94,18 @@ class TelegramStore:
                     nonce TEXT PRIMARY KEY, bot INTEGER, chat INTEGER, actor INTEGER,
                     catalog TEXT NOT NULL, selected INTEGER, stage TEXT NOT NULL,
                     expires REAL NOT NULL, outbox_id INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS screenshot_menus (
+                    nonce TEXT PRIMARY KEY, bot INTEGER, chat INTEGER, actor INTEGER,
+                    sessions TEXT NOT NULL, expires REAL NOT NULL, outbox_id INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS session_menus (
+                    nonce TEXT PRIMARY KEY, bot INTEGER, chat INTEGER, actor INTEGER,
+                    payload TEXT NOT NULL, expires REAL NOT NULL, outbox_id INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS pnl_menus (
+                    nonce TEXT PRIMARY KEY, bot INTEGER, chat INTEGER, actor INTEGER,
+                    expires REAL NOT NULL, outbox_id INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS asset_menus (
+                    nonce TEXT PRIMARY KEY, bot INTEGER, chat INTEGER, actor INTEGER,
+                    exchanges TEXT NOT NULL, expires REAL NOT NULL, outbox_id INTEGER NOT NULL);
             """)
             with self.db:
                 chat_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(chats)")}
@@ -93,6 +115,10 @@ class TelegramStore:
                 if "history_after" not in chat_columns:
                     self.db.execute("ALTER TABLE chats ADD COLUMN history_after INTEGER NOT NULL DEFAULT 0")
                 self.db.execute("DELETE FROM model_menus WHERE bot=?", (bot_id,))
+                self.db.execute("DELETE FROM screenshot_menus WHERE bot=?", (bot_id,))
+                self.db.execute("DELETE FROM session_menus WHERE bot=?", (bot_id,))
+                self.db.execute("DELETE FROM pnl_menus WHERE bot=?", (bot_id,))
+                self.db.execute("DELETE FROM asset_menus WHERE bot=?", (bot_id,))
                 columns = {row["name"] for row in self.db.execute("PRAGMA table_info(outbox)")}
                 for name in ("job_id", "replace_id"):
                     if name not in columns:
@@ -106,6 +132,8 @@ class TelegramStore:
                 job_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(jobs)")}
                 if "input" not in job_columns:
                     self.db.execute("ALTER TABLE jobs ADD COLUMN input TEXT NOT NULL DEFAULT '{}'")
+                if "kind" not in job_columns:
+                    self.db.execute("ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'ai'")
                 self.db.execute("CREATE INDEX IF NOT EXISTS telegram_outbox_job ON outbox(bot, job_id)")
                 self.db.execute("UPDATE proposals SET state='expired',payload='{}',guard='{}' "
                                 "WHERE bot=? AND state IN ('draft','pending','queued')", (bot_id,))
@@ -119,16 +147,25 @@ class TelegramStore:
                 self.db.execute("UPDATE outbox SET state='failed' WHERE bot=? AND state='pending' AND markup IS NOT NULL", (bot_id,))
                 self._prune(time.time())
                 interrupted = self.db.execute(
-                    "SELECT id,chat FROM jobs WHERE bot=? AND state IN ('queued','running')",
+                    "SELECT id,chat,kind,input,state FROM jobs WHERE bot=? AND state IN ('queued','running','executing')",
                     (bot_id,),
                 ).fetchall()
                 self.db.execute(
-                    "UPDATE jobs SET state='interrupted' WHERE bot=? AND state IN ('queued','running')",
+                    "UPDATE jobs SET state='interrupted' WHERE bot=? AND state IN ('queued','running','executing')",
                     (bot_id,),
                 )
                 self.db.execute("UPDATE chats SET expires=0 WHERE bot=?", (bot_id,))
                 for row in interrupted:
-                    self._complete_reply(row, "Server restarted. The unfinished request was not replayed. Use /ai to request it again.")
+                    command = "/screenshot" if row["kind"] == "screenshot" else "/ai"
+                    if row["kind"] == "account":
+                        command = "/" + json.loads(row["input"])["view"]
+                    if row["kind"] == "session":
+                        command = "/sessions"
+                    if row["state"] == "executing":
+                        self._complete_reply(row, "Server restarted during a session change. Outcome is unknown; "
+                                             "check /sessions. The change was not replayed.")
+                        continue
+                    self._complete_reply(row, f"Server restarted. The unfinished request was not replayed. Use {command} to request it again.")
         except BaseException:
             self.close()
             raise
@@ -145,11 +182,12 @@ class TelegramStore:
         row = self.db.execute("SELECT value FROM offsets WHERE bot=?", (self.bot_id,)).fetchone()
         return row[0] if row else 0
 
-    def _reply(self, chat: int, text: str, *, job_id: int | None = None, replace_id: int | None = None) -> None:
+    def _reply(self, chat: int, text: str, *, job_id: int | None = None, replace_id: int | None = None,
+               request_id: int | None = None) -> None:
         chunks = [PENDING_TEXT] if job_id is not None else message_chunks(text)
         self.db.executemany(
-            "INSERT INTO outbox(bot,chat,text,job_id,replace_id) VALUES (?,?,?,?,?)",
-            [(self.bot_id, chat, chunk, job_id, replace_id if index == 0 else None)
+            "INSERT INTO outbox(bot,chat,text,job_id,replace_id,request_id) VALUES (?,?,?,?,?,?)",
+            [(self.bot_id, chat, chunk, job_id, replace_id if index == 0 else None, request_id)
              for index, chunk in enumerate(chunks)],
         )
 
@@ -158,7 +196,7 @@ class TelegramStore:
             "SELECT id FROM outbox WHERE bot=? AND job_id=? ORDER BY id LIMIT 1",
             (self.bot_id, job["id"]),
         ).fetchone()
-        self._reply(job["chat"], text, replace_id=placeholder["id"] if placeholder else None)
+        self._reply(job["chat"], text, replace_id=placeholder["id"] if placeholder else None, request_id=job["id"])
 
     def preferences(self, chat: int, actor: int) -> dict:
         row = self.db.execute("SELECT model,effort FROM chats WHERE bot=? AND chat=? AND actor=?",
@@ -169,6 +207,176 @@ class TelegramStore:
         return self.db.execute("INSERT INTO outbox(bot,chat,text,markup,replace_id) VALUES (?,?,?,?,?)",
                                (self.bot_id, chat, "\U0001f916 " + text,
                                 json.dumps({"inline_keyboard": buttons}), replace_id)).lastrowid
+
+    def _queue_direct(self, update_id: int, chat: int, actor: int, kind: str, prompt: str, metadata: dict) -> bool:
+        pending = self.db.execute("SELECT COUNT(*) FROM jobs WHERE bot=? AND state IN ('queued','running','executing')",
+                                  (self.bot_id,)).fetchone()[0]
+        if pending >= 10:
+            self._reply(chat, "Request queue is full. Retry after a result or use /cancel.")
+            return False
+        self.db.execute("INSERT INTO jobs(bot,id,chat,actor,prompt,state,input,kind) "
+                        "VALUES (?,?,?,?,?,'queued',?,?)",
+                        (self.bot_id, update_id, chat, actor, prompt, json.dumps(metadata), kind))
+        return True
+
+    def _queue_screenshot(self, update_id: int, chat: int, actor: int, session: dict) -> bool:
+        target = {key: session[key] for key in ("session_id", "exchange", "symbol", "timeframe")}
+        return self._queue_direct(update_id, chat, actor, "screenshot", "/screenshot " + session_label(session), target)
+
+    def _screenshot_page(self, chat: int, nonce: str, sessions: list[dict], page: int, *, replace_id=None) -> int:
+        start = page * SCREENSHOT_PAGE_SIZE
+        pages = (len(sessions) + SCREENSHOT_PAGE_SIZE - 1) // SCREENSHOT_PAGE_SIZE
+        buttons = [[{"text": session_label(item)[:120], "callback_data": f"ts:{nonce}:{index}"}]
+                   for index, item in enumerate(sessions[start:start + SCREENSHOT_PAGE_SIZE], start)]
+        navigation = []
+        if page > 0:
+            navigation.append({"text": "Previous", "callback_data": f"ts:{nonce}:p{page - 1}"})
+        if page + 1 < pages:
+            navigation.append({"text": "Next", "callback_data": f"ts:{nonce}:p{page + 1}"})
+        if navigation:
+            buttons.append(navigation)
+        buttons.append([{"text": "Cancel", "callback_data": f"ts:{nonce}:c"}])
+        return self._menu_message(chat, f"Select a session to capture ({page + 1}/{pages}). "
+                                  "Only you can select within 10 minutes.", buttons, replace_id=replace_id)
+
+    def _screenshot_request(self, update_id: int, chat: int, actor: int, argument: str,
+                            sessions: list[dict] | None, now: float) -> None:
+        if len(argument) > 500:
+            self._reply(chat, "Use /screenshot <session>, for example /screenshot mrvl or /screenshot okx btc 5m.")
+            return
+        if sessions is None:
+            self._reply(chat, "Sessions are unavailable. Please retry /screenshot.")
+            return
+        matches = [{key: item.get(key, "") for key in ("session_id", "exchange", "symbol", "timeframe", "script_name")}
+                   for item in (match_sessions(sessions, argument) if argument else sessions)]
+        if not matches:
+            self._reply(chat, "No matching session. Check the symbol, exchange or exact session ID." if argument
+                        else "No sessions are registered.")
+            return
+        self.db.execute("DELETE FROM screenshot_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
+        if argument and len(matches) == 1:
+            self._queue_screenshot(update_id, chat, actor, matches[0])
+            return
+        nonce = secrets.token_urlsafe(18)
+        item_id = self._screenshot_page(chat, nonce, matches, 0)
+        self.db.execute("INSERT INTO screenshot_menus VALUES (?,?,?,?,?,?,?)",
+                        (nonce, self.bot_id, chat, actor, json.dumps(matches), now + 600, item_id))
+
+    def _screenshot_callback(self, update_id: int, query: dict, parts: list[str], now: float) -> str:
+        row = self.db.execute("SELECT s.*,o.message_id FROM screenshot_menus s JOIN outbox o ON o.id=s.outbox_id "
+                              "WHERE s.bot=? AND s.nonce=?", (self.bot_id, parts[1])).fetchone()
+        message = query.get("message") or {}
+        if row is None or row["expires"] <= now:
+            return "This selection expired or was handled already. Use /screenshot again."
+        if (row["chat"] != message.get("chat", {}).get("id") or row["actor"] != query.get("from", {}).get("id")
+                or row["message_id"] is None or row["message_id"] != message.get("message_id")):
+            return "Only the requester can use the current selection buttons."
+        if parts[2] == "c":
+            self.db.execute("DELETE FROM screenshot_menus WHERE nonce=?", (row["nonce"],))
+            self._reply(row["chat"], "Screenshot cancelled.", replace_id=row["outbox_id"])
+            return "Cancelled."
+        sessions = json.loads(row["sessions"])
+        choice = parts[2]
+        if choice.startswith("p"):
+            raw_page = choice[1:]
+            if (not raw_page.isascii() or not raw_page.isdecimal() or len(raw_page) > 6
+                    or int(raw_page) * SCREENSHOT_PAGE_SIZE >= len(sessions)):
+                return "Invalid session page."
+            item_id = self._screenshot_page(row["chat"], row["nonce"], sessions, int(raw_page), replace_id=row["outbox_id"])
+            self.db.execute("UPDATE screenshot_menus SET outbox_id=? WHERE nonce=?", (item_id, row["nonce"]))
+            return "Select a session."
+        if not choice.isascii() or not choice.isdecimal() or len(choice) > 6 or int(choice) >= len(sessions):
+            return "Invalid session selection."
+        selected = sessions[int(parts[2])]
+        if not self._queue_screenshot(update_id, row["chat"], row["actor"], selected):
+            return "Request queue is full. Try again later."
+        self.db.execute("DELETE FROM screenshot_menus WHERE nonce=?", (row["nonce"],))
+        self._reply(row["chat"], "Capturing chart: " + session_label(selected), replace_id=row["outbox_id"])
+        return "Capturing chart."
+
+    def finish_screenshot(self, job: dict, data: bytes) -> None:
+        with self.db:
+            target = json.loads(job["input"])
+            caption = "Chart: " + session_label(target)
+            item_id = self._insert_media(job, kind="photo", data=data, filename="chart.png", mime="image/png", caption=caption)
+            self.db.execute("UPDATE outbox SET state='pending' WHERE id=?", (item_id,))
+            self.db.execute("UPDATE jobs SET state='done',answer=? WHERE bot=? AND id=?", (caption, self.bot_id, job["id"]))
+
+    def _asset_menu(self, chat: int, actor: int, exchanges: list[str] | None, now: float) -> None:
+        self.db.execute("DELETE FROM asset_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
+        if exchanges is None:
+            self._reply(chat, "Exchange options are unavailable. Please retry /assets.")
+            return
+        exchanges = sorted(set(exchanges))
+        if not exchanges:
+            self._reply(chat, "No asset accounts configured.")
+            return
+        nonce = secrets.token_urlsafe(18)
+        choices = [{"text": exchange.upper(), "callback_data": f"te:{nonce}:{index}"}
+                   for index, exchange in enumerate(exchanges)]
+        buttons = [[{"text": "All", "callback_data": f"te:{nonce}:all"}]]
+        buttons.extend(choices[index:index + 2] for index in range(0, len(choices), 2))
+        buttons.append([{"text": "Cancel", "callback_data": f"te:{nonce}:cancel"}])
+        item_id = self._menu_message(chat, "Select all assets or an exchange. Only you can select within 10 minutes.", buttons)
+        self.db.execute("INSERT INTO asset_menus VALUES (?,?,?,?,?,?,?)",
+                        (nonce, self.bot_id, chat, actor, json.dumps(exchanges), now + 600, item_id))
+
+    def _asset_callback(self, update_id: int, query: dict, parts: list[str], now: float) -> str:
+        row = self.db.execute("SELECT m.*,o.message_id FROM asset_menus m JOIN outbox o ON o.id=m.outbox_id "
+                              "WHERE m.bot=? AND m.nonce=?", (self.bot_id, parts[1])).fetchone()
+        message = query.get("message") or {}
+        if row is None or row["expires"] <= now:
+            return "This selection expired or was handled already. Use /assets again."
+        if (row["chat"] != message.get("chat", {}).get("id") or row["actor"] != query.get("from", {}).get("id")
+                or row["message_id"] is None or row["message_id"] != message.get("message_id")):
+            return "Only the requester can use the current exchange buttons."
+        choice = parts[2]
+        if choice == "cancel":
+            self.db.execute("DELETE FROM asset_menus WHERE nonce=?", (row["nonce"],))
+            self._reply(row["chat"], "Asset selection cancelled.", replace_id=row["outbox_id"])
+            return "Cancelled."
+        choices = {str(index): exchange for index, exchange in enumerate(json.loads(row["exchanges"]))}
+        if choice != "all" and choice not in choices:
+            return "Invalid exchange selection."
+        request = {"view": "assets", "exchange": choices.get(choice)}
+        if not self._queue_direct(update_id, row["chat"], row["actor"], "account", "/assets", request):
+            return "Request queue is full. Retry later."
+        self.db.execute("UPDATE outbox SET job_id=? WHERE bot=? AND id=?", (update_id, self.bot_id, row["outbox_id"]))
+        self.db.execute("DELETE FROM asset_menus WHERE nonce=?", (row["nonce"],))
+        return "Loading assets."
+
+    def _pnl_menu(self, chat: int, actor: int, now: float) -> None:
+        nonce = secrets.token_urlsafe(18)
+        choices = [{"text": key.upper() if key != "all" else "All", "callback_data": f"tp:{nonce}:{key}"}
+                   for key in PNL_PERIODS]
+        buttons = [choices[:3], choices[3:], [{"text": "Cancel", "callback_data": f"tp:{nonce}:cancel"}]]
+        item_id = self._menu_message(chat, "Select a PnL period. Only you can select within 10 minutes.", buttons)
+        self.db.execute("DELETE FROM pnl_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
+        self.db.execute("INSERT INTO pnl_menus VALUES (?,?,?,?,?,?)", (nonce, self.bot_id, chat, actor, now + 600, item_id))
+
+    def _pnl_callback(self, update_id: int, query: dict, parts: list[str], now: float) -> str:
+        row = self.db.execute("SELECT m.*,o.message_id FROM pnl_menus m JOIN outbox o ON o.id=m.outbox_id "
+                              "WHERE m.bot=? AND m.nonce=?", (self.bot_id, parts[1])).fetchone()
+        message = query.get("message") or {}
+        if row is None or row["expires"] <= now:
+            return "This selection expired or was handled already. Use /pnl again."
+        if (row["chat"] != message.get("chat", {}).get("id") or row["actor"] != query.get("from", {}).get("id")
+                or row["message_id"] is None or row["message_id"] != message.get("message_id")):
+            return "Only the requester can use the current period buttons."
+        period = parts[2]
+        if period == "cancel":
+            self.db.execute("DELETE FROM pnl_menus WHERE nonce=?", (row["nonce"],))
+            self._reply(row["chat"], "PnL selection cancelled.", replace_id=row["outbox_id"])
+            return "Cancelled."
+        if period not in PNL_PERIODS:
+            return "Invalid PnL period."
+        if not self._queue_direct(update_id, row["chat"], row["actor"], "account", "/pnl " + period,
+                                  {"view": "pnl", "days": PNL_PERIODS[period]}):
+            return "Request queue is full. Retry later."
+        # Reuse the selected menu as the reply target, including cancellation/restart notices.
+        self.db.execute("UPDATE outbox SET job_id=? WHERE bot=? AND id=?", (update_id, self.bot_id, row["outbox_id"]))
+        self.db.execute("DELETE FROM pnl_menus WHERE nonce=?", (row["nonce"],))
+        return "Loading PnL."
 
     def _model_menu(self, chat: int, actor: int, catalog: dict, now: float) -> None:
         current = self.preferences(chat, actor)
@@ -229,6 +437,8 @@ class TelegramStore:
     def accept(
         self, update_id: int, message: dict | None, *, now: float,
         idle: int, username: str, ai_enabled: bool, model_catalog: dict | None = None,
+        screenshot_sessions: list[dict] | None = None,
+        asset_exchanges: list[str] | None = None,
     ) -> bool:
         """Commit authorization-filtered input and offset together; return cancel flag."""
         with self.db:
@@ -250,6 +460,40 @@ class TelegramStore:
             command, _, target = head.partition("@")
             if head.startswith("/") and target and target.lower() != username.lower():
                 return False
+            if command == "/screenshot":
+                self._screenshot_request(update_id, chat, actor, argument, screenshot_sessions, now)
+                return False
+            if command == "/sessions":
+                if len(argument) > 500:
+                    self._reply(chat, "Use /sessions or /sessions <symbol/exchange>.")
+                else:
+                    self.db.execute("DELETE FROM session_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
+                    self._queue_direct(update_id, chat, actor, "session", command, {"operation": "list", "query": argument})
+                return False
+            if command == "/pnl":
+                if not argument:
+                    self._pnl_menu(chat, actor, now)
+                    return False
+                try:
+                    days = pnl_days(argument)
+                except ValueError as exc:
+                    self._reply(chat, str(exc))
+                else:
+                    if self._queue_direct(update_id, chat, actor, "account", command, {"view": "pnl", "days": days}):
+                        self.db.execute("DELETE FROM pnl_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
+                return False
+            if command == "/assets":
+                if argument:
+                    self._reply(chat, "Use /assets without arguments, then select All or an exchange.")
+                else:
+                    self._asset_menu(chat, actor, asset_exchanges, now)
+                return False
+            if command in ("/positions", "/alerts"):
+                if argument:
+                    self._reply(chat, f"Use {command} without arguments to view all configured accounts.")
+                else:
+                    self._queue_direct(update_id, chat, actor, "account", command, {"view": command[1:]})
+                return False
             if command == "/model":
                 if not ai_enabled:
                     self._reply(chat, "AI is disabled or unavailable on this server.")
@@ -266,6 +510,10 @@ class TelegramStore:
                 return False
             if command in ("/end", "/cancel", "/new"):
                 self.db.execute("DELETE FROM model_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
+                self.db.execute("DELETE FROM screenshot_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
+                self.db.execute("DELETE FROM session_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
+                self.db.execute("DELETE FROM pnl_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
+                self.db.execute("DELETE FROM asset_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
                 cancelled = self.db.execute(
                     "SELECT id,chat FROM jobs WHERE bot=? AND chat=? AND actor=? AND state IN ('queued','running')",
                     (self.bot_id, chat, actor),
@@ -336,7 +584,7 @@ class TelegramStore:
                 self._reply(chat, "Request is too long (maximum 12000 characters).")
                 return False
             pending = self.db.execute(
-                "SELECT COUNT(*) FROM jobs WHERE bot=? AND state IN ('queued','running')", (self.bot_id,),
+                "SELECT COUNT(*) FROM jobs WHERE bot=? AND state IN ('queued','running','executing')", (self.bot_id,),
             ).fetchone()[0]
             if pending >= 10:
                 self._reply(chat, "Request queue is full. Retry after an answer or use /cancel.")
@@ -353,10 +601,10 @@ class TelegramStore:
             self._reply(chat, "", job_id=update_id)
             return False
 
-    def claim(self) -> dict | None:
+    def claim(self, kind: str = "ai") -> dict | None:
         with self.db:
             row = self.db.execute(
-                "SELECT * FROM jobs WHERE bot=? AND state='queued' ORDER BY id LIMIT 1", (self.bot_id,),
+                "SELECT * FROM jobs WHERE bot=? AND kind=? AND state='queued' ORDER BY id LIMIT 1", (self.bot_id, kind),
             ).fetchone()
             if row is None:
                 return None
@@ -370,7 +618,7 @@ class TelegramStore:
 
     def history(self, chat: int, actor: int) -> list[dict]:
         rows = self.db.execute(
-            "SELECT prompt,answer FROM jobs WHERE bot=? AND chat=? AND actor=? AND state='done' AND id>? ORDER BY id DESC LIMIT 10",
+            "SELECT prompt,answer FROM jobs WHERE bot=? AND chat=? AND actor=? AND kind='ai' AND state='done' AND id>? ORDER BY id DESC LIMIT 10",
             (self.bot_id, chat, actor, self._history_after(chat, actor)),
         ).fetchall()
         result = []
@@ -404,11 +652,18 @@ class TelegramStore:
         row = self.db.execute(
             "SELECT o.*, p.message_id AS target_message_id, r.state AS required_state, "
             "a.state AS proposal_state,a.expires AS proposal_expires, "
-            "m.stage AS menu_stage,m.expires AS menu_expires,j.state AS request_state FROM outbox o "
+            "m.stage AS menu_stage,m.expires AS menu_expires,s.expires AS screenshot_expires,"
+            "c.expires AS session_menu_expires,n.expires AS pnl_menu_expires,"
+            "e.expires AS asset_menu_expires,"
+            "j.state AS request_state FROM outbox o "
             "LEFT JOIN outbox p ON p.id=o.replace_id AND p.bot=o.bot "
             "LEFT JOIN outbox r ON r.id=o.requires_id AND r.bot=o.bot "
             "LEFT JOIN proposals a ON a.outbox_id=o.id AND a.bot=o.bot "
             "LEFT JOIN model_menus m ON m.outbox_id=o.id AND m.bot=o.bot "
+            "LEFT JOIN screenshot_menus s ON s.outbox_id=o.id AND s.bot=o.bot "
+            "LEFT JOIN session_menus c ON c.outbox_id=o.id AND c.bot=o.bot "
+            "LEFT JOIN pnl_menus n ON n.outbox_id=o.id AND n.bot=o.bot "
+            "LEFT JOIN asset_menus e ON e.outbox_id=o.id AND e.bot=o.bot "
             "LEFT JOIN jobs j ON j.id=o.request_id AND j.bot=o.bot "
             "WHERE o.bot=? AND o.state='pending' ORDER BY o.id LIMIT 1", (self.bot_id,),
         ).fetchone()
@@ -435,6 +690,10 @@ class TelegramStore:
 
     def _prune(self, now: float) -> None:
         self.db.execute("DELETE FROM model_menus WHERE expires<?", (now,))
+        self.db.execute("DELETE FROM screenshot_menus WHERE expires<?", (now,))
+        self.db.execute("DELETE FROM session_menus WHERE expires<?", (now,))
+        self.db.execute("DELETE FROM pnl_menus WHERE expires<?", (now,))
+        self.db.execute("DELETE FROM asset_menus WHERE expires<?", (now,))
         self.db.execute("DELETE FROM attachments WHERE created<?", (now - 86400,))
         self.db.execute("UPDATE proposals SET state='expired',payload='{}',guard='{}' "
                         "WHERE bot=? AND expires<? AND state IN ('pending','queued')", (self.bot_id, now))
@@ -541,6 +800,14 @@ class TelegramStore:
                 return "This approval is unavailable."
             self._prune(now)
             parts = str(query.get("data") or "").split(":")
+            if len(parts) == 3 and parts[0] == "ts":
+                return self._screenshot_callback(update_id, query, parts, now)
+            if len(parts) == 3 and parts[0] == "tc":
+                return self._session_callback(update_id, query, parts, now)
+            if len(parts) == 3 and parts[0] == "tp":
+                return self._pnl_callback(update_id, query, parts, now)
+            if len(parts) == 3 and parts[0] == "te":
+                return self._asset_callback(update_id, query, parts, now)
             if len(parts) == 4 and parts[0] == "tm":
                 return self._model_callback(query, parts, now)
             if len(parts) != 3 or parts[0] != "ta" or parts[1] not in {"y", "n"}:

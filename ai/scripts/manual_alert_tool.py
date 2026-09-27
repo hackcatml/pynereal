@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import threading
@@ -13,10 +14,16 @@ from data_service.config import sanitize_manual_alert_templates
 _CONTEXT_TOOL_NAME = "get_manual_alert_context"
 _SET_TOOL_NAME = "set_manual_alert_trigger"
 _DELETE_TOOL_NAME = "delete_manual_alert_triggers"
+_UPDATE_TEMPLATE_TOOL_NAME = "update_manual_alert_template"
 _MAX_MANUAL_ALERT_TRIGGERS = 50
 _MAX_MANUAL_ALERT_TEMPLATES = 50
 _TEMPLATE_MESSAGE_PREVIEW_CHARS = 500
 _TEMPLATE_AI_PREVIEW_CHARS = 500
+
+
+def _template_revision(template: dict[str, Any]) -> str:
+    encoded = json.dumps(template, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class ManualAlertToolError(ValueError):
@@ -68,6 +75,8 @@ class ManualAlertRegistryBridge:
             return await self._set_trigger(arguments)
         if operation == "delete_triggers":
             return await self._delete_triggers(arguments)
+        if operation == "update_template":
+            return await self._update_template(arguments)
         raise ManualAlertToolError(f"Unknown Manual Alert operation: {operation}")
 
     def _context(self) -> dict[str, Any]:
@@ -82,6 +91,7 @@ class ManualAlertRegistryBridge:
             templates = [
                 {
                     "index": index,
+                    "revision": _template_revision(template),
                     "title": str(template.get("title") or ""),
                     "message_preview": str(template.get("message") or "")[
                         :_TEMPLATE_MESSAGE_PREVIEW_CHARS
@@ -120,6 +130,57 @@ class ManualAlertRegistryBridge:
         return {
             "session_count": len(sessions),
             "sessions": sessions,
+        }
+
+    def _prepare_template_update(
+        self, arguments: dict[str, Any],
+    ) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+        session = self._registry.get(arguments["session_id"])
+        if session is None:
+            raise ManualAlertToolError("Session no longer exists; refresh Manual Alert context")
+        templates = session.spec.manual_alert_templates
+        index = arguments["template_index"]
+        if index >= len(templates):
+            raise ManualAlertToolError("Template no longer exists; refresh Manual Alert context")
+        before = dict(templates[index])
+        if _template_revision(before) != arguments["template_revision"]:
+            raise ManualAlertToolError("Template changed; refresh Manual Alert context before editing")
+        updated = {**before, **{
+            key: arguments[key] for key in ("title", "message", "ai") if key in arguments
+        }}
+        sanitized = sanitize_manual_alert_templates([updated])
+        if len(sanitized) != 1:
+            raise ManualAlertToolError("Template title, message and AI instruction must be valid")
+        after = sanitized[0]
+        if after["title"] != before.get("title") and any(
+            other_index != index and template.get("title") == after["title"]
+            for other_index, template in enumerate(templates)
+        ):
+            raise ManualAlertToolError("A template with this title already exists")
+        return session, before, after
+
+    async def _update_template(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        session, before, after = self._prepare_template_update(arguments)
+        index = arguments["template_index"]
+        changed = before != after
+        if changed:
+            templates = [dict(template) for template in session.spec.manual_alert_templates]
+            templates[index] = after
+            updated = await self._registry.update_manual_alert_templates(session.spec.id, templates)
+            if updated != templates:
+                raise RuntimeError("Manual Alert template was not persisted as requested")
+        return {
+            "updated": True,
+            "changed": changed,
+            "session_id": session.spec.id,
+            "exchange": session.spec.exchange,
+            "symbol": session.spec.symbol,
+            "timeframe": session.spec.timeframe,
+            "template_index": index,
+            "template_title": after["title"],
+            "template": after,
+            "template_revision": _template_revision(after),
+            "triggers_preserved": True,
         }
 
     async def _set_trigger(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -375,14 +436,14 @@ class ManualAlertRegistryBridge:
 
 
 class ManualAlertTools:
-    """Expose context lookup and persistent Manual Alert trigger changes."""
+    """Expose context lookup and persistent Manual Alert trigger/template changes."""
 
     def __init__(self, registry: Any) -> None:
         self.bridge = ManualAlertRegistryBridge(registry)
 
     @property
     def names(self) -> set[str]:
-        return {_CONTEXT_TOOL_NAME, _SET_TOOL_NAME, _DELETE_TOOL_NAME}
+        return {_CONTEXT_TOOL_NAME, _SET_TOOL_NAME, _DELETE_TOOL_NAME, _UPDATE_TEMPLATE_TOOL_NAME}
 
     @property
     def specs(self) -> list[dict[str, Any]]:
@@ -393,7 +454,7 @@ class ManualAlertTools:
                 "description": (
                     "List active PyneReal sessions, their exact session IDs, current prices, "
                     "configured Manual Alert templates, and active price triggers. Call this "
-                    "before setting or deleting a Manual Alert. Do not guess a session, template, "
+                    "before setting/deleting a price trigger or editing a template. Do not guess a session, template, "
                     "or trigger when the user's request can match more than one result."
                 ),
                 "inputSchema": {
@@ -467,6 +528,36 @@ class ManualAlertTools:
             },
             {
                 "type": "function",
+                "name": _UPDATE_TEMPLATE_TOOL_NAME,
+                "description": (
+                    "Edit one existing Manual Alert template only when explicitly requested. "
+                    "First read get_manual_alert_context and use its exact session ID, template "
+                    "index and revision. Pass only fields the user wants changed; omitted fields "
+                    "are preserved. message is the complete replacement format, not a rendered "
+                    "price; preserve placeholders such as {{market}} verbatim. Do not invent "
+                    "content missing from a truncated preview. No trigger price is required. "
+                    "Existing price triggers retain their saved template snapshots; this does "
+                    "not change them or send an alert. A stale revision is rejected."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string", "minLength": 1},
+                        "template_index": {"type": "integer", "minimum": 0},
+                        "template_revision": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                        "title": {"type": "string", "minLength": 1, "maxLength": 100},
+                        "message": {"type": "string", "minLength": 1, "maxLength": 5000},
+                        "ai": {
+                            "type": "string", "maxLength": 4000,
+                            "description": "AI instruction; omit to preserve, empty string to clear only on explicit request.",
+                        },
+                    },
+                    "required": ["session_id", "template_index", "template_revision"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "type": "function",
                 "name": _DELETE_TOOL_NAME,
                 "description": (
                     "Delete selected or all active Manual Alert price triggers while always "
@@ -535,6 +626,9 @@ class ManualAlertTools:
             elif tool == _SET_TOOL_NAME:
                 validated = self._validate_set_arguments(arguments)
                 result = self.bridge.execute("set_trigger", validated)
+            elif tool == _UPDATE_TEMPLATE_TOOL_NAME:
+                validated = self._validate_update_template_arguments(arguments)
+                result = self.bridge.execute("update_template", validated)
             else:
                 validated = self._validate_delete_arguments(arguments)
                 result = self.bridge.execute("delete_triggers", validated)
@@ -564,6 +658,36 @@ class ManualAlertTools:
     def _validate_context_arguments(arguments: dict[str, Any]) -> None:
         if arguments:
             raise ManualAlertToolError("get_manual_alert_context does not accept arguments")
+
+    @staticmethod
+    def _validate_update_template_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+        allowed = {"session_id", "template_index", "template_revision", "title", "message", "ai"}
+        unexpected = sorted(set(arguments) - allowed)
+        if unexpected:
+            raise ManualAlertToolError(f"Unexpected argument field(s): {', '.join(unexpected)}")
+        session_id = arguments.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ManualAlertToolError("session_id must be a non-empty string")
+        index = arguments.get("template_index")
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            raise ManualAlertToolError("template_index must be a non-negative integer")
+        revision = arguments.get("template_revision")
+        if (not isinstance(revision, str) or len(revision) != 64
+                or any(char not in "0123456789abcdef" for char in revision)):
+            raise ManualAlertToolError("template_revision must be the revision from Manual Alert context")
+        if not any(key in arguments for key in ("title", "message", "ai")):
+            raise ManualAlertToolError("At least one template field must be supplied")
+        validated = {**arguments, "session_id": session_id.strip()}
+        for key, limit in (("title", 100), ("message", 5000), ("ai", 4000)):
+            if key not in arguments:
+                continue
+            value = arguments[key]
+            if not isinstance(value, str) or (key != "ai" and not value.strip()):
+                raise ManualAlertToolError(f"{key} must be a valid string")
+            if len(value.strip()) > limit:
+                raise ManualAlertToolError(f"{key} exceeds {limit} characters")
+            validated[key] = value.strip()
+        return validated
 
     @staticmethod
     def _validate_set_arguments(arguments: dict[str, Any]) -> dict[str, Any]:

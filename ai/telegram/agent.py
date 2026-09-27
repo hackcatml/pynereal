@@ -4,6 +4,7 @@ import asyncio
 import base64
 import concurrent.futures
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -11,6 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .actions import TelegramActions, MUTATION_TOOLS
 from .attachments import attachment_content, validate_attachment, IMAGE_LIMIT
+from .account_reports import format_account_snapshot, format_alerts
+from .commands import match_sessions
+from .session_control import TelegramSessionControl
 
 
 _READ_TOOLS = frozenset({
@@ -34,7 +38,9 @@ TELEGRAM_INSTRUCTIONS = (
     "call telegram_chart_snapshot without session_id to list sessions, resolve the user's symbol "
     "and exchange, then call it with exactly one ID. Ask a clarification if ambiguous. "
     "It captures and queues the photo immediately, before your answer finishes, and returns only "
-    "delivery metadata. queued=true is not proof of successful delivery. Give a brief acknowledgement "
+    "delivery metadata. A running runner or completed strategy calculation is not required; "
+    "it captures the currently visible chart, not generation-matched analysis evidence. "
+    "queued=true is not proof of successful delivery. Give a brief acknowledgement "
     "without analyzing the image or repeating the capture. If not ready, report that instead of "
     "falling back to evaluation/account lookup. Only if the user asks for analysis or evaluation "
     "use the existing evaluation tools and capture_session_chart with the matching generation. "
@@ -46,6 +52,10 @@ TELEGRAM_INSTRUCTIONS = (
     "These Telegram proposal tools replace the direct mutation tools mentioned in shared "
     "instructions. Read alert/calendar context first, resolve scope and do not invent templates, "
     "prices, times, events or sources. Live web search is available for public information. "
+    "For existing Manual Alert template edits use propose_manual_alert_template_update, "
+    "with the template index and revision from get_manual_alert_context. No trigger price is "
+    "needed; pass only the requested replacement fields and preserve placeholders verbatim. "
+    "Existing price triggers keep their original template snapshots; do not imply they change. "
     "Use it to verify current facts and calendar dates, and include supporting source URLs "
     "in the answer or proposal. If a fact cannot be verified, say so and ask for missing details. "
     "Never include credentials, private account data or unpublished script contents in web "
@@ -197,7 +207,8 @@ class TelegramJobTools(TelegramReadOnlyTools):
                  "description": (
                      "Send a current session chart photo without evaluation or account/REST lookup. "
                      "Omit session_id to list sessions, then resolve one exact session from the request; "
-                     "ask the user if ambiguous. Captures a ready generation and queues the photo immediately. "
+                     "ask the user if ambiguous. Captures the visible chart once OHLCV data is ready, "
+                     "even with the runner stopped, and queues the photo immediately. "
                      "Returns metadata only, not an image for analysis. Use for screenshot-only requests, "
                      "not strategy/account analysis. Same-session repeats reuse the queued photo."
                  ),
@@ -289,20 +300,70 @@ class TelegramJobTools(TelegramReadOnlyTools):
         data = Path(result.pop("image_path")).read_bytes()
         validate_attachment({"kind": "image", "name": "chart.png", "limit": IMAGE_LIMIT}, data)
         self._run(self.service.queue_chart(self.job, data, session_id))
-        self.captures.add((session_id, result["generation_id"]))
+        self.captures.add((session_id, None))
         self.chart_snapshots[session_id] = {**result, "queued": True}
         return self.chart_snapshots[session_id]
 
 
 class TelegramAgent:
-    def __init__(self, codex_service, account_service, asset_service, *, workspace=None, executor=None) -> None:
+    def __init__(self, codex_service, account_service, asset_service, *, workspace=None, executor=None, registry=None) -> None:
         self.codex = codex_service
         self.tools = TelegramReadOnlyTools(codex_service.dynamic_tools, account_service, asset_service)
         self.actions = TelegramActions(codex_service.dynamic_tools, workspace, executor)
+        self.session_control = TelegramSessionControl(registry) if registry is not None else None
 
     @property
     def available(self) -> bool:
         return self.codex.running
+
+    async def screenshot_sessions(self) -> list[dict]:
+        bridge = self.codex.dynamic_tools.session_evaluation.bridge
+        result = await bridge._execute_on_loop("current_chart", {})
+        return result["sessions"]
+
+    async def asset_exchanges(self) -> list[str]:
+        return await self.tools.asset_service.configured_exchanges()
+
+    async def account_snapshot(self, view: str, *, days: int | None = 90, exchange: str | None = None) -> str:
+        if view == "alerts":
+            context = await self.codex.dynamic_tools.manual_alert.bridge._execute_on_loop("context", {})
+            context["collected_at"] = datetime.now(UTC).isoformat()
+            return await asyncio.to_thread(format_alerts, context)
+        if view not in {"assets", "positions", "pnl"}:
+            raise ValueError("Unsupported account command")
+        if view == "pnl":
+            snapshot = await self.tools.account_service.pnl(days=days)
+        elif view == "assets" and exchange is not None:
+            snapshot = await self.tools.asset_service.snapshot(exchange=exchange)
+        else:
+            snapshot = await self.tools._snapshot(SnapshotRequest(view=view))
+        return await asyncio.to_thread(format_account_snapshot, view, snapshot, exchange=exchange)
+
+    async def session_command(self, request: dict) -> dict:
+        if self.session_control is None:
+            raise RuntimeError("Session control is unavailable")
+        if request["operation"] == "list":
+            sessions = self.session_control.sessions()
+            query = request.get("query", "")
+            if query:
+                sessions = match_sessions(sessions, query)
+            return {"view": "list", "sessions": sessions, "query": query, "page": 0}
+        session = await self.session_control.execute(request["target"], request["operation"])
+        return {"view": "detail", "session": session}
+
+    async def capture_screenshot(self, session_id: str) -> bytes:
+        # Already on the service loop; no model turn or synchronous bridge wait.
+        bridge = self.codex.dynamic_tools.session_evaluation.bridge
+        result = await bridge._execute_on_loop("current_chart", {
+            "session_id": session_id, "width": 1440, "height": 1000,
+        })
+
+        def read_image():
+            data = Path(result["image_path"]).read_bytes()
+            validate_attachment({"kind": "image", "name": "chart.png", "limit": IMAGE_LIMIT}, data)
+            return data
+
+        return await asyncio.to_thread(read_image)
 
     async def model_catalog(self) -> dict:
         from openai_codex.generated.v2_all import ReasoningEffort
