@@ -96,6 +96,8 @@ class SessionEvaluationBridge:
             return await self._context(arguments)
         if operation == "capture":
             return await self._capture(arguments)
+        if operation == "current_chart":
+            return await self._current_chart(arguments)
         raise SessionEvaluationToolError(f"Unknown evaluation operation: {operation}")
 
     def _session_summaries(self) -> list[dict[str, Any]]:
@@ -400,6 +402,26 @@ class SessionEvaluationBridge:
             "summary": {"requested": 0, "succeeded": 0, "failed": 1},
             "error": {"type": "InvalidCollectorOutput"},
         }
+
+    async def _current_chart(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Screenshot-only path: no strategy evidence collection or account lookup."""
+        session_id = arguments.get("session_id")
+        if session_id is None:
+            sessions = self._session_summaries()
+            return {
+                "sessions": sessions,
+                "session_count": len(sessions),
+                "instruction": "Resolve exactly one session from the user's request, then call this screenshot tool with its ID. Ask if ambiguous.",
+            }
+        session = self._registry.get(session_id)
+        if session is None:
+            raise SessionEvaluationToolError(f"Unknown active session: {session_id}")
+        return await self._capture({
+            "session_id": session_id,
+            "generation_id": session.calculation_generation_id,
+            "width": arguments["width"],
+            "height": arguments["height"],
+        })
 
     async def _capture(self, arguments: dict[str, Any]) -> dict[str, Any]:
         session_id = arguments["session_id"]

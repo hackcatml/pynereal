@@ -26,6 +26,7 @@ from openai_codex.generated.v2_all import (
     ReasoningEffort,
     TurnCompletedNotification,
     TurnStatus,
+    ThreadUnsubscribeResponse,
     WebSearchThreadItem,
 )
 from pydantic import BaseModel, ConfigDict, Field
@@ -250,6 +251,7 @@ class CodexService:
         self._chat_state_lock = asyncio.Lock()
         self._conversations: dict[str, AsyncThread] = {}
         self._turn_locks: dict[str, asyncio.Lock] = {}
+        self._telegram_tool_handlers: dict[str, Callable | None] = {}
         self._model_options: list[dict[str, Any]] | None = None
         self._shared_chat_tasks: set[asyncio.Task[None]] = set()
         self._pending_shared_chats = 0
@@ -506,6 +508,54 @@ class CodexService:
                 effort=effort,
             ):
                 yield event
+
+    async def stream_telegram_chat(
+        self, message: str, *, history: list[dict], tools: Any,
+        model: str | None = None, effort: str | None = None,
+    ) -> AsyncIterator[CodexStreamEvent]:
+        from ai.telegram.agent import TELEGRAM_INSTRUCTIONS, restricted_config
+
+        if not self.running:
+            raise RuntimeError("AI is disabled or unavailable")
+        model = await self.validate_model(model)
+        effort = await self.validate_effort(effort, model)
+        codex = await self._get_codex()
+        # Fail closed if the installed SDK cannot read inherited MCP configuration.
+        response = await codex._client.request(
+            "config/read", {"cwd": str(self.project_root), "includeLayers": False},
+            response_model=ConfigReadResponse,
+        )
+        started = await codex._client.thread_start({
+            "approvalPolicy": "never",
+            "config": restricted_config(response.config.model_dump(), self.project_root),
+            "cwd": str(self.project_root),
+            "developerInstructions": self.developer_instructions + "\n\n" + TELEGRAM_INSTRUCTIONS,
+            "dynamicTools": tools.specs,
+            "ephemeral": True,
+        })
+        thread_id = started.thread.id
+        self._telegram_tool_handlers[thread_id] = tools.handle_server_request
+        try:
+            async for event in self._stream_turn(
+                AsyncThread(codex, thread_id),
+                self._build_initial_context(message, history),
+                trace_id="telegram-" + uuid.uuid4().hex[:8],
+                request_started_at=time.perf_counter(),
+                model=model,
+                effort=effort,
+            ):
+                yield event
+        finally:
+            # Retain a deny-only entry: a late call must not fall back to browser permissions.
+            self._telegram_tool_handlers[thread_id] = None
+            try:
+                async with asyncio.timeout(5):
+                    await codex._client.request(
+                        "thread/unsubscribe", {"threadId": thread_id},
+                        response_model=ThreadUnsubscribeResponse,
+                    )
+            except Exception as exc:
+                print(f"[ai] Telegram thread cleanup failed ({type(exc).__name__})")
 
     def start_shared_chat(
         self,
@@ -1174,7 +1224,17 @@ class CodexService:
         sync_client = getattr(client, "_sync", None)
         if sync_client is None or not hasattr(sync_client, "_approval_handler"):
             raise RuntimeError("Installed openai-codex SDK cannot handle dynamic tools")
-        sync_client._approval_handler = self.dynamic_tools.handle_server_request
+        self._telegram_tool_handlers = {}
+        sync_client._approval_handler = self._handle_tool_request
+
+    def _handle_tool_request(self, method: str, params: dict | None) -> dict:
+        thread_id = params.get("threadId") if isinstance(params, dict) else None
+        if thread_id in self._telegram_tool_handlers:
+            handler = self._telegram_tool_handlers[thread_id]
+            if handler is None:
+                return self.dynamic_tools._error_response("Telegram request has ended")
+            return handler(method, params)
+        return self.dynamic_tools.handle_server_request(method, params)
 
     def _permission_profile_config(self) -> dict[str, Any]:
         return {

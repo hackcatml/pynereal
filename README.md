@@ -628,6 +628,125 @@ Dashboard AI can:
   `data_service/templates/` when explicitly requested, or create new files
   under `tmp/`.
 
+### Telegram AI (Opt-In)
+
+The existing alert bot can also accept AI requests in a configured
+private chat, group or supergroup. Create `workdir/config/telegram_ai.toml` using
+`workdir/config/telegram_ai.example.toml`:
+
+```toml
+[telegram_ai]
+enabled = true
+allowed_user_ids = [123456789] # Your numeric Telegram user ID, not a username
+idle_timeout_seconds = 900
+```
+
+Reception reuses the root `.env` or environment `BOT_TOKEN` and numeric `CHAT_ID`.
+For groups, `CHAT_ID` is the negative group/supergroup ID, while
+`allowed_user_ids` contains the positive IDs of the people allowed to give
+instructions. Both the exact chat and sender must be allowed. Channel posts,
+bot messages and messages sent on behalf of a chat (including anonymous admins)
+are rejected. Conversation mode, history and cancellation are scoped to each
+user within that chat. **AI answers in a group are visible to all its members**,
+even those not allowed to give instructions. Enable it on **one server per bot**;
+an existing Telegram webhook or another `getUpdates` receiver must not share
+the bot. No incoming public port or Telegram webhook endpoint is required.
+Restart data-service after configuration changes, with Codex AI enabled.
+
+In a group, send `/ai@YourBot current positions` as a new message, using the
+bot's actual username. `/end@YourBot` and `/cancel@YourBot` also work. Commands
+addressed to another bot are ignored. To continue with ordinary text after `/ai`,
+disable Privacy Mode through BotFather's `/setprivacy` and remove/re-add the bot
+to the group, or use a bot that is already a group admin. Addressed commands work
+without disabling Privacy Mode, so admin permissions are not required for that
+workflow. See [Telegram's Privacy Mode documentation](https://core.telegram.org/bots/features#privacy-mode).
+If a group is migrated to a supergroup, update `CHAT_ID` to the new ID and restart;
+the receiver does not automatically authorize a different destination.
+
+- `/ai` or `/ai your request` starts AI conversation mode; subsequent text
+  continues the conversation. Responses and notices are prefixed with 🤖.
+- Accepted requests show `🤖 Think...` in a pending message; the server
+  sends no periodic animation edits. The completed answer replaces that message;
+  longer answers continue in additional messages.
+  Cancellation, failure and server restart also replace the pending message.
+  If the message was deleted or cannot be edited, the answer is sent separately.
+- `/end` exits the mode and cancels unfinished requests. `/cancel` cancels
+  unfinished requests but leaves the mode enabled. Neither undoes completed work.
+- `/new` starts a fresh conversation and keeps AI mode on, preserving your
+  model/effort selection. Previous conversation text and attachments are excluded
+  from the new context. Unfinished requests and pending change proposals are
+  cancelled; already-started approved actions may finish. Stored history and
+  existing Telegram messages are not deleted. This affects only your conversation
+  with this bot in this chat, not other users or browser AI.
+- The mode expires after 15 minutes without input, or on server restart.
+- `/model` shows your current model/effort and model selection buttons. After
+  choosing a model, choose its reasoning effort in the same message to save.
+  There is no separate `/effort` command. Choices use the existing web AI model
+  catalog and persist per bot/chat/user across restarts, independently of browser
+  AI preferences. Only the requester can select within 10 minutes. Cancel keeps
+  existing settings; `/model` again or server restart invalidates old buttons.
+  Changes apply to subsequently submitted requests, not running or queued work.
+  Opening the selector does not start AI conversation mode; use `/ai` to chat.
+- Assets, positions, cached order/position history, PnL and session evaluation
+  use the existing read-only services. Browser chat history stays separate.
+  Position/asset refresh uses those services; history refresh is restricted to
+  one specified account and symbol, not a full-account backfill.
+- Ask for a session chart screenshot to receive a photo. This uses the existing
+  local Chrome/Chromium capture path and requires a ready session generation.
+  Screenshot-only requests resolve the session without collecting account,
+  order-history or strategy-evaluation evidence. The photo enters the send queue
+  as soon as capture finishes, without waiting for the final AI answer or image
+  analysis. Browser rendering and Telegram delivery limits still apply. Explicit
+  analysis requests retain the existing evaluation flow.
+- Send a PNG/JPEG/WebP image (up to 5 MB) or a UTF-8 `.py`, `.pine`, `.txt` or
+  `.md` attachment (up to 256 KB), with your question in the caption while AI
+  mode is active, or start the caption with `/ai`. Attachments are not executed
+  or copied into the scripts directory. The last 10 attachments per user are
+  available for follow-up questions for up to 24 hours within the current conversation.
+- Reply to a newly recorded strategy/manual/verification notification to ask
+  about its exact session, candle and signal. Linking uses the actual Telegram
+  bot/chat/message IDs recorded by Notification Center, never the quoted text.
+  Older or unrecorded alerts cannot be linked; include their symbol, exchange
+  and time in a new request instead. Replies to your own AI results in the current
+  conversation also work.
+- Explicit requests to edit an existing `workdir/scripts` file produce a diff
+  attachment (`changes.html`) and **Save / Cancel** buttons. Open the HTML
+  preview to see removed lines in red and added lines in green, with unchanged
+  context and changed line ranges. It is self-contained, with no scripts or
+  external resources. Saving requires the same file
+  revision, preserves Scripting version history, and applies to running sessions
+  through the existing next-warm-up behavior. Telegram editing is limited to
+  256 KB per script; file creation, renaming and deletion are not exposed.
+  Approval results show a short save/check summary instead of internal JSON.
+  Active sessions include the estimated time until their next warm-up, sampled
+  when the save result is prepared (not a live countdown). Stopped runners apply
+  the saved source on their next start; unavailable timing is reported explicitly.
+- Manual Alert setup/deletion and calendar changes show the exact scope and
+  values for **Apply / Cancel** approval. Changes to the affected session,
+  templates, triggers or calendar after preview invalidate the proposal.
+  Live web search can verify public information and calendar dates with source
+  URLs. Calendar changes still require approval; shell/network access for
+  arbitrary commands remains disabled.
+- Only the original requester can approve, in the original chat and approval
+  message, within 10 minutes. Duplicate clicks cannot reapply the operation.
+  `/cancel`, `/end` and `/new` invalidate pending proposals; an already-started approved
+  action may finish. No exchange orders, transfers, withdrawals, arbitrary
+  shell commands or unapproved filesystem writes are exposed.
+
+State is stored locally in `workdir/data/telegram_ai.sqlite`, outside disposable
+caches. Treat it as private conversation/account data. Completed text history
+survives restart (the last 10 completed exchanges since `/new` are provided as context);
+unfinished requests are not automatically replayed, and messages from before
+receiver startup are ignored. Saved replies can resume delivery without rerunning
+AI. Pending approvals expire at restart; interrupted changes are never replayed
+automatically. If a change's outcome is uncertain, inspect the current file or
+settings before requesting it again. Network response loss can still cause a
+duplicate Telegram reply, photo or approval message, but only the recorded
+approval message can authorize its one-time operation.
+Existing strategy alert delivery is unchanged; AI output is paced and handles
+429 responses (at least 1.1 seconds between attempts for private chats, 3.1 seconds
+for groups), but does not yet share a global rate-limit queue with alert senders.
+
 ### Exchange Account Access
 
 Put exchange credentials in the local file below if AI should inspect account

@@ -61,7 +61,10 @@ def post_telegram_message(token: str, chat_id: str, text: str) -> dict:
             timeout=TELEGRAM_REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
-        return {"status": int(resp.status_code), "body": resp.text[:4096]}
+        from data_service.notification_events import delivery_result
+        reference = delivery_result(response=resp).get("message_ref")
+        return {"status": int(resp.status_code), "body": resp.text[:4096],
+                **({"message_ref": reference} if reference else {})}
     except requests.HTTPError as e:
         body = e.response.text[:4096] if e.response is not None else ""
         status = e.response.status_code if e.response is not None else "?"
