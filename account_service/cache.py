@@ -2049,6 +2049,12 @@ class AccountCache:
             if imports or pnl_events:
                 self._repair_okx_csv_position_pnl(connection)
                 self._repair_bitget_csv_position_pnl(connection)
+            if (
+                imports
+                or pnl_events
+                or touched_binance_fills
+                or touched_hyperliquid_fills
+            ):
                 self._allocate_position_funding(connection)
 
             imported_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
