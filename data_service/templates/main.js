@@ -2,11 +2,14 @@ var App = window.App || (window.App = {});
 
 App.ws.connect();
 App.ws.startKeepalive();
-App.data.loadChartInfo();
-App.data.loadScriptSource();
+const chartInfoReady = App.data.loadChartInfo();
+const scriptSourceReady = App.data.loadScriptSource();
 App.data.loadWebhookConfig();
 App.ui.loadManualAlertTemplates({ migrateLocal: true });
-App.ui.loadManualAlertTrigger();
+const manualAlertsReady = App.ui.loadManualAlertTrigger();
+if (App.chart.captureMode) {
+  App.chart.captureInputsReady = Promise.all([chartInfoReady, scriptSourceReady, manualAlertsReady]);
+}
 App.measure.init();
 App.chart.startJankMonitor();
 App.chart.attachResizeHandler();

@@ -15,7 +15,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from data_service.notification_events import notification_error, safe_value
+from data_service.notification_events import notification_error, safe_value, valid_telegram_reference
 
 
 class NotificationService:
@@ -95,6 +95,10 @@ class NotificationService:
                 cleared_through_id INTEGER NOT NULL DEFAULT 0
             );
             INSERT OR IGNORE INTO notification_meta (id, version) VALUES (1, 0);
+            CREATE TABLE IF NOT EXISTS telegram_notification_refs (
+                bot INTEGER, chat INTEGER, message INTEGER, event_key TEXT NOT NULL,
+                PRIMARY KEY(bot,chat,message)
+            );
         """)
         if "cleared_through_id" not in {row["name"] for row in db.execute("PRAGMA table_info(notification_meta)")}:
             db.execute("ALTER TABLE notification_meta ADD COLUMN cleared_through_id INTEGER NOT NULL DEFAULT 0")
@@ -134,8 +138,10 @@ class NotificationService:
                 }:
                     raise ValueError("invalid delivery status")
                 result[channel] = {k: v for k, v in delivery.items() if k in {
-                    "status", "http_status", "receiver_status", "error_type", "attempts",
+                    "status", "http_status", "receiver_status", "error_type", "attempts", "message_ref",
                 }}
+                if not valid_telegram_reference(result[channel].get("message_ref")):
+                    result[channel].pop("message_ref", None)
         if result["kind"] == "signal" and "webhook" not in result and "telegram" not in result:
             raise ValueError("signal must have a completed channel result")
         return result
@@ -146,6 +152,10 @@ class NotificationService:
             result = {}
             if operation == "apply":
                 event = self._validate(kwargs["event"])
+                reference = event.get("telegram", {}).get("message_ref")
+                if reference and event["telegram"].get("status") == "sent":
+                    db.execute("INSERT OR IGNORE INTO telegram_notification_refs VALUES (?,?,?,?)",
+                               (reference["bot"], reference["chat"], reference["message"], event["event_key"]))
                 row = db.execute("SELECT * FROM notifications WHERE event_key=?", (event["event_key"],)).fetchone()
                 now = time.time()
                 if row:
@@ -160,6 +170,16 @@ class NotificationService:
                     db.execute("INSERT INTO notifications(event_key,data,created_at,updated_at) VALUES (?,?,?,?)",
                                (event["event_key"], json.dumps(event, ensure_ascii=False), now, now))
                     changed = True
+            elif operation == "telegram_context":
+                row = db.execute("SELECT n.data FROM telegram_notification_refs r "
+                                 "JOIN notifications n ON n.event_key=r.event_key "
+                                 "WHERE r.bot=? AND r.chat=? AND r.message=?",
+                                 (kwargs["bot"], kwargs["chat"], kwargs["message"])).fetchone()
+                data = json.loads(row["data"]) if row else None
+                result = {"context": ({key: data[key] for key in (
+                    "event_key", "session_id", "origin", "occurred_at", "candle_timestamp_ms",
+                    "context", "signal", "finding",
+                ) if key in data} if data else None)}
             elif operation == "list":
                 rows = db.execute("""SELECT * FROM notifications WHERE id<?
                                      AND id>(SELECT cleared_through_id FROM notification_meta WHERE id=1)

@@ -24,6 +24,145 @@ App.chart = {
   manualAlertTooltipTriggerId: null,
   manualAlertTooltipHideTimer: null,
   manualAlertChipRafId: null,
+  captureMode: new URLSearchParams(window.location.search).get("chart_capture") === "1",
+  captureLayoutState() {
+    if (!this.captureMode || !App.state.initialLoadDone || App.state.initialLoadInProgress ||
+        !this.chart || !this.candleSeries || !App.collections.ohlcvData.length) return { ready: false };
+    const rect = this.container.getBoundingClientRect();
+    const paneBottom = this.container.clientHeight - this.chart.timeScale().height();
+    const priceScaleWidth = this.chart.priceScale("right").width();
+    const range = this.chart.timeScale().getVisibleLogicalRange();
+    if (rect.width <= 0 || paneBottom <= 0 || !range) return { ready: false };
+    const alerts = [];
+    for (const item of this.manualAlertTriggerItems.values()) {
+      const y = this.candleSeries.priceToCoordinate(Number(item.price));
+      if (y == null || !Number.isFinite(y)) return { ready: false };
+      if (y < 0 || y > paneBottom) {
+        if (item.chip.style.display !== "none") return { ready: false };
+        alerts.push([item.id, item.price, "offscreen"]);
+        continue;
+      }
+      const chipRect = item.chip.getBoundingClientRect();
+      const centerY = chipRect.top - rect.top + chipRect.height / 2;
+      const right = rect.right - chipRect.right;
+      if (item.chip.style.display === "none" || chipRect.height <= 0 ||
+          Math.abs(centerY - y) > 1 || Math.abs(right - Math.round(priceScaleWidth + 1)) > 1) {
+        return { ready: false };
+      }
+      alerts.push([item.id, item.price, y, centerY, right]);
+    }
+    return { ready: true, signature: JSON.stringify([
+      App.state.loadGeneration, rect.top, rect.left, rect.width, rect.height, paneBottom, priceScaleWidth, range,
+      this.candleSeries.coordinateToPrice(0), this.candleSeries.coordinateToPrice(paneBottom), alerts
+    ]) };
+  },
+  async prepareCapture() {
+    if (!this.captureMode || !this.captureInputsReady) throw new Error("Chart capture mode is not initialized");
+    const [, , alerts] = await this.captureInputsReady;
+    if (!alerts || !alerts.ok) throw new Error("Manual Alert data could not be loaded");
+    await document.fonts.ready;
+    let previous = null;
+    let stableFrames = 0;
+    while (stableFrames < 3) {
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      this.syncManualAlertChipPosition();
+      const current = this.captureLayoutState();
+      stableFrames = current.ready && previous === current.signature ? stableFrames + 1 : 0;
+      previous = current.ready ? current.signature : null;
+      if (stableFrames === 3) return current;
+    }
+  },
+  plotValueLabelsVisible: false,
+  setPlotValueLabelsVisible(enabled) {
+    this.plotValueLabelsVisible = this.captureMode || Boolean(enabled);
+    App.data.applyPlotValueLabels(this, App.collections);
+    if (this.captureMode) return;
+    try {
+      localStorage.setItem(App.config.storageKey("plotValueLabels"), String(this.plotValueLabelsVisible));
+    } catch {}
+  },
+  isRightPriceAxisPoint(clientX, clientY) {
+    const rect = this.container.getBoundingClientRect();
+    const width = this.chart.priceScale("right").width();
+    const timeHeight = this.chart.timeScale().height();
+    return width > 0 && clientX >= rect.right - width && clientX <= rect.right &&
+      clientY >= rect.top && clientY < rect.bottom - timeHeight;
+  },
+  attachPriceAxisMenu() {
+    const menu = document.getElementById("price-axis-menu");
+    const checkbox = document.getElementById("plot-value-labels-toggle");
+    try {
+      this.plotValueLabelsVisible = localStorage.getItem(App.config.storageKey("plotValueLabels")) === "true";
+    } catch {}
+    if (this.captureMode) this.plotValueLabelsVisible = true;
+    checkbox.checked = this.plotValueLabelsVisible;
+    let press = null;
+    const cancelPress = () => {
+      if (press) clearTimeout(press.timer);
+      press = null;
+    };
+    const close = () => {
+      cancelPress();
+      menu.classList.add("hidden");
+    };
+    const open = (clientX, clientY) => {
+      checkbox.checked = this.plotValueLabelsVisible;
+      menu.classList.remove("hidden");
+      menu.style.left = `${Math.max(8, Math.min(clientX, window.innerWidth - menu.offsetWidth - 8))}px`;
+      menu.style.top = `${Math.max(8, Math.min(clientY, window.innerHeight - menu.offsetHeight - 8))}px`;
+    };
+    this.container.addEventListener("contextmenu", (event) => {
+      if (!this.isRightPriceAxisPoint(event.clientX, event.clientY)) {
+        close();
+        return;
+      }
+      event.preventDefault();
+      if (press) {
+        clearTimeout(press.timer);
+        press.opened = true;
+      }
+      open(event.clientX, event.clientY);
+    });
+    this.container.addEventListener("touchstart", (event) => {
+      cancelPress();
+      if (event.touches.length !== 1) return;
+      const touch = event.touches[0];
+      if (!this.isRightPriceAxisPoint(touch.clientX, touch.clientY)) return;
+      press = { id: touch.identifier, x: touch.clientX, y: touch.clientY, opened: false };
+      press.timer = setTimeout(() => {
+        press.opened = true;
+        open(press.x, press.y);
+      }, 500);
+    }, { passive: true, capture: true });
+    this.container.addEventListener("touchmove", (event) => {
+      if (!press || press.opened) return;
+      const touch = event.touches[0];
+      if (event.touches.length !== 1 || touch.identifier !== press.id ||
+          Math.hypot(touch.clientX - press.x, touch.clientY - press.y) > 8) cancelPress();
+    }, { passive: true, capture: true });
+    window.addEventListener("touchend", (event) => {
+      // Do not turn the release after a long press into a click on the menu.
+      if (press && press.opened && event.cancelable) event.preventDefault();
+      cancelPress();
+    }, { passive: false, capture: true });
+    window.addEventListener("touchcancel", cancelPress, { passive: true, capture: true });
+    checkbox.addEventListener("change", () => {
+      this.setPlotValueLabelsVisible(checkbox.checked);
+      close();
+    });
+    document.addEventListener("pointerdown", (event) => {
+      if (!menu.contains(event.target)) close();
+    }, true);
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !menu.classList.contains("hidden")) {
+        event.preventDefault();
+        event.stopPropagation();
+        close();
+      }
+    }, true);
+    window.addEventListener("resize", close);
+    window.addEventListener("blur", close);
+  },
   isMobileViewport() {
     return window.matchMedia("(max-width: 640px), (hover: none) and (pointer: coarse)").matches;
   },
@@ -762,16 +901,24 @@ App.chart = {
   },
   applyInitialVisibleRange(dataLength) {
     const ts = this.chart.timeScale();
-    if (!this.isMobileViewport() || dataLength <= 0) {
+    const width = ts.width();
+    const rightPadding = Math.min(140, width * 0.12);
+    if (!this.isMobileViewport() || this.captureMode || dataLength <= 0) {
+      if (dataLength > 0 && rightPadding > 0) {
+        // Reserve pixels for price labels even when fitting thousands of candles.
+        ts.applyOptions({ rightOffsetPixels: rightPadding });
+      }
       ts.fitContent();
       return;
     }
-    const width = Math.max(1, this.container.clientWidth || window.innerWidth || 1);
-    const visibleBars = Math.min(dataLength, Math.max(140, Math.round(width / 2)));
-    const rightPadding = Math.max(4, Math.round(visibleBars * 0.04));
+    const containerWidth = Math.max(1, this.container.clientWidth || window.innerWidth || 1);
+    const visibleBars = Math.min(dataLength, Math.max(140, Math.round(containerWidth / 2)));
+    // Logical ranges overwrite the offset, so include the pixel margin in the range itself.
+    const paddingBars = width > rightPadding ? visibleBars * rightPadding / (width - rightPadding) : 0;
+    if (rightPadding > 0) ts.applyOptions({ rightOffsetPixels: rightPadding });
     ts.setVisibleLogicalRange({
       from: Math.max(0, dataLength - visibleBars),
-      to: dataLength - 1 + rightPadding
+      to: dataLength - 1 + paddingBars
     });
   },
   init() {
@@ -874,6 +1021,7 @@ App.chart = {
     });
     this.attachManualAlertGesture();
     this.attachTouchGuards();
+    this.attachPriceAxisMenu();
   },
   resetChartState(resetCandles = true) {
     const state = App.state;

@@ -61,7 +61,10 @@ def post_telegram_message(token: str, chat_id: str, text: str) -> dict:
             timeout=TELEGRAM_REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
-        return {"status": int(resp.status_code), "body": resp.text[:4096]}
+        from data_service.notification_events import delivery_result
+        reference = delivery_result(response=resp).get("message_ref")
+        return {"status": int(resp.status_code), "body": resp.text[:4096],
+                **({"message_ref": reference} if reference else {})}
     except requests.HTTPError as e:
         body = e.response.text[:4096] if e.response is not None else ""
         status = e.response.status_code if e.response is not None else "?"
@@ -204,6 +207,23 @@ def parse_alert_template_message(template_text: str, spec: SessionSpec,
             return json.loads(render_raw_alert_template_json(template_text, spec, context))
         except Exception:
             raise initial_error
+
+
+def validate_manual_alert_template(template: dict, spec: SessionSpec) -> None:
+    """Use the chart's placeholder-aware JSON rules before saving a template."""
+    context = {"price": 1, "market": 1, "time": 0, "title": template.get("title") or ""}
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"Invalid JSON constant: {value}")
+
+    try:
+        rendered = render_raw_alert_template_json(template["message"], spec, context)
+        json.loads(rendered, parse_constant=reject_constant)
+    except (ValueError, TypeError, RecursionError) as exc:
+        supported = ", ".join(alert_template_replacements(spec, context))
+        raise ValueError(
+            f"Invalid JSON: {template.get('title') or 'template'}. Supported placeholders: {supported}"
+        ) from exc
 
 
 def replace_alert_template_value(value: Any, spec: SessionSpec, context: dict[str, Any]) -> Any:

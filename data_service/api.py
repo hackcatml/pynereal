@@ -61,7 +61,7 @@ from config import (
     sanitize_manual_alert_triggers,
     validate_history_since,
 )
-from manual_alerts import send_manual_alert_payload
+from manual_alerts import send_manual_alert_payload, validate_manual_alert_template
 from ohlcv_io import make_ccxt_pro_client
 from ohlcv_paths import make_cache_path
 from update_service import UpdateService, UpdateServiceError
@@ -736,9 +736,16 @@ def build_session_api_router(
                 status_code=400,
             )
         try:
+            rt = _rt(session_id)
+            if rt is None:
+                return JSONResponse({"error": "session not found"}, status_code=404)
+            for template in sanitized:
+                validate_manual_alert_template(template, rt.spec)
             updated = await registry.update_manual_alert_templates(session_id, sanitized)
         except SessionNotFoundError:
             return JSONResponse({"error": "session not found"}, status_code=404)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
         except Exception as e:
             return JSONResponse({"error": f"failed to update templates: {e}"}, status_code=500)
         return JSONResponse({"templates": updated})
@@ -761,9 +768,18 @@ def build_session_api_router(
             return JSONResponse({"error": "each trigger requires valid price and template"}, status_code=400)
 
         try:
+            rt = _rt(session_id)
+            if rt is None:
+                return JSONResponse({"error": "session not found"}, status_code=404)
+            for trigger in triggers:
+                # Existing invalid snapshots must not prevent cancelling other alerts.
+                if trigger not in rt.spec.manual_alert_triggers:
+                    validate_manual_alert_template(trigger["template"], rt.spec)
             updated = await registry.update_manual_alert_triggers(session_id, triggers)
         except SessionNotFoundError:
             return JSONResponse({"error": "session not found"}, status_code=404)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
         except Exception as e:
             return JSONResponse({"error": f"failed to update trigger: {e}"}, status_code=500)
         return JSONResponse({"triggers": updated})

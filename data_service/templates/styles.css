@@ -27,6 +27,7 @@ body {
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 #chart-info,
@@ -292,6 +293,37 @@ body.source-open #chart {
 }
 .hidden {
   display: none !important;
+}
+.price-axis-menu {
+  position: fixed;
+  z-index: 19;
+  max-width: calc(100vw - 16px);
+  box-sizing: border-box;
+  padding: 4px;
+  border: 1px solid rgba(0, 0, 0, 0.14);
+  border-radius: 6px;
+  background: #fff;
+  color: #111;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  font-size: 12px;
+  line-height: 20px;
+  letter-spacing: 0;
+}
+.price-axis-menu label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.price-axis-menu input {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: #2962ff;
 }
 .template-backdrop {
   position: fixed;

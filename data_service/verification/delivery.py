@@ -444,6 +444,8 @@ class VerificationDeliveryService:
         text = self._telegram_text(request, webhook_outcome)
         try:
             response = post_telegram_message(token, chat_id, text)
+            from data_service.notification_events import recorded_result
+            reference = recorded_result(response).get("message_ref")
             status = int(response.get("status") or 0)
             self._update(
                 event_id,
@@ -451,7 +453,8 @@ class VerificationDeliveryService:
                 status="sent",
                 attempts=1,
             )
-            return {"status": "sent", "attempts": 1, "http_status": status}
+            return {"status": "sent", "attempts": 1, "http_status": status,
+                    **({"message_ref": reference} if reference else {})}
         except Exception as exc:
             error = f"{type(exc).__name__}: {_short(exc, 300)}"
             self._update(

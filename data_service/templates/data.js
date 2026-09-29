@@ -78,6 +78,14 @@ App.data = {
   hasLineValue(point) {
     return point && Object.prototype.hasOwnProperty.call(point, "value");
   },
+  applyPlotValueLabels(chart, collections) {
+    for (const controller of collections.plotSeriesMap.values()) {
+      const series = controller.type === "linebr" ? controller.activeSeries : controller.series;
+      if (series) {
+        series.applyOptions({ lastValueVisible: Boolean(chart.plotValueLabelsVisible) });
+      }
+    }
+  },
   buildPlotSeriesOptions(color, linewidth, style) {
     const styleCode = parseInt(style, 10);
     const isCrossStyle = styleCode === this.STYLE_CROSS || styleCode === this.STYLE_CIRCLES;
@@ -123,7 +131,11 @@ App.data = {
       if (segment.length === 0) {
         return;
       }
-      const series = this.addPlotLineSeries(chart, collections, seriesOptions, segment);
+      // Completed line-break segments must not keep historical price labels.
+      const series = this.addPlotLineSeries(chart, collections, {
+        ...seriesOptions,
+        lastValueVisible: Boolean(isActive && chart.plotValueLabelsVisible)
+      }, segment);
       if (isActive) {
         controller.activeSeries = series;
       }
@@ -160,7 +172,10 @@ App.data = {
       return;
     }
 
-    const series = this.addPlotLineSeries(chart, collections, options, seriesData);
+    const series = this.addPlotLineSeries(chart, collections, {
+      ...options,
+      lastValueVisible: Boolean(chart.plotValueLabelsVisible)
+    }, seriesData);
     collections.plotSeriesMap.set(title, { type: "single", series });
   },
   updatePlotSeries(chart, collections, title, time, value) {
@@ -187,13 +202,19 @@ App.data = {
     }
 
     if (!this.hasLineValue(linePoint)) {
+      if (controller.activeSeries) {
+        controller.activeSeries.applyOptions({ lastValueVisible: false });
+      }
       controller.lastHadValue = false;
       controller.activeSeries = null;
       return;
     }
 
     if (!controller.lastHadValue || !controller.activeSeries) {
-      controller.activeSeries = this.addPlotLineSeries(chart, collections, controller.options, []);
+      controller.activeSeries = this.addPlotLineSeries(chart, collections, {
+        ...controller.options,
+        lastValueVisible: Boolean(chart.plotValueLabelsVisible)
+      }, []);
     }
     controller.activeSeries.update(linePoint);
     controller.lastHadValue = true;

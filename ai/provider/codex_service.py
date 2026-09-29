@@ -26,6 +26,7 @@ from openai_codex.generated.v2_all import (
     ReasoningEffort,
     TurnCompletedNotification,
     TurnStatus,
+    ThreadUnsubscribeResponse,
     WebSearchThreadItem,
 )
 from pydantic import BaseModel, ConfigDict, Field
@@ -37,12 +38,14 @@ DEFAULT_DEVELOPER_INSTRUCTIONS = (
     "Treat exchanges and accounts as read-only. Do not place or cancel orders, "
     "change leverage, or perform any other account state mutation. "
     "You may change session state only through the dedicated tools when the user "
-    "explicitly requests setting or deleting Manual Alert price triggers. For any Manual Alert request, "
+    "explicitly requests setting/deleting Manual Alert price triggers or editing an existing "
+    "Manual Alert template. For any Manual Alert request, "
     "A server-verified automated strategy instruction configured through the ai parameter of "
     "strategy.entry or strategy.close is an explicit user request. Execute only its stated scope "
     "and use the exact session context supplied by the server. "
     "first call get_manual_alert_context to inspect the active sessions and templates. "
-    "If the session, price, alert template, deletion target, or deletion scope is unclear or "
+    "If information required for the requested operation (session, trigger price, template, "
+    "deletion target or scope) is unclear or "
     "could match more than one option, do not call a mutation tool. Ask for a human-readable distinction "
     "such as the exchange, timeframe, or strategy name. Never ask the user to provide a "
     "session_id. Resolve the user's symbol, company or asset name, or strategy description "
@@ -55,6 +58,11 @@ DEFAULT_DEVELOPER_INSTRUCTIONS = (
     "delete_manual_alert_triggers. If the user explicitly asks to delete all triggers in one "
     "session and then set a new trigger in that same session, call set_manual_alert_trigger once "
     "with replace_existing_triggers=true instead of performing separate delete and set calls. "
+    "For an explicit existing-template edit, use update_manual_alert_template with the exact "
+    "template index and revision from get_manual_alert_context. Change only the requested "
+    "fields; no trigger price is required. Preserve message placeholders verbatim. Existing "
+    "price triggers keep their saved template snapshots; explain that they are unchanged. "
+    "If the template changed, refresh context instead of overwriting stale data. "
     "Deleting or replacing triggers must always preserve configured alert templates. Never delete "
     "a template unless the user explicitly requests template deletion through a dedicated tool. "
     "When an asset or position request does not specify an account or exchange, run the "
@@ -250,6 +258,7 @@ class CodexService:
         self._chat_state_lock = asyncio.Lock()
         self._conversations: dict[str, AsyncThread] = {}
         self._turn_locks: dict[str, asyncio.Lock] = {}
+        self._telegram_tool_handlers: dict[str, Callable | None] = {}
         self._model_options: list[dict[str, Any]] | None = None
         self._shared_chat_tasks: set[asyncio.Task[None]] = set()
         self._pending_shared_chats = 0
@@ -506,6 +515,54 @@ class CodexService:
                 effort=effort,
             ):
                 yield event
+
+    async def stream_telegram_chat(
+        self, message: str, *, history: list[dict], tools: Any,
+        model: str | None = None, effort: str | None = None,
+    ) -> AsyncIterator[CodexStreamEvent]:
+        from ai.telegram.agent import TELEGRAM_INSTRUCTIONS, restricted_config
+
+        if not self.running:
+            raise RuntimeError("AI is disabled or unavailable")
+        model = await self.validate_model(model)
+        effort = await self.validate_effort(effort, model)
+        codex = await self._get_codex()
+        # Fail closed if the installed SDK cannot read inherited MCP configuration.
+        response = await codex._client.request(
+            "config/read", {"cwd": str(self.project_root), "includeLayers": False},
+            response_model=ConfigReadResponse,
+        )
+        started = await codex._client.thread_start({
+            "approvalPolicy": "never",
+            "config": restricted_config(response.config.model_dump(), self.project_root),
+            "cwd": str(self.project_root),
+            "developerInstructions": self.developer_instructions + "\n\n" + TELEGRAM_INSTRUCTIONS,
+            "dynamicTools": tools.specs,
+            "ephemeral": True,
+        })
+        thread_id = started.thread.id
+        self._telegram_tool_handlers[thread_id] = tools.handle_server_request
+        try:
+            async for event in self._stream_turn(
+                AsyncThread(codex, thread_id),
+                self._build_initial_context(message, history),
+                trace_id="telegram-" + uuid.uuid4().hex[:8],
+                request_started_at=time.perf_counter(),
+                model=model,
+                effort=effort,
+            ):
+                yield event
+        finally:
+            # Retain a deny-only entry: a late call must not fall back to browser permissions.
+            self._telegram_tool_handlers[thread_id] = None
+            try:
+                async with asyncio.timeout(5):
+                    await codex._client.request(
+                        "thread/unsubscribe", {"threadId": thread_id},
+                        response_model=ThreadUnsubscribeResponse,
+                    )
+            except Exception as exc:
+                print(f"[ai] Telegram thread cleanup failed ({type(exc).__name__})")
 
     def start_shared_chat(
         self,
@@ -1174,7 +1231,17 @@ class CodexService:
         sync_client = getattr(client, "_sync", None)
         if sync_client is None or not hasattr(sync_client, "_approval_handler"):
             raise RuntimeError("Installed openai-codex SDK cannot handle dynamic tools")
-        sync_client._approval_handler = self.dynamic_tools.handle_server_request
+        self._telegram_tool_handlers = {}
+        sync_client._approval_handler = self._handle_tool_request
+
+    def _handle_tool_request(self, method: str, params: dict | None) -> dict:
+        thread_id = params.get("threadId") if isinstance(params, dict) else None
+        if thread_id in self._telegram_tool_handlers:
+            handler = self._telegram_tool_handlers[thread_id]
+            if handler is None:
+                return self.dynamic_tools._error_response("Telegram request has ended")
+            return handler(method, params)
+        return self.dynamic_tools.handle_server_request(method, params)
 
     def _permission_profile_config(self) -> dict[str, Any]:
         return {
