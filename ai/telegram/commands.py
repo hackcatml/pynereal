@@ -12,7 +12,7 @@ BOT_COMMANDS = [
     {"command": "sessions", "description": "Select a session and control runner, webhook and Telegram"},
     {"command": "pnl", "description": "Select a PnL period or use /pnl 30d"},
     {"command": "alerts", "description": "List/set Manual Alerts or create/edit session templates"},
-    {"command": "model", "description": "Select model and reasoning effort"},
+    {"command": "model", "description": "Select model, reasoning effort and speed"},
     {"command": "new", "description": "Start a new chat"},
     {"command": "cancel", "description": "Cancel unfinished work"},
     {"command": "end", "description": "End the AI conversation"},

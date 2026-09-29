@@ -26,6 +26,7 @@
   let models = [];
   let selectedModel = "";
   let selectedEffort = "";
+  let selectedServiceTier = "default";
   let modelMenuAnchor = null;
   let activeRequest = null;
   let openTimer = null;
@@ -191,6 +192,31 @@
     selectedEffort = efforts.includes("medium") ? "medium" : efforts[efforts.length - 1];
   }
 
+  function supportedSpeeds() {
+    const selected = models.find((model) => model.value === selectedModel);
+    return selected?.speeds?.length ? selected.speeds : [{ value: "default", label: "Standard" }];
+  }
+
+  function clampSpeed() {
+    if (!supportedSpeeds().some((item) => item.value === selectedServiceTier)) {
+      selectedServiceTier = "default";
+    }
+  }
+
+  function applyPreferences(model, effort, serviceTier) {
+    if (!models.length) return;
+    const previous = [selectedModel, selectedEffort, selectedServiceTier];
+    if (models.some((item) => item.value === model)) selectedModel = model;
+    if (typeof effort === "string" && effort) selectedEffort = effort;
+    if (typeof serviceTier === "string" && serviceTier) selectedServiceTier = serviceTier;
+    clampEffort();
+    clampSpeed();
+    if (previous[0] === selectedModel && previous[1] === selectedEffort && previous[2] === selectedServiceTier) return;
+    renderModelMenu();
+    updateModelControls();
+    positionModelMenu(modelMenuAnchor);
+  }
+
   function updateModelControls() {
     const selected = models.find((model) => model.value === selectedModel);
     let label = selected ? selected.label : "Default model";
@@ -200,7 +226,8 @@
     el("scripting-ai-model-label").textContent = label;
     el("scripting-ai-model-selector").disabled = pending || models.length === 0;
     el("scripting-ai-model-menu").querySelectorAll(".ai-model-option").forEach((option) => {
-      const current = option.dataset.kind === "effort" ? selectedEffort : selectedModel;
+      const current = option.dataset.kind === "speed" ? selectedServiceTier
+        : option.dataset.kind === "effort" ? selectedEffort : selectedModel;
       option.setAttribute("aria-selected", String(option.dataset.value === current));
     });
   }
@@ -209,7 +236,9 @@
     api("/api/ai/chat/preferences", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: selectedModel || null, effort: selectedEffort || null }),
+      body: JSON.stringify({
+        model: selectedModel || null, effort: selectedEffort || null, service_tier: selectedServiceTier,
+      }),
     }).catch(() => {});
   }
 
@@ -253,6 +282,7 @@
       () => {
         selectedModel = model.value;
         clampEffort();
+        clampSpeed();
         pushPreferences();
         renderModelMenu();
         updateModelControls();
@@ -272,10 +302,20 @@
           selectedEffort = effort;
           pushPreferences();
           updateModelControls();
-          closeModelMenu();
         },
       ));
     }
+    heading("Speed");
+    supportedSpeeds().forEach((speed) => option(
+      "speed", speed.value, speed.label, speed.description,
+      speed.value === selectedServiceTier,
+      () => {
+        selectedServiceTier = speed.value;
+        pushPreferences();
+        updateModelControls();
+        closeModelMenu();
+      },
+    ));
   }
 
   async function loadModels() {
@@ -292,7 +332,9 @@
       selectedEffort = typeof response.selected_effort === "string"
         ? response.selected_effort
         : "";
+      selectedServiceTier = response.selected_service_tier || "default";
       clampEffort();
+      clampSpeed();
       renderModelMenu();
       updateModelControls();
     } catch {
@@ -394,6 +436,7 @@
           conversation_id: conversationId || null,
           model: selectedModel || null,
           effort: selectedEffort || null,
+          service_tier: selectedServiceTier,
         }),
       }, (eventName, data) => {
         if (eventName === "conversation") {
@@ -894,6 +937,7 @@
 
   window.PyneScriptingAi = {
     init,
+    applyPreferences,
     setAvailable,
     setContext,
     open,

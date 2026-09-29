@@ -377,6 +377,7 @@ class TelegramAgent:
             raise RuntimeError("No available AI models")
         known = [item.value for item in ReasoningEffort]
         choices = [{"value": item["value"], "label": item["label"],
+                    "speeds": item.get("speeds") or [{"value": "default", "label": "Standard", "description": ""}],
                     "efforts": [value for value in (item.get("efforts") or known) if value in known]}
                    for item in options]
         model = next((item["value"] for item in options if item.get("is_default")), options[0]["value"])
@@ -389,6 +390,7 @@ class TelegramAgent:
         try:
             async for event in self.codex.stream_telegram_chat(
                 message, history=history, tools=tools, model=settings.get("model"), effort=settings.get("effort"),
+                service_tier=settings.get("service_tier"),
             ):
                 if event.event == "done":
                     answer = str(event.payload.get("answer") or "")

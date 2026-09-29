@@ -418,7 +418,7 @@ class TelegramAIService:
                 await self._db("delivery_failed", item["id"], 0, True)
                 continue
             valid_buttons = (item.get("proposal_state") == "pending" and (item.get("proposal_expires") or 0) > time.time()
-                             or item.get("menu_stage") in {"model", "effort"} and (item.get("menu_expires") or 0) > time.time()
+                             or item.get("menu_stage") in {"model", "effort", "speed"} and (item.get("menu_expires") or 0) > time.time()
                              or (item.get("screenshot_expires") or 0) > time.time()
                              or (item.get("session_menu_expires") or 0) > time.time()
                              or (item.get("pnl_menu_expires") or 0) > time.time()

@@ -8385,6 +8385,7 @@
   let aiModels = [];
   let aiSelectedModel = "";
   let aiSelectedEffort = "";
+  let aiSelectedServiceTier = "default";
   let aiModelMenuAnchor = null;
   let reclampAiFab = null; // set by initAiChat; re-clamps the saved FAB spot
 
@@ -8418,6 +8419,17 @@
     aiSelectedEffort = efforts.includes("medium") ? "medium" : efforts[efforts.length - 1];
   }
 
+  function aiSupportedSpeeds() {
+    const selected = aiModels.find((item) => item.value === aiSelectedModel);
+    return selected?.speeds?.length ? selected.speeds : [{ value: "default", label: "Standard" }];
+  }
+
+  function clampAiSpeed() {
+    if (!aiSupportedSpeeds().some((item) => item.value === aiSelectedServiceTier)) {
+      aiSelectedServiceTier = "default";
+    }
+  }
+
   // the selection lives on the server so every browser shares it; the
   // ai_prefs_updated broadcast brings other clients in line
   function pushAiPrefs() {
@@ -8427,11 +8439,13 @@
       body: JSON.stringify({
         model: aiSelectedModel || null,
         effort: aiSelectedEffort || null,
+        service_tier: aiSelectedServiceTier,
       }),
     }).catch(() => {});
   }
 
-  function applyAiPrefs(model, effort) {
+  function applyAiPrefs(model, effort, serviceTier) {
+    window.PyneScriptingAi?.applyPreferences(model, effort, serviceTier);
     let changed = false;
     if (
       typeof model === "string" && model && model !== aiSelectedModel
@@ -8444,8 +8458,13 @@
       aiSelectedEffort = effort;
       changed = true;
     }
+    if (typeof serviceTier === "string" && serviceTier && serviceTier !== aiSelectedServiceTier) {
+      aiSelectedServiceTier = serviceTier;
+      changed = true;
+    }
     if (!changed) return;
     clampAiEffort();
+    clampAiSpeed();
     renderAiModelMenu();
     updateAiModelControls();
     if (aiModelMenuAnchor) positionAiModelMenu(aiModelMenuAnchor);
@@ -8458,7 +8477,8 @@
     el("ai-model-label").textContent = label;
     el("ai-model-selector").disabled = aiModels.length === 0;
     for (const option of el("ai-model-menu").querySelectorAll(".ai-model-option")) {
-      const selectedValue = option.dataset.kind === "effort" ? aiSelectedEffort : aiSelectedModel;
+      const selectedValue = option.dataset.kind === "speed" ? aiSelectedServiceTier
+        : option.dataset.kind === "effort" ? aiSelectedEffort : aiSelectedModel;
       option.setAttribute("aria-selected", String(option.dataset.value === selectedValue));
     }
   }
@@ -8467,6 +8487,7 @@
     if (!aiModels.some((item) => item.value === value)) return;
     aiSelectedModel = value;
     clampAiEffort();
+    clampAiSpeed();
     pushAiPrefs();
     // the reasoning section follows the model, so rebuild and keep the menu
     // open for the follow-up effort pick
@@ -8478,6 +8499,13 @@
   function selectAiEffort(value) {
     if (!aiSupportedEfforts().includes(value)) return;
     aiSelectedEffort = value;
+    pushAiPrefs();
+    updateAiModelControls();
+  }
+
+  function selectAiSpeed(value) {
+    if (!aiSupportedSpeeds().some((item) => item.value === value)) return;
+    aiSelectedServiceTier = value;
     pushAiPrefs();
     updateAiModelControls();
     closeAiModelMenu();
@@ -8539,6 +8567,13 @@
         );
       }
     }
+    addHeading("Speed");
+    for (const speed of aiSupportedSpeeds()) {
+      addOption(
+        "speed", speed.value, speed.label, speed.description,
+        speed.value === aiSelectedServiceTier, () => selectAiSpeed(speed.value),
+      );
+    }
   }
 
   async function loadAiModels() {
@@ -8559,7 +8594,9 @@
       aiSelectedModel = selected ? selected.value : "";
       aiSelectedEffort = typeof response.selected_effort === "string"
         ? response.selected_effort : "";
+      aiSelectedServiceTier = response.selected_service_tier || "default";
       clampAiEffort();
+      clampAiSpeed();
       renderAiModelMenu();
       updateAiModelControls();
     })().catch(() => {
@@ -8662,7 +8699,7 @@
       : "";
     aiRemotePending = Boolean(state && state.pending);
     // catch up on a model/effort change whose broadcast this client missed
-    if (state) applyAiPrefs(state.model, state.effort);
+    if (state) applyAiPrefs(state.model, state.effort, state.service_tier);
     saveAiMessages();
     saveAiConversationId();
     el("ai-chat-send").disabled = aiPending || aiRemotePending;
@@ -8940,6 +8977,7 @@
           conversation_id: aiConversationId || null,
           model: aiSelectedModel || null,
           effort: aiSelectedEffort || null,
+          service_tier: aiSelectedServiceTier,
         }),
       }, (eventName, data) => {
         if (eventName === "conversation") {
@@ -10687,7 +10725,7 @@
         } else if (msg.type === "ai_chat_updated" && !aiPending) {
           syncAiChatState({ allowImport: false });
         } else if (msg.type === "ai_prefs_updated") {
-          applyAiPrefs(msg.model, msg.effort);
+          applyAiPrefs(msg.model, msg.effort, msg.service_tier);
         } else if (msg.type === "calendar_updated") {
           if (isCalendarOpen()) loadCalendarEvents();
         } else if (msg.type === "calendar_forecast_running") {

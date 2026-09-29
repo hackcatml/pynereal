@@ -16,7 +16,7 @@ from .alert_menus import AlertMenuStore
 
 COMMAND_HELP = (
     "Command:\n"
-    "/model selects model and effort\n"
+    "/model selects model, effort and speed\n"
     "/new starts a new chat\n"
     "/end ends the conversation\n"
     "/cancel cancels work\n"
@@ -113,7 +113,7 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
             """)
             with self.db:
                 chat_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(chats)")}
-                for name in ("model", "effort"):
+                for name in ("model", "effort", "service_tier"):
                     if name not in chat_columns:
                         self.db.execute(f"ALTER TABLE chats ADD COLUMN {name} TEXT")
                 if "history_after" not in chat_columns:
@@ -206,9 +206,9 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
         self._reply(job["chat"], text, replace_id=placeholder["id"] if placeholder else None, request_id=job["id"])
 
     def preferences(self, chat: int, actor: int) -> dict:
-        row = self.db.execute("SELECT model,effort FROM chats WHERE bot=? AND chat=? AND actor=?",
+        row = self.db.execute("SELECT model,effort,service_tier FROM chats WHERE bot=? AND chat=? AND actor=?",
                               (self.bot_id, chat, actor)).fetchone()
-        return dict(row) if row else {"model": None, "effort": None}
+        return dict(row) if row else {"model": None, "effort": None, "service_tier": None}
 
     def _menu_message(self, chat: int, text: str, buttons: list, *, replace_id=None) -> int:
         return self.db.execute("INSERT INTO outbox(bot,chat,text,markup,replace_id) VALUES (?,?,?,?,?)",
@@ -389,13 +389,17 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
         current = self.preferences(chat, actor)
         model = current["model"] or catalog["model"]
         effort = current["effort"] or catalog["effort"]
+        selected = next((item for item in catalog["options"] if item["value"] == model), {})
+        speed = next((item["label"] for item in selected.get("speeds", [])
+                      if item["value"] == current["service_tier"]), "Standard")
         self.db.execute("DELETE FROM model_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
         nonce = secrets.token_urlsafe(18)
         buttons = [[{"text": item["label"] + (" (current)" if item["value"] == model else ""),
                      "callback_data": f"tm:m:{nonce}:{index}"}]
                    for index, item in enumerate(catalog["options"])]
         buttons.append([{"text": "Cancel", "callback_data": f"tm:c:{nonce}:0"}])
-        item_id = self._menu_message(chat, f"Model: {model}\nEffort: {effort}\n\nSelect a model, then effort.", buttons)
+        item_id = self._menu_message(chat, f"Model: {model}\nEffort: {effort}\nSpeed: {speed}"
+                                     "\n\nSelect a model, then effort and speed.", buttons)
         self.db.execute("INSERT INTO model_menus(nonce,bot,chat,actor,catalog,stage,expires,outbox_id) "
                         "VALUES (?,?,?,?,?,'model',?,?)",
                         (nonce, self.bot_id, chat, actor, json.dumps(catalog), now + 600, item_id))
@@ -427,19 +431,45 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
                                          buttons, replace_id=row["outbox_id"])
             self.db.execute("UPDATE model_menus SET stage='effort',selected=?,outbox_id=? WHERE nonce=?",
                             (index, item_id, row["nonce"]))
-            return "Select effort to save."
+            return "Select effort."
         if parts[1] == "e" and row["stage"] == "effort":
             selected = catalog["options"][row["selected"]]
             if index < len(selected["efforts"]):
-                model, effort = selected["value"], selected["efforts"][index]
-                self.db.execute("INSERT INTO chats(bot,chat,actor,expires,model,effort) VALUES (?,?,?,0,?,?) "
-                                "ON CONFLICT(bot,chat,actor) DO UPDATE SET model=excluded.model,effort=excluded.effort",
-                                (self.bot_id, row["chat"], row["actor"], model, effort))
-                self.db.execute("DELETE FROM model_menus WHERE nonce=?", (row["nonce"],))
-                self._reply(row["chat"], f"Model: {model}\nEffort: {effort}\n\nSaved for your next requests in this chat.",
-                            replace_id=row["outbox_id"])
-                return "Saved. Applies to your next requests."
+                effort = selected["efforts"][index]
+                speeds = selected.get("speeds") or [{"value": "default", "label": "Standard"}]
+                if len(speeds) == 1:
+                    return self._save_model_preferences(row, selected, effort, speeds[0])
+                catalog["effort"] = effort
+                current = self.preferences(row["chat"], row["actor"])["service_tier"] or "default"
+                choices = [{"text": speed["label"] + (" (current)" if speed["value"] == current else ""),
+                            "callback_data": f"tm:s:{row['nonce']}:{i}"}
+                           for i, speed in enumerate(speeds)]
+                buttons = [choices[i:i + 2] for i in range(0, len(choices), 2)]
+                buttons.append([{"text": "Cancel", "callback_data": f"tm:c:{row['nonce']}:0"}])
+                descriptions = "\n".join(f"{speed['label']}: {speed['description']}"
+                                         for speed in speeds if speed.get("description"))
+                text = f"Model: {selected['value']}\nEffort: {effort}\n\nSelect speed."
+                if descriptions:
+                    text += "\n" + descriptions
+                item_id = self._menu_message(row["chat"], text, buttons, replace_id=row["outbox_id"])
+                self.db.execute("UPDATE model_menus SET stage='speed',catalog=?,outbox_id=? WHERE nonce=?",
+                                (json.dumps(catalog), item_id, row["nonce"]))
+                return "Select speed to save."
+        if parts[1] == "s" and row["stage"] == "speed":
+            selected = catalog["options"][row["selected"]]
+            if index < len(selected["speeds"]):
+                return self._save_model_preferences(row, selected, catalog["effort"], selected["speeds"][index])
         return "Invalid or already handled selection. Use /model again."
+
+    def _save_model_preferences(self, row, selected: dict, effort: str, speed: dict) -> str:
+        self.db.execute("INSERT INTO chats(bot,chat,actor,expires,model,effort,service_tier) VALUES (?,?,?,0,?,?,?) "
+                        "ON CONFLICT(bot,chat,actor) DO UPDATE SET model=excluded.model,effort=excluded.effort,"
+                        "service_tier=excluded.service_tier",
+                        (self.bot_id, row["chat"], row["actor"], selected["value"], effort, speed["value"]))
+        self.db.execute("DELETE FROM model_menus WHERE nonce=?", (row["nonce"],))
+        self._reply(row["chat"], f"Model: {selected['value']}\nEffort: {effort}\nSpeed: {speed['label']}"
+                    "\n\nSaved for your next requests in this chat.", replace_id=row["outbox_id"])
+        return "Saved. Applies to your next requests."
 
     def accept(
         self, update_id: int, message: dict | None, *, now: float,

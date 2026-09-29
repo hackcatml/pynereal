@@ -792,20 +792,28 @@ not disable command reception.
 - `/end` exits the mode and cancels unfinished requests. `/cancel` cancels
   unfinished requests but leaves the mode enabled. Neither undoes completed work.
 - `/new` starts a fresh conversation and keeps AI mode on, preserving your
-  model/effort selection. Previous conversation text and attachments are excluded
+  model/effort/speed selection. Previous conversation text and attachments are excluded
   from the new context. Unfinished requests and pending change proposals are
   cancelled; already-started approved actions may finish. Stored history and
   existing Telegram messages are not deleted. This affects only your conversation
   with this bot in this chat, not other users or browser AI.
 - The mode expires after 15 minutes without input, or on server restart.
-- `/model` shows your current model/effort and model selection buttons. After
-  choosing a model, choose its reasoning effort in the same message to save.
+- `/model` shows your current model/effort/speed and model selection buttons. After
+  choosing a model, choose its reasoning effort and speed in the same message to
+  save. Speed choices come from the selected model's Codex catalog; Fast and
+  Ultrafast appear only when advertised. Models without extra speed tiers save
+  with Standard speed after the effort selection. Faster tiers may use more of
+  your allowance; the selector includes Codex's tier descriptions.
   There is no separate `/effort` command. Choices use the existing web AI model
   catalog and persist per bot/chat/user across restarts, independently of browser
   AI preferences. Only the requester can select within 10 minutes. Cancel keeps
   existing settings; `/model` again or server restart invalidates old buttons.
   Changes apply to subsequently submitted requests, not running or queued work.
   Opening the selector does not start AI conversation mode; use `/ai` to chat.
+- Browser AI and Script AI have the same Speed choices below Reasoning in their
+  existing model menus, without an extra control in the message input area.
+  Standard explicitly resets a previously selected faster tier. The shared web
+  selection is saved independently of Telegram preferences.
 - Assets, positions, cached order/position history, PnL and session evaluation
   use the existing read-only services. Browser chat history stays separate.
   Position/asset refresh uses those services; history refresh is restricted to

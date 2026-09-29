@@ -119,10 +119,13 @@ def build_scripting_ai_router(
             return JSONResponse({"error": "conversation_id must be a string"}, status_code=400)
         model = payload.get("model")
         effort = payload.get("effort")
+        service_tier = payload.get("service_tier")
         if model is not None and not isinstance(model, str):
             return JSONResponse({"error": "model must be a string"}, status_code=400)
         if effort is not None and not isinstance(effort, str):
             return JSONResponse({"error": "effort must be a string"}, status_code=400)
+        if service_tier is not None and not isinstance(service_tier, str):
+            return JSONResponse({"error": "service_tier must be a string"}, status_code=400)
         draft_content = payload.get("draft_content")
         if draft_content is not None and not isinstance(draft_content, str):
             return JSONResponse({"error": "draft_content must be a string"}, status_code=400)
@@ -146,7 +149,7 @@ def build_scripting_ai_router(
             effort = await codex_service.validate_effort(effort, model)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
-        if model is None or effort is None:
+        if model is None or effort is None or service_tier is None:
             try:
                 preferences = await codex_service.chat_preferences()
             except Exception:
@@ -156,6 +159,12 @@ def build_scripting_ai_router(
                     model = preferences["model"]
                 if effort is None and model == preferences["model"]:
                     effort = preferences["effort"]
+                if service_tier is None and model == preferences["model"]:
+                    service_tier = preferences.get("service_tier")
+        try:
+            service_tier = await codex_service.validate_service_tier(service_tier, model) or "default"
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
 
         history = _sanitize_ai_chat_history(payload.get("history"))
         try:
@@ -191,6 +200,7 @@ def build_scripting_ai_router(
                     history_messages=min(len(history), _AI_CHAT_MAX_HISTORY_MESSAGES),
                     model=model,
                     effort=effort,
+                    service_tier=service_tier,
                 ):
                     if event.event == "delta":
                         delta = str(event.payload.get("text") or "")
