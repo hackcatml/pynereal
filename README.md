@@ -630,6 +630,24 @@ Dashboard AI can:
 
 ### Telegram AI (Opt-In)
 
+Chart screenshots in both web AI and Telegram require Chrome/Chromium on the
+server. On Ubuntu/Debian x86_64, setup installs Chrome for Testing under
+`.runtime/chrome-for-testing/` when no existing browser is available. To install
+or repair only capture dependencies, run `bash setup.sh --chart-capture-only`
+from the PyneReal directory; this does not reinstall Python packages or change
+AI sandbox settings. An existing executable can also be selected with
+`PYNEREAL_CHROME_PATH`.
+
+Backend updates check this separately after applying the new code, before feeds
+and runners resume, including upgrades from an older Updater that already
+marked Python dependencies as synced. A working browser is reused without
+downloading or running apt. Automated installation never prompts for sudo;
+if administrator access or downloads fail, the update continues with a warning
+and capture stays unavailable until repaired manually. This host-tool check
+does not require an additional backend restart. Ordinary startup, frontend-only
+updates and screenshot requests do not install software. Other Linux
+architectures/distributions need a compatible browser installed manually.
+
 The existing alert bot can also accept AI requests in a configured
 private chat, group or supergroup. Create `workdir/config/telegram_ai.toml` using
 `workdir/config/telegram_ai.example.toml`:

@@ -14,6 +14,10 @@ from pathlib import Path
 from websockets.asyncio.client import connect
 
 
+class ChartCaptureBrowserError(RuntimeError):
+    """Chrome could not start or expose its local DevTools endpoint."""
+
+
 class _DevTools:
     def __init__(self, socket):
         self.socket = socket
@@ -60,7 +64,7 @@ async def _debug_url(profile: Path, process) -> str:
         except FileNotFoundError:
             pass
         await asyncio.sleep(0.05)
-    raise RuntimeError(f"Chart capture browser exited before loading (exit {process.returncode})")
+    raise ChartCaptureBrowserError(f"Chart capture browser exited before loading (exit {process.returncode})")
 
 
 async def _stop_browser(process) -> None:
@@ -100,10 +104,13 @@ async def capture_chart_png(browser: str, url: str, width: int, height: int, *, 
             ]
             if sys.platform.startswith("linux"):
                 command.insert(2, "--no-sandbox")
-            process = await asyncio.create_subprocess_exec(
-                *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-                start_new_session=os.name == "posix",
-            )
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                    start_new_session=os.name == "posix",
+                )
+            except OSError as exc:
+                raise ChartCaptureBrowserError(f"Chart capture browser could not start ({type(exc).__name__})") from exc
             endpoint = await _debug_url(Path(profile.name), process)
             async with connect(endpoint, proxy=None, max_size=32 * 1024 * 1024, close_timeout=1) as socket:
                 cdp = _DevTools(socket)

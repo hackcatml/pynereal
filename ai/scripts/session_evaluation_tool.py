@@ -22,7 +22,7 @@ from data_service.evaluation_context import (
 
 from .account_match import match_session_account, resolve_account_hint
 from .asset import configured_accounts, read_provider_config
-from .chart_capture import capture_chart_png
+from .chart_capture import ChartCaptureBrowserError, capture_chart_png
 from .evidence_compare import (
     build_evidence_summary,
     compact_session_context,
@@ -45,7 +45,9 @@ _MAX_CACHED_TURNS = 8
 
 
 class SessionEvaluationToolError(ValueError):
-    pass
+    def __init__(self, message: str, *, code: str = "evaluation_failed") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class SessionEvaluationBridge:
@@ -417,7 +419,9 @@ class SessionEvaluationBridge:
         if session is None:
             raise SessionEvaluationToolError(f"Unknown active session: {session_id}")
         if not session.feed.history_ready():
-            raise SessionEvaluationToolError("Chart OHLCV data is not ready yet; retry after data loading completes")
+            raise SessionEvaluationToolError(
+                "Chart OHLCV data is not ready yet; retry after data loading completes", code="chart_not_ready",
+            )
         capture_path = await self._capture_chart(
             session_id,
             int(arguments["width"]),
@@ -480,7 +484,7 @@ class SessionEvaluationBridge:
             shutil.which("chromium-browser"),
         ]
         for candidate in candidates:
-            if candidate and Path(candidate).is_file():
+            if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
                 return str(candidate)
         return None
 
@@ -488,7 +492,9 @@ class SessionEvaluationBridge:
         browser = self._browser_executable()
         if browser is None:
             raise SessionEvaluationToolError(
-                "No supported Chrome or Chromium executable is available for chart capture"
+                "No supported Chrome or Chromium executable is available for chart capture. "
+                "On Linux, run bash setup.sh --chart-capture-only in the PyneReal directory.",
+                code="browser_missing",
             )
         def prepare_output():
             output_dir = self._project_root / "tmp" / "session-evaluation"
@@ -509,7 +515,12 @@ class SessionEvaluationBridge:
         try:
             png = await capture_chart_png(browser, url, width, height, timeout=_CAPTURE_TIMEOUT_SECONDS)
         except TimeoutError as exc:
-            raise SessionEvaluationToolError("Chart capture timed out waiting for chart/Alert layout synchronization") from exc
+            raise SessionEvaluationToolError(
+                "Chart capture timed out waiting for the browser or chart/Alert layout synchronization",
+                code="capture_timeout",
+            ) from exc
+        except ChartCaptureBrowserError as exc:
+            raise SessionEvaluationToolError(str(exc), code="browser_start_failed") from exc
         except Exception as exc:
             raise SessionEvaluationToolError(f"Chart capture failed: {exc}") from exc
         await asyncio.to_thread(output_path.write_bytes, png)

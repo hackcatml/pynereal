@@ -93,18 +93,58 @@ EOF
   fi
 }
 
+_chart_capture_browser() {
+  local candidate
+  for candidate in "${PYNEREAL_CHROME_PATH:-}" \
+    "$PWD/.runtime/chrome-for-testing/chrome-linux64/chrome" \
+    "$(command -v google-chrome 2>/dev/null)" \
+    "$(command -v google-chrome-stable 2>/dev/null)" \
+    "$(command -v chromium 2>/dev/null)" \
+    "$(command -v chromium-browser 2>/dev/null)"; do
+    if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+_chart_capture_ready() {
+  [ -n "$1" ] && timeout 10 "$1" --version >/dev/null 2>&1
+}
+
 _setup_ai_chart_capture() {
   [ "$(uname -s)" = "Linux" ] || return 0
-  command -v apt-get >/dev/null 2>&1 || return 0
 
-  local sudo_cmd="" libasound_pkg libatk_pkg libatk_bridge_pkg libatspi_pkg libcups_pkg
-  local install_root metadata download_url tmp_dir
+  local browser libasound_pkg libatk_pkg libatk_bridge_pkg libatspi_pkg libcups_pkg
+  local install_root metadata download_url tmp_dir python_bin
+  local -a sudo_cmd=()
+  browser="$(_chart_capture_browser)"
+  if _chart_capture_ready "$browser"; then
+    echo "[setup] AI chart-capture browser is ready"
+    return 0
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "[setup] install Chrome/Chromium manually and set PYNEREAL_CHROME_PATH" >&2
+    return 1
+  fi
+  if [ -z "$browser" ] && [ "$(uname -m)" != "x86_64" ]; then
+    echo "[setup] automatic Chrome download requires Linux x86_64; install Chromium for this architecture" >&2
+    return 1
+  fi
   if [ "$(id -u)" != "0" ]; then
     if command -v sudo >/dev/null 2>&1; then
-      sudo_cmd="sudo"
+      sudo_cmd=(sudo)
+      if [ "${PYNEREAL_SETUP_NONINTERACTIVE:-0}" = "1" ]; then
+        sudo_cmd+=(-n)
+        if ! "${sudo_cmd[@]}" true; then
+          echo "[setup] chart-capture dependencies need administrator access; run bash setup.sh --chart-capture-only in a terminal" >&2
+          return 1
+        fi
+      fi
     else
-      echo "[setup] no root access; skipping AI chart-capture dependencies" >&2
-      return 0
+      echo "[setup] no administrator access for AI chart-capture dependencies" >&2
+      return 1
     fi
   fi
 
@@ -116,10 +156,10 @@ _setup_ai_chart_capture() {
     fi
   }
 
-  if ! $sudo_cmd apt-get update; then
-    echo "[setup] package index update failed; skipping AI chart-capture dependencies" >&2
+  if ! "${sudo_cmd[@]}" apt-get update; then
+    echo "[setup] package index update failed; AI chart capture is unavailable" >&2
     unset -f _apt_package 2>/dev/null || true
-    return 0
+    return 1
   fi
   libasound_pkg="$(_apt_package libasound2t64 libasound2)"
   libatk_pkg="$(_apt_package libatk1.0-0t64 libatk1.0-0)"
@@ -128,7 +168,7 @@ _setup_ai_chart_capture() {
   libcups_pkg="$(_apt_package libcups2t64 libcups2)"
 
   echo "[setup] installing AI chart-capture dependencies"
-  if ! $sudo_cmd apt-get install -y \
+  if ! "${sudo_cmd[@]}" env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install --no-upgrade -y \
     ca-certificates curl unzip fonts-noto-cjk \
     "$libasound_pkg" "$libatk_pkg" "$libatk_bridge_pkg" "$libatspi_pkg" \
     "$libcups_pkg" libcairo2 libdbus-1-3 libdrm2 libgbm1 libnspr4 libnss3 \
@@ -136,39 +176,41 @@ _setup_ai_chart_capture() {
     libxfixes3 libxkbcommon0 libxrandr2; then
     echo "[setup] AI chart-capture dependency install failed" >&2
     unset -f _apt_package 2>/dev/null || true
-    return 0
+    return 1
   fi
   command -v fc-cache >/dev/null 2>&1 && fc-cache -f >/dev/null 2>&1 || true
 
   install_root="$PWD/.runtime/chrome-for-testing"
-  if command -v google-chrome >/dev/null 2>&1 \
-    || command -v google-chrome-stable >/dev/null 2>&1 \
-    || command -v chromium >/dev/null 2>&1 \
-    || command -v chromium-browser >/dev/null 2>&1 \
-    || [ -x "$install_root/chrome-linux64/chrome" ]; then
+  if [ -n "$browser" ]; then
     unset -f _apt_package 2>/dev/null || true
-    return 0
+    if _chart_capture_ready "$browser"; then
+      echo "[setup] AI chart-capture browser is ready"
+      return 0
+    fi
+    echo "[setup] existing chart-capture browser still cannot run; check its installation" >&2
+    return 1
   fi
 
   echo "[setup] installing Chrome for Testing for AI chart capture"
-  metadata="$(curl -fsSL \
+  metadata="$(curl -fsSL --connect-timeout 15 --max-time 60 \
     https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json)" \
     || {
       echo "[setup] could not resolve the current Chrome for Testing release" >&2
       unset -f _apt_package 2>/dev/null || true
-      return 0
+      return 1
     }
-  download_url="$(printf '%s' "$metadata" | python -c '
+  python_bin="${PYNEREAL_SETUP_PYTHON:-$(command -v python3)}"
+  download_url="$(printf '%s' "$metadata" | "$python_bin" -c '
 import json, sys
 downloads = json.load(sys.stdin)["channels"]["Stable"]["downloads"]["chrome"]
 print(next(item["url"] for item in downloads if item["platform"] == "linux64"))
 ')" || {
     echo "[setup] invalid Chrome for Testing release metadata" >&2
     unset -f _apt_package 2>/dev/null || true
-    return 0
+    return 1
   }
-  tmp_dir="$(mktemp -d)" || return 0
-  if curl -fL "$download_url" -o "$tmp_dir/chrome-linux64.zip" \
+  tmp_dir="$(mktemp -d)" || return 1
+  if curl -fL --connect-timeout 15 --max-time 300 "$download_url" -o "$tmp_dir/chrome-linux64.zip" \
     && unzip -q "$tmp_dir/chrome-linux64.zip" -d "$tmp_dir"; then
     mkdir -p "$install_root"
     rm -rf "$install_root/chrome-linux64"
@@ -178,9 +220,16 @@ print(next(item["url"] for item in downloads if item["platform"] == "linux64"))
     echo "[setup] Chrome for Testing installed at $install_root/chrome-linux64/chrome"
   else
     echo "[setup] Chrome for Testing install failed; AI chart capture will be unavailable" >&2
+    rm -rf "$tmp_dir"
+    unset -f _apt_package 2>/dev/null || true
+    return 1
   fi
   rm -rf "$tmp_dir"
   unset -f _apt_package 2>/dev/null || true
+  if ! _chart_capture_ready "$install_root/chrome-linux64/chrome"; then
+    echo "[setup] installed chart-capture browser cannot run; check its runtime dependencies" >&2
+    return 1
+  fi
 }
 
 _setup_main() {
@@ -202,10 +251,14 @@ _setup_main() {
   python -m pip install -r requirements-runtime.txt || return 1
 
   _setup_ai_sandbox
-  _setup_ai_chart_capture
+  _setup_ai_chart_capture || echo "[setup] setup completed without chart capture; retry bash setup.sh --chart-capture-only" >&2
 }
 
-_setup_main "$@"
+if [ "${1:-}" = "--chart-capture-only" ]; then
+  _setup_ai_chart_capture
+else
+  _setup_main "$@"
+fi
 _setup_status=$?
-unset -f _find_python _setup_main _setup_ai_sandbox _setup_ai_chart_capture 2>/dev/null || true
+unset -f _find_python _setup_main _setup_ai_sandbox _setup_ai_chart_capture _chart_capture_browser _chart_capture_ready 2>/dev/null || true
 return "$_setup_status" 2>/dev/null || exit "$_setup_status"

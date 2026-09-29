@@ -9,6 +9,8 @@ from datetime import datetime
 from functools import partial
 from pathlib import Path
 
+from ai.scripts.session_evaluation_tool import SessionEvaluationToolError
+
 from .config import TelegramAIConfig
 from .store import TelegramStore
 from .transport import TelegramError, TelegramTransport
@@ -292,8 +294,19 @@ class TelegramAIService:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            _log(logging.ERROR, "screenshot failed (%s)", type(exc).__name__)
-            await self._db("finish", job, "Chart capture failed or the chart is not ready. Check the session and retry /screenshot.", "failed")
+            reason = exc.code if isinstance(exc, SessionEvaluationToolError) else "capture_failed"
+            messages = {
+                "browser_missing": "Chart capture requires Chrome/Chromium on the server. "
+                                   "On Linux, run bash setup.sh --chart-capture-only in the PyneReal directory.",
+                "browser_start_failed": "The server's chart-capture browser could not start. "
+                                        "Check its installation and runtime dependencies.",
+                "capture_timeout": "Chart capture timed out waiting for the browser or chart/Alert layout. "
+                                   "Retry /screenshot; check the server if it persists.",
+                "chart_not_ready": "Chart OHLCV data is still loading. Retry /screenshot after it is ready.",
+            }
+            _log(logging.ERROR, "screenshot failed (%s reason=%s)", type(exc).__name__, reason)
+            await self._db("finish", job, messages.get(reason,
+                           "Chart capture failed. Check the session and retry /screenshot."), "failed")
 
     async def _work(self) -> None:
         while True:
