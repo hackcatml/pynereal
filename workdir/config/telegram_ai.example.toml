@@ -1,0 +1,11 @@
+# Copy to telegram_ai.toml, then set the numeric user ID allowed to issue commands.
+# Reuses BOT_TOKEN and CHAT_ID from the environment or the repository .env.
+# CHAT_ID: private chat or group/supergroup ID (negative for groups).
+# allowed_user_ids: positive numeric IDs of people allowed to issue commands.
+# Enable reception on ONE server per bot. Group replies are visible to all members.
+# In groups use /ai@YourBot <request>; plain messages require Privacy Mode disabled
+# (via BotFather; remove/re-add the bot afterwards) or the bot to be an admin.
+[telegram_ai]
+enabled = false
+allowed_user_ids = []
+idle_timeout_seconds = 900

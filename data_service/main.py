@@ -16,12 +16,18 @@ from fastapi.exception_handlers import http_exception_handler
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ai.provider.codex_service import CodexService
+from ai.telegram.agent import TelegramAgent
+from ai.telegram.config import TelegramAIConfig
+from ai.telegram.service import TelegramAIService
 from ai.scripts.asset import eprint
 from account_data import AccountDataService
 from asset_portfolio import AssetPortfolioService
 from asset_transfer import AssetTransferService
 from calendar_store import CalendarEventStore
-from config import ensure_provider_config, load_hub_config, load_initial_sessions
+from config import (
+    default_telegram_chat_id, default_telegram_token,
+    ensure_provider_config, load_hub_config, load_initial_sessions,
+)
 from registry import SessionRegistry
 from api import build_session_api_router, build_control_router, build_validation_router
 from scripting_api import ScriptingExecutor, build_scripting_router
@@ -66,6 +72,7 @@ def build_app(
             _PROJECT_ROOT / "workdir" / "data" / "cache" / "scripting_history.sqlite"
         ),
     )
+    app.state.scripting_workspace = scripting_workspace
     scripting_backtest_manager = ScriptingBacktestManager(
         _PROJECT_ROOT,
         registry=registry,
@@ -317,6 +324,23 @@ async def main() -> None:
         eprint(f"[account] service startup failed: {type(exc).__name__}: {exc}")
     heartbeat = asyncio.create_task(_hub_status_heartbeat(registry))
 
+    try:
+        telegram_config = await asyncio.to_thread(
+            TelegramAIConfig.load,
+            _PROJECT_ROOT / "workdir" / "config" / "telegram_ai.toml",
+            token=default_telegram_token(), chat_id=default_telegram_chat_id(),
+        )
+    except (OSError, ValueError):
+        eprint("[telegram-ai] invalid configuration; reception disabled")
+        telegram_config = TelegramAIConfig()
+    telegram_ai = TelegramAIService(
+        telegram_config,
+        path=_PROJECT_ROOT / "workdir" / "data" / "telegram_ai.sqlite",
+        agent=TelegramAgent(codex_service, account_data_service, asset_portfolio_service,
+                            workspace=app.state.scripting_workspace, executor=app.state.scripting_executor, registry=registry),
+        notifications=registry.notifications,
+    )
+
     server = uvicorn.Server(
         uvicorn.Config(app, host=cfg.host, port=cfg.port, loop="asyncio", lifespan="off",
                        ws_ping_interval=None, ws_ping_timeout=None)
@@ -339,6 +363,7 @@ async def main() -> None:
         else None
     )
     try:
+        await telegram_ai.start()
         await server.serve()
     finally:
         update_shutdown_task.cancel()
@@ -353,7 +378,10 @@ async def main() -> None:
             pass
         heartbeat.cancel()
         try:
-            await registry.shutdown()
+            try:
+                await telegram_ai.close()
+            finally:
+                await registry.shutdown()
         finally:
             try:
                 await account_data_service.close()

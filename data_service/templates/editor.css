@@ -5,8 +5,8 @@
   gap: 5px;
   min-width: 0;
   padding: 5px 10px;
-  border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.12));
-  background: #11161d;
+  border-bottom: 1px solid var(--border, var(--ui-hover-overlay, rgba(255, 255, 255, 0.12)));
+  background: var(--ui-surface, #11161d);
 }
 
 .editor-find-row {
@@ -37,34 +37,34 @@
   height: 28px;
   box-sizing: border-box;
   padding: 4px 8px;
-  border: 1px solid #3a4350;
+  border: 1px solid var(--ui-border, #3a4350);
   border-radius: 4px;
   outline: none;
-  background: #0b0f14;
-  color: #e6edf3;
+  background: var(--ui-inset, #0b0f14);
+  color: var(--ui-heading, #e6edf3);
   font: 11px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
-.editor-find-panel input:focus { border-color: #388bfd; }
+.editor-find-panel input:focus { border-color: var(--ui-focus, #388bfd); }
 
 .editor-find-count {
   overflow: hidden;
-  color: #8b949e;
+  color: var(--ui-muted, #8b949e);
   font: 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   text-align: center;
   white-space: nowrap;
 }
 
-.editor-find-count.empty { color: #ff9a92; }
+.editor-find-count.empty { color: var(--ui-negative, #ff9a92); }
 
 .editor-find-action,
 .editor-replace-command {
   height: 28px;
   box-sizing: border-box;
-  border: 1px solid #3a4350;
+  border: 1px solid var(--ui-border, #3a4350);
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.04);
-  color: #c9d1d9;
+  background: var(--ui-hover-overlay, rgba(255, 255, 255, 0.04));
+  color: var(--ui-text, #c9d1d9);
   cursor: pointer;
   touch-action: manipulation;
 }
@@ -93,10 +93,10 @@
 .editor-find-action:focus-visible,
 .editor-replace-command:hover:not(:disabled),
 .editor-replace-command:focus-visible {
-  border-color: #59636f;
+  border-color: var(--ui-border-strong, #59636f);
   outline: none;
-  background: rgba(255, 255, 255, 0.09);
-  color: #ffffff;
+  background: var(--ui-hover-overlay, rgba(255, 255, 255, 0.09));
+  color: var(--ui-heading, #ffffff);
 }
 
 .editor-find-action:disabled,
@@ -111,9 +111,9 @@
 }
 
 .editor-replace-all[aria-pressed="true"] {
-  border-color: #388bfd;
+  border-color: var(--ui-focus, #388bfd);
   background: #1f6feb;
-  color: #ffffff;
+  color: var(--ui-heading, #ffffff);
 }
 
 .editor-replace-toggle span {
@@ -136,10 +136,10 @@
     z-index: 7;
     width: min(440px, calc(100% - 20px));
     padding: 6px;
-    border: 1px solid #3a4350;
+    border: 1px solid var(--ui-border, #3a4350);
     border-radius: 0 0 6px 6px;
-    background: #181d24;
-    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.38);
+    background: var(--ui-raised, #181d24);
+    box-shadow: 0 8px 22px rgb(0 0 0 / calc(0.38 * var(--ui-shadow-scale, 1)));
     animation: editor-find-enter 130ms ease-out;
   }
 

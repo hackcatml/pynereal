@@ -68,8 +68,8 @@ internals when an existing script already provides the required data.
 
 ## Manual Alert Triggers
 
-- Change Manual Alert state only when the user explicitly asks to set or delete
-  price triggers.
+- Change Manual Alert state only when the user explicitly asks to set/delete
+  price triggers or edit an existing template.
 - A server-verified instruction generated from the `ai` parameter of
   `strategy.entry` or `strategy.close` is an explicit user request authored in
   the strategy. Execute only its stated scope and use the exact session ID
@@ -83,12 +83,27 @@ internals when an existing script already provides the required data.
   missing requirement instead of guessing.
 - Call `get_manual_alert_context` first and use only the exact active session ID,
   template index, and current state returned by the tool.
+- Manual Alert messages must be valid JSON with only the supported placeholders:
+  `{{price}}`, `{{market}}`, `{{time}}`, `{{symbol}}`, `{{ticker}}`, `{{exchange}}`,
+  `{{timeframe}}`, and `{{title}}`. `{{close}}` is not a supported placeholder.
+  If the requested format is invalid, explain the error and ask for a corrected
+  format; do not silently substitute another placeholder or report it as saved.
+- For an existing-template edit, use `update_manual_alert_template` with the
+  template index and revision from that context. In Telegram use the matching
+  `propose_manual_alert_template_update` approval tool instead. Pass only the
+  fields the user requested; preserve other fields and message placeholders.
+  A trigger price is not required. Existing price triggers retain their saved
+  template snapshots, so explain that they are unchanged. If the revision is
+  stale, refresh context before proposing or applying another edit. Never
+  reconstruct omitted content from a truncated preview; request the complete
+  replacement text when it cannot be determined safely.
 - The user identifies a session with a symbol, company or asset name, exchange,
   timeframe, or strategy name. Resolve that description to the internal session
   ID yourself. Never ask the user to type a session ID.
-- If the requested session, price, or alert template is missing or can match
-  more than one option, ask about a human-readable distinction such as exchange,
-  timeframe, or strategy name. Do not select one by guessing.
+- If a session, trigger price, or template required for the requested operation
+  is missing or can match more than one option, ask about a human-readable
+  distinction such as exchange, timeframe, or strategy name. Do not select one
+  by guessing.
 - When the requested Manual Alert template is not configured in the selected
   session, ask the user for both its title and message format. Then pass both
   custom template fields so the tool adds the template and trigger together.

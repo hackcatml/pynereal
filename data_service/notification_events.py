@@ -31,6 +31,9 @@ def delivery_result(*, response=None, error=None, status: str = "sent") -> dict:
         except (ValueError, TypeError):
             body = None
         if isinstance(body, dict):
+            reference = telegram_message_reference(body)
+            if reference is not None:
+                result["message_ref"] = reference
             if body.get("ok") is False:
                 result["status"] = "failed"
             business_status = body.get("status")
@@ -59,11 +62,36 @@ def recorded_result(result: dict) -> dict:
     except (ValueError, TypeError):
         body = None
     if isinstance(body, dict):
+        reference = telegram_message_reference(body)
+        if reference is not None:
+            outcome["message_ref"] = reference
         if body.get("ok") is False:
             outcome["status"] = "failed"
         if body.get("status") in ("pending", "executed", "failed", "error", "success", "ok"):
             outcome["receiver_status"] = body["status"]
+    reference = result.get("message_ref")
+    if valid_telegram_reference(reference):
+        outcome["message_ref"] = dict(reference)
     return outcome
+
+
+def valid_telegram_reference(value: Any) -> bool:
+    return (isinstance(value, dict) and set(value) == {"bot", "chat", "message"}
+            and all(type(value[key]) is int for key in value)
+            and value["bot"] > 0 and value["chat"] != 0 and value["message"] > 0)
+
+
+def telegram_message_reference(body: Any) -> dict | None:
+    if not isinstance(body, dict) or body.get("ok") is not True:
+        return None
+    message = body.get("result")
+    if not isinstance(message, dict):
+        return None
+    sender, chat = message.get("from"), message.get("chat")
+    if not isinstance(sender, dict) or sender.get("is_bot") is not True or not isinstance(chat, dict):
+        return None
+    reference = {"bot": sender.get("id"), "chat": chat.get("id"), "message": message.get("message_id")}
+    return reference if valid_telegram_reference(reference) else None
 
 
 def safe_text(value: Any, limit: int = 2000) -> str:

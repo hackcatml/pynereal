@@ -17,6 +17,9 @@ workdir/config/providers.toml
 # Ignore runtime session state and per-session output (hub)
 workdir/config/sessions.json
 workdir/config/ai_chat.json
+workdir/config/telegram_ai.toml
+workdir/data/telegram_ai.sqlite*
+workdir/data/telegram_ai.lock
 workdir/config/calendar_events.json
 workdir/config/watchlist_favorites.json
 workdir/config/update_request.json

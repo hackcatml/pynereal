@@ -61,7 +61,7 @@ from config import (
     sanitize_manual_alert_triggers,
     validate_history_since,
 )
-from manual_alerts import send_manual_alert_payload
+from manual_alerts import send_manual_alert_payload, validate_manual_alert_template
 from ohlcv_io import make_ccxt_pro_client
 from ohlcv_paths import make_cache_path
 from update_service import UpdateService, UpdateServiceError
@@ -736,9 +736,16 @@ def build_session_api_router(
                 status_code=400,
             )
         try:
+            rt = _rt(session_id)
+            if rt is None:
+                return JSONResponse({"error": "session not found"}, status_code=404)
+            for template in sanitized:
+                validate_manual_alert_template(template, rt.spec)
             updated = await registry.update_manual_alert_templates(session_id, sanitized)
         except SessionNotFoundError:
             return JSONResponse({"error": "session not found"}, status_code=404)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
         except Exception as e:
             return JSONResponse({"error": f"failed to update templates: {e}"}, status_code=500)
         return JSONResponse({"templates": updated})
@@ -761,9 +768,18 @@ def build_session_api_router(
             return JSONResponse({"error": "each trigger requires valid price and template"}, status_code=400)
 
         try:
+            rt = _rt(session_id)
+            if rt is None:
+                return JSONResponse({"error": "session not found"}, status_code=404)
+            for trigger in triggers:
+                # Existing invalid snapshots must not prevent cancelling other alerts.
+                if trigger not in rt.spec.manual_alert_triggers:
+                    validate_manual_alert_template(trigger["template"], rt.spec)
             updated = await registry.update_manual_alert_triggers(session_id, triggers)
         except SessionNotFoundError:
             return JSONResponse({"error": "session not found"}, status_code=404)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
         except Exception as e:
             return JSONResponse({"error": f"failed to update trigger: {e}"}, status_code=500)
         return JSONResponse({"triggers": updated})
@@ -1251,6 +1267,7 @@ def build_control_router(
             "models": models,
             "selected_model": prefs["model"],
             "selected_effort": prefs["effort"],
+            "selected_service_tier": prefs["service_tier"],
         })
 
     @r.put("/api/ai/chat/preferences")
@@ -1261,8 +1278,11 @@ def build_control_router(
         effort = payload.get("effort")
         if effort is not None and not isinstance(effort, str):
             return JSONResponse({"error": "effort must be a string"}, status_code=400)
+        service_tier = payload.get("service_tier")
+        if service_tier is not None and not isinstance(service_tier, str):
+            return JSONResponse({"error": "service_tier must be a string"}, status_code=400)
         try:
-            prefs = await codex_service.set_chat_preferences(model, effort)
+            prefs = await codex_service.set_chat_preferences(model, effort, service_tier)
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         except Exception as e:
@@ -1272,6 +1292,7 @@ def build_control_router(
             "type": "ai_prefs_updated",
             "model": prefs["model"],
             "effort": prefs["effort"],
+            "service_tier": prefs["service_tier"],
         })
         return JSONResponse(prefs)
 
@@ -1307,12 +1328,15 @@ def build_control_router(
         effort = payload.get("effort")
         if effort is not None and not isinstance(effort, str):
             return JSONResponse({"error": "effort must be a string"}, status_code=400)
+        service_tier = payload.get("service_tier")
+        if service_tier is not None and not isinstance(service_tier, str):
+            return JSONResponse({"error": "service_tier must be a string"}, status_code=400)
         try:
             model = await codex_service.validate_model(model)
             effort = await codex_service.validate_effort(effort, model)
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
-        if model is None or effort is None:
+        if model is None or effort is None or service_tier is None:
             # fall back to the shared dashboard selection (or its defaults)
             try:
                 prefs = await codex_service.chat_preferences()
@@ -1323,6 +1347,12 @@ def build_control_router(
                     model = prefs["model"]
                 if effort is None and model == prefs["model"]:
                     effort = prefs["effort"]
+                if service_tier is None and model == prefs["model"]:
+                    service_tier = prefs.get("service_tier")
+        try:
+            service_tier = await codex_service.validate_service_tier(service_tier, model) or "default"
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
         history = _sanitize_ai_chat_history(payload.get("history"))
         async def notify_chat_updated() -> None:
             await registry.hub_ws.broadcast_json({"type": "ai_chat_updated"})
@@ -1334,6 +1364,7 @@ def build_control_router(
             on_state_changed=notify_chat_updated,
             model=model,
             effort=effort,
+            service_tier=service_tier,
         )
 
         async def stream() -> AsyncIterator[str]:
@@ -1537,6 +1568,7 @@ def build_control_router(
                 preferences = await codex_service.chat_preferences()
                 model = preferences.get("model") if isinstance(preferences, dict) else None
                 effort = preferences.get("effort") if isinstance(preferences, dict) else None
+                service_tier = preferences.get("service_tier") if isinstance(preferences, dict) else None
                 prompt = _manual_calendar_event_prompt(
                     event_date=event_date,
                     user_text=user_text,
@@ -1548,6 +1580,7 @@ def build_control_router(
                     initial_context=prompt,
                     model=model,
                     effort=effort,
+                    service_tier=service_tier,
                 ):
                     event_payload = stream_event.payload
                     if stream_event.event == "conversation":
@@ -1602,6 +1635,7 @@ def build_control_router(
             preferences = {}
         model = preferences.get("model")
         effort = preferences.get("effort")
+        service_tier = preferences.get("service_tier")
         message = f"{event['title']} 전망을 분석해줘."
         prompt = _calendar_forecast_prompt(event, affected_sessions)
 
@@ -1624,6 +1658,7 @@ def build_control_router(
                     initial_context=prompt,
                     model=model,
                     effort=effort,
+                    service_tier=service_tier,
                 ):
                     payload = stream_event.payload
                     if stream_event.event == "conversation":

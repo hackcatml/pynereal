@@ -628,6 +628,262 @@ Dashboard AI can:
   `data_service/templates/` when explicitly requested, or create new files
   under `tmp/`.
 
+### Telegram AI (Opt-In)
+
+Chart screenshots in both web AI and Telegram require Chrome/Chromium on the
+server. On Ubuntu/Debian x86_64, setup installs Chrome for Testing under
+`.runtime/chrome-for-testing/` when no existing browser is available. To install
+or repair only capture dependencies, run `bash setup.sh --chart-capture-only`
+from the PyneReal directory; this does not reinstall Python packages or change
+AI sandbox settings. An existing executable can also be selected with
+`PYNEREAL_CHROME_PATH`.
+
+Backend updates check this separately after applying the new code, before feeds
+and runners resume, including upgrades from an older Updater that already
+marked Python dependencies as synced. A working browser is reused without
+downloading or running apt. Automated installation never prompts for sudo;
+if administrator access or downloads fail, the update continues with a warning
+and capture stays unavailable until repaired manually. This host-tool check
+does not require an additional backend restart. Ordinary startup, frontend-only
+updates and screenshot requests do not install software. Other Linux
+architectures/distributions need a compatible browser installed manually.
+
+The existing alert bot can also accept AI requests in a configured
+private chat, group or supergroup. Create `workdir/config/telegram_ai.toml` using
+`workdir/config/telegram_ai.example.toml`:
+
+```toml
+[telegram_ai]
+enabled = true
+allowed_user_ids = [123456789] # Your numeric Telegram user ID, not a username
+idle_timeout_seconds = 900
+```
+
+Reception reuses the root `.env` or environment `BOT_TOKEN` and numeric `CHAT_ID`.
+For groups, `CHAT_ID` is the negative group/supergroup ID, while
+`allowed_user_ids` contains the positive IDs of the people allowed to give
+instructions. Both the exact chat and sender must be allowed. Channel posts,
+bot messages and messages sent on behalf of a chat (including anonymous admins)
+are rejected. Conversation mode, history and cancellation are scoped to each
+user within that chat. **AI answers in a group are visible to all its members**,
+even those not allowed to give instructions. Enable it on **one server per bot**;
+an existing Telegram webhook or another `getUpdates` receiver must not share
+the bot. No incoming public port or Telegram webhook endpoint is required.
+Restart data-service after configuration changes. Codex AI must be enabled for
+AI conversations; `/screenshot`, `/assets`, `/positions`, `/sessions`, `/pnl`
+and `/alerts` do not require it.
+
+In a group, send `/ai@YourBot current positions` as a new message, using the
+bot's actual username. `/end@YourBot` and `/cancel@YourBot` also work. Commands
+addressed to another bot are ignored. To continue with ordinary text after `/ai`,
+disable Privacy Mode through BotFather's `/setprivacy` and remove/re-add the bot
+to the group, or use a bot that is already a group admin. Addressed commands work
+without disabling Privacy Mode, so admin permissions are not required for that
+workflow. See [Telegram's Privacy Mode documentation](https://core.telegram.org/bots/features#privacy-mode).
+If a group is migrated to a supergroup, update `CHAT_ID` to the new ID and restart;
+the receiver does not automatically authorize a different destination.
+
+At startup, PyneReal registers `/ai`, `/screenshot`, `/assets`, `/positions`,
+`/sessions`, `/pnl`, `/alerts`, `/model`, `/new`, `/cancel`, `/end` and `/help`
+for the configured chat via Telegram's
+[`setMyCommands`](https://core.telegram.org/bots/api#setmycommands).
+Typing `/` shows their descriptions without manual BotFather configuration.
+Registration does not grant access: the same chat/user checks apply to all
+commands and selection buttons. A menu-registration failure is logged and does
+not disable command reception.
+
+- `/screenshot` shows all registered sessions as selection buttons, with 10
+  sessions per page and Previous/Next buttons when needed. This also applies
+  when there is only one session.
+- `/screenshot mrvl` or `/screenshot btc` captures and sends the matching session
+  chart **without enabling AI conversation mode or calling the model**. Add an
+  exchange/timeframe, such as `/screenshot okx mrvl 5m`, or use an exact session ID.
+  Multiple matches show session-selection buttons; only the requester can select,
+  once, within 10 minutes. In groups, `/screenshot@YourBot mrvl` also works.
+  Capture runs separately from the AI request queue and requires ready OHLCV data,
+  not a running runner or completed strategy calculation. It captures the current
+  visible chart, including any available plots. Captures reserve space to the
+  right of the latest candle for price labels, without changing ordinary chart
+  views. Browser rendering and Telegram delivery limits still
+  apply; unavailable charts are reported rather than substituted. `/cancel` cancels
+  unfinished captures and selections. Restart invalidates old selections and does
+  not replay unfinished captures. This command does not enter AI conversation history.
+- `/assets` first shows **All** and configured-exchange selection buttons; no
+  balance lookup runs until selection. Only the requester can select within
+  10 minutes. The result replaces the menu with the selected accounts and their
+  totals; selecting an exchange does not include other exchanges' balances.
+  Totals remain separated
+  by quote currency, such as USDT and USDC; unavailable accounts or prices are
+  marked as partial data, not zero balances. Individual holdings valued below
+  10 USD equivalent are omitted, while account and overall totals stay unchanged.
+  USD-pegged quote currencies use the existing valuation convention; other quote
+  currencies need an available conversion price. Holdings with unavailable
+  valuations are also omitted; partial-data and account-lookup failure notices remain.
+- `/positions` reports open positions, including account, symbol, side, size,
+  entry/mark price, unrealized PnL, return and realized PnL when available.
+  Failed account lookups are distinguished from accounts with no positions.
+  Both account commands work without AI mode or model inference and use the
+  existing Account Center services: valid cached snapshots are reused, and
+  missing or expired snapshots follow their existing refresh behavior. Reports
+  include the snapshot time in UTC. These commands take no arguments: `/assets`
+  lets you select the scope, while `/positions` covers all configured accounts.
+  Selecting an exchange queries only its configured accounts when that scope's
+  cache is missing or expired. All and each exchange have separate 30-second
+  caches; a partial lookup never replaces the full-account snapshot. Existing
+  background market-metadata refresh is unchanged. Neither command places
+  orders or modifies account settings.
+  They run independently of AI requests, do not enter AI conversation history,
+  and retain the same authorization, cancellation and delivery safeguards.
+- `/sessions` shows session-selection buttons, 10 per page. `/sessions mrvl` or
+  `/sessions okx mrvl` narrows the list. Selecting a session shows runner,
+  calculation, data/feed, webhook and Telegram notification state, with buttons
+  to start/stop its runner or enable/disable its webhook and Telegram alerts.
+  **Control buttons apply the displayed action immediately** using the same
+  operations as the dashboard. Runner start follows normal warm-up; stopping
+  does not close exchange positions. The Telegram switch controls this session's
+  alert notifications, not the bot's command reception. Refresh reloads state;
+  there is no background status polling. Only the requester can use the current
+  buttons; expired, repeated or replaced-session selections are rejected.
+  Changes already started may finish after `/cancel`; failed or interrupted
+  controls are not automatically retried or replayed after a server restart.
+- `/pnl` shows period-selection buttons: 7D, 30D, 90D, 6M, 1Y and All. No PnL
+  query runs until you select a period; the report then replaces the menu.
+  Only the requester can select, once, within 10 minutes. Cancel closes the menu.
+  You can still specify `/pnl 7d`, `30d`, `90d`, `6m` (180 days), `1y` (365 days),
+  or `all` directly. Reports are grouped by account and settlement currency.
+  This reuses Account Center's PnL: Net PnL includes realized PnL
+  and current cached unrealized PnL. `all` means all stored history, not a new
+  full exchange backfill. Missing history can still make the report partial.
+- `/alerts` (also `/alert`) shows **List**, **Set alert** and **Set templates** buttons. List shows active
+  Manual Alert price triggers across sessions, with symbol, exchange, timeframe,
+  template title and trigger price; unused templates are not listed. The List,
+  Set alert and Set templates buttons remain available below the results. Select an alert,
+  then press **Cancel alert** to cancel only that price trigger; its template is
+  kept. The list refreshes after cancellation, with 10 alerts per page. Alerts
+  that already fired or changed since selection are not cancelled using stale
+  details. Closing the menu does not cancel any alerts.
+  Set alert lets you choose a session and an existing template, enter a positive
+  decimal price or a calculation such as `252.41 * 0.996` or `252.41 + 1.01`
+  (`+`, `-`, `*`, `/` and parentheses; no variables, commas or currency).
+  Review the calculated positive price, then press **Set alert**
+  to arm the price trigger. No trigger is added before confirmation. **Change
+  price** returns to price input. The same active price/template is not added
+  twice; other alerts and all templates remain unchanged. A changed or removed
+  session/template rejects the setup. If no templates exist, use Set templates
+  first. This uses the existing market-price trigger mechanism, not a direct
+  webhook send, and does not require a running strategy or AI mode.
+  Set templates lets you select a session and create a new template or edit an
+  existing one. Send its title, message and optional AI instruction as text
+  (reply to the prompt in groups), review the contents, then press **Save**.
+  Placeholders such as `{{market}}` are preserved. Saving only updates the
+  session's templates: existing trigger snapshots are unchanged and no alert is
+  sent. Only the requester can enter text or save; menus expire after 10 minutes
+  of inactivity. `/cancel`, `/end` or a server restart discards unsaved drafts.
+  Concurrent template/session changes reject stale saves instead of overwriting.
+  These three commands also work without AI mode or model inference; AI tools
+  do not gain access to the session-control buttons' mutation operations.
+- `/ai` or `/ai your request` starts AI conversation mode; subsequent text
+  continues the conversation. Responses and notices are prefixed with 🤖.
+- Accepted requests show `🤖 Think...` in a pending message; the server
+  sends no periodic animation edits. The completed answer replaces that message;
+  longer answers continue in additional messages.
+  Cancellation, failure and server restart also replace the pending message.
+  If the message was deleted or cannot be edited, the answer is sent separately.
+- `/end` exits the mode and cancels unfinished requests. `/cancel` cancels
+  unfinished requests but leaves the mode enabled. Neither undoes completed work.
+- `/new` starts a fresh conversation and keeps AI mode on, preserving your
+  model/effort/speed selection. Previous conversation text and attachments are excluded
+  from the new context. Unfinished requests and pending change proposals are
+  cancelled; already-started approved actions may finish. Stored history and
+  existing Telegram messages are not deleted. This affects only your conversation
+  with this bot in this chat, not other users or browser AI.
+- The mode expires after 15 minutes without input, or on server restart.
+- `/model` shows your current model/effort/speed and model selection buttons. After
+  choosing a model, choose its reasoning effort and speed in the same message to
+  save. Speed choices come from the selected model's Codex catalog; Fast and
+  Ultrafast appear only when advertised. Models without extra speed tiers save
+  with Standard speed after the effort selection. Faster tiers may use more of
+  your allowance; the selector includes Codex's tier descriptions.
+  There is no separate `/effort` command. Choices use the existing web AI model
+  catalog and persist per bot/chat/user across restarts, independently of browser
+  AI preferences. Only the requester can select within 10 minutes. Cancel keeps
+  existing settings; `/model` again or server restart invalidates old buttons.
+  Changes apply to subsequently submitted requests, not running or queued work.
+  Opening the selector does not start AI conversation mode; use `/ai` to chat.
+- Browser AI and Script AI have the same Speed choices below Reasoning in their
+  existing model menus, without an extra control in the message input area.
+  Standard explicitly resets a previously selected faster tier. The shared web
+  selection is saved independently of Telegram preferences.
+- Assets, positions, cached order/position history, PnL and session evaluation
+  use the existing read-only services. Browser chat history stays separate.
+  Position/asset refresh uses those services; history refresh is restricted to
+  one specified account and symbol, not a full-account backfill.
+- Ask for a session chart screenshot to receive a photo. This uses the existing
+  local Chrome/Chromium capture path once OHLCV data is ready, even if the runner
+  is stopped. It does not wait for or require a completed strategy calculation.
+  Screenshot-only requests resolve the session without collecting account,
+  order-history or strategy-evaluation evidence. The photo enters the send queue
+  as soon as capture finishes, without waiting for the final AI answer or image
+  analysis. Browser rendering and Telegram delivery limits still apply. Explicit
+  analysis requests retain the existing evaluation flow, including calculation
+  readiness and generation-consistency checks for analysis captures.
+- Send a PNG/JPEG/WebP image (up to 5 MB) or a UTF-8 `.py`, `.pine`, `.txt` or
+  `.md` attachment (up to 256 KB), with your question in the caption while AI
+  mode is active, or start the caption with `/ai`. Attachments are not executed
+  or copied into the scripts directory. The last 10 attachments per user are
+  available for follow-up questions for up to 24 hours within the current conversation.
+- Reply to a newly recorded strategy/manual/verification notification to ask
+  about its exact session, candle and signal. Linking uses the actual Telegram
+  bot/chat/message IDs recorded by Notification Center, never the quoted text.
+  Older or unrecorded alerts cannot be linked; include their symbol, exchange
+  and time in a new request instead. Replies to your own AI results in the current
+  conversation also work.
+- Explicit requests to edit an existing `workdir/scripts` file produce a diff
+  attachment (`changes.html`) and **Save / Cancel** buttons. Open the HTML
+  preview to see removed lines in red and added lines in green, with unchanged
+  context and changed line ranges. It is self-contained, with no scripts or
+  external resources. Saving requires the same file
+  revision, preserves Scripting version history, and applies to running sessions
+  through the existing next-warm-up behavior. Telegram editing is limited to
+  256 KB per script; file creation, renaming and deletion are not exposed.
+  Approval results show a short save/check summary instead of internal JSON.
+  Active sessions include the estimated time until their next warm-up, sampled
+  when the save result is prepared (not a live countdown). Stopped runners apply
+  the saved source on their next start; unavailable timing is reported explicitly.
+- Manual Alert setup/deletion and calendar changes show the exact scope and
+  values for **Apply / Cancel** approval. Changes to the affected session,
+  templates, triggers or calendar after preview invalidate the proposal.
+  Live web search can verify public information and calendar dates with source
+  URLs. Calendar changes still require approval; shell/network access for
+  arbitrary commands remains disabled.
+- Existing Manual Alert templates can also be edited. Specify the session,
+  template and replacement message, title or AI instruction; no trigger price
+  is required. Telegram shows the complete before/after values for **Apply / Cancel**
+  approval. Unspecified fields and placeholders such as `{{market}}` are preserved.
+  Existing price triggers retain their original template snapshots; editing a
+  template does not change those triggers or send an alert. Stale template
+  revisions are rejected. The web AI supports the same template-editing operation
+  through its dedicated tool when explicitly requested.
+- Only the original requester can approve, in the original chat and approval
+  message, within 10 minutes. Duplicate clicks cannot reapply the operation.
+  `/cancel`, `/end` and `/new` invalidate pending proposals; an already-started approved
+  action may finish. No exchange orders, transfers, withdrawals, arbitrary
+  shell commands or unapproved filesystem writes are exposed.
+
+State is stored locally in `workdir/data/telegram_ai.sqlite`, outside disposable
+caches. Treat it as private conversation/account data. Completed text history
+survives restart (the last 10 completed exchanges since `/new` are provided as context);
+unfinished requests are not automatically replayed, and messages from before
+receiver startup are ignored. Saved replies can resume delivery without rerunning
+AI. Pending approvals expire at restart; interrupted changes are never replayed
+automatically. If a change's outcome is uncertain, inspect the current file or
+settings before requesting it again. Network response loss can still cause a
+duplicate Telegram reply, photo or approval message, but only the recorded
+approval message can authorize its one-time operation.
+Existing strategy alert delivery is unchanged; AI output is paced and handles
+429 responses (at least 1.1 seconds between attempts for private chats, 3.1 seconds
+for groups), but does not yet share a global rate-limit queue with alert senders.
+
 ### Exchange Account Access
 
 Put exchange credentials in the local file below if AI should inspect account

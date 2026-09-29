@@ -444,6 +444,28 @@
     el("hub-menu-button").setAttribute("aria-expanded", "false");
   }
 
+  function initHubTheme() {
+    const key = "pyne.hub.theme";
+    const root = document.documentElement;
+    const button = el("hub-theme-toggle");
+    function applyTheme(value) {
+      const light = value === "light";
+      root.dataset.theme = light ? "light" : "dark";
+      button.setAttribute("aria-label", `Switch to ${light ? "dark" : "light"} theme`);
+      button.dataset.tooltip = light ? "Dark theme" : "Light theme";
+    }
+    applyTheme(root.dataset.theme);
+    // Keep the drawer's swipe capture from taking a tap intended for this button.
+    button.addEventListener("pointerdown", (event) => event.stopPropagation());
+    button.addEventListener("click", () => {
+      applyTheme(root.dataset.theme === "light" ? "dark" : "light");
+      try { localStorage.setItem(key, root.dataset.theme); } catch {}
+    });
+    window.addEventListener("storage", (event) => {
+      if (event.key === key || event.key === null) applyTheme(event.newValue);
+    });
+  }
+
   const watchlistExchangeNames = {
     binance: "Binance",
     bitget: "Bitget",
@@ -619,7 +641,7 @@
     const favorite = document.createElement("button");
     favorite.type = "button";
     favorite.className = "watchlist-favorite";
-    favorite.textContent = "★";
+    favorite.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.78 5.63 6.22.91-4.5 4.39 1.06 6.2L12 17.2l-5.56 2.93 1.06-6.2L3 9.54l6.22-.91Z" /></svg>';
     item.appendChild(favorite);
 
     const market = document.createElement("div");
@@ -2613,7 +2635,7 @@
       });
       donut.style.background = stops.length
         ? `conic-gradient(${stops.join(", ")})`
-        : "#29313c";
+        : "var(--ui-hover, #29313c)";
       donut.classList.toggle("showing-account-types", showAccountTypes);
       donut.setAttribute("aria-pressed", String(showAccountTypes));
       donut.setAttribute(
@@ -6039,7 +6061,7 @@
     }, { passive: false });
 
     el("hub-menu-button").addEventListener("click", openHubMenu);
-    el("hub-menu-close").addEventListener("click", closeHubMenu);
+    initHubTheme();
     el("hub-menu-backdrop").addEventListener("click", closeHubMenu);
     el("hub-watchlist-open").addEventListener("click", openWatchlist);
     el("hub-calendar-open").addEventListener("click", openCalendar);
@@ -8363,6 +8385,7 @@
   let aiModels = [];
   let aiSelectedModel = "";
   let aiSelectedEffort = "";
+  let aiSelectedServiceTier = "default";
   let aiModelMenuAnchor = null;
   let reclampAiFab = null; // set by initAiChat; re-clamps the saved FAB spot
 
@@ -8396,6 +8419,17 @@
     aiSelectedEffort = efforts.includes("medium") ? "medium" : efforts[efforts.length - 1];
   }
 
+  function aiSupportedSpeeds() {
+    const selected = aiModels.find((item) => item.value === aiSelectedModel);
+    return selected?.speeds?.length ? selected.speeds : [{ value: "default", label: "Standard" }];
+  }
+
+  function clampAiSpeed() {
+    if (!aiSupportedSpeeds().some((item) => item.value === aiSelectedServiceTier)) {
+      aiSelectedServiceTier = "default";
+    }
+  }
+
   // the selection lives on the server so every browser shares it; the
   // ai_prefs_updated broadcast brings other clients in line
   function pushAiPrefs() {
@@ -8405,11 +8439,13 @@
       body: JSON.stringify({
         model: aiSelectedModel || null,
         effort: aiSelectedEffort || null,
+        service_tier: aiSelectedServiceTier,
       }),
     }).catch(() => {});
   }
 
-  function applyAiPrefs(model, effort) {
+  function applyAiPrefs(model, effort, serviceTier) {
+    window.PyneScriptingAi?.applyPreferences(model, effort, serviceTier);
     let changed = false;
     if (
       typeof model === "string" && model && model !== aiSelectedModel
@@ -8422,8 +8458,13 @@
       aiSelectedEffort = effort;
       changed = true;
     }
+    if (typeof serviceTier === "string" && serviceTier && serviceTier !== aiSelectedServiceTier) {
+      aiSelectedServiceTier = serviceTier;
+      changed = true;
+    }
     if (!changed) return;
     clampAiEffort();
+    clampAiSpeed();
     renderAiModelMenu();
     updateAiModelControls();
     if (aiModelMenuAnchor) positionAiModelMenu(aiModelMenuAnchor);
@@ -8436,7 +8477,8 @@
     el("ai-model-label").textContent = label;
     el("ai-model-selector").disabled = aiModels.length === 0;
     for (const option of el("ai-model-menu").querySelectorAll(".ai-model-option")) {
-      const selectedValue = option.dataset.kind === "effort" ? aiSelectedEffort : aiSelectedModel;
+      const selectedValue = option.dataset.kind === "speed" ? aiSelectedServiceTier
+        : option.dataset.kind === "effort" ? aiSelectedEffort : aiSelectedModel;
       option.setAttribute("aria-selected", String(option.dataset.value === selectedValue));
     }
   }
@@ -8445,6 +8487,7 @@
     if (!aiModels.some((item) => item.value === value)) return;
     aiSelectedModel = value;
     clampAiEffort();
+    clampAiSpeed();
     pushAiPrefs();
     // the reasoning section follows the model, so rebuild and keep the menu
     // open for the follow-up effort pick
@@ -8456,6 +8499,13 @@
   function selectAiEffort(value) {
     if (!aiSupportedEfforts().includes(value)) return;
     aiSelectedEffort = value;
+    pushAiPrefs();
+    updateAiModelControls();
+  }
+
+  function selectAiSpeed(value) {
+    if (!aiSupportedSpeeds().some((item) => item.value === value)) return;
+    aiSelectedServiceTier = value;
     pushAiPrefs();
     updateAiModelControls();
     closeAiModelMenu();
@@ -8517,6 +8567,13 @@
         );
       }
     }
+    addHeading("Speed");
+    for (const speed of aiSupportedSpeeds()) {
+      addOption(
+        "speed", speed.value, speed.label, speed.description,
+        speed.value === aiSelectedServiceTier, () => selectAiSpeed(speed.value),
+      );
+    }
   }
 
   async function loadAiModels() {
@@ -8537,7 +8594,9 @@
       aiSelectedModel = selected ? selected.value : "";
       aiSelectedEffort = typeof response.selected_effort === "string"
         ? response.selected_effort : "";
+      aiSelectedServiceTier = response.selected_service_tier || "default";
       clampAiEffort();
+      clampAiSpeed();
       renderAiModelMenu();
       updateAiModelControls();
     })().catch(() => {
@@ -8640,7 +8699,7 @@
       : "";
     aiRemotePending = Boolean(state && state.pending);
     // catch up on a model/effort change whose broadcast this client missed
-    if (state) applyAiPrefs(state.model, state.effort);
+    if (state) applyAiPrefs(state.model, state.effort, state.service_tier);
     saveAiMessages();
     saveAiConversationId();
     el("ai-chat-send").disabled = aiPending || aiRemotePending;
@@ -8918,6 +8977,7 @@
           conversation_id: aiConversationId || null,
           model: aiSelectedModel || null,
           effort: aiSelectedEffort || null,
+          service_tier: aiSelectedServiceTier,
         }),
       }, (eventName, data) => {
         if (eventName === "conversation") {
@@ -10665,7 +10725,7 @@
         } else if (msg.type === "ai_chat_updated" && !aiPending) {
           syncAiChatState({ allowImport: false });
         } else if (msg.type === "ai_prefs_updated") {
-          applyAiPrefs(msg.model, msg.effort);
+          applyAiPrefs(msg.model, msg.effort, msg.service_tier);
         } else if (msg.type === "calendar_updated") {
           if (isCalendarOpen()) loadCalendarEvents();
         } else if (msg.type === "calendar_forecast_running") {

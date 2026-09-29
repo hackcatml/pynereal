@@ -26,6 +26,7 @@ from openai_codex.generated.v2_all import (
     ReasoningEffort,
     TurnCompletedNotification,
     TurnStatus,
+    ThreadUnsubscribeResponse,
     WebSearchThreadItem,
 )
 from pydantic import BaseModel, ConfigDict, Field
@@ -37,12 +38,14 @@ DEFAULT_DEVELOPER_INSTRUCTIONS = (
     "Treat exchanges and accounts as read-only. Do not place or cancel orders, "
     "change leverage, or perform any other account state mutation. "
     "You may change session state only through the dedicated tools when the user "
-    "explicitly requests setting or deleting Manual Alert price triggers. For any Manual Alert request, "
+    "explicitly requests setting/deleting Manual Alert price triggers or editing an existing "
+    "Manual Alert template. For any Manual Alert request, "
     "A server-verified automated strategy instruction configured through the ai parameter of "
     "strategy.entry or strategy.close is an explicit user request. Execute only its stated scope "
     "and use the exact session context supplied by the server. "
     "first call get_manual_alert_context to inspect the active sessions and templates. "
-    "If the session, price, alert template, deletion target, or deletion scope is unclear or "
+    "If information required for the requested operation (session, trigger price, template, "
+    "deletion target or scope) is unclear or "
     "could match more than one option, do not call a mutation tool. Ask for a human-readable distinction "
     "such as the exchange, timeframe, or strategy name. Never ask the user to provide a "
     "session_id. Resolve the user's symbol, company or asset name, or strategy description "
@@ -55,6 +58,11 @@ DEFAULT_DEVELOPER_INSTRUCTIONS = (
     "delete_manual_alert_triggers. If the user explicitly asks to delete all triggers in one "
     "session and then set a new trigger in that same session, call set_manual_alert_trigger once "
     "with replace_existing_triggers=true instead of performing separate delete and set calls. "
+    "For an explicit existing-template edit, use update_manual_alert_template with the exact "
+    "template index and revision from get_manual_alert_context. Change only the requested "
+    "fields; no trigger price is required. Preserve message placeholders verbatim. Existing "
+    "price triggers keep their saved template snapshots; explain that they are unchanged. "
+    "If the template changed, refresh context instead of overwriting stale data. "
     "Deleting or replacing triggers must always preserve configured alert templates. Never delete "
     "a template unless the user explicitly requests template deletion through a dedicated tool. "
     "When an asset or position request does not specify an account or exchange, run the "
@@ -162,12 +170,26 @@ class _CodexModelInfo(BaseModel):
         default_factory=list,
         alias="supportedReasoningEfforts",
     )
+    service_tiers: list[dict[str, Any]] | None = Field(default_factory=list, alias="serviceTiers")
 
 
 class _CodexModelListResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
     data: list[_CodexModelInfo]
+
+
+class _CodexAccountInfo(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    type: Literal["apiKey", "chatgpt", "amazonBedrock"]
+
+
+class _CodexAccountResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    account: _CodexAccountInfo | None = None
+    requires_openai_auth: bool = Field(alias="requiresOpenaiAuth")
 
 
 @dataclass(frozen=True)
@@ -250,16 +272,18 @@ class CodexService:
         self._chat_state_lock = asyncio.Lock()
         self._conversations: dict[str, AsyncThread] = {}
         self._turn_locks: dict[str, asyncio.Lock] = {}
+        self._telegram_tool_handlers: dict[str, Callable | None] = {}
         self._model_options: list[dict[str, Any]] | None = None
         self._shared_chat_tasks: set[asyncio.Task[None]] = set()
         self._pending_shared_chats = 0
         self._warm_thread_task: asyncio.Task[AsyncThread | None] | None = None
         self._chat_messages: list[dict[str, Any]] = []
         self._chat_conversation_id: str | None = None
-        # model/effort picked in the dashboard; persisted so every browser
+        # model/effort/speed picked in the dashboard; persisted so every browser
         # shares the same selection
         self._chat_model: str | None = None
         self._chat_effort: str | None = None
+        self._chat_service_tier: str | None = None
         self._load_chat_state()
 
     @property
@@ -309,7 +333,7 @@ class CodexService:
                     ))
                     self._install_dynamic_tool_handler(codex)
                     await codex.__aenter__()
-                    account = await codex.account(refresh_token=True)
+                    account = await self._read_account(codex, refresh_token=True)
                     if account.account is None:
                         raise RuntimeError(
                             "Codex login was saved but the restarted app-server "
@@ -331,8 +355,15 @@ class CodexService:
                 f"in {elapsed_ms:.0f}ms"
             )
 
+    @staticmethod
+    async def _read_account(codex: AsyncCodex, *, refresh_token: bool = False) -> _CodexAccountResponse:
+        # Authentication needs account presence, not the SDK's fixed plan-name enum.
+        return await codex._client.request(
+            "account/read", {"refreshToken": refresh_token}, response_model=_CodexAccountResponse,
+        )
+
     async def _ensure_authenticated(self, codex: AsyncCodex) -> CodexAuthenticationResult:
-        account = await codex.account()
+        account = await self._read_account(codex)
         if account.account is not None:
             return "ready"
 
@@ -483,6 +514,7 @@ class CodexService:
         history_messages: int = 0,
         model: str | None = None,
         effort: str | None = None,
+        service_tier: str | None = None,
     ) -> AsyncIterator[CodexStreamEvent]:
         request_started_at = time.perf_counter()
         trace_id = uuid.uuid4().hex[:8]
@@ -504,8 +536,60 @@ class CodexService:
                 request_started_at=request_started_at,
                 model=model,
                 effort=effort,
+                service_tier=service_tier,
             ):
                 yield event
+
+    async def stream_telegram_chat(
+        self, message: str, *, history: list[dict], tools: Any,
+        model: str | None = None, effort: str | None = None,
+        service_tier: str | None = None,
+    ) -> AsyncIterator[CodexStreamEvent]:
+        from ai.telegram.agent import TELEGRAM_INSTRUCTIONS, restricted_config
+
+        if not self.running:
+            raise RuntimeError("AI is disabled or unavailable")
+        model = await self.validate_model(model)
+        effort = await self.validate_effort(effort, model)
+        service_tier = await self.validate_service_tier(service_tier, model) or "default"
+        codex = await self._get_codex()
+        # Fail closed if the installed SDK cannot read inherited MCP configuration.
+        response = await codex._client.request(
+            "config/read", {"cwd": str(self.project_root), "includeLayers": False},
+            response_model=ConfigReadResponse,
+        )
+        started = await codex._client.thread_start({
+            "approvalPolicy": "never",
+            "config": restricted_config(response.config.model_dump(), self.project_root),
+            "cwd": str(self.project_root),
+            "developerInstructions": self.developer_instructions + "\n\n" + TELEGRAM_INSTRUCTIONS,
+            "dynamicTools": tools.specs,
+            "ephemeral": True,
+        })
+        thread_id = started.thread.id
+        self._telegram_tool_handlers[thread_id] = tools.handle_server_request
+        try:
+            async for event in self._stream_turn(
+                AsyncThread(codex, thread_id),
+                self._build_initial_context(message, history),
+                trace_id="telegram-" + uuid.uuid4().hex[:8],
+                request_started_at=time.perf_counter(),
+                model=model,
+                effort=effort,
+                service_tier=service_tier,
+            ):
+                yield event
+        finally:
+            # Retain a deny-only entry: a late call must not fall back to browser permissions.
+            self._telegram_tool_handlers[thread_id] = None
+            try:
+                async with asyncio.timeout(5):
+                    await codex._client.request(
+                        "thread/unsubscribe", {"threadId": thread_id},
+                        response_model=ThreadUnsubscribeResponse,
+                    )
+            except Exception as exc:
+                print(f"[ai] Telegram thread cleanup failed ({type(exc).__name__})")
 
     def start_shared_chat(
         self,
@@ -516,6 +600,7 @@ class CodexService:
         on_state_changed: ChatStateCallback | None = None,
         model: str | None = None,
         effort: str | None = None,
+        service_tier: str | None = None,
     ) -> CodexChatRun:
         run = CodexChatRun()
         self._pending_shared_chats += 1
@@ -528,6 +613,7 @@ class CodexService:
                 on_state_changed=on_state_changed,
                 model=model,
                 effort=effort,
+                service_tier=service_tier,
             ),
             name=f"codex-shared-chat-{run.id}",
         )
@@ -722,6 +808,7 @@ class CodexService:
         on_state_changed: ChatStateCallback | None = None,
         model: str | None = None,
         effort: str | None = None,
+        service_tier: str | None = None,
     ) -> AsyncIterator[CodexStreamEvent]:
         run = self.start_shared_chat(
             message,
@@ -730,6 +817,7 @@ class CodexService:
             on_state_changed=on_state_changed,
             model=model,
             effort=effort,
+            service_tier=service_tier,
         )
         async for event in run.events():
             yield event
@@ -744,6 +832,7 @@ class CodexService:
         on_state_changed: ChatStateCallback | None,
         model: str | None,
         effort: str | None,
+        service_tier: str | None,
     ) -> None:
         try:
             async with self._shared_chat_lock:
@@ -761,6 +850,7 @@ class CodexService:
                         history_messages=len(history),
                         model=model,
                         effort=effort,
+                        service_tier=service_tier,
                     ):
                         if event.event == "conversation":
                             await self._set_chat_conversation_id(
@@ -822,6 +912,7 @@ class CodexService:
                         for effort in item.supported_reasoning_efforts
                         if effort.get("reasoningEffort")
                     ],
+                    "speeds": self._model_speed_options(item.service_tiers or []),
                 }
                 for item in response.data
                 if not item.hidden
@@ -843,9 +934,26 @@ class CodexService:
                         # supported efforts unknown for a model outside model/list;
                         # an empty list means "accept any known effort"
                         "efforts": [],
+                        "speeds": self._model_speed_options([]),
                     })
             self._model_options = options
             return [dict(item) for item in self._model_options]
+
+    @staticmethod
+    def _model_speed_options(tiers: list[dict[str, Any]]) -> list[dict[str, str]]:
+        options = [{"value": "default", "label": "Standard", "description": ""}]
+        seen = {"default"}
+        for tier in tiers:
+            value = tier.get("id")
+            if not isinstance(value, str) or not value or value in seen:
+                continue
+            seen.add(value)
+            options.append({
+                "value": value,
+                "label": str(tier.get("name") or value),
+                "description": str(tier.get("description") or ""),
+            })
+        return options
 
     async def _configured_model(self, codex: AsyncCodex) -> str | None:
         client = getattr(codex, "_client", None)
@@ -882,29 +990,39 @@ class CodexService:
         return requested
 
     async def chat_preferences(self) -> dict[str, str | None]:
-        """Resolve the shared dashboard model/effort selection against the
+        """Resolve the shared dashboard model/effort/speed selection against the
         current model options, falling back to the preferred defaults."""
         options = await self.model_options()
         async with self._chat_state_lock:
             stored_model = self._chat_model
             stored_effort = self._chat_effort
+            stored_service_tier = self._chat_service_tier
         model = self._resolve_preferred_model(options, stored_model)
         effort = self._resolve_preferred_effort(options, model, stored_effort)
-        return {"model": model, "effort": effort}
+        service_tier = self._resolve_preferred_service_tier(options, model, stored_service_tier)
+        return {"model": model, "effort": effort, "service_tier": service_tier}
 
     async def set_chat_preferences(
         self,
         model: str | None,
         effort: str | None,
+        service_tier: str | None = None,
     ) -> dict[str, str | None]:
         validated_model = await self.validate_model(model)
-        target_model = validated_model or (await self.chat_preferences())["model"]
+        current = await self.chat_preferences()
+        target_model = validated_model or current["model"]
         validated_effort = await self.validate_effort(effort, target_model)
+        validated_service_tier = await self.validate_service_tier(service_tier, target_model)
+        if validated_service_tier is None:
+            validated_service_tier = self._resolve_preferred_service_tier(
+                await self.model_options(), target_model, current["service_tier"],
+            )
         async with self._chat_state_lock:
             if validated_model:
                 self._chat_model = validated_model
             if validated_effort:
                 self._chat_effort = validated_effort
+            self._chat_service_tier = validated_service_tier
             self._save_chat_state()
         return await self.chat_preferences()
 
@@ -956,6 +1074,29 @@ class CodexService:
         supported = [str(value) for value in (selected or {}).get("efforts") or []]
         if supported and requested not in supported:
             raise ValueError(f"model does not support reasoning effort: {requested}")
+        return requested
+
+    @staticmethod
+    def _resolve_preferred_service_tier(
+        options: list[dict[str, Any]], model: str | None, stored: str | None,
+    ) -> str:
+        selected = next((item for item in options if item["value"] == model), {})
+        supported = {item["value"] for item in selected.get("speeds", [])}
+        return stored if stored and stored in supported else "default"
+
+    async def validate_service_tier(self, service_tier: str | None, model: str | None) -> str | None:
+        if service_tier is None:
+            return None
+        requested = service_tier.strip()
+        if not requested:
+            return None
+        if requested == "default":
+            return requested
+        options = await self.model_options()
+        if model is None:
+            model = self._resolve_preferred_model(options, None)
+        if requested != self._resolve_preferred_service_tier(options, model, requested):
+            raise ValueError(f"model does not support speed: {requested}")
         return requested
 
     async def import_chat_state(
@@ -1043,6 +1184,8 @@ class CodexService:
             self._chat_model = model if isinstance(model, str) and model else None
             effort = payload.get("effort")
             self._chat_effort = effort if isinstance(effort, str) and effort else None
+            service_tier = payload.get("service_tier")
+            self._chat_service_tier = service_tier if isinstance(service_tier, str) else None
         except Exception as e:
             print(f"[ai] chat state load failed: {e}")
 
@@ -1066,6 +1209,7 @@ class CodexService:
             # after missing an ai_prefs_updated broadcast catch up
             "model": self._chat_model,
             "effort": self._chat_effort,
+            "service_tier": self._chat_service_tier,
         }
 
     @staticmethod
@@ -1174,7 +1318,17 @@ class CodexService:
         sync_client = getattr(client, "_sync", None)
         if sync_client is None or not hasattr(sync_client, "_approval_handler"):
             raise RuntimeError("Installed openai-codex SDK cannot handle dynamic tools")
-        sync_client._approval_handler = self.dynamic_tools.handle_server_request
+        self._telegram_tool_handlers = {}
+        sync_client._approval_handler = self._handle_tool_request
+
+    def _handle_tool_request(self, method: str, params: dict | None) -> dict:
+        thread_id = params.get("threadId") if isinstance(params, dict) else None
+        if thread_id in self._telegram_tool_handlers:
+            handler = self._telegram_tool_handlers[thread_id]
+            if handler is None:
+                return self.dynamic_tools._error_response("Telegram request has ended")
+            return handler(method, params)
+        return self.dynamic_tools.handle_server_request(method, params)
 
     def _permission_profile_config(self) -> dict[str, Any]:
         return {
@@ -1248,6 +1402,7 @@ class CodexService:
         request_started_at: float,
         model: str | None = None,
         effort: str | None = None,
+        service_tier: str | None = None,
     ) -> AsyncIterator[CodexStreamEvent]:
         turn = None
         first_event_ms: float | None = None
@@ -1259,6 +1414,7 @@ class CodexService:
                 approval_mode=ApprovalMode.deny_all,
                 effort=ReasoningEffort(effort) if effort else ReasoningEffort.xhigh,
                 model=model,
+                service_tier=service_tier,
             )
             turn_start_ms = (time.perf_counter() - turn_start_requested_at) * 1000
             request_to_turn_ms = (time.perf_counter() - request_started_at) * 1000

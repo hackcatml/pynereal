@@ -168,6 +168,7 @@ class UpdateService:
                     restart_required=False,
                     message="Applying frontend update",
                     error="",
+                    warning="",
                     owner_pid=os.getpid(),
                 )
                 self._live_update_task = asyncio.create_task(
@@ -190,6 +191,7 @@ class UpdateService:
                 restart_required=True,
                 message="Stopping runners and data service",
                 error="",
+                warning="",
                 owner_pid=os.getpid(),
             )
 
@@ -280,7 +282,7 @@ class UpdateService:
             )
         else:
             try:
-                if self._dependency_sync_required(request.get("changed_files", [])):
+                if self._python_dependency_sync_required(request.get("changed_files", [])):
                     write_update_state(
                         self.state_path,
                         status="updating",
@@ -345,25 +347,28 @@ class UpdateService:
             return False
         request = read_update_state(self.request_path)
         changed_files = request.get("changed_files", [])
-        if request.get("dependencies_synced") or not self._dependency_sync_required(
-            changed_files
-        ):
-            return False
-        python_dependencies_changed = self._python_dependency_sync_required(
-            changed_files
+        python_dependencies_changed = (
+            not request.get("dependencies_synced")
+            and self._python_dependency_sync_required(changed_files)
         )
         try:
-            write_update_state(
-                self.state_path,
-                status="restarting",
-                message="Installing dependencies",
-            )
             if python_dependencies_changed:
+                write_update_state(
+                    self.state_path,
+                    status="restarting",
+                    message="Installing dependencies",
+                )
                 self._install_current_dependencies()
-            else:
-                self._install_ai_host_tools()
-            request["dependencies_synced"] = True
-            _write_json_atomic(self.request_path, request)
+                request["dependencies_synced"] = True
+                _write_json_atomic(self.request_path, request)
+            # Older updaters marked dependencies synced without installing Chrome.
+            # Check after the merge, once per update, before feeds/runners start.
+            if not request.get("chart_capture_checked") and not read_update_state(self.state_path).get("error"):
+                write_update_state(self.state_path, message="Checking chart-capture browser")
+                warning = self._install_ai_host_tools()
+                request["chart_capture_checked"] = True
+                _write_json_atomic(self.request_path, request)
+                write_update_state(self.state_path, warning=warning)
             write_update_state(
                 self.state_path,
                 status="restarting",
@@ -440,10 +445,11 @@ class UpdateService:
                 pending_runner_ids=sorted(pending),
             )
         else:
+            warning = str(read_update_state(self.state_path).get("warning") or "")
             write_update_state(
                 self.state_path,
                 status="completed",
-                message="Update completed.",
+                message=f"Update completed. {warning}" if warning else "Update completed.",
                 error="",
                 commit=commit,
                 pending_runner_ids=[],
@@ -512,8 +518,27 @@ class UpdateService:
                 or f"Python dependency installation failed with exit code {completed.returncode}"
             )
 
-    def _install_ai_host_tools(self) -> None:
-        pass
+    def _install_ai_host_tools(self) -> str:
+        if not sys.platform.startswith("linux"):
+            return ""
+        env = os.environ.copy()
+        env["PYNEREAL_SETUP_NONINTERACTIVE"] = "1"
+        env["PYNEREAL_SETUP_PYTHON"] = sys.executable
+        try:
+            completed = subprocess.run(
+                ["timeout", "--kill-after=5s", "870", "bash", str(self.repo_root / "setup.sh"), "--chart-capture-only"],
+                cwd=self.repo_root,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                timeout=900,
+            )
+            if completed.returncode == 0:
+                return ""
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"[update] chart-capture setup failed: {type(exc).__name__}", file=sys.stderr)
+        warning = "Chart capture is unavailable; run bash setup.sh --chart-capture-only in a terminal."
+        print(f"[update] {warning}", file=sys.stderr)
+        return warning
 
     def _install_target_dependencies(self, target_sha: str) -> None:
         requirements = self._project_requirements(
@@ -525,7 +550,6 @@ class UpdateService:
             )
         )
         self._install_requirements(requirements)
-        self._install_ai_host_tools()
 
     def _install_current_dependencies(self) -> None:
         requirements = self._project_requirements(
@@ -537,7 +561,6 @@ class UpdateService:
             )
         )
         self._install_requirements(requirements)
-        self._install_ai_host_tools()
 
     def _git(self, *args: str, timeout: float = 60) -> str:
         completed = subprocess.run(

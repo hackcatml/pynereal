@@ -110,6 +110,34 @@ def main():{description_block}
 {body}'''
 
 
+def next_warmup_at(session: object) -> int | None:
+    now_ms = int(time.time() * 1000)
+    scheduled = getattr(session, "next_prerun_at", None)
+    phase = str(getattr(session, "runner_phase", "") or "")
+    if (
+        isinstance(scheduled, (int, float))
+        and (scheduled > now_ms or phase in {"prerun_scheduled", "prerun_active"})
+    ):
+        return int(scheduled)
+    spec = getattr(session, "spec", None)
+    timeframe = str(getattr(spec, "timeframe", "") or "")
+    duration_ms = max(1000, timeframe_seconds(timeframe) * 1000)
+    offset_ms = max(
+        0,
+        int(getattr(session, "prerun_effective_offset_seconds", 0) or 0) * 1000,
+    )
+    feed = getattr(session, "feed", None)
+    last_bar_time = feed.last_bar_time() if feed is not None else None
+    if isinstance(last_bar_time, (int, float)) and last_bar_time > 0:
+        next_bar_ms = int(last_bar_time * 1000) + duration_ms
+    else:
+        next_bar_ms = ((now_ms // duration_ms) + 1) * duration_ms
+    target_ms = next_bar_ms + offset_ms
+    while target_ms <= now_ms:
+        target_ms += duration_ms
+    return target_ms
+
+
 def build_scripting_router(
     workspace: ScriptingWorkspace,
     registry: SessionRegistry | None = None,
@@ -127,33 +155,6 @@ def build_scripting_router(
         router = APIRouter(lifespan=executor_lifespan)
     else:
         router = APIRouter()
-
-    def next_warmup_at(session: object) -> int | None:
-        now_ms = int(time.time() * 1000)
-        scheduled = getattr(session, "next_prerun_at", None)
-        phase = str(getattr(session, "runner_phase", "") or "")
-        if (
-            isinstance(scheduled, (int, float))
-            and (scheduled > now_ms or phase in {"prerun_scheduled", "prerun_active"})
-        ):
-            return int(scheduled)
-        spec = getattr(session, "spec", None)
-        timeframe = str(getattr(spec, "timeframe", "") or "")
-        duration_ms = max(1000, timeframe_seconds(timeframe) * 1000)
-        offset_ms = max(
-            0,
-            int(getattr(session, "prerun_effective_offset_seconds", 0) or 0) * 1000,
-        )
-        feed = getattr(session, "feed", None)
-        last_bar_time = feed.last_bar_time() if feed is not None else None
-        if isinstance(last_bar_time, (int, float)) and last_bar_time > 0:
-            next_bar_ms = int(last_bar_time * 1000) + duration_ms
-        else:
-            next_bar_ms = ((now_ms // duration_ms) + 1) * duration_ms
-        target_ms = next_bar_ms + offset_ms
-        while target_ms <= now_ms:
-            target_ms += duration_ms
-        return target_ms
 
     def usage_payload(path: str, *, directory: bool) -> dict:
         prefix = f"{path}/"
