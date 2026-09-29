@@ -11,7 +11,7 @@ BOT_COMMANDS = [
     {"command": "positions", "description": "Show open positions across all configured accounts"},
     {"command": "sessions", "description": "Select a session and control runner, webhook and Telegram"},
     {"command": "pnl", "description": "Select a PnL period or use /pnl 30d"},
-    {"command": "alerts", "description": "List active Manual Alert price triggers"},
+    {"command": "alerts", "description": "List/set Manual Alerts or create/edit session templates"},
     {"command": "model", "description": "Select model and reasoning effort"},
     {"command": "new", "description": "Start a new chat"},
     {"command": "cancel", "description": "Cancel unfinished work"},

@@ -37,7 +37,7 @@ class TelegramAIService:
         self._direct_active: dict[str, tuple[dict, asyncio.Task]] = {}
         self._jobs_lock = asyncio.Lock()
         self._job_ready = asyncio.Event()
-        self._direct_ready = {kind: asyncio.Event() for kind in ("screenshot", "account", "session")}
+        self._direct_ready = {kind: asyncio.Event() for kind in ("screenshot", "account", "session", "alert")}
         self._send_ready = asyncio.Event()
         self._started_at = 0.0
         self._username = ""
@@ -87,6 +87,7 @@ class TelegramAIService:
                 asyncio.create_task(self._direct_work("screenshot"), name="telegram-screenshot-worker"),
                 asyncio.create_task(self._direct_work("account"), name="telegram-account-worker"),
                 asyncio.create_task(self._direct_work("session"), name="telegram-session-worker"),
+                asyncio.create_task(self._direct_work("alert"), name="telegram-alert-worker"),
                 asyncio.create_task(self._send(), name="telegram-ai-sender"),
                 asyncio.create_task(self._register_commands(), name="telegram-command-menu"),
             ]
@@ -202,7 +203,7 @@ class TelegramAIService:
                             if active is not None:
                                 job, task = active
                                 if job["chat"] == message["chat"]["id"] and job["actor"] == message["from"]["id"]:
-                                    if job["kind"] == "session" and await self._db("session_command_executing", job):
+                                    if job["kind"] in {"session", "alert"} and await self._db("session_command_executing", job):
                                         continue
                                     task.cancel()
                 offset = max(offset, update["update_id"] + 1)
@@ -214,7 +215,7 @@ class TelegramAIService:
     async def _direct_work(self, kind: str) -> None:
         ready = self._direct_ready[kind]
         handler = {"screenshot": self._take_screenshot, "account": self._account_snapshot,
-                   "session": self._session_command}[kind]
+                   "session": self._session_command, "alert": self._alert_command}[kind]
         while True:
             ready.clear()
             async with self._jobs_lock:
@@ -263,6 +264,21 @@ class TelegramAIService:
             _log(logging.ERROR, "session command failed (%s)", type(exc).__name__)
             await self._db("finish_session_command", job, None,
                            "Session request failed. Check /sessions for current state before retrying; changes were not retried.")
+
+    async def _alert_command(self, job: dict) -> None:
+        try:
+            async with self._jobs_lock:
+                await self._db("begin_alert_command", job)
+            payload = await self.agent.alert_command(json.loads(job["input"]))
+            await self._db("finish_alert_command", job, payload)
+        except asyncio.CancelledError:
+            raise
+        except SessionCommandError as exc:
+            await self._db("finish_alert_command", job, None, str(exc))
+        except Exception as exc:
+            _log(logging.ERROR, "alert command failed (%s)", type(exc).__name__)
+            await self._db("finish_alert_command", job, None,
+                           "Alert request failed. Check the current alerts/templates before retrying; changes were not retried.")
 
     async def _take_screenshot(self, job: dict) -> None:
         try:
@@ -393,7 +409,8 @@ class TelegramAIService:
                              or (item.get("screenshot_expires") or 0) > time.time()
                              or (item.get("session_menu_expires") or 0) > time.time()
                              or (item.get("pnl_menu_expires") or 0) > time.time()
-                             or (item.get("asset_menu_expires") or 0) > time.time())
+                             or (item.get("asset_menu_expires") or 0) > time.time()
+                             or (item.get("alert_menu_expires") or 0) > time.time())
             if (item.get("requires_id") is not None and item.get("required_state") != "sent"
                     or item.get("markup") and not valid_buttons):
                 await self._db("delivery_failed", item["id"], 0, True)

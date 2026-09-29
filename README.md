@@ -736,9 +736,32 @@ not disable command reception.
   This reuses Account Center's PnL: Net PnL includes realized PnL
   and current cached unrealized PnL. `all` means all stored history, not a new
   full exchange backfill. Missing history can still make the report partial.
-- `/alerts` lists active Manual Alert price triggers across sessions, with
-  symbol, exchange, timeframe, template title and trigger price. It does not
-  fire, delete or change alerts, and excludes templates with no active trigger.
+- `/alerts` (also `/alert`) shows **List**, **Set alert** and **Set templates** buttons. List shows active
+  Manual Alert price triggers across sessions, with symbol, exchange, timeframe,
+  template title and trigger price; unused templates are not listed. The List,
+  Set alert and Set templates buttons remain available below the results. Select an alert,
+  then press **Cancel alert** to cancel only that price trigger; its template is
+  kept. The list refreshes after cancellation, with 10 alerts per page. Alerts
+  that already fired or changed since selection are not cancelled using stale
+  details. Closing the menu does not cancel any alerts.
+  Set alert lets you choose a session and an existing template, enter a positive
+  decimal price or a calculation such as `252.41 * 0.996` or `252.41 + 1.01`
+  (`+`, `-`, `*`, `/` and parentheses; no variables, commas or currency).
+  Review the calculated positive price, then press **Set alert**
+  to arm the price trigger. No trigger is added before confirmation. **Change
+  price** returns to price input. The same active price/template is not added
+  twice; other alerts and all templates remain unchanged. A changed or removed
+  session/template rejects the setup. If no templates exist, use Set templates
+  first. This uses the existing market-price trigger mechanism, not a direct
+  webhook send, and does not require a running strategy or AI mode.
+  Set templates lets you select a session and create a new template or edit an
+  existing one. Send its title, message and optional AI instruction as text
+  (reply to the prompt in groups), review the contents, then press **Save**.
+  Placeholders such as `{{market}}` are preserved. Saving only updates the
+  session's templates: existing trigger snapshots are unchanged and no alert is
+  sent. Only the requester can enter text or save; menus expire after 10 minutes
+  of inactivity. `/cancel`, `/end` or a server restart discards unsaved drafts.
+  Concurrent template/session changes reject stale saves instead of overwriting.
   These three commands also work without AI mode or model inference; AI tools
   do not gain access to the session-control buttons' mutation operations.
 - `/ai` or `/ai your request` starts AI conversation mode; subsequent text

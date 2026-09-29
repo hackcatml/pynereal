@@ -11,6 +11,7 @@ from .transport import PENDING_TEXT, message_chunks
 from .attachments import attachment_descriptor
 from .commands import match_sessions, session_label, pnl_days, PNL_PERIODS
 from .session_menus import SessionMenuStore
+from .alert_menus import AlertMenuStore
 
 
 COMMAND_HELP = (
@@ -24,14 +25,14 @@ COMMAND_HELP = (
     "/positions shows open positions\n"
     "/sessions selects a session and controls runner/alerts\n"
     "/pnl [7d, 30d, 90d, 6m, 1y, all] shows PnL\n"
-    "/alerts lists active Manual Alerts\n"
+    "/alerts lists/sets Manual Alerts or edits templates\n"
     "These direct commands do not require AI mode."
 )
 AI_MODE_NOTICE = "AI mode on. Send text, images or scripts.\nChanges require your approval.\n\n" + COMMAND_HELP
 SCREENSHOT_PAGE_SIZE = 10
 
 
-class TelegramStore(SessionMenuStore):
+class TelegramStore(SessionMenuStore, AlertMenuStore):
     """All methods run on the service's dedicated single-thread executor."""
 
     def __init__(self, path: Path) -> None:
@@ -106,6 +107,9 @@ class TelegramStore(SessionMenuStore):
                 CREATE TABLE IF NOT EXISTS asset_menus (
                     nonce TEXT PRIMARY KEY, bot INTEGER, chat INTEGER, actor INTEGER,
                     exchanges TEXT NOT NULL, expires REAL NOT NULL, outbox_id INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS alert_menus (
+                    nonce TEXT PRIMARY KEY, bot INTEGER, chat INTEGER, actor INTEGER,
+                    payload TEXT NOT NULL, expires REAL NOT NULL, outbox_id INTEGER NOT NULL);
             """)
             with self.db:
                 chat_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(chats)")}
@@ -119,6 +123,7 @@ class TelegramStore(SessionMenuStore):
                 self.db.execute("DELETE FROM session_menus WHERE bot=?", (bot_id,))
                 self.db.execute("DELETE FROM pnl_menus WHERE bot=?", (bot_id,))
                 self.db.execute("DELETE FROM asset_menus WHERE bot=?", (bot_id,))
+                self.db.execute("DELETE FROM alert_menus WHERE bot=?", (bot_id,))
                 columns = {row["name"] for row in self.db.execute("PRAGMA table_info(outbox)")}
                 for name in ("job_id", "replace_id"):
                     if name not in columns:
@@ -161,9 +166,11 @@ class TelegramStore(SessionMenuStore):
                         command = "/" + json.loads(row["input"])["view"]
                     if row["kind"] == "session":
                         command = "/sessions"
+                    if row["kind"] == "alert":
+                        command = "/alerts"
                     if row["state"] == "executing":
-                        self._complete_reply(row, "Server restarted during a session change. Outcome is unknown; "
-                                             "check /sessions. The change was not replayed.")
+                        self._complete_reply(row, "Server restarted during a change. Outcome is unknown; "
+                                             f"check {command}. The change was not replayed.")
                         continue
                     self._complete_reply(row, f"Server restarted. The unfinished request was not replayed. Use {command} to request it again.")
         except BaseException:
@@ -452,7 +459,6 @@ class TelegramStore(SessionMenuStore):
             if not inserted or message is None:
                 return False
             chat, actor = message["chat"]["id"], message["from"]["id"]
-            self._prune(now)
             text = str(message.get("text") or message.get("caption") or "").strip()
             parts = text.split(maxsplit=1)
             head = parts[0] if parts else ""
@@ -460,6 +466,10 @@ class TelegramStore(SessionMenuStore):
             command, _, target = head.partition("@")
             if head.startswith("/") and target and target.lower() != username.lower():
                 return False
+            if not text.startswith("/") and self._alert_text(message, text, now):
+                self._prune(now)
+                return False
+            self._prune(now)
             if command == "/screenshot":
                 self._screenshot_request(update_id, chat, actor, argument, screenshot_sessions, now)
                 return False
@@ -488,7 +498,13 @@ class TelegramStore(SessionMenuStore):
                 else:
                     self._asset_menu(chat, actor, asset_exchanges, now)
                 return False
-            if command in ("/positions", "/alerts"):
+            if command in {"/alerts", "/alert"}:
+                if argument:
+                    self._reply(chat, "Use /alerts without arguments, then select List, Set alert or Set templates.")
+                else:
+                    self._alert_menu({"chat": chat, "actor": actor}, {"stage": "home"})
+                return False
+            if command == "/positions":
                 if argument:
                     self._reply(chat, f"Use {command} without arguments to view all configured accounts.")
                 else:
@@ -514,6 +530,7 @@ class TelegramStore(SessionMenuStore):
                 self.db.execute("DELETE FROM session_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
                 self.db.execute("DELETE FROM pnl_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
                 self.db.execute("DELETE FROM asset_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
+                self.db.execute("DELETE FROM alert_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
                 cancelled = self.db.execute(
                     "SELECT id,chat FROM jobs WHERE bot=? AND chat=? AND actor=? AND state IN ('queued','running')",
                     (self.bot_id, chat, actor),
@@ -655,6 +672,7 @@ class TelegramStore(SessionMenuStore):
             "m.stage AS menu_stage,m.expires AS menu_expires,s.expires AS screenshot_expires,"
             "c.expires AS session_menu_expires,n.expires AS pnl_menu_expires,"
             "e.expires AS asset_menu_expires,"
+            "l.expires AS alert_menu_expires,"
             "j.state AS request_state FROM outbox o "
             "LEFT JOIN outbox p ON p.id=o.replace_id AND p.bot=o.bot "
             "LEFT JOIN outbox r ON r.id=o.requires_id AND r.bot=o.bot "
@@ -664,6 +682,7 @@ class TelegramStore(SessionMenuStore):
             "LEFT JOIN session_menus c ON c.outbox_id=o.id AND c.bot=o.bot "
             "LEFT JOIN pnl_menus n ON n.outbox_id=o.id AND n.bot=o.bot "
             "LEFT JOIN asset_menus e ON e.outbox_id=o.id AND e.bot=o.bot "
+            "LEFT JOIN alert_menus l ON l.outbox_id=o.id AND l.bot=o.bot "
             "LEFT JOIN jobs j ON j.id=o.request_id AND j.bot=o.bot "
             "WHERE o.bot=? AND o.state='pending' ORDER BY o.id LIMIT 1", (self.bot_id,),
         ).fetchone()
@@ -694,6 +713,7 @@ class TelegramStore(SessionMenuStore):
         self.db.execute("DELETE FROM session_menus WHERE expires<?", (now,))
         self.db.execute("DELETE FROM pnl_menus WHERE expires<?", (now,))
         self.db.execute("DELETE FROM asset_menus WHERE expires<?", (now,))
+        self.db.execute("DELETE FROM alert_menus WHERE expires<?", (now,))
         self.db.execute("DELETE FROM attachments WHERE created<?", (now - 86400,))
         self.db.execute("UPDATE proposals SET state='expired',payload='{}',guard='{}' "
                         "WHERE bot=? AND expires<? AND state IN ('pending','queued')", (self.bot_id, now))
@@ -808,6 +828,8 @@ class TelegramStore(SessionMenuStore):
                 return self._pnl_callback(update_id, query, parts, now)
             if len(parts) == 3 and parts[0] == "te":
                 return self._asset_callback(update_id, query, parts, now)
+            if len(parts) == 3 and parts[0] == "tl":
+                return self._alert_callback(update_id, query, parts, now)
             if len(parts) == 4 and parts[0] == "tm":
                 return self._model_callback(query, parts, now)
             if len(parts) != 3 or parts[0] != "ta" or parts[1] not in {"y", "n"}:

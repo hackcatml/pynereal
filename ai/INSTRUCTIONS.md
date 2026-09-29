@@ -83,6 +83,11 @@ internals when an existing script already provides the required data.
   missing requirement instead of guessing.
 - Call `get_manual_alert_context` first and use only the exact active session ID,
   template index, and current state returned by the tool.
+- Manual Alert messages must be valid JSON with only the supported placeholders:
+  `{{price}}`, `{{market}}`, `{{time}}`, `{{symbol}}`, `{{ticker}}`, `{{exchange}}`,
+  `{{timeframe}}`, and `{{title}}`. `{{close}}` is not a supported placeholder.
+  If the requested format is invalid, explain the error and ask for a corrected
+  format; do not silently substitute another placeholder or report it as saved.
 - For an existing-template edit, use `update_manual_alert_template` with the
   template index and revision from that context. In Telegram use the matching
   `propose_manual_alert_template_update` approval tool instead. Pass only the

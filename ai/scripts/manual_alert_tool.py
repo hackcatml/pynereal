@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from data_service.config import sanitize_manual_alert_templates
+from data_service.manual_alerts import validate_manual_alert_template
 
 _CONTEXT_TOOL_NAME = "get_manual_alert_context"
 _SET_TOOL_NAME = "set_manual_alert_trigger"
@@ -152,6 +153,10 @@ class ManualAlertRegistryBridge:
         if len(sanitized) != 1:
             raise ManualAlertToolError("Template title, message and AI instruction must be valid")
         after = sanitized[0]
+        try:
+            validate_manual_alert_template(after, session.spec)
+        except ValueError as exc:
+            raise ManualAlertToolError(str(exc)) from None
         if after["title"] != before.get("title") and any(
             other_index != index and template.get("title") == after["title"]
             for other_index, template in enumerate(templates)
@@ -262,6 +267,11 @@ class ManualAlertRegistryBridge:
             raise ManualAlertToolError(
                 "template_index or both custom template fields are required"
             )
+
+        try:
+            validate_manual_alert_template(template, session.spec)
+        except ValueError as exc:
+            raise ManualAlertToolError(str(exc)) from None
 
         current = [dict(trigger) for trigger in session.spec.manual_alert_triggers]
         replace_existing = bool(arguments.get("replace_existing_triggers", False))

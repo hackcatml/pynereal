@@ -6,7 +6,6 @@ import copy
 import json
 import os
 import shutil
-import subprocess
 import sys
 import threading
 import time
@@ -23,6 +22,7 @@ from data_service.evaluation_context import (
 
 from .account_match import match_session_account, resolve_account_hint
 from .asset import configured_accounts, read_provider_config
+from .chart_capture import capture_chart_png
 from .evidence_compare import (
     build_evidence_summary,
     compact_session_context,
@@ -418,8 +418,7 @@ class SessionEvaluationBridge:
             raise SessionEvaluationToolError(f"Unknown active session: {session_id}")
         if not session.feed.history_ready():
             raise SessionEvaluationToolError("Chart OHLCV data is not ready yet; retry after data loading completes")
-        capture_path = await asyncio.to_thread(
-            self._capture_chart,
+        capture_path = await self._capture_chart(
             session_id,
             int(arguments["width"]),
             int(arguments["height"]),
@@ -445,8 +444,7 @@ class SessionEvaluationBridge:
                 "The requested calculation generation is no longer ready; collect context again"
             )
 
-        capture_path = await asyncio.to_thread(
-            self._capture_chart,
+        capture_path = await self._capture_chart(
             session_id,
             int(arguments["width"]),
             int(arguments["height"]),
@@ -486,52 +484,35 @@ class SessionEvaluationBridge:
                 return str(candidate)
         return None
 
-    def _capture_chart(self, session_id: str, width: int, height: int) -> Path:
+    async def _capture_chart(self, session_id: str, width: int, height: int) -> Path:
         browser = self._browser_executable()
         if browser is None:
             raise SessionEvaluationToolError(
                 "No supported Chrome or Chromium executable is available for chart capture"
             )
-        output_dir = self._project_root / "tmp" / "session-evaluation"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        now = time.time()
-        for old_path in output_dir.glob("*.png"):
-            try:
-                if now - old_path.stat().st_mtime > 24 * 60 * 60:
-                    old_path.unlink()
-            except OSError:
-                pass
-        safe_name = "".join(char if char.isalnum() else "_" for char in session_id)[:80]
-        output_path = output_dir / f"{safe_name}-{int(now * 1000)}.png"
+        def prepare_output():
+            output_dir = self._project_root / "tmp" / "session-evaluation"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            now = time.time()
+            for old_path in output_dir.glob("*.png"):
+                try:
+                    if now - old_path.stat().st_mtime > 24 * 60 * 60:
+                        old_path.unlink()
+                except OSError:
+                    pass
+            safe_name = "".join(char if char.isalnum() else "_" for char in session_id)[:80]
+            return output_dir / f"{safe_name}-{time.time_ns()}.png"
+
+        output_path = await asyncio.to_thread(prepare_output)
         port = int(self._registry.supervisor.port)
         url = f"http://127.0.0.1:{port}/s/{quote(session_id, safe='')}?chart_capture=1"
-        command = [
-            browser,
-            "--headless=new",
-            "--disable-gpu",
-            "--disable-dev-shm-usage",
-            "--hide-scrollbars",
-            "--no-first-run",
-            f"--window-size={width},{height}",
-            "--virtual-time-budget=5000",
-            f"--screenshot={output_path}",
-            url,
-        ]
-        if sys.platform.startswith("linux"):
-            command.insert(2, "--no-sandbox")
-        completed = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=_CAPTURE_TIMEOUT_SECONDS,
-            check=False,
-        )
-        if completed.returncode != 0 or not output_path.exists():
-            output_path.unlink(missing_ok=True)
-            raise SessionEvaluationToolError(
-                f"Chart capture failed (browser exit {completed.returncode})"
-            )
+        try:
+            png = await capture_chart_png(browser, url, width, height, timeout=_CAPTURE_TIMEOUT_SECONDS)
+        except TimeoutError as exc:
+            raise SessionEvaluationToolError("Chart capture timed out waiting for chart/Alert layout synchronization") from exc
+        except Exception as exc:
+            raise SessionEvaluationToolError(f"Chart capture failed: {exc}") from exc
+        await asyncio.to_thread(output_path.write_bytes, png)
         return output_path
 
 

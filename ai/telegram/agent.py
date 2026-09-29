@@ -351,6 +351,10 @@ class TelegramAgent:
         session = await self.session_control.execute(request["target"], request["operation"])
         return {"view": "detail", "session": session}
 
+    async def alert_command(self, request: dict) -> dict:
+        from .alert_menus import template_command
+        return await template_command(self.session_control, request)
+
     async def capture_screenshot(self, session_id: str) -> bytes:
         # Already on the service loop; no model turn or synchronous bridge wait.
         bridge = self.codex.dynamic_tools.session_evaluation.bridge

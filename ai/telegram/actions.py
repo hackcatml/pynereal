@@ -13,6 +13,7 @@ import time
 from pydantic import BaseModel, ConfigDict, Field
 
 from ai.scripts.manual_alert_tool import ManualAlertToolError
+from data_service.manual_alerts import validate_manual_alert_template
 
 from .attachments import TEXT_LIMIT
 
@@ -297,8 +298,15 @@ class TelegramActions:
                 if index is not None:
                     if custom or index >= len(sessions[0]["templates"]):
                         raise ValueError("Select one current template or supply a custom template")
+                    template = sessions[0]["templates"][index]
                 elif not payload.get("custom_template_title") or not payload.get("custom_template_message"):
                     raise ValueError("A template or custom title and message are required")
+                else:
+                    template = {"title": payload["custom_template_title"], "message": payload["custom_template_message"]}
+                try:
+                    validate_manual_alert_template(template, registry.get(ids[0]).spec)
+                except ValueError as exc:
+                    raise ProposalConflict(str(exc)) from None
             state = {"preview": sessions, "identities": identities}
             if kind == "update_manual_alert_template":
                 try:

@@ -209,6 +209,23 @@ def parse_alert_template_message(template_text: str, spec: SessionSpec,
             raise initial_error
 
 
+def validate_manual_alert_template(template: dict, spec: SessionSpec) -> None:
+    """Use the chart's placeholder-aware JSON rules before saving a template."""
+    context = {"price": 1, "market": 1, "time": 0, "title": template.get("title") or ""}
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"Invalid JSON constant: {value}")
+
+    try:
+        rendered = render_raw_alert_template_json(template["message"], spec, context)
+        json.loads(rendered, parse_constant=reject_constant)
+    except (ValueError, TypeError, RecursionError) as exc:
+        supported = ", ".join(alert_template_replacements(spec, context))
+        raise ValueError(
+            f"Invalid JSON: {template.get('title') or 'template'}. Supported placeholders: {supported}"
+        ) from exc
+
+
 def replace_alert_template_value(value: Any, spec: SessionSpec, context: dict[str, Any]) -> Any:
     if isinstance(value, str):
         replacements = alert_template_replacements(spec, context)
