@@ -670,7 +670,7 @@ even those not allowed to give instructions. Enable it on **one server per bot**
 an existing Telegram webhook or another `getUpdates` receiver must not share
 the bot. No incoming public port or Telegram webhook endpoint is required.
 Restart data-service after configuration changes. Codex AI must be enabled for
-AI conversations; `/screenshot`, `/assets`, `/positions`, `/sessions`, `/pnl`
+AI conversations; `/screenshot`, `/price`, `/assets`, `/positions`, `/sessions`, `/pnl`
 and `/alerts` do not require it.
 
 In a group, send `/ai@YourBot current positions` as a new message, using the
@@ -683,7 +683,7 @@ workflow. See [Telegram's Privacy Mode documentation](https://core.telegram.org/
 If a group is migrated to a supergroup, update `CHAT_ID` to the new ID and restart;
 the receiver does not automatically authorize a different destination.
 
-At startup, PyneReal registers `/ai`, `/screenshot`, `/assets`, `/positions`,
+At startup, PyneReal registers `/ai`, `/screenshot`, `/price`, `/assets`, `/positions`,
 `/sessions`, `/pnl`, `/alerts`, `/model`, `/new`, `/cancel`, `/end` and `/help`
 for the configured chat via Telegram's
 [`setMyCommands`](https://core.telegram.org/bots/api#setmycommands).
@@ -708,6 +708,15 @@ not disable command reception.
   apply; unavailable charts are reported rather than substituted. `/cancel` cancels
   unfinished captures and selections. Restart invalidates old selections and does
   not replay unfinished captures. This command does not enter AI conversation history.
+- `/price` shows registered-session selection buttons (10 per page).
+  `/price btc` or `/price okx mrvl 5m` returns a unique match directly; multiple
+  matches show selection buttons. It reads the last received trade price and
+  UTC trade time from the existing feed, without an AI call or additional
+  exchange request. The runner need not be running. Missing prices, stopped
+  feeds and trade times more than 60 seconds old are explicitly indicated;
+  an old trade does not necessarily mean a disconnected feed. Selections are
+  requester-only, expire after 10 minutes and are invalidated by `/cancel` or
+  server restart. This command does not enter AI conversation history.
 - `/assets` first shows **All** and configured-exchange selection buttons; no
   balance lookup runs until selection. Only the requester can select within
   10 minutes. The result replaces the menu with the selected accounts and their

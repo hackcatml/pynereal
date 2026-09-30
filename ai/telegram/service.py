@@ -39,7 +39,7 @@ class TelegramAIService:
         self._direct_active: dict[str, tuple[dict, asyncio.Task]] = {}
         self._jobs_lock = asyncio.Lock()
         self._job_ready = asyncio.Event()
-        self._direct_ready = {kind: asyncio.Event() for kind in ("screenshot", "account", "session", "alert")}
+        self._direct_ready = {kind: asyncio.Event() for kind in ("screenshot", "account", "session", "alert", "price")}
         self._send_ready = asyncio.Event()
         self._started_at = 0.0
         self._username = ""
@@ -90,6 +90,7 @@ class TelegramAIService:
                 asyncio.create_task(self._direct_work("account"), name="telegram-account-worker"),
                 asyncio.create_task(self._direct_work("session"), name="telegram-session-worker"),
                 asyncio.create_task(self._direct_work("alert"), name="telegram-alert-worker"),
+                asyncio.create_task(self._direct_work("price"), name="telegram-price-worker"),
                 asyncio.create_task(self._send(), name="telegram-ai-sender"),
                 asyncio.create_task(self._register_commands(), name="telegram-command-menu"),
             ]
@@ -217,7 +218,8 @@ class TelegramAIService:
     async def _direct_work(self, kind: str) -> None:
         ready = self._direct_ready[kind]
         handler = {"screenshot": self._take_screenshot, "account": self._account_snapshot,
-                   "session": self._session_command, "alert": self._alert_command}[kind]
+                   "session": self._session_command, "alert": self._alert_command,
+                   "price": self._price_command}[kind]
         while True:
             ready.clear()
             async with self._jobs_lock:
@@ -266,6 +268,18 @@ class TelegramAIService:
             _log(logging.ERROR, "session command failed (%s)", type(exc).__name__)
             await self._db("finish_session_command", job, None,
                            "Session request failed. Check /sessions for current state before retrying; changes were not retried.")
+
+    async def _price_command(self, job: dict) -> None:
+        try:
+            payload = await self.agent.price_command(json.loads(job["input"]))
+            await self._db("finish_session_command", job, payload)
+        except asyncio.CancelledError:
+            raise
+        except SessionCommandError as exc:
+            await self._db("finish_session_command", job, None, str(exc))
+        except Exception as exc:
+            _log(logging.ERROR, "price command failed (%s)", type(exc).__name__)
+            await self._db("finish_session_command", job, None, "Price lookup failed. Please retry /price.")
 
     async def _alert_command(self, job: dict) -> None:
         try:

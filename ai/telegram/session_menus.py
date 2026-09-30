@@ -13,19 +13,21 @@ class SessionMenuStore:
     def _session_menu(self, job: dict, payload: dict, *, replace_id=None) -> str:
         nonce = secrets.token_urlsafe(18)
         buttons = []
+        prefix = "tq" if payload.get("purpose") == "price" else "tc"
         if payload["view"] == "list":
             page, sessions = payload["page"], payload["sessions"]
             pages = max(1, (len(sessions) + 9) // 10)
-            text = f"Sessions ({page + 1}/{pages})\nSelect a session. Buttons expire in 10 minutes."
+            title = "Prices" if prefix == "tq" else "Sessions"
+            text = f"{title} ({page + 1}/{pages})\nSelect a session. Buttons expire in 10 minutes."
             if not sessions:
                 text = "No matching sessions." if payload.get("query") else "No sessions are registered."
             for index, session in enumerate(sessions[page * 10:page * 10 + 10], page * 10):
-                buttons.append([{"text": session_label(session)[:120], "callback_data": f"tc:{nonce}:s{index}"}])
+                buttons.append([{"text": session_label(session)[:120], "callback_data": f"{prefix}:{nonce}:s{index}"}])
             navigation = []
             if page > 0:
-                navigation.append({"text": "Previous", "callback_data": f"tc:{nonce}:p{page - 1}"})
+                navigation.append({"text": "Previous", "callback_data": f"{prefix}:{nonce}:p{page - 1}"})
             if page + 1 < pages:
-                navigation.append({"text": "Next", "callback_data": f"tc:{nonce}:p{page + 1}"})
+                navigation.append({"text": "Next", "callback_data": f"{prefix}:{nonce}:p{page + 1}"})
             if navigation:
                 buttons.append(navigation)
         else:
@@ -44,7 +46,7 @@ class SessionMenuStore:
             buttons.append([{"text": "Refresh", "callback_data": f"tc:{nonce}:status"},
                             {"text": "Sessions", "callback_data": f"tc:{nonce}:list"}])
             text += "\nButtons apply changes immediately. Stop does not close exchange positions."
-        buttons.append([{"text": "Close", "callback_data": f"tc:{nonce}:close"}])
+        buttons.append([{"text": "Close", "callback_data": f"{prefix}:{nonce}:close"}])
         item_id = self._menu_message(job["chat"], text, buttons, replace_id=replace_id)
         self.db.execute("DELETE FROM session_menus WHERE bot=? AND chat=? AND actor=?",
                         (self.bot_id, job["chat"], job["actor"]))
@@ -57,15 +59,19 @@ class SessionMenuStore:
                               "WHERE s.bot=? AND s.nonce=?", (self.bot_id, parts[1])).fetchone()
         message = query.get("message") or {}
         if row is None or row["expires"] <= now:
-            return "This menu expired or was handled already. Use /sessions again."
+            command = "/price" if parts[0] == "tq" else "/sessions"
+            return f"This menu expired or was handled already. Use {command} again."
         if (row["chat"] != message.get("chat", {}).get("id") or row["actor"] != query.get("from", {}).get("id")
                 or row["message_id"] is None or row["message_id"] != message.get("message_id")):
             return "Only the requester can use the current session buttons."
         operation = parts[2]
         payload = json.loads(row["payload"])
+        is_price = payload.get("purpose") == "price"
+        if parts[0] != ("tq" if is_price else "tc"):
+            return "Invalid session selection."
         if operation == "close":
             self.db.execute("DELETE FROM session_menus WHERE nonce=?", (row["nonce"],))
-            self._reply(row["chat"], "Session menu closed.", replace_id=row["outbox_id"])
+            self._reply(row["chat"], "Price menu closed." if is_price else "Session menu closed.", replace_id=row["outbox_id"])
             return "Closed."
         target = None
         if payload["view"] == "list":
@@ -81,7 +87,7 @@ class SessionMenuStore:
                 return "Select a session."
             if index >= len(payload["sessions"]):
                 return "Invalid session selection."
-            target, operation = payload["sessions"][index], "status"
+            target, operation = payload["sessions"][index], "price" if is_price else "status"
         else:
             if operation not in {"status", "list", *SESSION_ACTIONS}:
                 return "Invalid session action."
@@ -91,9 +97,12 @@ class SessionMenuStore:
                 if desired == target[field]:
                     return "Invalid session action. Use the displayed buttons."
         metadata = {"operation": operation, "target": target, "replace_id": row["outbox_id"]}
-        if not self._queue_direct(update_id, row["chat"], row["actor"], "session", "/sessions " + operation, metadata):
+        kind, command = ("price", "/price") if is_price else ("session", "/sessions")
+        if not self._queue_direct(update_id, row["chat"], row["actor"], kind, command + " " + operation, metadata):
             return "Request queue is full. Retry later."
         self.db.execute("DELETE FROM session_menus WHERE nonce=?", (row["nonce"],))
+        if is_price:
+            return "Loading price."
         return "Updating session." if operation in SESSION_ACTIONS else "Loading session."
 
     def begin_session_command(self, job: dict) -> None:
@@ -117,6 +126,9 @@ class SessionMenuStore:
             if error:
                 self._reply(job["chat"], error, replace_id=replace_id, request_id=job["id"])
                 answer = error
+            elif payload["view"] == "price":
+                answer = payload["report"]
+                self._reply(job["chat"], answer, replace_id=replace_id, request_id=job["id"])
             else:
                 answer = self._session_menu(job, payload, replace_id=replace_id)
             self.db.execute("UPDATE jobs SET answer=? WHERE bot=? AND id=?", (answer, self.bot_id, job["id"]))
