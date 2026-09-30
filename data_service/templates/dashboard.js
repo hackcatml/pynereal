@@ -7345,12 +7345,16 @@
     return sel ? String(sel.value || "") : "";
   }
 
+  function addSessionScriptValues() {
+    return ["", ...scriptOptions];
+  }
+
   function syncScriptSelectLabel() {
     const nodes = scriptSelectNodes();
     const value = selectedScriptValue();
-    const text = value || "script_name…";
+    const text = value || "Script (optional)";
     if (nodes.label) nodes.label.textContent = text;
-    if (nodes.button) nodes.button.title = value || "Select script";
+    if (nodes.button) nodes.button.title = value || "Select script (optional)";
     if (nodes.options) {
       nodes.options.querySelectorAll(".script-select-option").forEach((option, index) => {
         const selected = option.dataset.scriptValue === value;
@@ -7364,30 +7368,20 @@
   function renderScriptOptions() {
     const nodes = scriptSelectNodes();
     if (!nodes.options) return;
-    if (!scriptOptions.length) {
-      nodes.options.innerHTML = `<div class="script-select-empty">No scripts found</div>`;
-      scriptActiveIndex = -1;
-      syncScriptSelectLabel();
-      return;
-    }
     const value = selectedScriptValue();
-    nodes.options.innerHTML = scriptOptions.map((script, index) => {
+    nodes.options.innerHTML = addSessionScriptValues().map((script, index) => {
       const selected = script === value;
       const active = index === scriptActiveIndex;
+      const label = script || "No script";
       return `<button type="button" role="option" ` +
         `class="script-select-option${selected ? " selected" : ""}${active ? " active" : ""}" ` +
         `data-script-index="${index}" data-script-value="${esc(script)}" ` +
-        `aria-selected="${selected ? "true" : "false"}" title="${esc(script)}">${esc(script)}</button>`;
+        `aria-selected="${selected ? "true" : "false"}" title="${esc(label)}">${esc(label)}</button>`;
     }).join("");
   }
 
   function setScriptActiveIndex(index) {
-    if (!scriptOptions.length) {
-      scriptActiveIndex = -1;
-      renderScriptOptions();
-      return;
-    }
-    const next = Math.max(0, Math.min(Number(index) || 0, scriptOptions.length - 1));
+    const next = Math.max(0, Math.min(Number(index) || 0, addSessionScriptValues().length - 1));
     scriptActiveIndex = next;
     renderScriptOptions();
     const active = el("script-select-options").querySelector(".script-select-option.active");
@@ -7416,7 +7410,7 @@
   function openScriptDropdown() {
     const nodes = scriptSelectNodes();
     if (!nodes.control || !nodes.button || !nodes.options) return;
-    const currentIndex = scriptOptions.indexOf(selectedScriptValue());
+    const currentIndex = addSessionScriptValues().indexOf(selectedScriptValue());
     scriptActiveIndex = currentIndex >= 0 ? currentIndex : 0;
     renderScriptOptions();
     setAnimatedScriptOptions(nodes.control, nodes.button, nodes.options, true);
@@ -7445,14 +7439,14 @@
   }
 
   function moveScriptActive(delta) {
-    if (!scriptOptions.length) return;
     const current = scriptActiveIndex >= 0 ? scriptActiveIndex : 0;
     setScriptActiveIndex(current + delta);
   }
 
   function commitScriptActive() {
-    if (scriptActiveIndex < 0 || scriptActiveIndex >= scriptOptions.length) return false;
-    selectScriptValue(scriptOptions[scriptActiveIndex]);
+    const values = addSessionScriptValues();
+    if (scriptActiveIndex < 0 || scriptActiveIndex >= values.length) return false;
+    selectScriptValue(values[scriptActiveIndex]);
     closeScriptDropdown();
     const button = el("script-select-button");
     if (button) button.focus();
@@ -9512,13 +9506,6 @@
   el("add-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     el("add-error").textContent = "";
-    if (!selectedScriptValue()) {
-      el("add-error").textContent = "스크립트를 선택하세요.";
-      openScriptDropdown();
-      const button = el("script-select-button");
-      if (button) button.focus();
-      return;
-    }
     const fd = new FormData(e.target);
     const payload = {};
     fd.forEach((v, k) => {
@@ -10514,7 +10501,7 @@
       const cur = sel.value;
       scriptOptions = Array.isArray(data.scripts) ? data.scripts : [];
       const opts = scriptOptions.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("");
-      sel.innerHTML = '<option value="">script_name…</option>' + opts;
+      sel.innerHTML = '<option value="">Script (optional)</option>' + opts;
       sel.value = cur && scriptOptions.includes(cur) ? cur : "";
       renderScriptOptions();
       syncScriptSelectLabel();
@@ -10561,7 +10548,7 @@
       setScriptActiveIndex(0);
     } else if (e.key === "End") {
       e.preventDefault();
-      setScriptActiveIndex(scriptOptions.length - 1);
+      setScriptActiveIndex(addSessionScriptValues().length - 1);
     } else if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       commitScriptActive();
