@@ -55,6 +55,7 @@ import {
 import { tags } from "@lezer/highlight";
 import { pyneCompletion } from "./completions.js";
 import { desktopMinimap } from "./minimap.js";
+import { preciseTouchSelection } from "./touch_selection.js";
 import { buildChangeHunks, changeActionState, openChangeAtLine, setChangeHunks } from "./change_actions.js";
 
 const setSearchEffect = StateEffect.define();
@@ -286,6 +287,7 @@ function create(container, options = {}) {
 
   const extensions = () => [
     history(),
+    preciseTouchSelection,
     drawSelection(),
     dropCursor(),
     rectangularSelection(),
