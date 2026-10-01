@@ -1,5 +1,6 @@
 var App = window.App || (window.App = {});
 
+App.history.attach();
 App.ws.connect();
 App.ws.startKeepalive();
 const chartInfoReady = App.data.loadChartInfo();

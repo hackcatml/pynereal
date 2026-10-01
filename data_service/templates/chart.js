@@ -14,6 +14,7 @@ App.chart = {
   resizeObserver: null,
   touchGuardsAttached: false,
   manualAlertLastTap: null,
+  manualAlertPointerType: null,
   manualAlertLineDrag: null,
   manualAlertLineSuppressTapUntil: 0,
   manualAlertLineChartInputFrozen: false,
@@ -824,6 +825,7 @@ App.chart = {
   attachManualAlertGesture() {
     document.addEventListener("pointerdown", (e) => {
       if (!(e.target instanceof Node) || !this.container.contains(e.target)) return;
+      this.manualAlertPointerType = e.pointerType;
       this.startManualAlertLineDrag(e);
     }, { capture: true, passive: false });
     window.addEventListener("pointermove", (e) => {
@@ -854,6 +856,8 @@ App.chart = {
 
     this.container.addEventListener("dblclick", (e) => {
       if (e.button !== 0) return;
+      // Touch uses the stricter double-tap interval below, not native dblclick.
+      if (this.manualAlertPointerType && this.manualAlertPointerType !== "mouse") return;
       if (performance.now() < this.manualAlertLineSuppressTapUntil) return;
       e.preventDefault();
       App.ui.closeManualAlertMenu();
@@ -869,7 +873,7 @@ App.chart = {
       if (!previous) return;
       const dt = now - previous.time;
       const distance = Math.hypot(e.clientX - previous.clientX, e.clientY - previous.clientY);
-      if (dt > 360 || distance > 28) return;
+      if (dt > 250 || distance > 28) return;
       e.preventDefault();
       this.manualAlertLastTap = null;
       App.ui.closeManualAlertMenu();
@@ -905,17 +909,23 @@ App.chart = {
     const rightPadding = Math.min(140, width * 0.12);
     if (!this.isMobileViewport() || this.captureMode || dataLength <= 0) {
       if (dataLength > 0 && rightPadding > 0) {
-        // Reserve pixels for price labels even when fitting thousands of candles.
-        ts.applyOptions({ rightOffsetPixels: rightPadding });
+        // Reserve the initial label margin without persistent pixel-offset mode,
+        // which rescales historical scroll offsets during time-axis dragging.
+        const spacing = Math.max(ts.options().minBarSpacing, (width - rightPadding) / dataLength);
+        const paddingBars = rightPadding / spacing;
+        ts.applyOptions({ rightOffset: paddingBars, rightBarStaysOnScroll: false });
+        ts.setVisibleLogicalRange({ from: 0, to: dataLength - 1 + paddingBars });
+      } else {
+        ts.fitContent();
       }
-      ts.fitContent();
       return;
     }
     const containerWidth = Math.max(1, this.container.clientWidth || window.innerWidth || 1);
     const visibleBars = Math.min(dataLength, Math.max(140, Math.round(containerWidth / 2)));
     // Logical ranges overwrite the offset, so include the pixel margin in the range itself.
     const paddingBars = width > rightPadding ? visibleBars * rightPadding / (width - rightPadding) : 0;
-    if (rightPadding > 0) ts.applyOptions({ rightOffsetPixels: rightPadding });
+    // Keep the pinch midpoint anchored, including after restoring old scale options.
+    if (rightPadding > 0) ts.applyOptions({ rightOffset: paddingBars, rightBarStaysOnScroll: false });
     ts.setVisibleLogicalRange({
       from: Math.max(0, dataLength - visibleBars),
       to: dataLength - 1 + paddingBars
@@ -937,7 +947,8 @@ App.chart = {
         rightOffset: this.isMobileViewport() ? 4 : 10,
         barSpacing: this.isMobileViewport() ? 5 : 6,
         minBarSpacing: 0.5,
-        rightBarStaysOnScroll: true
+        // Anchor wheel/pinch zoom to the pointer rather than the right edge.
+        rightBarStaysOnScroll: false
       },
       crosshair: {
         mode: LightweightCharts.CrosshairMode.Magnet
@@ -1031,6 +1042,7 @@ App.chart = {
     // invalidate any loadInitialWithRetry still in flight so it won't append to
     // (or race with) the reload that typically follows this reset
     state.loadGeneration++;
+    App.history.reset();
     if (resetCandles) {
       this.candleSeries.setData([]);
       this.volumeSeries.setData([]);
@@ -1122,6 +1134,14 @@ App.chart = {
     const monitorJank = (ts) => {
       if (document.visibilityState === "hidden") {
         state.lastFrameTs = ts;
+        requestAnimationFrame(monitorJank);
+        return;
+      }
+      // History replacement temporarily rebuilds series and moves their indexes.
+      // Do not reload the page or persist that intermediate viewport as a fault.
+      if (App.history?.loading) {
+        state.jankFrames = [];
+        state.lastFrameTs = null;
         requestAnimationFrame(monitorJank);
         return;
       }
@@ -1230,7 +1250,8 @@ App.chart = {
     document.addEventListener("gesturechange", preventGestureEvent, options);
     document.addEventListener("gestureend", preventGestureEvent, options);
   },
-  goToStart() {
+  async goToStart() {
+    if (!await App.history.goToEdge("start")) return;
     const ts = this.chart.timeScale();
     const lr = ts.getVisibleLogicalRange();
     // 현재 줌(보이는 봉 개수)을 유지한 채 첫 봉(logical index 0)을 약간의 여백을 두고 보여준다.
@@ -1238,7 +1259,8 @@ App.chart = {
     const margin = Math.max(2, Math.round(span * 0.08));
     ts.setVisibleLogicalRange({ from: -margin, to: span - margin });
   },
-  goToEnd() {
+  async goToEnd() {
+    if (!await App.history.goToEdge("end")) return;
     const ts = this.chart.timeScale();
     const lr = ts.getVisibleLogicalRange();
     // 현재 줌을 유지한 채 최신 봉을 오른쪽 여백을 두고 확정 이동한다.
