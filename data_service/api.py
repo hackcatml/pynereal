@@ -9,7 +9,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-from fastapi import APIRouter, Body, File, Request, UploadFile
+from fastapi import APIRouter, Body, File, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from markdown_it import MarkdownIt
 
@@ -30,6 +30,7 @@ from account_service.csv_import import (
 from asset_portfolio import AssetPortfolioError, AssetPortfolioService
 from asset_transfer import AssetTransferError, AssetTransferService
 from calendar_store import CalendarEventStore, CalendarStoreError
+from chart_history import CHART_PAGE_SIZE, read_chart_window
 from data_integrity import DataIntegrityCancelled, inspect_data_integrity
 from registry import (
     HistoryNotReadyError,
@@ -425,6 +426,20 @@ def build_session_api_router(
 
     def _rt(session_id: str) -> Optional[Session]:
         return registry.get(session_id)
+
+    @r.get("/api/{session_id}/chart-window")
+    def get_chart_window(
+        session_id: str,
+        limit: int = Query(CHART_PAGE_SIZE, ge=1, le=CHART_PAGE_SIZE),
+        before: int | None = Query(None, ge=0),
+        after: int | None = Query(None, ge=0),
+    ) -> JSONResponse:
+        rt = _rt(session_id)
+        if rt is None:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        if before is not None and after is not None:
+            return JSONResponse({"error": "Use before or after, not both"}, status_code=400)
+        return JSONResponse(read_chart_window(rt, limit, before, after), headers={"Cache-Control": "no-store"})
 
     @r.get("/api/{session_id}/trades")
     def get_trades(session_id: str) -> JSONResponse:

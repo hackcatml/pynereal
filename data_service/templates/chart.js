@@ -906,7 +906,7 @@ App.chart = {
     if (!this.isMobileViewport() || this.captureMode || dataLength <= 0) {
       if (dataLength > 0 && rightPadding > 0) {
         // Reserve pixels for price labels even when fitting thousands of candles.
-        ts.applyOptions({ rightOffsetPixels: rightPadding });
+        ts.applyOptions({ rightOffsetPixels: rightPadding, rightBarStaysOnScroll: !this.isMobileViewport() });
       }
       ts.fitContent();
       return;
@@ -915,7 +915,8 @@ App.chart = {
     const visibleBars = Math.min(dataLength, Math.max(140, Math.round(containerWidth / 2)));
     // Logical ranges overwrite the offset, so include the pixel margin in the range itself.
     const paddingBars = width > rightPadding ? visibleBars * rightPadding / (width - rightPadding) : 0;
-    if (rightPadding > 0) ts.applyOptions({ rightOffsetPixels: rightPadding });
+    // Keep the pinch midpoint anchored, including after restoring old scale options.
+    if (rightPadding > 0) ts.applyOptions({ rightOffsetPixels: rightPadding, rightBarStaysOnScroll: false });
     ts.setVisibleLogicalRange({
       from: Math.max(0, dataLength - visibleBars),
       to: dataLength - 1 + paddingBars
@@ -937,7 +938,7 @@ App.chart = {
         rightOffset: this.isMobileViewport() ? 4 : 10,
         barSpacing: this.isMobileViewport() ? 5 : 6,
         minBarSpacing: 0.5,
-        rightBarStaysOnScroll: true
+        rightBarStaysOnScroll: !this.isMobileViewport()
       },
       crosshair: {
         mode: LightweightCharts.CrosshairMode.Magnet
@@ -1031,6 +1032,7 @@ App.chart = {
     // invalidate any loadInitialWithRetry still in flight so it won't append to
     // (or race with) the reload that typically follows this reset
     state.loadGeneration++;
+    App.history.reset();
     if (resetCandles) {
       this.candleSeries.setData([]);
       this.volumeSeries.setData([]);
@@ -1122,6 +1124,14 @@ App.chart = {
     const monitorJank = (ts) => {
       if (document.visibilityState === "hidden") {
         state.lastFrameTs = ts;
+        requestAnimationFrame(monitorJank);
+        return;
+      }
+      // History replacement temporarily rebuilds series and moves their indexes.
+      // Do not reload the page or persist that intermediate viewport as a fault.
+      if (App.history?.loading) {
+        state.jankFrames = [];
+        state.lastFrameTs = null;
         requestAnimationFrame(monitorJank);
         return;
       }
@@ -1230,7 +1240,8 @@ App.chart = {
     document.addEventListener("gesturechange", preventGestureEvent, options);
     document.addEventListener("gestureend", preventGestureEvent, options);
   },
-  goToStart() {
+  async goToStart() {
+    if (!await App.history.goToEdge("start")) return;
     const ts = this.chart.timeScale();
     const lr = ts.getVisibleLogicalRange();
     // 현재 줌(보이는 봉 개수)을 유지한 채 첫 봉(logical index 0)을 약간의 여백을 두고 보여준다.
@@ -1238,7 +1249,8 @@ App.chart = {
     const margin = Math.max(2, Math.round(span * 0.08));
     ts.setVisibleLogicalRange({ from: -margin, to: span - margin });
   },
-  goToEnd() {
+  async goToEnd() {
+    if (!await App.history.goToEdge("end")) return;
     const ts = this.chart.timeScale();
     const lr = ts.getVisibleLogicalRange();
     // 현재 줌을 유지한 채 최신 봉을 오른쪽 여백을 두고 확정 이동한다.

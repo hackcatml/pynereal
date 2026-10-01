@@ -333,6 +333,7 @@ class Session:
         self.paths = SessionPaths.build(spec.id)
 
         self.ws_manager = WSManager(on_disconnect=self._cleanup_client)
+        self.chart_revision = uuid.uuid4().hex
         self.trades_history: List[Dict[str, Any]] = []
         self.plot_options: Dict[str, Dict[str, Any]] = {}
         self.plotchar_history: List[Dict[str, Any]] = []
@@ -504,6 +505,7 @@ class Session:
 
     def reconfigure_script(self, spec: SessionSpec) -> None:
         """Apply a stopped-session script change without replacing its identity."""
+        self.chart_revision = uuid.uuid4().hex
         self.spec = spec
         self.trades_history.clear()
         self.plot_options.clear()
@@ -693,6 +695,16 @@ class Session:
             msg = json.loads(msg_text)
         except json.JSONDecodeError:
             return  # keepalive ping
+        if isinstance(msg, dict) and msg.get("type") == "chart_ping":
+            if self.client_roles.get(ws) == "chart":
+                await self.ws_manager.send(ws, {
+                    **self._runner_phase_payload(),
+                    "type": "chart_pong",
+                    "id": msg.get("id"),
+                    "chart_revision": self.chart_revision,
+                    "runner_connected": self.runner_count > 0,
+                })
+            return
         events = msg if isinstance(msg, list) else [msg]
         for event in events:
             await self._handle_event(ws, event)
@@ -939,6 +951,9 @@ class Session:
         }
 
     async def send_to_charts(self, payload: dict) -> None:
+        if payload.get("type") in {"script_modified", "chart_reset", "runner_connected", "runner_disconnected"}:
+            self.chart_revision = uuid.uuid4().hex
+            payload = {**payload, "chart_revision": self.chart_revision}
         for ws, role in list(self.client_roles.items()):
             if role == "chart":
                 await self.ws_manager.send(ws, payload)

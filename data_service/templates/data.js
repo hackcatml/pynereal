@@ -1,5 +1,89 @@
 var App = window.App || (window.App = {});
 
+// Draw disconnected lines on one price series instead of allocating a series
+// for each segment. Scaling and crosshair values still use the chart library.
+App.LineBreakPrimitive = class {
+  constructor(points, options) {
+    this.points = points.slice();
+    this.options = options;
+    this.views = [{ renderer: () => this }];
+  }
+
+  attached({ chart, series, requestUpdate }) {
+    this.chart = chart;
+    this.series = series;
+    this.requestUpdate = requestUpdate;
+  }
+
+  detached() {
+    this.chart = null;
+    this.series = null;
+    this.requestUpdate = null;
+  }
+
+  paneViews() { return this.views; }
+
+  update(point) {
+    const last = this.points.at(-1);
+    if (last && point.time === last.time) this.points[this.points.length - 1] = point;
+    else if (!last || point.time > last.time) this.points.push(point);
+    this.requestUpdate?.();
+  }
+
+  lowerBound(time) {
+    let low = 0, high = this.points.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (this.points[mid].time < time) low = mid + 1;
+      else high = mid;
+    }
+    return low;
+  }
+
+  draw(target) {
+    if (!this.chart || !this.series || !this.points.length) return;
+    const scale = this.chart.timeScale();
+    const range = scale.getVisibleRange();
+    if (!range) return;
+    // Include the neighbouring points so lines crossing a viewport edge remain
+    // connected, but never scan the whole history on each frame.
+    const from = Math.max(0, this.lowerBound(range.from) - 1);
+    const to = Math.min(this.points.length, this.lowerBound(range.to) + 2);
+    target.useBitmapCoordinateSpace(({ context: ctx, horizontalPixelRatio: rx, verticalPixelRatio: ry }) => {
+      ctx.save();
+      ctx.strokeStyle = this.options.color;
+      ctx.lineWidth = this.options.lineWidth * ry;
+      ctx.lineCap = 'butt';
+      ctx.lineJoin = 'round';
+      let count = 0, singleX = 0, singleY = 0;
+      const flush = () => {
+        if (count === 1) {
+          const half = scale.options().barSpacing * rx / 2;
+          ctx.moveTo(singleX - half, singleY);
+          ctx.lineTo(singleX + half, singleY);
+        }
+        if (count) ctx.stroke();
+        count = 0;
+      };
+      for (let i = from; i < to; i++) {
+        const point = this.points[i];
+        const x = point.value == null ? null : scale.timeToCoordinate(point.time);
+        const y = point.value == null ? null : this.series.priceToCoordinate(point.value);
+        if (x == null || y == null) { flush(); continue; }
+        if (!count) {
+          ctx.beginPath();
+          ctx.moveTo(x * rx, y * ry);
+          singleX = x * rx;
+          singleY = y * ry;
+        } else ctx.lineTo(x * rx, y * ry);
+        count++;
+      }
+      flush();
+      ctx.restore();
+    });
+  }
+};
+
 App.data = {
   STYLE_CIRCLES: 2,
   STYLE_CROSS: 4,
@@ -9,7 +93,7 @@ App.data = {
     collections.ohlcvData = Array.isArray(data)
       ? data
           .filter(d => d && Number.isFinite(Number(d.time)))
-          .map(d => ({
+          .map(d => d.close == null ? { time: Number(d.time) } : ({
             time: Number(d.time),
             open: Number(d.open),
             high: Number(d.high),
@@ -47,14 +131,25 @@ App.data = {
       volume: Number(bar.volume) || 0
     };
     const existingIndex = collections.ohlcvIndexByTime.get(time);
+    const lastIndex = collections.ohlcvData.length - 1;
     if (existingIndex != null) {
       collections.ohlcvData[existingIndex] = cachedBar;
+      if (existingIndex === lastIndex) {
+        collections.ohlcvVolumePrefix[lastIndex] = (collections.ohlcvVolumePrefix[lastIndex - 1] || 0) + cachedBar.volume;
+        if (App.measure) App.measure.scheduleRender();
+        return;
+      }
       this.rebuildOhlcvCache(collections.ohlcvData, false);
       return;
     }
     const last = collections.ohlcvData[collections.ohlcvData.length - 1];
     if (!last || time > last.time) {
       collections.ohlcvData.push(cachedBar);
+      collections.ohlcvIndexByTime.set(time, lastIndex + 1);
+      collections.ohlcvVolumePrefix.push((collections.ohlcvVolumePrefix[lastIndex] || 0) + cachedBar.volume);
+      if (App.measure) App.measure.scheduleRender();
+      if (App.chart?.bgcolorPrimitive) App.chart.bgcolorPrimitive.onOhlcvChanged();
+      return;
     } else {
       collections.ohlcvData.push(cachedBar);
       collections.ohlcvData.sort((a, b) => a.time - b.time);
@@ -119,41 +214,32 @@ App.data = {
     return series;
   },
   createLineBreakPlot(chart, collections, seriesOptions, seriesData) {
+    const lastHadValue = Boolean(this.hasLineValue(seriesData.at(-1)));
+    const series = this.addPlotLineSeries(chart, collections, {
+      ...seriesOptions,
+      lineVisible: false,
+      lastValueVisible: false
+    }, seriesData.filter(point => this.hasLineValue(point)));
+    const primitive = new App.LineBreakPrimitive(seriesData, seriesOptions);
+    series.attachPrimitive(primitive);
+    let activeStart = seriesData.length;
+    while (activeStart > 0 && this.hasLineValue(seriesData[activeStart - 1])) activeStart--;
+    // The label must follow only the latest segment, never a historical one
+    // when the user scrolls back. Keep that small series separate.
+    const labelSeries = this.addPlotLineSeries(chart, collections, {
+      ...seriesOptions,
+      lineVisible: false,
+      crosshairMarkerVisible: false,
+      lastValueVisible: Boolean(lastHadValue && chart.plotValueLabelsVisible)
+    }, seriesData.slice(activeStart));
     const controller = {
       type: "linebr",
-      options: seriesOptions,
-      activeSeries: null,
-      lastHadValue: false
+      series,
+      primitive,
+      labelSeries,
+      activeSeries: lastHadValue ? labelSeries : null,
+      lastHadValue
     };
-    let segment = [];
-
-    const flushSegment = (isActive) => {
-      if (segment.length === 0) {
-        return;
-      }
-      // Completed line-break segments must not keep historical price labels.
-      const series = this.addPlotLineSeries(chart, collections, {
-        ...seriesOptions,
-        lastValueVisible: Boolean(isActive && chart.plotValueLabelsVisible)
-      }, segment);
-      if (isActive) {
-        controller.activeSeries = series;
-      }
-      segment = [];
-    };
-
-    seriesData.forEach(point => {
-      if (this.hasLineValue(point)) {
-        segment.push(point);
-        controller.lastHadValue = true;
-      } else {
-        flushSegment(false);
-        controller.lastHadValue = false;
-        controller.activeSeries = null;
-      }
-    });
-    flushSegment(controller.lastHadValue);
-
     return controller;
   },
   createPlotSeries(chart, collections, plot, seriesData) {
@@ -166,8 +252,14 @@ App.data = {
     }
     const { title, color, linewidth, style } = plot;
     const { options, isLineBreakStyle } = this.buildPlotSeriesOptions(color, linewidth, style);
-    if (isLineBreakStyle) {
-      const controller = this.createLineBreakPlot(chart, collections, options, seriesData);
+    const hasHistoryGaps = plot.historyGaps?.length && options.lineVisible !== false;
+    if (isLineBreakStyle || hasHistoryGaps) {
+      // Ordinary lines still connect across script nulls, but not unread history.
+      const points = !isLineBreakStyle ? seriesData.filter(point => this.hasLineValue(point)) : seriesData.slice();
+      for (const time of plot.historyGaps || []) points.push({ time });
+      points.sort((a, b) => a.time - b.time);
+      const controller = this.createLineBreakPlot(chart, collections, options, points);
+      controller.connectNulls = !isLineBreakStyle;
       collections.plotSeriesMap.set(title, controller);
       return;
     }
@@ -201,6 +293,8 @@ App.data = {
       return;
     }
 
+    if (controller.connectNulls && !this.hasLineValue(linePoint)) return;
+    controller.primitive.update(linePoint);
     if (!this.hasLineValue(linePoint)) {
       if (controller.activeSeries) {
         controller.activeSeries.applyOptions({ lastValueVisible: false });
@@ -211,24 +305,35 @@ App.data = {
     }
 
     if (!controller.lastHadValue || !controller.activeSeries) {
-      controller.activeSeries = this.addPlotLineSeries(chart, collections, {
-        ...controller.options,
+      controller.activeSeries = controller.labelSeries;
+      controller.activeSeries.setData([]);
+      controller.activeSeries.applyOptions({
         lastValueVisible: Boolean(chart.plotValueLabelsVisible)
-      }, []);
+      });
     }
+    controller.series.update(linePoint);
     controller.activeSeries.update(linePoint);
     controller.lastHadValue = true;
   },
-  async loadTradeHistory(generation = App.state.loadGeneration) {
+  normalizePriceMarkerData(data) {
+    // A line series requires one price per timestamp, even when several orders
+    // execute on the same candle. Order labels are kept separately in markers.
+    const points = new Map();
+    for (const point of data) {
+      if (point.time == null || point.value == null) continue;
+      const time = Number(point.time);
+      const value = Number(point.value);
+      if (Number.isFinite(time) && Number.isFinite(value)) points.set(time, { time, value });
+    }
+    return [...points.values()].sort((a, b) => a.time - b.time);
+  },
+  renderTradeHistory(trades) {
     const state = App.state;
     const collections = App.collections;
     const chart = App.chart;
-    if (!state.runnerConnected || generation !== state.loadGeneration) return;
     try {
-      const resp = await fetch(`${App.config.apiBase}/trades`);
-      const trades = await resp.json();
-      if (generation !== state.loadGeneration) return;
-
+      if (collections.seriesMarkers) collections.seriesMarkers.detach();
+      collections.seriesMarkers = null;
       collections.markers.length = 0;
       collections.markerKeys.clear();
       collections.entryMarkerData.length = 0;
@@ -291,26 +396,21 @@ App.data = {
         collections.seriesMarkers = LightweightCharts.createSeriesMarkers(chart.candleSeries, collections.markers);
       }
 
-      if (collections.entryMarkerData.length > 0) {
-        chart.entryMarkerSeries.setData(collections.entryMarkerData);
-      }
-      if (collections.closeMarkerData.length > 0) {
-        chart.closeMarkerSeries.setData(collections.closeMarkerData);
-      }
+      collections.entryMarkerData = this.normalizePriceMarkerData(collections.entryMarkerData);
+      collections.closeMarkerData = this.normalizePriceMarkerData(collections.closeMarkerData);
+      chart.entryMarkerSeries.setData(collections.entryMarkerData);
+      chart.closeMarkerSeries.setData(collections.closeMarkerData);
     } catch (e) {
       console.error("Failed to load trade history:", e);
     }
   },
-  async loadPlotcharHistory(generation = App.state.loadGeneration) {
+  renderPlotcharHistory(plotchars) {
     const state = App.state;
     const collections = App.collections;
     const chart = App.chart;
-    if (!state.runnerConnected || generation !== state.loadGeneration) return;
     try {
-      const resp = await fetch(`${App.config.apiBase}/plotchar`);
-      const plotchars = await resp.json();
-      if (generation !== state.loadGeneration) return;
-
+      if (collections.plotcharSeriesMarkers) collections.plotcharSeriesMarkers.detach();
+      collections.plotcharSeriesMarkers = null;
       collections.plotcharMarkers.length = 0;
       collections.plotcharMarkerKeys.clear();
 
@@ -350,165 +450,34 @@ App.data = {
       console.error("Failed to load plotchar history:", e);
     }
   },
-  async loadPlotData(generation = App.state.loadGeneration) {
-    const state = App.state;
+  clearPlotData() {
     const collections = App.collections;
     const chart = App.chart;
-    if (!state.runnerConnected || generation !== state.loadGeneration) return;
-    const warmupDeadline = Date.now() + 5 * 60 * 1000;
-    let attempts = 0;
-    while (attempts < 30 && Date.now() < warmupDeadline) {
-      if (generation !== state.loadGeneration) return;
-      try {
-        const resp = await fetch(`${App.config.apiBase}/plot?limit=100000`);
-        if (resp.status === 409) {
-          await App.util.sleep(1000);
-          continue;
+    for (const series of collections.plotSeriesList) chart.chart.removeSeries(series);
+    collections.plotSeriesList.length = 0;
+    collections.plotSeriesMap.clear();
+    if (chart.bgcolorPrimitive) chart.bgcolorPrimitive.clear();
+  },
+  renderPlotData(plots) {
+    const collections = App.collections;
+    const chart = App.chart;
+    this.clearPlotData();
+    for (const plot of plots) {
+      const seriesData = [];
+      for (const point of plot.data || []) {
+        if (plot.kind === "bgcolor") {
+          const pointTime = Number(point.time);
+          if (Number.isFinite(pointTime)) seriesData.push({ time: pointTime, value: point.value });
+        } else {
+          const linePoint = this.toLinePoint(point.time, point.value);
+          if (linePoint) seriesData.push(linePoint);
         }
-        const plots = await resp.json();
-        attempts += 1;
-        if (generation !== state.loadGeneration) return;
-
-        const hasHistoricalData = Array.isArray(plots) && plots.some(
-          plot => Array.isArray(plot && plot.data) && plot.data.length > 0
-        );
-        if (hasHistoricalData) {
-          const pendingSeriesData = [];
-          plots.forEach(plot => {
-            const seriesData = [];
-            if (plot.data && Array.isArray(plot.data)) {
-              plot.data.forEach(point => {
-                if (plot.kind === "bgcolor") {
-                  const pointTime = Number(point.time);
-                  if (Number.isFinite(pointTime)) {
-                    seriesData.push({ time: pointTime, value: point.value });
-                  }
-                } else {
-                  const linePoint = App.data.toLinePoint(point.time, point.value);
-                  if (linePoint) {
-                    seriesData.push(linePoint);
-                  }
-                }
-              });
-            }
-
-            pendingSeriesData.push([plot, seriesData]);
-          });
-
-          pendingSeriesData.forEach(([plot, data]) => {
-            this.createPlotSeries(chart, collections, plot, data);
-          });
-          return;
-        }
-      } catch (e) {
-        attempts += 1;
-        // Ignore and retry
       }
-      await App.util.sleep(1000);
+      this.createPlotSeries(chart, collections, plot, seriesData);
     }
   },
   async loadInitialWithRetry() {
-    const state = App.state;
-    const collections = App.collections;
-    const chart = App.chart;
-    if (state.initialLoadInProgress || state.initialLoadDone) {
-      return;
-    }
-    state.initialLoadInProgress = true;
-    // snapshot the generation; a resetChartState (e.g. chart_reset) bumps it and
-    // this loop bails so only the newest loader touches the chart
-    const gen = state.loadGeneration;
-    for (let i = 0; i < 30; i++) {
-      if (gen !== state.loadGeneration) {
-        return;
-      }
-      try {
-        const resp = await fetch(`${App.config.apiBase}/ohlcv?limit=100000`);
-        const data = await resp.json();
-        if (gen !== state.loadGeneration) {
-          return;
-        }
-        if (Array.isArray(data) && data.length > 0) {
-          const cleanData = data.filter(d => d && d.time != null && d.open != null && d.high != null &&
-            d.low != null && d.close != null);
-          if (cleanData.length === 0) {
-            await App.util.sleep(1000);
-            continue;
-          }
-          this.rebuildOhlcvCache(cleanData);
-          chart.candleSeries.setData(cleanData);
-          chart.volumeSeries.setData(cleanData.map(d => ({
-            time: d.time,
-            value: d.volume,
-            color: d.close >= d.open ? "#26a69a" : "#ef5350"
-          })));
-          const savedRange = sessionStorage.getItem(App.config.storageKey("chartVisibleRange"));
-          const savedLogicalRange = sessionStorage.getItem(App.config.storageKey("chartVisibleLogicalRange"));
-          const savedScale = sessionStorage.getItem(App.config.storageKey("chartScaleOptions"));
-          if (savedRange || savedLogicalRange) {
-            chart.chart.timeScale().fitContent();
-          } else {
-            chart.applyInitialVisibleRange(cleanData.length);
-          }
-          if (savedScale) {
-            try {
-              const opts = JSON.parse(savedScale);
-              chart.chart.timeScale().applyOptions(opts);
-            } catch {}
-            sessionStorage.removeItem(App.config.storageKey("chartScaleOptions"));
-          }
-          if (savedLogicalRange) {
-            try {
-              const range = JSON.parse(savedLogicalRange);
-              chart.chart.timeScale().setVisibleLogicalRange(range);
-            } catch {}
-            sessionStorage.removeItem(App.config.storageKey("chartVisibleLogicalRange"));
-          } else if (savedRange) {
-            try {
-              const range = JSON.parse(savedRange);
-              chart.chart.timeScale().setVisibleRange(range);
-            } catch {}
-            sessionStorage.removeItem(App.config.storageKey("chartVisibleRange"));
-          }
-
-          state.firstBarTime = data[0].time;
-          if (state.configuredTimeframeSec) {
-            state.timeframeInterval = state.configuredTimeframeSec;
-          } else if (data.length >= 2) {
-            // Fallback only: on OKX/Binance/Bybit zero-volume bars are hidden, so the gap
-            // between the first two visible bars may not be the timeframe.
-            state.timeframeInterval = data[1].time - data[0].time;
-          }
-          if (data.length > 0) {
-            state.lastPrice = data[data.length - 1].close;
-            state.lastOhlcv = data[data.length - 1];
-          }
-
-          if (gen !== state.loadGeneration) {
-            return;
-          }
-          await this.loadTradeHistory(gen);
-          if (gen !== state.loadGeneration) return;
-          await this.loadPlotcharHistory(gen);
-          if (gen !== state.loadGeneration) return;
-          await this.loadPlotData(gen);
-          if (gen !== state.loadGeneration) {
-            return;
-          }
-          if (App.ui && App.ui.applyManualAlertTriggerState) {
-            App.ui.applyManualAlertTriggerState(App.state.manualAlertTriggers || []);
-          }
-          state.initialLoadDone = true;
-          state.initialLoadInProgress = false;
-          return;
-        }
-      } catch (e) {
-        // ignore
-      }
-      await App.util.sleep(1000);
-    }
-    console.error("Initial OHLCV not ready (timeout).");
-    state.initialLoadInProgress = false;
+    return App.history.loadInitial();
   },
   timeframeToSeconds(tf) {
     const m = /^(\d+)([smhdw])$/i.exec((tf || "").trim());
