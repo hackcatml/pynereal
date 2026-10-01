@@ -100,10 +100,17 @@ App.ui = {
     if (ohlcvText !== null) {
       state.baseInfoText = ohlcvText || "";
     }
-    this.elements.chartInfoBase.innerHTML = String(state.baseInfoTop || "")
+    const baseMarkup = String(state.baseInfoTop || "")
       .split(" | ")
-      .map((part) => this.escapeHtml(part))
+      .map((part, index) => index === 1 && App.timeframes?.options().length > 1
+        ? `<button id="chart-timeframe-toggle" type="button" aria-label="Chart timeframe" aria-haspopup="menu" aria-expanded="false" aria-controls="chart-timeframe-menu">${this.escapeHtml(App.timeframes.label())}</button>`
+        : this.escapeHtml(part))
       .join('<span class="chart-info-sep chart-info-sep-strong" aria-hidden="true"></span>');
+    // Preserve the timeframe button while the crosshair updates OHLCV text.
+    if (this.chartInfoBaseMarkup !== baseMarkup) {
+      this.elements.chartInfoBase.innerHTML = baseMarkup;
+      this.chartInfoBaseMarkup = baseMarkup;
+    }
     this.elements.chartInfoOhlcv.innerHTML = state.baseInfoText || "";
     this.elements.chartInfoSeparator.classList.toggle("hidden", !state.baseInfoText);
     this.updateRunnerStatus();

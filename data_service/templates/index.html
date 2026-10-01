@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Chart</title>
-  <link rel="stylesheet" href="/static/styles.css?v=46" />
+  <link rel="stylesheet" href="/static/styles.css?v=47" />
   <link rel="stylesheet" href="/static/measure.css?v=2" />
   <link rel="stylesheet" href="/static/editor.css?v=7" />
   <link rel="stylesheet" href="/static/codemirror.css?v=10" />
@@ -12,6 +12,7 @@
 </head>
 <body>
   <div id="chart"></div>
+  <div id="chart-timeframe-menu" class="chart-timeframe-menu hidden" role="menu" aria-label="Chart timeframe"></div>
   <div id="price-axis-menu" class="price-axis-menu hidden" role="dialog" aria-label="Price scale settings">
     <label>
       <input id="plot-value-labels-toggle" type="checkbox" />
@@ -316,14 +317,15 @@
   <script src="/static/state.js?v=6"></script>
   <script src="/static/codemirror.js?v=15"></script>
   <script src="/static/editor.js?v=8"></script>
-  <script src="/static/ui.js?v=33"></script>
+  <script src="/static/ui.js?v=34"></script>
   <script src="/static/bgcolor.js?v=2"></script>
-  <script src="/static/chart.js?v=16"></script>
+  <script src="/static/chart.js?v=17"></script>
   <script src="/static/measure.js?v=2"></script>
   <script src="/static/trendline.js?v=2"></script>
-  <script src="/static/data.js?v=19"></script>
-  <script src="/static/chart_history.js?v=6"></script>
-  <script src="/static/ws.js?v=7"></script>
-  <script src="/static/main.js?v=4"></script>
+  <script src="/static/data.js?v=20"></script>
+  <script src="/static/chart_timeframe.js?v=1"></script>
+  <script src="/static/chart_history.js?v=7"></script>
+  <script src="/static/ws.js?v=8"></script>
+  <script src="/static/main.js?v=5"></script>
 </body>
 </html>

@@ -184,6 +184,68 @@ body.source-open #chart {
   font-size: 16px;
   font-weight: 700;
 }
+#chart-timeframe-toggle {
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: 0;
+  text-decoration: underline dotted;
+  text-underline-offset: 4px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+#chart-timeframe-toggle:hover,
+#chart-timeframe-toggle[aria-expanded="true"] {
+  color: #1767bc;
+}
+.chart-timeframe-menu {
+  position: fixed;
+  z-index: 40;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  width: min(204px, calc(100vw - 24px));
+  box-sizing: border-box;
+  padding: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid #d3d7dd;
+  border-radius: 6px;
+  background: #fff;
+  color: #222;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.14);
+  scrollbar-width: thin;
+}
+.chart-timeframe-menu.hidden {
+  display: none;
+}
+.chart-timeframe-menu button {
+  min-height: 36px;
+  border: 0;
+  border-radius: 4px;
+  padding: 6px;
+  background: transparent;
+  color: inherit;
+  font: 500 13px/20px system-ui, sans-serif;
+  letter-spacing: 0;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.chart-timeframe-menu button:hover {
+  background: #f0f3f6;
+}
+.chart-timeframe-menu button[aria-checked="true"] {
+  background: #e5f0fc;
+  color: #1767bc;
+}
+.chart-timeframe-menu button:focus-visible,
+#chart-timeframe-toggle:focus-visible {
+  outline: 2px solid #1767bc;
+  outline-offset: 1px;
+}
 #chart-info .info-ohlcv {
   font-size: 14px;
 }

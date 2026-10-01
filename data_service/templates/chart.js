@@ -1077,7 +1077,7 @@ App.chart = {
     collections.seriesMarkers = null;
     collections.plotcharSeriesMarkers = null;
     state.firstBarTime = null;
-    state.timeframeInterval = state.configuredTimeframeSec || 60;
+    state.timeframeInterval = App.timeframes?.seconds() || state.configuredTimeframeSec || 60;
     state.lastBarTime = 0;
     state.lastOpenPrice = { time: 0, value: 0 };
     state.lastPrice = 0;
@@ -1096,7 +1096,9 @@ App.chart = {
 
     const now = Date.now();
     const currentTime = Math.floor(now / 1000);
-    const nextCandleTime = Math.ceil(currentTime / state.timeframeInterval) * state.timeframeInterval;
+    const nextCandleTime = App.timeframes?.isHigher()
+      ? App.timeframes.bucketTime(currentTime) + state.timeframeInterval
+      : Math.ceil(currentTime / state.timeframeInterval) * state.timeframeInterval;
     const remainingSeconds = nextCandleTime - currentTime;
     const minutes = Math.floor(remainingSeconds / 60);
     const seconds = remainingSeconds % 60;

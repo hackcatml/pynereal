@@ -34,6 +34,7 @@ _STATIC_FILES = {
     "measure.css": "text/css",
     "data.js": "text/javascript",
     "chart_history.js": "text/javascript",
+    "chart_timeframe.js": "text/javascript",
     "ws.js": "text/javascript",
     "main.js": "text/javascript",
     "dashboard.js": "text/javascript",

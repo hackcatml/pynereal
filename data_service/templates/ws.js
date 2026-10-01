@@ -121,6 +121,7 @@ App.ws = {
     }
     if (App.history.captureLive(msg)) return;
     try {
+        if (App.timeframes?.handleLive(msg)) return;
         if (msg.type === "script_modified") {
           state.sourceSaveStatus = "";
           if (state.sourcePanelOpen) {

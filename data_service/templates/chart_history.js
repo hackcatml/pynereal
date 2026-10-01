@@ -35,6 +35,7 @@ App.history = {
   },
   reset() {
     this.cancelPending(false);
+    App.timeframes?.reset();
     this.resyncPending = false;
     this.hasBefore = false;
     this.hasAfter = false;
@@ -235,7 +236,7 @@ App.history = {
   },
   logicalAt(time) {
     const scale = App.chart.chart.timeScale();
-    const coordinate = scale.timeToCoordinate(time);
+    const coordinate = scale.timeToCoordinate(App.timeframes?.bucketTime(time) ?? time);
     return coordinate == null ? null : scale.coordinateToLogical(coordinate);
   },
   settleChart() {
@@ -270,29 +271,7 @@ App.history = {
     this.plots = combined.plots;
     this.trades = combined.trades;
     this.plotchars = combined.plotchars;
-    state.firstBarTime = bars[0].time;
-    const last = bars[bars.length - 1];
-    state.lastBarTime = last.time;
-    state.lastPrice = last.close;
-    state.lastOhlcv = last;
-    state.lastOpenPrice = { ...combined.lastOpenPrice };
-    state.timeframeInterval = state.configuredTimeframeSec || window.interval || 60;
-    // Release old plots before replacing their shared candle timeline.
-    if (overlays) App.data.clearPlotData();
-    App.data.rebuildOhlcvCache(bars);
-    chart.candleSeries.setData(bars);
-    chart.volumeSeries.setData(bars.map(bar => bar.close == null ? { time: bar.time } : ({
-      time: bar.time, value: bar.volume,
-      color: bar.close >= bar.open ? "#26a69a" : "#ef5350"
-    })));
-    if (overlays) {
-      App.data.renderPlotData([...this.plots.values()].map(plot => ({
-        ...plot.definition, historyGaps: gaps,
-        data: [...plot.points.values()].sort((a, b) => a.time - b.time)
-      })));
-      App.data.renderTradeHistory([...this.trades.values()].sort((a, b) => a.time - b.time));
-      App.data.renderPlotcharHistory([...this.plotchars.values()].sort((a, b) => a.time - b.time));
-    }
+    this.renderData(bars, gaps, overlays);
     if (extending && previousRange && anchorIndex != null) {
       await this.settleChart();
       if (generation !== state.loadGeneration) return;
@@ -312,6 +291,38 @@ App.history = {
     }
     App.ui?.applyManualAlertTriggerState?.(state.manualAlertTriggers || []);
     await this.settleChart();
+  },
+  renderData(sourceBars, gaps, overlays = true) {
+    const { state, chart } = App;
+    const higher = App.timeframes?.isHigher();
+    const bars = App.timeframes?.project(sourceBars, this.windows) ?? sourceBars;
+    state.firstBarTime = bars[0].time;
+    const last = bars.findLast(bar => bar.close != null);
+    state.lastBarTime = bars[bars.length - 1].time;
+    state.lastPrice = last?.close || 0;
+    state.lastOhlcv = last;
+    state.lastOpenPrice = { ...this.renderedWindow.lastOpenPrice };
+    state.timeframeInterval = higher ? App.timeframes.seconds() : state.configuredTimeframeSec || this.activeWindow.interval || 60;
+    // Release old plots before replacing their shared candle timeline.
+    if (overlays || higher) App.data.clearPlotData();
+    if (higher) {
+      App.data.renderTradeHistory([]);
+      App.data.renderPlotcharHistory([]);
+    }
+    App.data.rebuildOhlcvCache(bars);
+    chart.candleSeries.setData(bars);
+    chart.volumeSeries.setData(bars.map(bar => bar.close == null ? { time: bar.time } : ({
+      time: bar.time, value: bar.volume,
+      color: bar.close >= bar.open ? "#26a69a" : "#ef5350"
+    })));
+    if (overlays && !higher) {
+      App.data.renderPlotData([...this.plots.values()].map(plot => ({
+        ...plot.definition, historyGaps: gaps,
+        data: [...plot.points.values()].sort((a, b) => a.time - b.time)
+      })));
+      App.data.renderTradeHistory([...this.trades.values()].sort((a, b) => a.time - b.time));
+      App.data.renderPlotcharHistory([...this.plotchars.values()].sort((a, b) => a.time - b.time));
+    }
   },
   async fetchWindow(query, signal) {
     const controller = new AbortController();
@@ -370,7 +381,7 @@ App.history = {
           } else if (initial && !painted) {
             await this.applyWindow(payload, mode, false);
             if (generation !== App.state.loadGeneration) return false;
-            App.chart.applyInitialVisibleRange(payload.bars.length);
+            App.chart.applyInitialVisibleRange(App.collections.ohlcvData.length);
             painted = true;
           }
           this.flushLive();
@@ -473,7 +484,8 @@ App.history = {
     const time = scale.coordinateToTime(scale.logicalToCoordinate(center))
       ?? (center < 0 ? bars[0]?.time : bars.at(-1)?.time);
     if (time == null) return;
-    const window = this.windows.find(window => window.start <= time && time <= window.end);
+    const window = this.windows.find(window =>
+      (App.timeframes?.bucketTime(window.start) ?? window.start) <= time && time <= window.end);
     if (!window) {
       // A wide drag can land inside an unread gap. Fetch that viewport directly.
       const from = scale.getVisibleRange()?.from ?? time;
@@ -490,7 +502,7 @@ App.history = {
     App.chart.chart.timeScale().subscribeVisibleLogicalRangeChange(range => {
       const previous = this.lastRange;
       this.lastRange = range;
-      if (!range || !previous || this.loading || App.state.initialLoadInProgress || !App.state.initialLoadDone) return;
+      if (!range || !previous || this.loading || App.timeframes?.switching || App.state.initialLoadInProgress || !App.state.initialLoadDone) return;
       // fitContent() on the initial 5,000 bars must not immediately fetch all history.
       const direction = range.from < previous.from - 0.5 ? -1 : range.to > previous.to + 0.5 ? 1 : 0;
       if (direction) void this.loadVisibleRange(range, direction);

@@ -500,7 +500,7 @@ App.data = {
       const tfSeconds = App.data.timeframeToSeconds(info.timeframe);
       if (tfSeconds) {
         state.configuredTimeframeSec = tfSeconds;
-        state.timeframeInterval = tfSeconds;
+        state.timeframeInterval = App.timeframes?.isHigher() ? App.timeframes.seconds() : tfSeconds;
       }
       if (info.script_title) {
         state.scriptTitle = info.script_title || "No title";
