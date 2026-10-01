@@ -14,6 +14,7 @@ App.chart = {
   resizeObserver: null,
   touchGuardsAttached: false,
   manualAlertLastTap: null,
+  manualAlertPointerType: null,
   manualAlertLineDrag: null,
   manualAlertLineSuppressTapUntil: 0,
   manualAlertLineChartInputFrozen: false,
@@ -824,6 +825,7 @@ App.chart = {
   attachManualAlertGesture() {
     document.addEventListener("pointerdown", (e) => {
       if (!(e.target instanceof Node) || !this.container.contains(e.target)) return;
+      this.manualAlertPointerType = e.pointerType;
       this.startManualAlertLineDrag(e);
     }, { capture: true, passive: false });
     window.addEventListener("pointermove", (e) => {
@@ -854,6 +856,8 @@ App.chart = {
 
     this.container.addEventListener("dblclick", (e) => {
       if (e.button !== 0) return;
+      // Touch uses the stricter double-tap interval below, not native dblclick.
+      if (this.manualAlertPointerType && this.manualAlertPointerType !== "mouse") return;
       if (performance.now() < this.manualAlertLineSuppressTapUntil) return;
       e.preventDefault();
       App.ui.closeManualAlertMenu();
@@ -869,7 +873,7 @@ App.chart = {
       if (!previous) return;
       const dt = now - previous.time;
       const distance = Math.hypot(e.clientX - previous.clientX, e.clientY - previous.clientY);
-      if (dt > 360 || distance > 28) return;
+      if (dt > 250 || distance > 28) return;
       e.preventDefault();
       this.manualAlertLastTap = null;
       App.ui.closeManualAlertMenu();
@@ -905,10 +909,15 @@ App.chart = {
     const rightPadding = Math.min(140, width * 0.12);
     if (!this.isMobileViewport() || this.captureMode || dataLength <= 0) {
       if (dataLength > 0 && rightPadding > 0) {
-        // Reserve pixels for price labels even when fitting thousands of candles.
-        ts.applyOptions({ rightOffsetPixels: rightPadding, rightBarStaysOnScroll: !this.isMobileViewport() });
+        // Reserve the initial label margin without persistent pixel-offset mode,
+        // which rescales historical scroll offsets during time-axis dragging.
+        const spacing = Math.max(ts.options().minBarSpacing, (width - rightPadding) / dataLength);
+        const paddingBars = rightPadding / spacing;
+        ts.applyOptions({ rightOffset: paddingBars, rightBarStaysOnScroll: false });
+        ts.setVisibleLogicalRange({ from: 0, to: dataLength - 1 + paddingBars });
+      } else {
+        ts.fitContent();
       }
-      ts.fitContent();
       return;
     }
     const containerWidth = Math.max(1, this.container.clientWidth || window.innerWidth || 1);
@@ -916,7 +925,7 @@ App.chart = {
     // Logical ranges overwrite the offset, so include the pixel margin in the range itself.
     const paddingBars = width > rightPadding ? visibleBars * rightPadding / (width - rightPadding) : 0;
     // Keep the pinch midpoint anchored, including after restoring old scale options.
-    if (rightPadding > 0) ts.applyOptions({ rightOffsetPixels: rightPadding, rightBarStaysOnScroll: false });
+    if (rightPadding > 0) ts.applyOptions({ rightOffset: paddingBars, rightBarStaysOnScroll: false });
     ts.setVisibleLogicalRange({
       from: Math.max(0, dataLength - visibleBars),
       to: dataLength - 1 + paddingBars
@@ -938,7 +947,8 @@ App.chart = {
         rightOffset: this.isMobileViewport() ? 4 : 10,
         barSpacing: this.isMobileViewport() ? 5 : 6,
         minBarSpacing: 0.5,
-        rightBarStaysOnScroll: !this.isMobileViewport()
+        // Anchor wheel/pinch zoom to the pointer rather than the right edge.
+        rightBarStaysOnScroll: false
       },
       crosshair: {
         mode: LightweightCharts.CrosshairMode.Magnet
