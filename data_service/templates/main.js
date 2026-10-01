@@ -12,6 +12,7 @@ if (App.chart.captureMode) {
   App.chart.captureInputsReady = Promise.all([chartInfoReady, scriptSourceReady, manualAlertsReady]);
 }
 App.measure.init();
+App.trendline.init();
 App.chart.startJankMonitor();
 App.chart.attachResizeHandler();
 App.chart.attachNavButtons();

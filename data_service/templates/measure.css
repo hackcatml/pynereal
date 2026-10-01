@@ -41,6 +41,7 @@
   }
 }
 .drawing-tool-btn {
+  position: relative;
   width: 32px;
   height: 32px;
   display: inline-flex;
@@ -94,6 +95,34 @@ body.measure-active .measure-overlay {
 }
 body.measure-active :is(#chart, #backtest-price-chart) {
   cursor: crosshair;
+}
+body.trendline-active :is(#chart, #backtest-price-chart) {
+  cursor: crosshair;
+  touch-action: none;
+}
+body.trendline-dragging :is(#chart, #backtest-price-chart) {
+  touch-action: none;
+}
+.drawing-tool-btn[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: 50%;
+  left: calc(100% + 10px);
+  transform: translateY(-50%);
+  padding: 5px 8px;
+  border-radius: 4px;
+  background: #222;
+  color: #fff;
+  font: 12px/1.4 system-ui, sans-serif;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+}
+@media (hover: hover) {
+  .drawing-tool-btn[data-tooltip]:hover::after,
+  .drawing-tool-btn[data-tooltip]:focus-visible::after {
+    opacity: 1;
+  }
 }
 .measure-label {
   position: fixed;

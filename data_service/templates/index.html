@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Chart</title>
   <link rel="stylesheet" href="/static/styles.css?v=46" />
-  <link rel="stylesheet" href="/static/measure.css?v=1" />
+  <link rel="stylesheet" href="/static/measure.css?v=2" />
   <link rel="stylesheet" href="/static/editor.css?v=7" />
   <link rel="stylesheet" href="/static/codemirror.css?v=10" />
   <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.9/dist/lightweight-charts.standalone.production.js"></script>
@@ -34,7 +34,17 @@
           <path d="m17.5 15.5 2-2"/>
         </svg>
       </button>
+      <button id="trendline-tool-toggle" class="drawing-tool-btn" type="button" aria-label="Trend line" aria-pressed="false" data-tooltip="Trend line" role="menuitem">
+        <svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="m6 18 12-12"/><circle cx="4" cy="20" r="2"/><circle cx="20" cy="4" r="2"/>
+        </svg>
+      </button>
     </div>
+    <button id="trendline-delete" class="drawing-tool-btn hidden" type="button" aria-label="Delete trend line" data-tooltip="Delete trend line">
+      <svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M3 6h18M9 6V4h6v2M5 6l1 14h12l1-14M10 10v6M14 10v6"/>
+      </svg>
+    </button>
   </div>
   <svg id="measure-overlay" class="measure-overlay" aria-hidden="true"></svg>
   <div id="measure-label" class="measure-label hidden"></div>
@@ -308,11 +318,12 @@
   <script src="/static/editor.js?v=8"></script>
   <script src="/static/ui.js?v=33"></script>
   <script src="/static/bgcolor.js?v=2"></script>
-  <script src="/static/chart.js?v=15"></script>
-  <script src="/static/measure.js?v=1"></script>
+  <script src="/static/chart.js?v=16"></script>
+  <script src="/static/measure.js?v=2"></script>
+  <script src="/static/trendline.js?v=2"></script>
   <script src="/static/data.js?v=19"></script>
   <script src="/static/chart_history.js?v=6"></script>
   <script src="/static/ws.js?v=7"></script>
-  <script src="/static/main.js?v=3"></script>
+  <script src="/static/main.js?v=4"></script>
 </body>
 </html>

@@ -223,6 +223,7 @@ App.measure = {
   },
 
   setActive(active) {
+    if (active) App.trendline?.setActive(false);
     App.state.measureToolActive = Boolean(active);
     document.body.classList.toggle("measure-active", App.state.measureToolActive);
     this.toolsButton.classList.toggle("active", App.state.measureToolActive);

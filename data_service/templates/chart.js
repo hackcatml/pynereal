@@ -551,7 +551,7 @@ App.chart = {
   manualAlertLineDragEnabled() {
     if (!App.ui || !App.ui.manualAlertTriggerActive || !App.ui.manualAlertTriggerActive()) return false;
     if (App.state.manualAlertMenuOpen || App.state.manualAlertConfirmOpen) return false;
-    if (App.state.measureToolActive || App.state.sourcePanelOpen) return false;
+    if (App.state.measureToolActive || App.trendline?.active || App.trendline?.selectedId != null || App.state.sourcePanelOpen) return false;
     const modal = App.ui.elements && App.ui.elements.alertTemplateModal;
     if (modal && !modal.classList.contains("hidden")) return false;
     return true;
@@ -814,7 +814,7 @@ App.chart = {
     };
   },
   openManualAlertMenuFromPointer(pointer) {
-    if (App.state.measureToolActive) return;
+    if (App.state.measureToolActive || App.trendline?.active || App.trendline?.selectedId != null) return;
     if (App.state.sourcePanelOpen) return;
     if (!App.ui.elements.alertTemplateModal.classList.contains("hidden")) return;
     const context = this.manualAlertContextFromPointer(pointer);

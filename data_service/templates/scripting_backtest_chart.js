@@ -728,6 +728,7 @@
       },
     };
     app.measure.init();
+    app.trendline.init();
     syncPriceToolsLayout();
   }
 
