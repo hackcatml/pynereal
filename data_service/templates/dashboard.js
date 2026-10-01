@@ -3398,6 +3398,7 @@
       leverage: makeMetric("Leverage"),
       realized: makeMetric("Realized PnL"),
       liquidation: makeMetric("Liquidation"),
+      duration: makeMetric("Duration"),
     };
     row.append(header, metrics);
     return row;
@@ -3445,6 +3446,22 @@
       ? `${formatPositionNumber(position.leverage, 2)}x` : "—";
     updatePositionRealizedPnlCell(nodes.realized, position);
     nodes.liquidation.textContent = formatPositionNumber(position.liquidation_price);
+    nodes.duration.dataset.openedAt = String(position.opened_timestamp ?? "");
+    setText(nodes.duration, formatOpenPositionDuration(nodes.duration.dataset.openedAt));
+  }
+
+  function formatOpenPositionDuration(openedTimestamp, now = Date.now()) {
+    const opened = Number(openedTimestamp);
+    return formatAccountHistoryDuration(opened > 0 ? opened : Number.NaN, now);
+  }
+
+  function updatePositionDurations() {
+    if (!isAssetsOpen() || accountView !== "positions" || document.visibilityState === "hidden") return;
+    const now = Date.now();
+    for (const row of el("positions-list").children) {
+      const node = row.positionListNodes.duration;
+      setText(node, formatOpenPositionDuration(node.dataset.openedAt, now));
+    }
   }
 
   function setPositionsLoading(loading, preserveContent = false) {
@@ -4276,8 +4293,8 @@
   }
 
   function formatAccountHistoryDuration(openedAt, closedAt) {
-    const opened = Date.parse(String(openedAt || ""));
-    const closed = Date.parse(String(closedAt || ""));
+    const opened = typeof openedAt === "number" ? openedAt : Date.parse(String(openedAt || ""));
+    const closed = typeof closedAt === "number" ? closedAt : Date.parse(String(closedAt || ""));
     if (!Number.isFinite(opened) || !Number.isFinite(closed) || closed < opened) return "—";
     let seconds = Math.floor((closed - opened) / 1000);
     const days = Math.floor(seconds / 86400);
@@ -10360,7 +10377,10 @@
     closeDataSinceTooltips();
   });
 
-  setInterval(updateRunnerStatusTooltips, 1000);
+  setInterval(() => {
+    updateRunnerStatusTooltips();
+    updatePositionDurations();
+  }, 1000);
 
   // ---- collapsible "Add session" card (collapsed by default) ---------------
   let addCardAnimation = null;
