@@ -26,6 +26,10 @@ App.indicators = {
   panels: new Map(),
   collapsedHeight: 36,
   hovering: false,
+  settingsVersion: 0,
+  settingsReady: false,
+  settingsError: "",
+  appliedRevision: -1,
 
   active() { return this.settings?.filter(item => item.enabled) || []; },
   isOpen() { return !!this.menu && !this.menu.classList.contains("hidden"); },
@@ -69,15 +73,112 @@ App.indicators = {
       };
     });
   },
-  save() {
+  sharedSettings(settings = this.settings) {
+    return settings.map(({ expandedHeight, ...shared }) => ({ ...shared, colors: [...shared.colors] }));
+  },
+  saveLocal() {
     try { localStorage.setItem(App.config.storageKey("indicators"), JSON.stringify(this.settings)); } catch {}
+  },
+  async requestSettings(payload) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    try {
+      const response = await fetch(`${App.config.apiBase}/chart-indicators`, {
+        cache: "no-store", signal: controller.signal,
+        ...(payload ? { method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload), keepalive: true } : {}),
+      });
+      if (!response.ok) throw new Error(`Indicator settings HTTP ${response.status}`);
+      const result = await response.json();
+      if (result.settings !== null && !Array.isArray(result.settings)) throw new Error("Invalid indicator settings");
+      return result.settings;
+    } finally {
+      clearTimeout(timeout);
+    }
+  },
+  startSettingsSync(saved) {
+    this.sharedKey = JSON.stringify(this.sharedSettings());
+    this.settingsLoaded = this.restoreSettings(saved);
+  },
+  async restoreSettings(saved) {
+    const version = this.settingsVersion;
+    try {
+      let shared = await this.requestSettings();
+      // Only an existing browser preference can seed an unconfigured session.
+      // A fresh capture must never write the default (all-disabled) settings.
+      if (shared === null && Array.isArray(saved) && !App.chart.captureMode) {
+        shared = await this.requestSettings({ settings: this.sharedSettings(this.loadSettings(saved)), initialize_only: true });
+      }
+      if (shared !== null && version === this.settingsVersion) {
+        const local = this.settings;
+        const expandedHeights = new Map();
+        this.sharedKey = JSON.stringify(this.sharedSettings(this.loadSettings(shared)));
+        this.settings = this.loadSettings(shared).map(setting => {
+          const previous = local.find(item => item.id === setting.id);
+          if (!App.chart.captureMode && previous && "collapsed" in setting) {
+            // Older server preferences have no collapse state; migrate it from this browser.
+            if (shared.find(item => item.id === setting.id)?.collapsed === undefined) {
+              setting.collapsed = previous.collapsed;
+            }
+            setting.expandedHeight = previous.expandedHeight;
+            if (setting.enabled && previous.collapsed && !setting.collapsed) {
+              expandedHeights.set(setting.id, setting.expandedHeight || Math.max(100, Math.round(App.chart.container.clientHeight * 0.25)));
+            }
+          }
+          return setting;
+        });
+        if (!App.chart.captureMode) this.save();
+        this.renderMenu();
+        this.syncSeries();
+        if (expandedHeights.size) this.applyPaneHeights(expandedHeights);
+        this.reset();
+      }
+      this.settingsReady = true;
+      this.settingsError = "";
+      this.status();
+      return { ok: true };
+    } catch {
+      this.settingsError = "Indicator settings could not be loaded. Reload the chart to retry.";
+      this.status();
+      return { ok: false };
+    }
+  },
+  save() {
+    this.saveLocal();
+    if (!this.settingsLoaded || App.chart.captureMode) return;
+    const settings = this.sharedSettings(), key = JSON.stringify(settings);
+    if (key === this.sharedKey) return;
+    this.sharedKey = key;
+    this.settingsVersion++;
+    // Serialize explicit edits so a slow earlier response cannot overwrite a newer edit.
+    this.writeQueue = (this.writeQueue || Promise.resolve()).then(async () => {
+      await this.settingsLoaded;
+      try {
+        await this.requestSettings({ settings });
+        this.settingsError = "";
+      } catch {
+        this.sharedKey = null;
+        this.settingsError = "Indicator settings were not saved. Change a setting to retry.";
+      }
+      this.status();
+    });
+  },
+  captureState() {
+    if (this.settingsError) throw new Error(this.settingsError);
+    if (this.failed) throw new Error("Indicator calculation failed");
+    // Wait for the complete initial/rebuilt series, not a quiet market. Continuous
+    // live updates must not prevent capture of an already-rendered indicator.
+    const ready = this.settingsReady && (!this.active().length || (
+      this.appliedRevision === this.revision && !this.needsReset && this.paneFrame === null
+    ));
+    return { ready, signature: this.revision };
   },
   init() {
     this.button = document.getElementById("chart-indicators-toggle");
     this.menu = document.getElementById("chart-indicators-menu");
     if (!this.button || !this.menu) return;
-    let saved = [];
-    try { saved = JSON.parse(localStorage.getItem(App.config.storageKey("indicators"))) || []; } catch {}
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(App.config.storageKey("indicators"))); } catch {}
     this.settings = this.loadSettings(saved);
     this.initPanels();
     this.attachPaneResizePersistence();
@@ -137,6 +238,7 @@ App.indicators = {
     });
     this.syncSeries();
     this.reset();
+    this.startSettingsSync(saved);
     App.chart.container.addEventListener("pointerup", () => {
       requestAnimationFrame(() => App.chart.positionNavButtons());
     }, { passive: true });
@@ -545,6 +647,7 @@ App.indicators = {
   status(message = "") {
     const status = document.getElementById("chart-indicator-status");
     if (!status) return;
+    message ||= this.settingsError;
     status.textContent = message;
     status.classList.toggle("hidden", !message);
   },
@@ -571,6 +674,7 @@ App.indicators = {
                 if (!this.hovering) this.showPaneValues(item.id, panel.latest);
               }
             }
+            this.appliedRevision = data.revision;
             this.status();
           }
           this.schedule();

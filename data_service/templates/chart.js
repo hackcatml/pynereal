@@ -32,7 +32,10 @@ App.chart = {
   captureMode: new URLSearchParams(window.location.search).get("chart_capture") === "1",
   captureLayoutState() {
     if (!this.captureMode || !App.state.initialLoadDone || App.state.initialLoadInProgress ||
-        !this.chart || !this.candleSeries || !App.collections.ohlcvData.length) return { ready: false };
+        !this.chart || !this.candleSeries || !this.currentPriceLine ||
+        !App.collections.ohlcvData.length) return { ready: false };
+    const indicators = App.indicators?.captureState();
+    if (indicators && !indicators.ready) return { ready: false };
     const rect = this.container.getBoundingClientRect();
     const paneBottom = this.pricePaneHeight();
     const priceScaleWidth = this.chart.priceScale("right").width();
@@ -58,17 +61,26 @@ App.chart = {
     }
     return { ready: true, signature: JSON.stringify([
       App.state.loadGeneration, rect.top, rect.left, rect.width, rect.height, paneBottom, priceScaleWidth, range,
-      this.candleSeries.coordinateToPrice(0), this.candleSeries.coordinateToPrice(paneBottom), alerts
+      this.candleSeries.coordinateToPrice(0), this.candleSeries.coordinateToPrice(paneBottom), alerts,
+      indicators?.signature
     ]) };
   },
   async prepareCapture() {
     if (!this.captureMode || !this.captureInputsReady) throw new Error("Chart capture mode is not initialized");
-    const [, , alerts] = await this.captureInputsReady;
+    const [, , alerts, indicators] = await this.captureInputsReady;
     if (!alerts || !alerts.ok) throw new Error("Manual Alert data could not be loaded");
+    if (indicators && !indicators.ok) throw new Error("Indicator settings could not be loaded");
     await document.fonts.ready;
     let previous = null;
     let stableFrames = 0;
+    let priceLineGeneration = -1;
     while (stableFrames < 3) {
+      // Initialize the label from loaded prices before waiting for the canvas to settle.
+      if (App.state.initialLoadDone && !App.state.initialLoadInProgress &&
+          (priceLineGeneration !== App.state.loadGeneration || !this.currentPriceLine)) {
+        this.updatePriceLineWithTimer();
+        priceLineGeneration = App.state.loadGeneration;
+      }
       await new Promise(resolve => requestAnimationFrame(resolve));
       this.syncManualAlertChipPosition();
       const current = this.captureLayoutState();
