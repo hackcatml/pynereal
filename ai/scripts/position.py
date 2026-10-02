@@ -396,6 +396,7 @@ def enrich_binance_realized_pnl(
     if cycle is None:
         return
     start_time, cycle_trades = cycle
+    normalized["opened_timestamp"] = start_time
 
     # Trade rows provide exact cycle-specific realized PnL and commissions.
     # Income History is needed only for funding, which is not a trade event.
@@ -592,6 +593,19 @@ def normalize_position(position: dict[str, Any]) -> dict[str, Any]:
     if contracts is not None and contract_size is not None:
         quantity = contracts * contract_size
     realized_pnl, realized_pnl_breakdown = normalize_realized_pnl(position)
+    info = position.get("info")
+    info = info if isinstance(info, dict) else {}
+    opened_timestamp = None
+    # Unified timestamp can be the last update (notably Binance and Bitget WS).
+    for key, scale in (
+        ("openTime", 1), ("cTime", 1), ("ctime", 1),
+        ("createdTime", 1), ("createdAt", 1),
+        ("open_time", 1000), ("first_open_time", 1000),
+    ):
+        value = _integer_or_none(info.get(key))
+        if value is not None and 0 < value * scale < 8_640_000_000_000_000:
+            opened_timestamp = value * scale
+            break
     return {
         "symbol": str(position.get("symbol") or ""),
         "side": normalized_side(position, contracts),
@@ -615,6 +629,7 @@ def normalize_position(position: dict[str, Any]) -> dict[str, Any]:
         "percentage": number_or_none(position.get("percentage")),
         "stop_loss_price": number_or_none(position.get("stopLossPrice")),
         "take_profit_price": number_or_none(position.get("takeProfitPrice")),
+        "opened_timestamp": opened_timestamp,
         "timestamp": position.get("timestamp"),
         "datetime": position.get("datetime"),
         "last_update_timestamp": position.get("lastUpdateTimestamp"),

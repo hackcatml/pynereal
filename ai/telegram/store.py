@@ -21,6 +21,7 @@ COMMAND_HELP = (
     "/end ends the conversation\n"
     "/cancel cancels work\n"
     "/screenshot [session] selects or captures a chart\n"
+    "/price [session] shows the last-trade price\n"
     "/assets selects all assets or an exchange\n"
     "/positions shows open positions\n"
     "/sessions selects a session and controls runner/alerts\n"
@@ -166,6 +167,8 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
                         command = "/" + json.loads(row["input"])["view"]
                     if row["kind"] == "session":
                         command = "/sessions"
+                    if row["kind"] == "price":
+                        command = "/price"
                     if row["kind"] == "alert":
                         command = "/alerts"
                     if row["state"] == "executing":
@@ -503,12 +506,13 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
             if command == "/screenshot":
                 self._screenshot_request(update_id, chat, actor, argument, screenshot_sessions, now)
                 return False
-            if command == "/sessions":
+            if command in {"/sessions", "/price"}:
                 if len(argument) > 500:
-                    self._reply(chat, "Use /sessions or /sessions <symbol/exchange>.")
+                    self._reply(chat, f"Use {command} or {command} <symbol/exchange>.")
                 else:
                     self.db.execute("DELETE FROM session_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
-                    self._queue_direct(update_id, chat, actor, "session", command, {"operation": "list", "query": argument})
+                    kind = "price" if command == "/price" else "session"
+                    self._queue_direct(update_id, chat, actor, kind, command, {"operation": "list", "query": argument})
                 return False
             if command == "/pnl":
                 if not argument:
@@ -852,7 +856,7 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
             parts = str(query.get("data") or "").split(":")
             if len(parts) == 3 and parts[0] == "ts":
                 return self._screenshot_callback(update_id, query, parts, now)
-            if len(parts) == 3 and parts[0] == "tc":
+            if len(parts) == 3 and parts[0] in {"tc", "tq"}:
                 return self._session_callback(update_id, query, parts, now)
             if len(parts) == 3 and parts[0] == "tp":
                 return self._pnl_callback(update_id, query, parts, now)

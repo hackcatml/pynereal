@@ -351,6 +351,10 @@ class TelegramAgent:
         session = await self.session_control.execute(request["target"], request["operation"])
         return {"view": "detail", "session": session}
 
+    async def price_command(self, request: dict) -> dict:
+        from .price import price_command
+        return price_command(self.session_control, request)
+
     async def alert_command(self, request: dict) -> dict:
         from .alert_menus import template_command
         return await template_command(self.session_control, request)

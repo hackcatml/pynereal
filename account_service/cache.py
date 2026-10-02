@@ -1526,10 +1526,22 @@ class AccountCache:
                     side = str(position.get("side") or "")
                     market_scope = str(position.get("market_scope") or "")
                     dex = str(position.get("dex") or "")
-                    opened_at = _timestamp(
-                        position.get("datetime") or position.get("timestamp"),
-                        observed_at,
-                    )
+                    opened_timestamp = position.get("opened_timestamp")
+                    opened_at = ""
+                    if (
+                        isinstance(opened_timestamp, (int, float))
+                        and not isinstance(opened_timestamp, bool)
+                        and opened_timestamp > 0
+                    ):
+                        opened_at = _timestamp(opened_timestamp, "")
+                    # Only a confirmed opening time may replace a cached lifecycle;
+                    # generic timestamps can change on every position update.
+                    if not opened_at:
+                        previous = existing.get(key)
+                        opened_at = previous["opened_at"] if previous is not None else _timestamp(
+                            position.get("datetime") or position.get("timestamp"),
+                            observed_at,
+                        )
                     connection.execute(
                         """
                         INSERT INTO current_positions (
@@ -1543,6 +1555,7 @@ class AccountCache:
                             dex = excluded.dex,
                             symbol = excluded.symbol,
                             side = excluded.side,
+                            opened_at = excluded.opened_at,
                             last_seen_at = excluded.last_seen_at,
                             source = excluded.source,
                             payload_json = excluded.payload_json

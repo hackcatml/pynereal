@@ -49,6 +49,31 @@ def _account(row: dict) -> str:
     return f"{_text(row.get('exchange')).upper()} | {_text(row.get('account'))}"
 
 
+def _position_duration(opened_timestamp, collected_at) -> str:
+    if opened_timestamp is None or isinstance(opened_timestamp, bool):
+        return "Unavailable"
+    try:
+        opened = float(opened_timestamp)
+        observed = datetime.fromisoformat(collected_at or "")
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=UTC)
+        elapsed = observed.timestamp() * 1000 - opened
+    except (TypeError, ValueError, OverflowError):
+        return "Unavailable"
+    if not math.isfinite(elapsed) or opened <= 0 or elapsed < 0:
+        return "Unavailable"
+    days, seconds = divmod(int(elapsed // 1000), 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m"
+    return f"{seconds}s"
+
+
 def _below_asset_threshold(holding: dict, portfolio: dict) -> bool:
     quote = _text(portfolio.get("quote_currency")).upper()
     dollar_quotes = {"USD", "USDT", "USDC", "BUSD", "DAI", "FDUSD", "PYUSD", "TUSD", "USDP"}
@@ -151,6 +176,9 @@ def _positions(snapshot: dict) -> str:
             lines.append("Realized PnL: " + _money(position.get("realized_pnl"), currency, signed=True))
             if breakdown and not breakdown.get("complete"):
                 lines.append("Realized PnL breakdown is incomplete.")
+            lines.append("Duration: " + _position_duration(
+                position.get("opened_timestamp"), snapshot.get("collected_at"),
+            ))
     return "\n".join(lines)
 
 

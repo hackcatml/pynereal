@@ -1,23 +1,127 @@
 var App = window.App || (window.App = {});
 
 App.ws = {
+  reconnectTimer: null,
+  connectTimer: null,
+  probeTimer: null,
+  probeId: 0,
+  chartRevision: null,
+  syncNeeded: false,
+  syncTask: null,
+  keepaliveTimer: null,
+  wasHidden: false,
+  lastResumeAt: 0,
+  clearProbe() {
+    clearTimeout(this.probeTimer);
+    this.probeTimer = null;
+  },
+  disconnect(socket, delay = 1000) {
+    if (socket !== App.state.ws) return;
+    clearTimeout(this.connectTimer);
+    this.clearProbe();
+    socket.onopen = socket.onmessage = socket.onclose = socket.onerror = null;
+    App.state.ws = null;
+    try { socket.close(); } catch {}
+    // Keep the rendered chart; only an explicit data/script reset invalidates it.
+    App.history.suspend();
+    this.syncTask = null;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    if (!document.hidden) {
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null;
+        this.connect();
+      }, delay);
+    }
+  },
   connect() {
+    const state = App.state;
+    if (document.hidden || state.ws) return;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(`${wsProtocol}//${location.host}${App.config.wsPath}`);
+    state.ws = socket;
+    this.connectTimer = setTimeout(() => this.disconnect(socket), 8000);
+
+    socket.onopen = () => {
+      if (state.ws !== socket) return;
+      clearTimeout(this.connectTimer);
+      App.history.suspend();
+      socket.send(JSON.stringify({ type: "client_hello", role: "chart" }));
+      this.syncNeeded = true;
+      this.probe();
+    };
+
+    socket.onmessage = (ev) => {
+      if (state.ws !== socket) return;
+      try {
+        this.handleMessage(JSON.parse(ev.data));
+      } catch (e) {
+        console.error("ws parse error", e);
+      }
+    };
+
+    socket.onclose = socket.onerror = () => this.disconnect(socket);
+  },
+  probe() {
+    const socket = App.state.ws;
+    if (document.hidden || !socket || socket.readyState !== WebSocket.OPEN || this.probeTimer) return;
+    const id = ++this.probeId;
+    this.probeTimer = setTimeout(() => this.disconnect(socket, 0), 3000);
+    try { socket.send(JSON.stringify({ type: "chart_ping", id })); }
+    catch { this.disconnect(socket, 0); }
+  },
+  resume() {
+    if (document.hidden || Date.now() - this.lastResumeAt < 500) return;
+    this.lastResumeAt = Date.now();
+    App.history.suspend();
+    this.syncTask = null;
+    this.syncNeeded = true;
+    const socket = App.state.ws;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      this.clearProbe();
+      this.probe();
+    } else {
+      if (socket) this.disconnect(socket, 0);
+      this.connect();
+    }
+  },
+  handleMessage(msg) {
     const state = App.state;
     const chart = App.chart;
     const collections = App.collections;
-
-    const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
-    state.ws = new WebSocket(`${wsProtocol}//${location.host}${App.config.wsPath}`);
-
-    state.ws.onopen = () => {
-      console.log("ws connected");
-      state.ws.send(JSON.stringify({ type: "client_hello", role: "chart" }));
-      App.data.loadInitialWithRetry();
-    };
-
-    state.ws.onmessage = (ev) => {
-      try {
-        const msg = JSON.parse(ev.data);
+    if (msg.type === "chart_pong" && (msg.id !== this.probeId || !this.probeTimer)) return;
+    if (msg.chart_revision) {
+      if (this.chartRevision && this.chartRevision !== msg.chart_revision) {
+        chart.resetChartState(false);
+        this.syncTask = null;
+        this.syncNeeded = true;
+      }
+      this.chartRevision = msg.chart_revision;
+    }
+    if (msg.type === "chart_pong") {
+      this.clearProbe();
+      state.runnerConnected = Boolean(msg.runner_connected);
+      state.runnerPhase = msg.phase;
+      state.nextPrerunAt = msg.next_prerun_at;
+      App.ui.updateRunnerStatus();
+      if (!this.syncTask && (this.syncNeeded || !state.initialLoadDone)) {
+        this.syncNeeded = false;
+        const task = App.history.refreshRecent();
+        this.syncTask = task;
+        void task.then(ok => {
+          if (this.syncTask === task && !ok) this.syncNeeded = true;
+        }).catch(error => {
+          if (this.syncTask === task) this.syncNeeded = true;
+          console.error("Chart resync failed:", error);
+        }).finally(() => { if (this.syncTask === task) this.syncTask = null; });
+      }
+      return;
+    }
+    if (App.history.captureLive(msg)) return;
+    try {
+        if (App.timeframes?.handleLive(msg)) return;
         if (msg.type === "script_modified") {
           state.sourceSaveStatus = "";
           if (state.sourcePanelOpen) {
@@ -159,9 +263,7 @@ App.ws = {
             if (!collections.entryPriceKeys.has(priceKey)) {
               collections.entryMarkerData.push({ time: Number(msg.time), value: Number(msg.price) });
               collections.entryPriceKeys.add(priceKey);
-              collections.entryMarkerData = collections.entryMarkerData.filter(m =>
-                Number.isFinite(Number(m.time)) && Number.isFinite(Number(m.value))
-              );
+              collections.entryMarkerData = App.data.normalizePriceMarkerData(collections.entryMarkerData);
               chart.entryMarkerSeries.setData(collections.entryMarkerData);
             }
           }
@@ -196,9 +298,7 @@ App.ws = {
             if (!collections.closePriceKeys.has(priceKey)) {
               collections.closeMarkerData.push({ time: Number(msg.time), value: Number(msg.price) });
               collections.closePriceKeys.add(priceKey);
-              collections.closeMarkerData = collections.closeMarkerData.filter(m =>
-                Number.isFinite(Number(m.time)) && Number.isFinite(Number(m.value))
-              );
+              collections.closeMarkerData = App.data.normalizePriceMarkerData(collections.closeMarkerData);
               chart.closeMarkerSeries.setData(collections.closeMarkerData);
             }
           }
@@ -245,26 +345,29 @@ App.ws = {
           const { title, time, value } = msg;
           App.data.updatePlotSeries(chart, collections, title, time, value);
         }
-      } catch (e) {
-        console.error("ws parse error", e);
-      }
-    };
-
-    state.ws.onclose = () => {
-      chart.resetChartState(false);
-      state.ws = null;
-      setTimeout(() => this.connect(), 1000);
-    };
-    state.ws.onerror = () => {
-      chart.resetChartState(false);
-      try { state.ws.close(); } catch {}
-    };
+    } catch (error) {
+      console.error("ws message error", error);
+    }
   },
   startKeepalive() {
-    setInterval(() => {
-      if (App.state.ws && App.state.ws.readyState === WebSocket.OPEN) {
-        App.state.ws.send("ping");
+    if (this.keepaliveTimer) return;
+    this.wasHidden = document.hidden;
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        this.wasHidden = true;
+        this.clearProbe();
+        App.history.suspend();
+      } else if (this.wasHidden) {
+        this.wasHidden = false;
+        this.resume();
       }
+    });
+    window.addEventListener("pageshow", event => { if (event.persisted) this.resume(); });
+    window.addEventListener("online", () => this.resume());
+    this.keepaliveTimer = setInterval(() => {
+      if (document.hidden) return;
+      if (App.state.ws) this.probe();
+      else if (!this.reconnectTimer) this.connect();
     }, 15000);
   }
 };

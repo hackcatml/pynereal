@@ -2,7 +2,8 @@
   "name": "pynereal-ui-assets",
   "private": true,
   "scripts": {
-    "build:codemirror": "node data_service/codemirror_build/build-codemirror.mjs"
+    "build:codemirror": "node data_service/codemirror_build/build-codemirror.mjs",
+    "build:indicators": "node data_service/indicators_build/build.mjs"
   },
   "devDependencies": {
     "@codemirror/autocomplete": "6.20.3",
@@ -14,6 +15,7 @@
     "@codemirror/state": "6.7.4",
     "@codemirror/view": "6.43.11",
     "@lezer/highlight": "1.2.3",
-    "esbuild": "0.28.2"
+    "esbuild": "0.28.2",
+    "trading-signals": "8.3.0"
   }
 }

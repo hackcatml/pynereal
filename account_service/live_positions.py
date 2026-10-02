@@ -308,6 +308,8 @@ class LivePositionState:
             key = _position_key(normalized)
             previous = current.get(key)
             if isinstance(previous, dict):
+                if normalized.get("opened_timestamp") is None:
+                    normalized["opened_timestamp"] = previous.get("opened_timestamp")
                 previous_mark = _number(previous.get("mark_price"))
                 if _number(normalized.get("mark_price")) is None and previous_mark is not None:
                     normalized["mark_price"] = previous_mark

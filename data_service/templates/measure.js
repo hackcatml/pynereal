@@ -223,6 +223,7 @@ App.measure = {
   },
 
   setActive(active) {
+    if (active) App.trendline?.setActive(false);
     App.state.measureToolActive = Boolean(active);
     document.body.classList.toggle("measure-active", App.state.measureToolActive);
     this.toolsButton.classList.toggle("active", App.state.measureToolActive);
@@ -304,7 +305,7 @@ App.measure = {
     } catch {}
     const timeScaleHeight = 28;
     const right = rect.left + Math.max(0, rect.width - priceScaleWidth);
-    const bottom = rect.top + Math.max(0, rect.height - timeScaleHeight);
+    const bottom = rect.top + (App.chart.pricePaneHeight?.() ?? Math.max(0, rect.height - timeScaleHeight));
     if (right <= rect.left || bottom <= rect.top) return null;
     return {
       left: rect.left,

@@ -7,6 +7,7 @@ from pathlib import PurePosixPath
 BOT_COMMANDS = [
     {"command": "ai", "description": "Start an AI conversation"},
     {"command": "screenshot", "description": "Choose a session or capture directly: /screenshot mrvl"},
+    {"command": "price", "description": "Select a session or get its last-trade price: /price btc"},
     {"command": "assets", "description": "Select all assets or an exchange"},
     {"command": "positions", "description": "Show open positions across all configured accounts"},
     {"command": "sessions", "description": "Select a session and control runner, webhook and Telegram"},
