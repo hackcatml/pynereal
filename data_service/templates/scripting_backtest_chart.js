@@ -5,6 +5,7 @@
   const STYLE_CIRCLES = 2;
   const STYLE_CROSS = 4;
   const STYLE_LINEBR = 7;
+  const PRICE_PAGE_SIZE = 5000;
   const state = {
     job: null,
     equity: null,
@@ -24,12 +25,15 @@
     plotSeries: new Map(),
     bgcolorPrimitive: null,
     priceBars: [],
+    priceCache: new Map(),
+    priceWindows: [],
+    priceIndexByBar: new Map(),
+    priceWindow: null,
     priceMarkers: [],
     priceRowCount: 0,
-    priceStart: -1,
-    priceEnd: -1,
     priceRequest: 0,
-    priceSelectionRequest: 0,
+    priceController: null,
+    priceHistoryFrame: null,
     pricePaging: false,
     priceWindowReplacing: false,
     priceSync: null,
@@ -809,23 +813,7 @@
         volume && volume.value,
       );
     });
-    state.priceChart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
-      if (
-        !range
-        || state.pricePaging
-        || state.priceWindowReplacing
-        || !state.priceBars.length
-      ) return;
-      const preloadThreshold = 100;
-      if (range.from < preloadThreshold && state.priceStart > 0) {
-        void extendPriceWindow("before");
-      } else if (
-        range.to > state.priceBars.length - 1 - preloadThreshold
-        && state.priceEnd < state.priceRowCount - 1
-      ) {
-        void extendPriceWindow("after");
-      }
-    });
+    state.priceChart.timeScale().subscribeVisibleLogicalRangeChange(schedulePriceHistory);
     const observer = new ResizeObserver(() => {
       if (!container.clientWidth || !container.clientHeight) return;
       state.priceChart.resize(container.clientWidth, container.clientHeight);
@@ -894,9 +882,12 @@
   }
 
   function renderPriceMarkers() {
+    const first = Number(state.priceBars[0]?.time);
+    const last = Number(state.priceBars.at(-1)?.time);
+    const markers = state.priceMarkers.filter(marker => marker.time >= first && marker.time <= last);
     const entryPoints = new Map();
     const closePoints = new Map();
-    state.priceMarkers.forEach((marker) => {
+    markers.forEach((marker) => {
       const time = Number(marker.time);
       const price = Number(marker.price);
       if (!Number.isFinite(time) || !Number.isFinite(price)) return;
@@ -905,7 +896,7 @@
     });
     state.entryMarkerSeries.setData([...entryPoints.values()].sort((a, b) => a.time - b.time));
     state.closeMarkerSeries.setData([...closePoints.values()].sort((a, b) => a.time - b.time));
-    state.markerApi.setMarkers(state.priceMarkers.map((marker) => ({
+    state.markerApi.setMarkers(markers.map((marker) => ({
       time: marker.time,
       position: marker.position,
       color: marker.color,
@@ -959,41 +950,28 @@
   function removePlotController(controller) {
     if (!controller || !state.priceChart) return;
     if (controller.type === "linebr") {
-      controller.series.forEach((series) => state.priceChart.removeSeries(series));
-      return;
+      controller.series.detachPrimitive(controller.primitive);
     }
-    if (controller.type === "single" && controller.series) {
+    if (controller.series) {
       state.priceChart.removeSeries(controller.series);
     }
   }
 
-  function clearPlotSeries() {
-    state.plotSeries.forEach(removePlotController);
-    state.plotSeries.clear();
-  }
-
   function setLineBreakPlotData(title, options, points) {
-    removePlotController(state.plotSeries.get(title));
-    const seriesList = [];
-    let segment = [];
-
-    const flushSegment = () => {
-      if (!segment.length) return;
-      const series = state.priceChart.addSeries(LightweightCharts.LineSeries, options);
-      series.setData(segment);
-      seriesList.push(series);
-      segment = [];
-    };
-
-    points.forEach((point) => {
-      if (Object.prototype.hasOwnProperty.call(point, "value")) {
-        segment.push(point);
-      } else {
-        flushSegment();
-      }
-    });
-    flushSegment();
-    state.plotSeries.set(title, { type: "linebr", series: seriesList });
+    let controller = state.plotSeries.get(title);
+    if (!controller || controller.type !== "linebr") {
+      removePlotController(controller);
+      const series = state.priceChart.addSeries(LightweightCharts.LineSeries, {
+        ...options, lineVisible: false,
+      });
+      const primitive = new window.App.LineBreakPrimitive(points, options);
+      series.attachPrimitive(primitive);
+      controller = { type: "linebr", series, primitive };
+      state.plotSeries.set(title, controller);
+    }
+    controller.primitive.points = points;
+    controller.series.setData(points.filter(point => point.value != null));
+    controller.primitive.requestUpdate?.();
   }
 
   function updatePlotDefinitions(plots) {
@@ -1009,7 +987,8 @@
     state.plotDefinitions.forEach((plot) => {
       const title = String(plot.title || "");
       const points = state.priceBars.map((bar) => {
-        const value = bar.plots && Number(bar.plots[title]);
+        const raw = bar.plots?.[title];
+        const value = raw == null ? NaN : Number(raw);
         return Number.isFinite(value)
           ? { time: Number(bar.time), value }
           : { time: Number(bar.time) };
@@ -1037,14 +1016,14 @@
   }
 
   function applyPriceData(logicalRange = null, prepended = 0) {
-    state.candleSeries.setData(state.priceBars.map((bar) => ({
+    state.candleSeries.setData(state.priceBars.map((bar) => bar.close == null ? { time: bar.time } : ({
       time: Number(bar.time),
       open: Number(bar.open),
       high: Number(bar.high),
       low: Number(bar.low),
       close: Number(bar.close),
     })));
-    state.volumeSeries.setData(state.priceBars.map((bar) => ({
+    state.volumeSeries.setData(state.priceBars.map((bar) => bar.close == null ? { time: bar.time } : ({
       time: Number(bar.time),
       value: Number(bar.volume) || 0,
       color: Number(bar.close) >= Number(bar.open) ? "#26a69a" : "#ef5350",
@@ -1087,66 +1066,140 @@
     }
   }
 
-  async function extendPriceWindow(direction) {
-    if (state.pricePaging || !state.priceBars.length) return;
-    const before = direction === "before";
-    if ((before && state.priceStart <= 0) || (!before && state.priceEnd >= state.priceRowCount - 1)) {
-      return;
+  function priceRangeLoaded(start, end) {
+    return state.priceWindows.some(range => range.start <= start && range.end >= end);
+  }
+
+  function priceWindowAround(index) {
+    const last = state.priceRowCount ? state.priceRowCount - 1
+      : Number(state.equity.barIndices[state.equity.length - 1]);
+    const start = Math.floor(Math.max(0, Math.min(index - Math.floor(PRICE_PAGE_SIZE / 2), last - PRICE_PAGE_SIZE + 1)));
+    return { start, end: Math.min(last, start + PRICE_PAGE_SIZE - 1) };
+  }
+
+  function beginPriceRequest() {
+    state.priceController?.abort();
+    state.priceController = new AbortController();
+    state.pricePaging = false;
+    return ++state.priceRequest;
+  }
+
+  function fetchPriceWindow(start, end, signal = state.priceController.signal) {
+    return json(
+      `/api/scripting/backtests/${encodeURIComponent(jobId)}/chart?start_index=${start}&end_index=${end}`,
+      { signal },
+    );
+  }
+
+  function mergePriceWindow(payload) {
+    const incoming = Array.isArray(payload.bars) ? payload.bars : [];
+    if (!incoming.length) throw new Error("Price chart window is empty.");
+    incoming.forEach(bar => state.priceCache.set(Number(bar.bar_index), bar));
+    state.priceRowCount = Number(payload.row_count) || state.priceRowCount;
+    const ranges = [...state.priceWindows, {
+      start: Number(payload.start_index), end: Number(payload.end_index),
+    }].sort((a, b) => a.start - b.start);
+    state.priceWindows = [];
+    for (const range of ranges) {
+      const previous = state.priceWindows.at(-1);
+      if (previous && previous.end + 1 >= range.start) previous.end = Math.max(previous.end, range.end);
+      else state.priceWindows.push({ ...range });
     }
+    updatePlotDefinitions(payload.plots);
+    state.priceMarkers = normalizedPriceMarkers([...state.priceMarkers, ...(payload.markers || [])]);
+  }
+
+  function selectPriceWindow(index) {
+    const range = state.priceWindows.find(range => range.start <= index && range.end >= index);
+    if (!range || (state.priceWindow?.start === range.start && state.priceWindow?.end === range.end)) return false;
+    // Keep every visited window cached, but render only this continuous window.
+    // Years of unread timestamps must not become hundreds of thousands of
+    // whitespace candles on every frame in a synchronized multi-chart view.
+    const bars = [];
+    for (let i = range.start; i <= range.end; i++) {
+      const bar = state.priceCache.get(i);
+      if (bar) bars.push(bar);
+    }
+    state.priceWindow = { ...range };
+    state.priceBars = bars;
+    state.priceIndexByBar = new Map(bars.map((bar, index) => [Number(bar.bar_index), index]));
+    return true;
+  }
+
+  function missingPriceRange(start, end, focus) {
+    const holes = [];
+    let next = 0;
+    for (const range of state.priceWindows) {
+      if (range.start > next) holes.push({ start: next, end: range.start - 1 });
+      next = Math.max(next, range.end + 1);
+    }
+    if (next < state.priceRowCount) holes.push({ start: next, end: state.priceRowCount - 1 });
+    const visible = holes.filter(range => range.start <= end && range.end >= start);
+    const hole = visible.find(range => range.start <= focus && range.end >= focus) || visible[0];
+    if (!hole) return null;
+    const first = Math.floor(Math.max(hole.start, Math.min(focus - Math.floor(PRICE_PAGE_SIZE / 2), hole.end - PRICE_PAGE_SIZE + 1)));
+    return { start: first, end: Math.min(hole.end, first + PRICE_PAGE_SIZE - 1) };
+  }
+
+  function schedulePriceHistory() {
+    if (state.priceHistoryFrame != null) return;
+    state.priceHistoryFrame = requestAnimationFrame(() => {
+      state.priceHistoryFrame = null;
+      void extendPriceWindow();
+    });
+  }
+
+  async function extendPriceWindow() {
+    if (state.pricePaging || state.priceWindowReplacing || !state.priceBars.length) return;
+    const range = state.priceChart.timeScale().getVisibleLogicalRange();
+    if (!range) return;
+    const bars = state.priceBars;
+    const barAt = logical => Number(bars[Math.max(0, Math.min(bars.length - 1, Math.round(logical)))].bar_index);
+    const focus = barAt((range.from + range.to) / 2);
+    const target = missingPriceRange(barAt(range.from) - 100, barAt(range.to) + 100, focus);
+    if (!target) return;
+    const request = beginPriceRequest();
     state.pricePaging = true;
-    const request = state.priceRequest;
-    const pageSize = 2000;
-    const start = before
-      ? Math.max(0, state.priceStart - pageSize)
-      : state.priceEnd + 1;
-    const end = before
-      ? state.priceStart - 1
-      : Math.min(state.priceRowCount - 1, state.priceEnd + pageSize);
-    const logicalRange = state.priceChart.timeScale().getVisibleLogicalRange();
+    let completed = false;
     try {
-      const payload = await json(
-        `/api/scripting/backtests/${encodeURIComponent(jobId)}/chart?start_index=${start}&end_index=${end}`,
-      );
+      const payload = await fetchPriceWindow(Math.floor(target.start), Math.floor(target.end));
       if (request !== state.priceRequest) return;
-      const incomingBars = Array.isArray(payload.bars) ? payload.bars : [];
-      const knownBars = new Map(state.priceBars.map((bar) => [Number(bar.bar_index), bar]));
-      incomingBars.forEach((bar) => knownBars.set(Number(bar.bar_index), bar));
-      const previousStart = state.priceStart;
-      state.priceBars = [...knownBars.values()].sort(
-        (left, right) => Number(left.bar_index) - Number(right.bar_index),
-      );
-      state.priceRowCount = Number(payload.row_count) || state.priceRowCount;
-      updatePlotDefinitions(payload.plots);
-      state.priceStart = Math.min(state.priceStart, Number(payload.start_index));
-      state.priceEnd = Math.max(state.priceEnd, Number(payload.end_index));
-      state.priceMarkers = normalizedPriceMarkers([
-        ...state.priceMarkers,
-        ...(Array.isArray(payload.markers) ? payload.markers : []),
-      ]);
-      const prepended = before
-        ? state.priceBars.filter((bar) => Number(bar.bar_index) < previousStart).length
-        : 0;
+      // Capture the viewport after the response, not before the user's drag.
+      await nextAnimationFrame();
+      if (request !== state.priceRequest) return;
+      const scale = state.priceChart.timeScale();
+      const logicalRange = scale.getVisibleLogicalRange();
+      const anchorTime = scale.getVisibleRange()?.from;
+      const anchorIndex = anchorTime == null ? null : scale.timeToIndex(anchorTime, true);
+      const activeBar = Number(state.priceBars[0].bar_index);
+      mergePriceWindow(payload);
+      selectPriceWindow(activeBar);
+      const nextIndex = state.priceBars.findIndex(bar => Number(bar.time) === anchorTime);
+      const prepended = anchorIndex == null || nextIndex < 0 ? 0 : nextIndex - anchorIndex;
       applyPriceData(logicalRange, prepended);
+      await nextAnimationFrame();
+      completed = true;
     } catch (error) {
-      showError(error.message || "Earlier price data could not be loaded.");
+      if (request === state.priceRequest && error.name !== "AbortError") {
+        showError(error.message || "Price data could not be loaded.");
+      }
     } finally {
-      state.pricePaging = false;
-      window.BacktestChartLink?.notify();
+      if (request === state.priceRequest) {
+        state.pricePaging = false;
+        window.BacktestChartLink?.notify();
+        if (completed) schedulePriceHistory();
+      }
     }
   }
 
   function updatePriceSelection(index, synchronizedRange = null) {
     const equity = state.equity;
-    const selectionRequest = ++state.priceSelectionRequest;
     state.selectedIndex = index;
     const timestamp = equity.timestamps[index];
     el("backtest-equity-selection-time").textContent = formatTimestamp(timestamp);
     el("backtest-equity-selection-value").textContent = formatAmount(equity.equities[index]);
-    if (!synchronizedRange) renderPriceMarkers();
     const bars = state.priceBars.length;
-    const localIndex = state.priceBars.findIndex(
-      (bar) => Number(bar.bar_index) === Number(equity.barIndices[index]),
-    );
+    const localIndex = state.priceIndexByBar.get(Number(equity.barIndices[index]));
     if (bars > 0 && localIndex >= 0 && localIndex < bars) {
       const visible = Math.min(180, bars);
       const from = Math.max(0, Math.floor(localIndex - visible / 2));
@@ -1156,66 +1209,35 @@
         from: Number(state.priceBars[from].time),
         to: Number(state.priceBars[to].time),
       };
-      const placeSelection = () => {
-        state.priceChart.timeScale().setVisibleRange(visibleRange);
-        state.priceChart.setCrosshairPosition(
-          Number(candle.close),
-          Number(candle.time),
-          state.candleSeries,
-        );
-      };
-      placeSelection();
-      requestAnimationFrame(() => {
-        if (selectionRequest !== state.priceSelectionRequest) return;
-        placeSelection();
-      });
+      state.priceChart.timeScale().setVisibleRange(visibleRange);
+      state.priceChart.setCrosshairPosition(
+        Number(candle.close), Number(candle.time), state.candleSeries,
+      );
     }
     drawEquity();
-  }
-
-  function replacePriceWindow(payload) {
-    const bars = Array.isArray(payload.bars) ? payload.bars : [];
-    if (!bars.length) throw new Error("Price chart window is empty.");
-    state.priceBars = bars;
-    state.priceRowCount = Number(payload.row_count) || bars.length;
-    state.plotDefinitions = [];
-    clearPlotSeries();
-    updatePlotDefinitions(payload.plots);
-    state.priceStart = Number(payload.start_index);
-    state.priceEnd = Number(payload.end_index);
-    state.priceMarkers = normalizedPriceMarkers(payload.markers);
-    applyPriceData();
   }
 
   async function loadPriceAt(index) {
     const equity = state.equity;
     const barIndex = Math.round(equity.barIndices[index]);
-    const request = ++state.priceRequest;
+    const request = beginPriceRequest();
     const loading = el("backtest-price-loading");
     state.priceWindowReplacing = true;
-    const loadedIndex = state.priceBars.findIndex(
-      (bar) => Number(bar.bar_index) === barIndex,
-    );
-    if (loadedIndex >= 0) {
-      updatePriceSelection(index);
-      await nextAnimationFrame();
-      await nextAnimationFrame();
-      if (request !== state.priceRequest) return;
-      state.priceWindowReplacing = false;
-      loading.classList.add("hidden");
-      window.BacktestChartLink?.notify();
-      return;
-    }
-    const start = Math.max(0, barIndex - 1000);
-    const end = barIndex + 1000;
-    loading.textContent = "Loading price chart...";
-    loading.classList.remove("hidden");
     try {
-      const payload = await json(
-        `/api/scripting/backtests/${encodeURIComponent(jobId)}/chart?start_index=${start}&end_index=${end}`,
-      );
+      if (!state.priceCache.has(barIndex)) {
+        const { start, end } = priceWindowAround(barIndex);
+        loading.textContent = "Loading price chart...";
+        loading.classList.remove("hidden");
+        const payload = await fetchPriceWindow(start, end);
+        if (request !== state.priceRequest) return;
+        mergePriceWindow(payload);
+      }
+      if (selectPriceWindow(barIndex)) {
+        applyPriceData();
+        await nextAnimationFrame();
+        await nextAnimationFrame();
+      }
       if (request !== state.priceRequest) return;
-      replacePriceWindow(payload);
       updatePriceSelection(index);
       await nextAnimationFrame();
       await nextAnimationFrame();
@@ -1223,6 +1245,7 @@
       state.priceWindowReplacing = false;
       loading.classList.add("hidden");
       window.BacktestChartLink?.notify();
+      schedulePriceHistory();
     } catch (error) {
       if (request !== state.priceRequest) return;
       state.priceWindowReplacing = false;
@@ -1259,7 +1282,6 @@
     sync.controller.abort();
     if (sync.request === state.priceRequest) {
       state.priceRequest++;
-      state.priceSelectionRequest++;
       state.priceWindowReplacing = false;
       el("backtest-price-loading").classList.add("hidden");
     }
@@ -1276,24 +1298,26 @@
     const firstBar = Number(equity.barIndices[fromIndex]);
     const lastBar = Number(equity.barIndices[toIndex]);
     const index = equityIndexForTime(Math.max(from, Math.min(to, view.time)));
-    const sync = { request: ++state.priceRequest, controller: new AbortController() };
+    const sync = { request: beginPriceRequest(), controller: state.priceController };
     state.priceSync = sync;
-    state.priceSelectionRequest++;
     state.priceWindowReplacing = true;
     const loading = el("backtest-price-loading");
     try {
-      if (!state.priceBars.length || state.priceStart > firstBar || state.priceEnd < lastBar) {
+      if (!priceRangeLoaded(firstBar, lastBar)) {
         loading.textContent = "Loading price chart...";
         loading.classList.remove("hidden");
-        const start = Math.max(0, firstBar - 1000);
-        const end = lastBar + 1000;
-        const payload = await json(
-          `/api/scripting/backtests/${encodeURIComponent(jobId)}/chart?start_index=${start}&end_index=${end}`,
-          { signal: sync.controller.signal },
-        );
+        const { start } = priceWindowAround(firstBar);
+        const end = Math.max(lastBar, priceWindowAround(lastBar).end);
+        const payload = await fetchPriceWindow(start, end, sync.controller.signal);
         if (sync.controller.signal.aborted || sync.request !== state.priceRequest) return;
         // Keep a fetched window for the newest queued pan even if its viewport changed.
-        replacePriceWindow(payload);
+        mergePriceWindow(payload);
+      }
+      if (!current() || sync.request !== state.priceRequest) return;
+      if (selectPriceWindow(firstBar)) {
+        applyPriceData();
+        await nextAnimationFrame();
+        await nextAnimationFrame();
       }
       if (!current() || sync.request !== state.priceRequest) return;
       updatePriceSelection(index, { from, to });
