@@ -25,12 +25,16 @@ App.chart = {
   manualAlertTooltipTriggerId: null,
   manualAlertTooltipHideTimer: null,
   manualAlertChipRafId: null,
+  pricePaneHeight() {
+    return this.chart?.panes?.()[0]?.getHeight?.() ??
+      Math.max(0, this.container.clientHeight - (this.chart?.timeScale().height() || 28));
+  },
   captureMode: new URLSearchParams(window.location.search).get("chart_capture") === "1",
   captureLayoutState() {
     if (!this.captureMode || !App.state.initialLoadDone || App.state.initialLoadInProgress ||
         !this.chart || !this.candleSeries || !App.collections.ohlcvData.length) return { ready: false };
     const rect = this.container.getBoundingClientRect();
-    const paneBottom = this.container.clientHeight - this.chart.timeScale().height();
+    const paneBottom = this.pricePaneHeight();
     const priceScaleWidth = this.chart.priceScale("right").width();
     const range = this.chart.timeScale().getVisibleLogicalRange();
     if (rect.width <= 0 || paneBottom <= 0 || !range) return { ready: false };
@@ -85,9 +89,8 @@ App.chart = {
   isRightPriceAxisPoint(clientX, clientY) {
     const rect = this.container.getBoundingClientRect();
     const width = this.chart.priceScale("right").width();
-    const timeHeight = this.chart.timeScale().height();
     return width > 0 && clientX >= rect.right - width && clientX <= rect.right &&
-      clientY >= rect.top && clientY < rect.bottom - timeHeight;
+      clientY >= rect.top && clientY < rect.top + this.pricePaneHeight();
   },
   attachPriceAxisMenu() {
     const menu = document.getElementById("price-axis-menu");
@@ -371,11 +374,7 @@ App.chart = {
   },
   syncManualAlertChipPosition() {
     if (!this.manualAlertChipsVisible || !this.chart || !this.candleSeries || !this.container) return;
-    let timeScaleHeight = 28;
-    try {
-      timeScaleHeight = this.chart.timeScale().height() || timeScaleHeight;
-    } catch {}
-    const paneBottom = Math.max(0, this.container.clientHeight - timeScaleHeight);
+    const paneBottom = this.pricePaneHeight();
     let priceScaleWidth = 76;
     try {
       priceScaleWidth = this.chart.priceScale("right").width() || priceScaleWidth;
@@ -561,7 +560,7 @@ App.chart = {
     const rect = this.container.getBoundingClientRect();
     const x = pointer.clientX - rect.left;
     const y = pointer.clientY - rect.top;
-    if (x < 0 || x > rect.width || y < 0 || y > rect.height) return false;
+    if (x < 0 || x > rect.width || y < 0 || y > this.pricePaneHeight()) return false;
 
     const isTouch = pointer.pointerType !== "mouse";
     const labelTolerance = isTouch ? 24 : 16;
@@ -782,9 +781,8 @@ App.chart = {
     } catch {}
     // The right price scale and bottom time scale also live inside #chart, but
     // they are not candle area. Keep right-side chart whitespace clickable.
-    const timeScaleHeight = 28;
     if (priceScaleWidth > 0 && x >= rect.width - priceScaleWidth) return null;
-    if (y >= rect.height - timeScaleHeight) return null;
+    if (y >= this.pricePaneHeight()) return null;
 
     const timeScale = this.chart.timeScale();
     const time = timeScale.coordinateToTime(x);
@@ -1077,7 +1075,7 @@ App.chart = {
     collections.seriesMarkers = null;
     collections.plotcharSeriesMarkers = null;
     state.firstBarTime = null;
-    state.timeframeInterval = state.configuredTimeframeSec || 60;
+    state.timeframeInterval = App.timeframes?.seconds() || state.configuredTimeframeSec || 60;
     state.lastBarTime = 0;
     state.lastOpenPrice = { time: 0, value: 0 };
     state.lastPrice = 0;
@@ -1089,6 +1087,7 @@ App.chart = {
     if (App.measure) {
       App.measure.clear();
     }
+    App.indicators?.reset();
   },
   updatePriceLineWithTimer() {
     const state = App.state;
@@ -1096,7 +1095,9 @@ App.chart = {
 
     const now = Date.now();
     const currentTime = Math.floor(now / 1000);
-    const nextCandleTime = Math.ceil(currentTime / state.timeframeInterval) * state.timeframeInterval;
+    const nextCandleTime = App.timeframes?.isHigher()
+      ? App.timeframes.bucketTime(currentTime) + state.timeframeInterval
+      : Math.ceil(currentTime / state.timeframeInterval) * state.timeframeInterval;
     const remainingSeconds = nextCandleTime - currentTime;
     const minutes = Math.floor(remainingSeconds / 60);
     const seconds = remainingSeconds % 60;
@@ -1273,7 +1274,19 @@ App.chart = {
     const startBtn = document.getElementById("nav-to-start");
     const endBtn = document.getElementById("nav-to-end");
     if (!startBtn || !endBtn) return;
-    if (this.isMobileViewport()) return;
+    if ((this.chart.panes?.().length || 1) > 1) {
+      const bottom = this.container.clientHeight - this.pricePaneHeight() + 38;
+      startBtn.style.bottom = `${bottom}px`;
+      endBtn.style.bottom = `${bottom}px`;
+      endBtn.style.right = `${this.chart.priceScale("right").width() + 12}px`;
+      return;
+    }
+    if (this.isMobileViewport()) {
+      startBtn.style.bottom = "";
+      endBtn.style.bottom = "";
+      endBtn.style.right = "";
+      return;
+    }
     const container = this.container;
 
     // 우측 버튼(»): 가격 축 너비만큼 왼쪽으로 이동시켜 축과 겹치지 않게 한다.
@@ -1316,7 +1329,8 @@ App.chart = {
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
       const inChart = x >= 0 && x <= rect.width && y >= 0 && y <= rect.height;
-      const inBottom = inChart && y >= rect.height - CORNER_H;
+      const paneBottom = this.pricePaneHeight();
+      const inBottom = inChart && y <= paneBottom && y >= paneBottom - CORNER_H;
       const showStart = inBottom && x <= CORNER_W;
       const showEnd = inBottom && x >= rect.width - CORNER_W;
       // 버튼을 보여주기 직전에 가격 축/로고 위치에 맞춰 좌표를 보정한다.

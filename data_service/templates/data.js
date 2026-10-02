@@ -117,6 +117,7 @@ App.data = {
     if (notifyBgcolor && App.chart && App.chart.bgcolorPrimitive) {
       App.chart.bgcolorPrimitive.onOhlcvChanged();
     }
+    App.indicators?.reset();
   },
   upsertOhlcvCache(bar) {
     if (!bar || !Number.isFinite(Number(bar.time))) return;
@@ -137,6 +138,7 @@ App.data = {
       if (existingIndex === lastIndex) {
         collections.ohlcvVolumePrefix[lastIndex] = (collections.ohlcvVolumePrefix[lastIndex - 1] || 0) + cachedBar.volume;
         if (App.measure) App.measure.scheduleRender();
+        App.indicators?.update(cachedBar);
         return;
       }
       this.rebuildOhlcvCache(collections.ohlcvData, false);
@@ -149,6 +151,7 @@ App.data = {
       collections.ohlcvVolumePrefix.push((collections.ohlcvVolumePrefix[lastIndex] || 0) + cachedBar.volume);
       if (App.measure) App.measure.scheduleRender();
       if (App.chart?.bgcolorPrimitive) App.chart.bgcolorPrimitive.onOhlcvChanged();
+      App.indicators?.update(cachedBar);
       return;
     } else {
       collections.ohlcvData.push(cachedBar);
@@ -500,7 +503,7 @@ App.data = {
       const tfSeconds = App.data.timeframeToSeconds(info.timeframe);
       if (tfSeconds) {
         state.configuredTimeframeSec = tfSeconds;
-        state.timeframeInterval = tfSeconds;
+        state.timeframeInterval = App.timeframes?.isHigher() ? App.timeframes.seconds() : tfSeconds;
       }
       if (info.script_title) {
         state.scriptTitle = info.script_title || "No title";

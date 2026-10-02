@@ -305,7 +305,7 @@ App.measure = {
     } catch {}
     const timeScaleHeight = 28;
     const right = rect.left + Math.max(0, rect.width - priceScaleWidth);
-    const bottom = rect.top + Math.max(0, rect.height - timeScaleHeight);
+    const bottom = rect.top + (App.chart.pricePaneHeight?.() ?? Math.max(0, rect.height - timeScaleHeight));
     if (right <= rect.left || bottom <= rect.top) return null;
     return {
       left: rect.left,

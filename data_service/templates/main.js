@@ -1,6 +1,9 @@
 var App = window.App || (window.App = {});
 
 App.history.attach();
+App.timeframes.init();
+App.sessionPicker.init();
+App.indicators.init();
 App.ws.connect();
 App.ws.startKeepalive();
 const chartInfoReady = App.data.loadChartInfo();
