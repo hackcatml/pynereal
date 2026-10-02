@@ -375,6 +375,7 @@ SMI, and VWAP. Each indicator's settings button exposes its periods and colors, 
 the standard-deviation multiplier for Bollinger Bands. MACD defaults to 12/26/9
 with MACD/signal lines and a positive/negative histogram. SMI defaults to a
 10-bar range with two 3-period EMA smoothings and a 3-period EMA signal line.
+Bollinger Bands default to red (upper), blue (basis), and green (lower).
 RSI, MACD and SMI each use a separate lower pane that can collapse to a value
 row without stopping calculation; values follow the selected candle. Indicators
 are off by default; selections, parameters, colors, collapsed state and resized
@@ -390,7 +391,14 @@ runners and shows the exchange, timeframe and script. It is fetched only when
 the menu opens; selecting a session navigates in the current tab.
 
 Indicators use the currently displayed timeframe, including higher-timeframe
-OHLCV aggregated in the browser. Calculations run in a browser Web Worker using
+OHLCV aggregated in the browser. Switching to a higher timeframe loads enough
+original candles from the local server to form an initial 50 higher-timeframe
+candles around the viewed time, or all available candles if local history is
+shorter. It reuses cached data and requests missing history in 5,000-candle pages;
+it does not fetch exchange data or recalculate the strategy. Unread partial
+buckets do not count toward the initial 50 candles. This is an initial target,
+not a total limit: navigating further loads additional history normally.
+Calculations run in a browser Web Worker using
 `trading-signals`; live updates replace the current candle instead of replaying
 all history. Loading or correcting historical data rebuilds the indicators.
 Unread gaps restart the indicator warm-up rather than connecting incomplete

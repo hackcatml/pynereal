@@ -5,6 +5,7 @@ App.timeframes = {
   selected: null,
   switching: false,
   selectionId: 0,
+  initialCandleCount: 50,
   groups: new Map(),
   incomplete: new Set(),
   choices: ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w"],
@@ -89,6 +90,48 @@ App.timeframes = {
     state.lastOpenPrice = { ...raw.lastOpenPrice };
     return true;
   },
+  fitHigherRange(range) {
+    const bars = App.collections.ohlcvData;
+    if (!bars.length) return;
+    const anchor = this.bucketTime(range?.to ?? bars.at(-1).time);
+    let end = bars.findLastIndex(bar => bar.time <= anchor && Number.isFinite(bar.close));
+    if (end < 0) end = bars.findIndex(bar => Number.isFinite(bar.close));
+    if (end < 0) return;
+    let start = end;
+    // Fit actual candles around the viewed time, without spanning unread gaps.
+    while (start > 0 && end - start + 1 < this.initialCandleCount && Number.isFinite(bars[start - 1].close)) start--;
+    while (end + 1 < bars.length && end - start + 1 < this.initialCandleCount && Number.isFinite(bars[end + 1].close)) end++;
+    const padding = end === bars.length - 1 ? Math.max(1, (end - start + 1) * 0.08) : 0;
+    App.chart.chart.timeScale().setVisibleLogicalRange({ from: start, to: end + padding });
+  },
+  async ensureHigherHistory(anchor, id, generation) {
+    const history = App.history;
+    while (id === this.selectionId && generation === App.state.loadGeneration && this.isHigher()) {
+      if (history.loading) {
+        await history.loadComplete;
+        continue;
+      }
+      const window = history.windows.findLast(item => this.bucketTime(item.start) <= anchor) || history.windows[0];
+      if (!window) return;
+      const first = this.bucketTime(window.start), last = this.bucketTime(window.end);
+      const candles = App.collections.ohlcvData.filter(bar =>
+        bar.time >= first && bar.time <= last && Number.isFinite(bar.close));
+      const beforeCount = candles.filter(bar => bar.time <= anchor).length;
+      let direction;
+      // Finish an unread right boundary before treating its candle as usable.
+      if (last <= anchor && this.incomplete.has(last) && window.hasAfter) direction = "after";
+      else if (beforeCount < this.initialCandleCount && window.hasBefore) direction = "before";
+      else if (beforeCount < this.initialCandleCount && candles.length < this.initialCandleCount && window.hasAfter) direction = "after";
+      else return;
+      const previous = { start: window.start, end: window.end, hasBefore: window.hasBefore, hasAfter: window.hasAfter };
+      history.selectWindow(window);
+      const query = direction === "before" ? { before: window.start } : { after: window.end };
+      if (!await history.requestWindow(query, direction)) return;
+      if (id !== this.selectionId || generation !== App.state.loadGeneration) return;
+      const next = history.activeWindow;
+      if (!next || Object.keys(previous).every(key => next[key] === previous[key])) return;
+    }
+  },
   async select(seconds) {
     const option = this.options().find(item => item.seconds === seconds);
     if (!option) return;
@@ -116,7 +159,14 @@ App.timeframes = {
       App.ui.setChartInfo(App.chart.formatOhlcvText(App.state.lastOhlcv));
       await App.history.settleChart();
       if (id !== this.selectionId || generation !== App.state.loadGeneration) return;
-      if (range) {
+      if (this.isHigher()) {
+        this.fitHigherRange(range);
+        const anchor = this.bucketTime(range?.to ?? App.state.lastBarTime);
+        await this.ensureHigherHistory(anchor, id, generation);
+        if (id !== this.selectionId || generation !== App.state.loadGeneration) return;
+        this.fitHigherRange(range);
+        App.ui.setChartInfo(App.chart.formatOhlcvText(App.state.lastOhlcv));
+      } else if (range) {
         const from = this.bucketTime(range.from);
         const to = this.bucketTime(range.to + previousSeconds - seconds);
         scale.setVisibleRange({ from, to: Math.max(from + seconds, to) });

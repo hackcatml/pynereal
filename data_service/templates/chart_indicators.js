@@ -4,7 +4,7 @@ App.indicators = {
   definitions: [
     { id: "sma", name: "SMA", period: 20, colors: ["#1565c0"] },
     { id: "ema", name: "EMA", period: 20, colors: ["#e65100"] },
-    { id: "bb", name: "Bollinger Bands", period: 20, multiplier: 2, colors: ["#00897b", "#78909c", "#00897b"] },
+    { id: "bb", name: "Bollinger Bands", period: 20, multiplier: 2, colors: ["#d32f2f", "#1565c0", "#00897b"] },
     { id: "rsi", name: "RSI", period: 14, colors: ["#7b1fa2"], pane: true, range: [0, 100], levels: [30, 70] },
     { id: "macd", name: "MACD", fastPeriod: 12, slowPeriod: 26, signalPeriod: 9,
       colors: ["#1565c0", "#e65100", "#00897b", "#d32f2f"], pane: true, levels: [0],
@@ -46,6 +46,9 @@ App.indicators = {
   loadSettings(saved) {
     return this.definitions.map(def => {
       const old = Array.isArray(saved) ? saved.find(item => item?.id === def.id) : null;
+      const legacyBbColors = def.id === "bb" && old?.colors?.length === 3 &&
+        ["#00897b", "#78909c", "#00897b"].every((color, index) => old.colors[index]?.toLowerCase?.() === color);
+      const colors = legacyBbColors ? null : old?.colors;
       const params = Object.fromEntries(this.fields(def).map(field => {
         const value = old?.[field], spec = this.fieldSpec(field);
         return [field, Number.isFinite(value) && value >= spec.min && value <= spec.max &&
@@ -58,7 +61,7 @@ App.indicators = {
       return {
         id: def.id, enabled: old?.enabled === true,
         ...params,
-        colors: def.colors.map((color, index) => /^#[0-9a-f]{6}$/i.test(old?.colors?.[index]) ? old.colors[index] : color),
+        colors: def.colors.map((color, index) => /^#[0-9a-f]{6}$/i.test(colors?.[index]) ? colors[index] : color),
         ...(def.pane ? {
           collapsed: old?.collapsed === true,
           expandedHeight: Number.isFinite(old?.expandedHeight) && old.expandedHeight >= 30 ? old.expandedHeight : undefined,
