@@ -102,11 +102,13 @@ App.ui = {
     }
     const baseMarkup = String(state.baseInfoTop || "")
       .split(" | ")
-      .map((part, index) => index === 1 && App.timeframes?.options().length > 1
+      .map((part, index) => index === 0 && App.sessionPicker && App.config.runtimeId
+        ? `<button id="chart-session-toggle" type="button" aria-label="Select chart session" aria-haspopup="menu" aria-expanded="false" aria-controls="chart-session-menu">${this.escapeHtml(part)}</button>`
+        : index === 1 && App.timeframes?.options().length > 1
         ? `<button id="chart-timeframe-toggle" type="button" aria-label="Chart timeframe" aria-haspopup="menu" aria-expanded="false" aria-controls="chart-timeframe-menu">${this.escapeHtml(App.timeframes.label())}</button>`
         : this.escapeHtml(part))
       .join('<span class="chart-info-sep chart-info-sep-strong" aria-hidden="true"></span>');
-    // Preserve the timeframe button while the crosshair updates OHLCV text.
+    // Preserve the navigation buttons while the crosshair updates OHLCV text.
     if (this.chartInfoBaseMarkup !== baseMarkup) {
       this.elements.chartInfoBase.innerHTML = baseMarkup;
       this.chartInfoBaseMarkup = baseMarkup;
@@ -1649,7 +1651,7 @@ App.ui = {
   },
   refreshMobileViewportLock() {
     const templateOpen = !this.elements.alertTemplateModal.classList.contains("hidden");
-    this.setMobileViewportLock(App.state.sourcePanelOpen || templateOpen || App.state.manualAlertMenuOpen);
+    this.setMobileViewportLock(App.state.sourcePanelOpen || templateOpen || App.state.manualAlertMenuOpen || App.indicators?.isOpen());
   },
   getSourcePaneBounds() {
     const viewportWidth = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 1);

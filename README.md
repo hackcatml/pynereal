@@ -368,6 +368,42 @@ The runner can be started before opening a chart, or the chart can be opened
 before the runner starts. Source code, script title, and alert toggles are still
 available from the chart page.
 
+## Browser Chart Indicators
+
+The chart's **Indicators** tool enables SMA, EMA, Bollinger Bands, RSI, MACD,
+SMI, and VWAP. Each indicator's settings button exposes its periods and colors, plus
+the standard-deviation multiplier for Bollinger Bands. MACD defaults to 12/26/9
+with MACD/signal lines and a positive/negative histogram. SMI defaults to a
+10-bar range with two 3-period EMA smoothings and a 3-period EMA signal line.
+RSI, MACD and SMI each use a separate lower pane that can collapse to a value
+row without stopping calculation; values follow the selected candle. Indicators
+are off by default; selections, parameters, colors, collapsed state and resized
+expanded pane height are saved in the browser for each session.
+
+VWAP uses HLC3 weighted by candle volume and resets at 00:00 UTC. Zero-volume
+candles do not add weight. Like other browser indicators, its values depend on
+the loaded candles and displayed timeframe; loading missing history recalculates it.
+
+Click the symbol name in the chart header to switch to another registered
+session whose chart data is ready. The list includes sessions with stopped
+runners and shows the exchange, timeframe and script. It is fetched only when
+the menu opens; selecting a session navigates in the current tab.
+
+Indicators use the currently displayed timeframe, including higher-timeframe
+OHLCV aggregated in the browser. Calculations run in a browser Web Worker using
+`trading-signals`; live updates replace the current candle instead of replaying
+all history. Loading or correcting historical data rebuilds the indicators.
+Unread gaps restart the indicator warm-up rather than connecting incomplete
+history. Values near the start of the loaded range can change when more history
+is loaded, especially for recursively smoothed indicators.
+
+These indicators are chart-only: they do not change strategy calculations,
+signals, or alerts, and they do not add exchange requests. They are not a promise
+of exact TradingView or PyneCore numerical equivalence. The worker is bundled, so
+normal setup and Update do not require Node.js or npm. To rebuild it during
+development, run `npm ci` and `npm run build:indicators`; source lives in
+`data_service/indicators_build/`.
+
 ## Strategy Calculation Timing
 
 When a new candle is confirmed, the runner updates the latest OHLCV data and
@@ -1077,6 +1113,7 @@ Apache License Version 2.0.
 
 - [PyneCore](https://github.com/PyneSys/pynecore)
 - [Lightweight Charts](https://tradingview.github.io/lightweight-charts/)
+- [trading-signals](https://github.com/bennycode/trading-signals)
 - [CCXT](https://github.com/ccxt/ccxt)
 - [OpenAI Codex](https://openai.com/codex/)
 - [CodeMirror](https://codemirror.net/)

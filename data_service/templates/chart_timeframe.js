@@ -152,6 +152,8 @@ App.timeframes = {
   },
   toggleMenu() {
     if (!this.menu.classList.contains("hidden")) { this.closeMenu(); return; }
+    App.sessionPicker?.close();
+    App.indicators?.close();
     const options = this.options();
     if (options.length < 2) return;
     this.menu.replaceChildren(...options.map(option => {
