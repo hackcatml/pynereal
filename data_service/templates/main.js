@@ -12,7 +12,9 @@ App.data.loadWebhookConfig();
 App.ui.loadManualAlertTemplates({ migrateLocal: true });
 const manualAlertsReady = App.ui.loadManualAlertTrigger();
 if (App.chart.captureMode) {
-  App.chart.captureInputsReady = Promise.all([chartInfoReady, scriptSourceReady, manualAlertsReady]);
+  App.chart.captureInputsReady = Promise.all([
+    chartInfoReady, scriptSourceReady, manualAlertsReady, App.indicators.settingsLoaded,
+  ]);
 }
 App.measure.init();
 App.trendline.init();
