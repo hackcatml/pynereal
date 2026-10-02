@@ -22,6 +22,7 @@ workdir/data/telegram_ai.sqlite*
 workdir/data/telegram_ai.lock
 workdir/config/calendar_events.json
 workdir/config/watchlist_favorites.json
+workdir/config/chart_indicators/
 workdir/config/update_request.json
 workdir/config/update_state.json
 workdir/data/notifications.sqlite

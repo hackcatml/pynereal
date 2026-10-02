@@ -31,6 +31,7 @@ from asset_portfolio import AssetPortfolioError, AssetPortfolioService
 from asset_transfer import AssetTransferError, AssetTransferService
 from calendar_store import CalendarEventStore, CalendarStoreError
 from chart_history import CHART_PAGE_SIZE, read_chart_window
+from chart_indicator_settings import ChartIndicatorSettings, validate_indicator_settings
 from data_integrity import DataIntegrityCancelled, inspect_data_integrity
 from registry import (
     HistoryNotReadyError,
@@ -423,9 +424,37 @@ def build_session_api_router(
     scripting_workspace: ScriptingWorkspace,
 ) -> APIRouter:
     r = APIRouter()
+    indicator_settings = ChartIndicatorSettings(app_state.config_dir / "chart_indicators")
 
     def _rt(session_id: str) -> Optional[Session]:
         return registry.get(session_id)
+
+    @r.get("/api/{session_id}/chart-indicators")
+    def get_chart_indicators(session_id: str) -> JSONResponse:
+        if _rt(session_id) is None:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        try:
+            settings = indicator_settings.get(session_id)
+        except (OSError, ValueError):
+            return JSONResponse({"error": "Indicator settings could not be read"}, status_code=500)
+        return JSONResponse({"settings": settings}, headers={"Cache-Control": "no-store"})
+
+    @r.put("/api/{session_id}/chart-indicators")
+    def save_chart_indicators(session_id: str, payload: dict = Body(...)) -> JSONResponse:
+        if _rt(session_id) is None:
+            return JSONResponse({"error": "session not found"}, status_code=404)
+        initialize_only = payload.get("initialize_only", False)
+        if not isinstance(initialize_only, bool):
+            return JSONResponse({"error": "initialize_only must be boolean"}, status_code=400)
+        try:
+            settings = validate_indicator_settings(payload.get("settings"))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        try:
+            saved = indicator_settings.save(session_id, settings, initialize_only=initialize_only)
+        except (OSError, ValueError):
+            return JSONResponse({"error": "Indicator settings could not be saved"}, status_code=500)
+        return JSONResponse({"settings": saved}, headers={"Cache-Control": "no-store"})
 
     @r.get("/api/{session_id}/chart-window")
     def get_chart_window(

@@ -378,8 +378,24 @@ with MACD/signal lines and a positive/negative histogram. SMI defaults to a
 Bollinger Bands default to red (upper), blue (basis), and green (lower).
 RSI, MACD and SMI each use a separate lower pane that can collapse to a value
 row without stopping calculation; values follow the selected candle. Indicators
-are off by default; selections, parameters, colors, collapsed state and resized
-expanded pane height are saved in the browser for each session.
+are off by default. Selections, parameters, colors and collapsed state are saved
+per session on the server in `workdir/config/chart_indicators/`, while resized
+pane heights remain local to each browser.
+
+After upgrading, reopen the chart in the browser where indicators were configured
+to copy its previous local preferences to the server. This initial migration only
+runs when that session has no saved server settings; other browsers then load the
+server settings when opening the chart. Setting changes are saved on demand,
+without polling or additional exchange requests.
+If older server settings lack a collapse state, reopening the configured browser
+also copies that state to the server.
+
+Telegram and AI screenshots use these saved settings and wait for the indicator
+history to finish calculating and rendering. The current-price label is refreshed
+before capture without waiting for its one-second timer. Collapsed lower indicator panes stay
+collapsed; expanded panes use the capture viewport rather than a phone's pane heights. A settings
+or calculation failure is reported instead of silently sending a chart without
+the requested indicators.
 
 VWAP uses HLC3 weighted by candle volume and resets at 00:00 UTC. Zero-volume
 candles do not add weight. Like other browser indicators, its values depend on
