@@ -20,6 +20,7 @@ App.history = {
   finishLoading: null,
   requestTimeoutMs: 10000,
   edgeRequestId: 0,
+  liveBarVersion: null,
   cancelPending(replay = true) {
     if (!this.loading && !App.state.initialLoadInProgress) return;
     App.state.loadGeneration++;
@@ -35,6 +36,7 @@ App.history = {
   },
   reset() {
     this.cancelPending(false);
+    this.liveBarVersion = null;
     App.timeframes?.reset();
     this.resyncPending = false;
     this.hasBefore = false;
@@ -50,6 +52,7 @@ App.history = {
     this.pending.clear();
   },
   suspend() {
+    this.liveBarVersion = null;
     this.resyncPending = true;
     this.cancelPending(false);
     this.pending.clear();
@@ -99,7 +102,9 @@ App.history = {
         }
         window.start = Math.min(window.start, cached.start);
         window.end = Math.max(window.end, cached.end);
-        cached.bars.forEach((bar, time) => { if (keepCached(time)) bars.set(time, bar); });
+        cached.bars.forEach((bar, time) => {
+          if (keepCached(time) && !(payload.live_bar_sequence != null && time === end)) bars.set(time, bar);
+        });
         for (const [title, plot] of cached.plots) {
           const target = window.plots.get(title);
           if (!target) {
@@ -212,6 +217,12 @@ App.history = {
       return true;
     }
     const time = Number(msg.time ?? msg.data?.time);
+    if (msg.type === "bar" && Number.isFinite(msg.sequence)) {
+      // The HTTP snapshot can be newer than messages buffered during its request.
+      const version = this.liveBarVersion;
+      if (version?.time === time && msg.sequence <= version.sequence) return true;
+      if (!version || time >= version.time) this.liveBarVersion = { time, sequence: msg.sequence };
+    }
     const window = this.windows.find(cached => time >= cached.start && (time <= cached.end || !cached.hasAfter));
     if (window) {
       this.cacheLive(window, msg, time);
@@ -263,6 +274,9 @@ App.history = {
         this.activeWindow.hasAfter = this.hasAfter;
       }
       return;
+    }
+    if (Number.isFinite(payload.live_bar_sequence)) {
+      this.liveBarVersion = { time: payload.bars.at(-1).time, sequence: payload.live_bar_sequence };
     }
     const window = this.cacheWindow(payload, mode, overlays);
     const { combined, bars, gaps } = this.retainedData(overlays ? this.windows : [window]);
