@@ -83,6 +83,7 @@ class Feed:
         self.collector_error: Optional[str] = None
         self._history_start_mtime: Optional[float] = None
         self._history_start_time: Optional[int] = None
+        self.latest_chart_bar: dict[str, Any] | None = None
         self._raw_trade_sequence = 0
         self._last_raw_trade_price: Optional[float] = None
         self._last_raw_trade_time_ms: Optional[int] = None
@@ -99,6 +100,7 @@ class Feed:
     async def broadcast_bar(self, bar: list) -> None:
         payload = {
             "type": "bar",
+            "sequence": (self.latest_chart_bar["sequence"] if self.latest_chart_bar else 0) + 1,
             "data": {
                 "time": int(bar[0] // 1000),
                 "open": float(bar[1]),
@@ -108,6 +110,8 @@ class Feed:
                 "volume": float(bar[5]),
             },
         }
+        # Replace the whole snapshot so history readers see matching data/sequence.
+        self.latest_chart_bar = payload
         for session in list(self.subscribers.values()):
             await session.send_to_charts(payload)
 

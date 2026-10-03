@@ -37,6 +37,7 @@ def read_candle_window(path: Path, exchange: str, limit: int, before=None, after
             return result
         if after is not None:
             start = _bar_position(reader, after + 1)
+            result["has_before"] = start > 0
             positions = range(start, reader.size)
         else:
             end = reader.size if before is None else _bar_position(reader, before)
@@ -142,8 +143,39 @@ def _signature(path: Path):
         return None
 
 
+def _merge_live_bar(window: dict, snapshot: dict | None, exchange: str, limit: int, before, after) -> None:
+    """Overlay the forming candle at the live edge, never change historical pages."""
+    interval = window["interval"]
+    if snapshot is None or not interval or before is not None or window["has_after"]:
+        return
+    bar = snapshot["data"]
+    timestamp = bar["time"]
+    if not timestamp <= datetime.now(UTC).timestamp() < timestamp + interval:
+        return
+    if bar["volume"] < 0 or (bar["volume"] == 0 and tradingview_hides_zero_volume(exchange)):
+        return
+    if after is not None and timestamp <= after:
+        return
+    bars = window["bars"]
+    if bars and timestamp < bars[-1]["time"]:
+        return
+    if bars and timestamp == bars[-1]["time"]:
+        bars[-1] = dict(bar)
+    else:
+        if after is not None and len(bars) >= limit:
+            window["has_after"] = True
+            return
+        bars.append(dict(bar))
+        if len(bars) > limit:
+            del bars[0]
+            window["has_before"] = True
+    window["live_bar_sequence"] = snapshot["sequence"]
+
+
 def read_chart_window(session, limit=CHART_PAGE_SIZE, before=None, after=None) -> dict:
+    snapshot = getattr(getattr(session, "feed", None), "latest_chart_bar", None)
     window = read_candle_window(session.ohlcv_path, session.spec.exchange, limit, before, after)
+    _merge_live_bar(window, snapshot, session.spec.exchange, limit, before, after)
     window.update(plots=[], trades=[], plotchars=[], overlays_ready=True)
     if not window["bars"] or not session.runner_count:
         return window
