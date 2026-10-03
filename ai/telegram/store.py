@@ -26,7 +26,7 @@ COMMAND_HELP = (
     "/positions shows open positions\n"
     "/sessions selects a session and controls runner/alerts\n"
     "/pnl [7d, 30d, 90d, 6m, 1y, all] shows PnL\n"
-    "/alerts lists/sets Manual Alerts or edits templates\n"
+    "/alerts lists/sets/sends Manual Alerts or edits templates\n"
     "These direct commands do not require AI mode."
 )
 AI_MODE_NOTICE = "AI mode on. Send text, images or scripts.\nChanges require your approval.\n\n" + COMMAND_HELP
@@ -193,13 +193,23 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
         return row[0] if row else 0
 
     def _reply(self, chat: int, text: str, *, job_id: int | None = None, replace_id: int | None = None,
-               request_id: int | None = None) -> None:
+               request_id: int | None = None, command_menu: bool = False) -> None:
         chunks = [PENDING_TEXT] if job_id is not None else message_chunks(text)
         self.db.executemany(
-            "INSERT INTO outbox(bot,chat,text,job_id,replace_id,request_id) VALUES (?,?,?,?,?,?)",
-            [(self.bot_id, chat, chunk, job_id, replace_id if index == 0 else None, request_id)
+            "INSERT INTO outbox(bot,chat,text,job_id,replace_id,request_id,kind) VALUES (?,?,?,?,?,?,?)",
+            [(self.bot_id, chat, chunk, job_id, replace_id if index == 0 else None, request_id,
+              "command_menu" if command_menu and index == 0 else "text")
              for index, chunk in enumerate(chunks)],
         )
+
+    def ensure_command_menu(self, chat: int) -> None:
+        with self.db:
+            existing = self.db.execute(
+                "SELECT 1 FROM outbox WHERE bot=? AND chat=? AND kind='command_menu' "
+                "AND state IN ('pending','sent') LIMIT 1", (self.bot_id, chat),
+            ).fetchone()
+            if existing is None:
+                self._reply(chat, "Command menu ready. Select a command below.", command_menu=True)
 
     def _complete_reply(self, job, text: str) -> None:
         placeholder = self.db.execute(
@@ -534,7 +544,7 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
                 return False
             if command in {"/alerts", "/alert"}:
                 if argument:
-                    self._reply(chat, "Use /alerts without arguments, then select List, Set alert or Set templates.")
+                    self._reply(chat, "Use /alerts without arguments, then select List, Set alert, Send alert or Set templates.")
                 else:
                     self._alert_menu({"chat": chat, "actor": actor}, {"stage": "home"})
                 return False
@@ -599,7 +609,7 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
                         notice += (f"\n\nIn groups, use /ai@{username} <request> for reliable delivery. "
                                    "Plain messages require Privacy Mode disabled or the bot to be an admin. "
                                    "Replies are visible to everyone in this group.")
-                    self._reply(chat, notice)
+                    self._reply(chat, notice, command_menu=True)
                 return False
             mode = self.db.execute(
                 "SELECT expires FROM chats WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor),
@@ -619,7 +629,7 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
             if command == "/ai":
                 text = argument.strip()
                 if not text and not (message.get("photo") or message.get("document")):
-                    self._reply(chat, AI_MODE_NOTICE)
+                    self._reply(chat, AI_MODE_NOTICE, command_menu=True)
                     return False
             try:
                 attachment = attachment_descriptor(message)

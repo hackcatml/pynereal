@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import copy
 import hashlib
 import json
@@ -13,8 +14,9 @@ from decimal import Decimal, DecimalException, localcontext
 
 from ai.scripts.manual_alert_tool import ManualAlertToolError, ManualAlertTools
 from data_service.config import sanitize_manual_alert_templates
-from data_service.manual_alerts import validate_manual_alert_template
+from data_service.manual_alerts import build_manual_alert_payload, send_manual_alert_payload, validate_manual_alert_template
 from .commands import session_label
+from .price import _positive_number
 from .session_control import SessionCommandError
 
 
@@ -81,6 +83,40 @@ def _trigger_price(text: str) -> float:
     return price
 
 
+async def _send_alert(session, target: dict, request: dict) -> dict:
+    template = request["draft"]
+    try:
+        validate_manual_alert_template(template, session.spec)
+    except ValueError as exc:
+        raise SessionCommandError(str(exc)) from None
+    _, market, traded_at = session.feed.raw_trade_cursor()
+    market, traded_at = _positive_number(market), _positive_number(traded_at)
+    if (target["collector"] != "running" or traded_at is None
+            or not -5 <= time.time() - traded_at / 1000 <= 60):
+        market = None
+    if market is None:
+        raise SessionCommandError("Current market price is unavailable or stale. Nothing was sent. Check the feed and try again.")
+    bar_time = session.feed.last_bar_time()
+    if bar_time is None and any("{{time}}" in str(template.get(key) or "") for key in ("message", "ai")):
+        raise SessionCommandError("Current candle time is unavailable. Nothing was sent. Check the feed and try again.")
+    payload = build_manual_alert_payload(template=template, spec=session.spec, price=market,
+                                         market=market, time=bar_time)
+    result = await asyncio.to_thread(
+        send_manual_alert_payload, spec=session.spec, script_title=session._manual_alert_script_title(),
+        payload=payload, notify=session.notifications.publish if session.notifications else None,
+    )
+    dispatched = await session.dispatch_manual_alert_ai_instruction(payload, result, mode="send")
+    webhook, telegram = result.get("webhook", {}), result.get("telegram", {})
+    notice = session_label(target) + f"\nTemplate: {template['title']}\nPrice: {market}"
+    notice += "\nWebhook: " + ("sent" if webhook.get("sent") else "failed or unconfirmed")
+    notice += "\nTelegram: " + ("sent" if telegram.get("sent") else "failed" if telegram.get("error") else "not configured")
+    if payload.get("ai_instruction"):
+        notice += "\nAI instruction: " + ("dispatched" if dispatched else "not run")
+    if not webhook.get("sent"):
+        notice += "\nNot retried. Check the receiver before sending again."
+    return {"stage": "home", "notice": notice}
+
+
 async def template_command(control, request: dict) -> dict:
     if control is None:
         raise SessionCommandError("Session access is unavailable. Retry /alerts.")
@@ -109,11 +145,13 @@ async def template_command(control, request: dict) -> dict:
     if request["operation"] == "templates":
         return {"stage": "templates", "target": target, "templates": copy.deepcopy(current), "page": 0,
                 "mode": request.get("mode", "template")}
-    if request["operation"] == "set_trigger":
+    if request["operation"] in {"set_trigger", "send_alert"}:
         index = request["index"]
         if (type(index) is not int or not 0 <= index < len(current)
                 or current[index] != request["draft"]):
-            raise SessionCommandError("The selected template changed or was removed. No alert was set. Use /alerts again.")
+            raise SessionCommandError("The selected template changed or was removed. No alert was set or sent. Use /alerts again.")
+        if request["operation"] == "send_alert":
+            return await _send_alert(control.registry.get(target["session_id"]), target, request)
         tools = ManualAlertTools(control.registry)
         try:
             arguments = tools._validate_set_arguments({
@@ -192,11 +230,11 @@ class AlertMenuStore:
                 text += "\n\n" + _alert_label(payload) + "\n\nCancel this price trigger? Its template will be kept."
                 buttons.append([button("Cancel alert", "delete_trigger")])
             buttons.append([button("List", "list"), button("Set alert", "set_alert")])
-            buttons.append([button("Set templates", "sessions")])
+            buttons.append([button("Send alert", "send_alert"), button("Set templates", "sessions")])
         elif stage in {"sessions", "templates"}:
             items = payload[stage]
             page = payload.get("page", 0)
-            setting_alert = payload.get("mode") == "trigger"
+            setting_alert = payload.get("mode") in {"trigger", "send"}
             text = ("Select a session" if stage == "sessions" else session_label(payload["target"]) +
                     ("\nSelect an alert template" if setting_alert else "\nSelect a template or create one"))
             text += f" ({page + 1}/{max(1, (len(items) + 9) // 10)})."
@@ -205,7 +243,8 @@ class AlertMenuStore:
             if not items:
                 text += "\nNo sessions registered." if stage == "sessions" else "\nNo templates yet."
                 if stage == "templates" and setting_alert:
-                    text += " Create a template with Set templates first, then return to Set alert."
+                    action = "Send alert" if payload.get("mode") == "send" else "Set alert"
+                    text += f" Create a template with Set templates first, then return to {action}."
                     buttons.append([button("Set templates", "sessions")])
             for index, item in enumerate(items[page * 10:page * 10 + 10], page * 10):
                 label = session_label(item) if stage == "sessions" else item["title"]
@@ -224,18 +263,28 @@ class AlertMenuStore:
                 text += (f"\nTemplate: {draft['title']}\n\nSend the trigger price or a calculation, e.g. 252.41 * 0.996."
                          "\nUse numbers and +, -, *, /, parentheses. The result must be positive."
                          "\nReply to this prompt in groups. Use /cancel to discard.")
-            elif stage == "trigger_review":
+            elif stage in {"trigger_review", "send_review"}:
                 text += f"\n\nTemplate: {draft['title']}"
-                if payload.get("price_expression"):
-                    text += f"\nCalculation: {payload['price_expression']}"
-                text += f"\nPrice: {payload['price']}"
+                if stage == "send_review":
+                    text += "\nPrice: Market price at send time"
+                else:
+                    if payload.get("price_expression"):
+                        text += f"\nCalculation: {payload['price_expression']}"
+                    text += f"\nPrice: {payload['price']}"
                 for key, label in (("message", "Message"), ("ai", "AI instruction")):
                     value = draft.get(key)
                     if value:
-                        text += f"\n{label} (preview):\n" + (value[:850] + "..." if len(value) > 850 else value)
-                text += ("\n\nSet this price trigger? It fires when market price touches the target."
-                         "\nOther alerts are kept. This does not send a direct alert.")
-                buttons.append([button("Change price", "price"), button("Set alert", "set_trigger")])
+                        limit = 650 if stage == "send_review" else 850
+                        text += f"\n{label} (preview):\n" + (value[:limit] + "..." if len(value) > limit else value)
+                if stage == "send_review":
+                    text += ("\n\nSend this webhook now? It may place a real order."
+                             "\n{{price}} and {{market}} both use the latest received trade price when sending."
+                             " {{time}} uses the latest session candle's start time (Unix seconds).")
+                    buttons.append([button("Send now", "send_alert")])
+                else:
+                    text += ("\n\nSet this price trigger? It fires when market price touches the target."
+                             "\nOther alerts are kept. This does not send a direct alert.")
+                    buttons.append([button("Change price", "price"), button("Set alert", "set_trigger")])
             elif stage == "review":
                 text += "\n\nTemplate preview (long fields are shortened):"
                 for key, label in (("title", "Title"), ("message", "Message"), ("ai", "AI instruction")):
@@ -270,7 +319,7 @@ class AlertMenuStore:
         self.db.execute("UPDATE alert_menus SET payload=? WHERE nonce=?",
                         (json.dumps({"stage": "busy", "job": update_id}), row["nonce"]))
         return {"save": "Saving template.", "delete_trigger": "Cancelling alert.", "set_trigger": "Setting alert.",
-                "list": "Loading alerts."}.get(operation, "Loading sessions/templates.")
+                "send_alert": "Sending alert.", "list": "Loading alerts."}.get(operation, "Loading sessions/templates.")
 
     def _alert_callback(self, update_id: int, query: dict, parts: list[str], now: float) -> str:
         row = self.db.execute("SELECT m.*,o.message_id FROM alert_menus m JOIN outbox o ON o.id=m.outbox_id "
@@ -290,11 +339,11 @@ class AlertMenuStore:
             self._reply(row["chat"], "Menu closed. No changes applied." if stage in {"alerts", "trigger"} else
                         "Alert/template setup cancelled. Nothing was saved.", replace_id=row["outbox_id"])
             return "Cancelled."
-        if stage in {"home", "alerts", "trigger"} and operation in {"list", "sessions", "set_alert"}:
-            if operation == "set_alert":
-                return self._queue_alert(update_id, row, {"mode": "trigger"}, "sessions")
+        if stage in {"home", "alerts", "trigger"} and operation in {"list", "sessions", "set_alert", "send_alert"}:
+            if operation in {"set_alert", "send_alert"}:
+                return self._queue_alert(update_id, row, {"mode": "send" if operation == "send_alert" else "trigger"}, "sessions")
             return self._queue_alert(update_id, row, {}, operation)
-        if (stage == "templates" and payload.get("mode") == "trigger" and not payload["templates"]
+        if (stage == "templates" and payload.get("mode") in {"trigger", "send"} and not payload["templates"]
                 and operation == "sessions"):
             return self._queue_alert(update_id, row, {}, "sessions")
         if stage == "alerts":
@@ -313,7 +362,7 @@ class AlertMenuStore:
                 return "Invalid alert action."
             return self._queue_alert(update_id, row, payload, "delete_trigger")
         elif stage in {"sessions", "templates"}:
-            if (stage == "templates" and payload.get("mode") != "trigger"
+            if (stage == "templates" and payload.get("mode") not in {"trigger", "send"}
                     and operation == "new" and len(payload["templates"]) < 50):
                 payload.update(stage="title", index=None, draft={})
             elif (operation[:1] in {"p", "s" if stage == "sessions" else "t"}
@@ -326,16 +375,17 @@ class AlertMenuStore:
                     if stage == "sessions":
                         return self._queue_alert(update_id, row, {"target": items[index],
                             "mode": payload.get("mode", "template")}, "templates")
-                    payload.update(stage="price" if payload.get("mode") == "trigger" else "review",
+                    payload.update(stage={"trigger": "price", "send": "send_review"}.get(payload.get("mode"), "review"),
                                    index=index, draft=dict(items[index]))
                 else:
                     return "Invalid selection."
             else:
                 return "Invalid selection."
-        elif stage == "trigger_review":
-            if operation == "set_trigger":
-                return self._queue_alert(update_id, row, payload, "set_trigger")
-            if operation != "price":
+        elif stage in {"trigger_review", "send_review"}:
+            action = "send_alert" if stage == "send_review" else "set_trigger"
+            if operation == action:
+                return self._queue_alert(update_id, row, payload, action)
+            if stage != "trigger_review" or operation != "price":
                 return "Invalid alert action."
             payload.update(stage="price")
         elif stage == "review":
@@ -355,8 +405,8 @@ class AlertMenuStore:
         if payload["stage"] == "home":
             return "Invalid menu action."
         self._alert_menu(row, payload, replace_id=row["outbox_id"])
-        return {"review": "Review and save.", "alerts": "Select an alert.", "price": "Enter the trigger price.",
-                "trigger_review": "Review and set the alert.",
+        return {"review": "Review and save.", "alerts": "Select an alert.", "price": "Enter the price.",
+                "trigger_review": "Review and set the alert.", "send_review": "Review before sending.",
                 "trigger": "Review the alert before cancelling."}.get(payload["stage"], "Continue template setup.")
 
     @staticmethod
@@ -419,7 +469,7 @@ class AlertMenuStore:
                                   (self.bot_id, request["menu_nonce"])).fetchone()
             if row is None or row["expires"] <= time.time() or json.loads(row["payload"]).get("job") != job["id"]:
                 raise SessionCommandError("Alert request expired or was replaced. No changes applied. Use /alerts again.")
-            if request["operation"] in {"save", "delete_trigger", "set_trigger"}:
+            if request["operation"] in {"save", "delete_trigger", "set_trigger", "send_alert"}:
                 self.db.execute("UPDATE jobs SET state='executing' WHERE bot=? AND id=?", (self.bot_id, job["id"]))
 
     def finish_alert_command(self, job: dict, payload: dict | None, error: str = "") -> None:
@@ -431,7 +481,7 @@ class AlertMenuStore:
             request = json.loads(job["input"])
             row = self.db.execute("SELECT * FROM alert_menus WHERE bot=? AND nonce=?",
                                   (self.bot_id, request["menu_nonce"])).fetchone()
-            if error and request["operation"] in {"list", "delete_trigger", "set_trigger"} and row:
+            if error and request["operation"] in {"list", "delete_trigger", "set_trigger", "send_alert"} and row:
                 self._alert_menu(job, {"stage": "home", "notice": error}, replace_id=row["outbox_id"])
             elif error or payload["stage"] == "saved":
                 text = error or (session_label(payload["target"]) + "\nTemplate saved: " + payload["title"]
