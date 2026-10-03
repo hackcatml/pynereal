@@ -17,7 +17,7 @@ from pynecore.core.exchange_policy import tradingview_hides_zero_volume
 from log_utils import log_with_time
 from manual_alerts import build_manual_alert_payload, send_manual_alert_payload
 from ohlcv_paths import make_ohlcv_paths, runtime_output_dir
-from prerun_scheduler import default_offset_seconds
+from prerun_scheduler import default_offset_seconds, timeframe_seconds
 from market_data_diagnostics import log_session_diagnostic
 from state import DataState
 from tv_logos import static_logo_info
@@ -1149,13 +1149,15 @@ class Session:
                 if trade_time_ms is not None
                 else int(time.time())
             )
+            interval = timeframe_seconds(self.spec.timeframe)
+            bar_time = event_time // interval * interval
             self._manual_alert_trigger_sending_ids.add(trigger_id)
             asyncio.create_task(
                 self._send_manual_alert_trigger(
                     dict(trigger),
                     trigger_price,
                     price,
-                    event_time,
+                    bar_time,
                 )
             )
 

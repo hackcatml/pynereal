@@ -543,7 +543,11 @@ The JSON `MESSAGE` and optional `AI INSTRUCTION` support these placeholders:
 
 - `{{price}}`: the selected chart price. Drag the manual alert menu to adjust it.
 - `{{market}}`: the latest live price at the final `Send` click.
-- `{{time}}`: the chart time under the cursor, or the latest bar time if unavailable.
+- `{{time}}`: candle start time in Unix seconds. Direct `Send` uses the latest
+  session candle at final confirmation, regardless of the clicked chart position
+  or display timeframe. A `Set` trigger uses the candle containing the triggering
+  trade; if the trade has no timestamp, it uses the candle containing server time.
+  The separate Telegram `Time:` line still shows notification-generation time.
 - `{{symbol}}`: the session symbol, for example `BTC/USDT:USDT`.
 - `{{ticker}}`: alias of `{{symbol}}`, kept for template readability.
 - `{{exchange}}`: the session exchange id, for example `okx` or `bitget`.
@@ -752,6 +756,16 @@ Registration does not grant access: the same chat/user checks apply to all
 commands and selection buttons. A menu-registration failure is logged and does
 not disable command reception.
 
+PyneReal also sends a persistent command keyboard below the chat input on the
+first connection, so commands can be selected without typing `/`. It includes
+`/price`, `/assets`, `/positions`, `/screenshot`, `/sessions`, `/pnl`, `/alerts`,
+`/ai`, `/model`, `/new`, `/cancel` and `/end`. The startup notice is not repeated
+on every server restart. Send `/help`, `/start` or `/ai` to show the keyboard
+again; Telegram clients control how it is hidden or reopened while typing.
+Each button sends the existing command as a chat message, with the same
+authorization checks. Inline selection/approval buttons and AI conversation
+mode are unchanged; displaying the keyboard does not start an AI conversation.
+
 - `/screenshot` shows all registered sessions as selection buttons, with 10
   sessions per page and Previous/Next buttons when needed. This also applies
   when there is only one session.
@@ -823,10 +837,10 @@ not disable command reception.
   This reuses Account Center's PnL: Net PnL includes realized PnL
   and current cached unrealized PnL. `all` means all stored history, not a new
   full exchange backfill. Missing history can still make the report partial.
-- `/alerts` (also `/alert`) shows **List**, **Set alert** and **Set templates** buttons. List shows active
+- `/alerts` (also `/alert`) shows **List**, **Set alert**, **Send alert** and **Set templates** buttons. List shows active
   Manual Alert price triggers across sessions, with symbol, exchange, timeframe,
   template title and trigger price; unused templates are not listed. The List,
-  Set alert and Set templates buttons remain available below the results. Select an alert,
+  Set alert, Send alert and Set templates buttons remain available below the results. Select an alert,
   then press **Cancel alert** to cancel only that price trigger; its template is
   kept. The list refreshes after cancellation, with 10 alerts per page. Alerts
   that already fired or changed since selection are not cancelled using stale
@@ -841,6 +855,20 @@ not disable command reception.
   session/template rejects the setup. If no templates exist, use Set templates
   first. This uses the existing market-price trigger mechanism, not a direct
   webhook send, and does not require a running strategy or AI mode.
+  Send alert uses the chart's immediate webhook-send path: choose a session and
+  template, review, then press **Send now**. There is no price-entry step:
+  `{{price}}` and `{{market}}` both use the latest received trade price when
+  processing confirmation, and `{{time}}` uses the latest session candle's start
+  time in Unix seconds.
+  Sending requires a running feed with a valid trade
+  received within 60 seconds. **This can place a real order and, like chart
+  Send, does not depend on the session's webhook/Telegram toggles.** Telegram
+  delivery uses the configured credentials; template AI instructions run only
+  after webhook success when AI is enabled. The confirmation is requester-only,
+  expires after 10 minutes, and rejects changed sessions/templates. It creates
+  no price trigger and does not edit templates. Duplicate confirmations are
+  ignored; interrupted or failed sends are not automatically retried. Check
+  the receiver before manually retrying an unconfirmed delivery.
   Set templates lets you select a session and create a new template or edit an
   existing one. Send its title, message and optional AI instruction as text
   (reply to the prompt in groups), review the contents, then press **Save**.

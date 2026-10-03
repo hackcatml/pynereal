@@ -12,13 +12,27 @@ BOT_COMMANDS = [
     {"command": "positions", "description": "Show open positions across all configured accounts"},
     {"command": "sessions", "description": "Select a session and control runner, webhook and Telegram"},
     {"command": "pnl", "description": "Select a PnL period or use /pnl 30d"},
-    {"command": "alerts", "description": "List/set Manual Alerts or create/edit session templates"},
+    {"command": "alerts", "description": "List/set/send Manual Alerts or create/edit session templates"},
     {"command": "model", "description": "Select model, reasoning effort and speed"},
     {"command": "new", "description": "Start a new chat"},
     {"command": "cancel", "description": "Cancel unfinished work"},
     {"command": "end", "description": "End the AI conversation"},
     {"command": "help", "description": "Show command help"},
 ]
+
+
+def command_keyboard() -> dict:
+    return {
+        "keyboard": [
+            ["/price", "/assets", "/positions"],
+            ["/screenshot", "/sessions", "/pnl"],
+            ["/alerts", "/ai", "/model"],
+            ["/new", "/cancel", "/end"],
+        ],
+        "resize_keyboard": True,
+        "is_persistent": True,
+        "one_time_keyboard": False,
+    }
 
 
 PNL_PERIODS = {"7d": 7, "30d": 30, "90d": 90, "6m": 180, "1y": 365, "all": None}

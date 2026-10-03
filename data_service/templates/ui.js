@@ -692,6 +692,8 @@ App.ui = {
     const context = {
       ...pending.context,
       market: this.currentMarketPrice(),
+      // Use the latest source candle, not the clicked or aggregated display candle.
+      time: App.history?.renderedWindow?.end || App.state.lastBarTime || null,
       title: template.title
     };
     const payload = {

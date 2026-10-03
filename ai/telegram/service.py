@@ -16,7 +16,7 @@ from .store import TelegramStore
 from .transport import TelegramError, TelegramTransport
 from .attachments import validate_attachment
 from .actions import ProposalConflict, action_summary
-from .commands import BOT_COMMANDS
+from .commands import BOT_COMMANDS, command_keyboard
 from .session_control import SessionCommandError
 
 logger = logging.getLogger(__name__)
@@ -83,6 +83,7 @@ class TelegramAIService:
                 raise RuntimeError("Bot webhook is configured; Telegram AI reception was not started")
             self._username = str(me["username"])
             await self._db("open", int(me["id"]))
+            await self._db("ensure_command_menu", self.config.chat_id)
             tasks = [
                 asyncio.create_task(self._poll(), name="telegram-ai-receiver"),
                 asyncio.create_task(self._work(), name="telegram-ai-worker"),
@@ -293,8 +294,10 @@ class TelegramAIService:
             await self._db("finish_alert_command", job, None, str(exc))
         except Exception as exc:
             _log(logging.ERROR, "alert command failed (%s)", type(exc).__name__)
-            await self._db("finish_alert_command", job, None,
-                           "Alert request failed. Check the current alerts/templates before retrying; changes were not retried.")
+            notice = ("Alert delivery could not be confirmed. Check the webhook receiver before sending again. Not retried."
+                      if json.loads(job["input"]).get("operation") == "send_alert" else
+                      "Alert request failed. Check the current alerts/templates before retrying; changes were not retried.")
+            await self._db("finish_alert_command", job, None, notice)
 
     async def _take_screenshot(self, job: dict) -> None:
         try:
@@ -443,14 +446,18 @@ class TelegramAIService:
                 await self._db("delivery_failed", item["id"], 0, True)
                 continue
             pause = 3.1 if self.config.chat_id < 0 else 1.1
-            target = item.get("target_message_id")
+            # Reply keyboards require a new message; message edits only accept inline keyboards.
+            is_command_menu = item["kind"] == "command_menu"
+            target = None if is_command_menu else item.get("target_message_id")
             method = "editMessageText" if target is not None else "sendMessage"
             payload = {"chat_id": item["chat"], "text": item["text"],
                        "link_preview_options": {"is_disabled": True}}
             if target is not None:
                 payload["message_id"] = target
                 payload["reply_markup"] = {"inline_keyboard": []}
-            if item.get("markup"):
+            if is_command_menu:
+                payload["reply_markup"] = command_keyboard()
+            elif item.get("markup"):
                 payload["reply_markup"] = json.loads(item["markup"])
             try:
                 try:
