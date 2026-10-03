@@ -5,6 +5,7 @@
 }
 
 .scripting-backtest-box {
+  position: relative;
   width: min(860px, 100%);
   height: min(720px, calc(100vh - 32px));
   max-height: calc(100vh - 32px);
@@ -323,6 +324,47 @@
 .scripting-backtest-jobs::-webkit-scrollbar { height: 5px; }
 .scripting-backtest-jobs::-webkit-scrollbar-track { background: transparent; }
 .scripting-backtest-jobs::-webkit-scrollbar-thumb { border-radius: 5px; background: var(--ui-scrollbar, #3a4350); }
+
+.scripting-backtest-job-item {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: stretch;
+  max-width: 270px;
+}
+
+.scripting-backtest-job-item .scripting-backtest-job {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-radius: 4px 0 0 4px;
+}
+
+.scripting-backtest-job-delete {
+  flex: 0 0 27px;
+  width: 27px;
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  padding: 0;
+  border: 1px solid var(--ui-border, #303843);
+  border-left: 0;
+  border-radius: 0 4px 4px 0;
+  background: var(--ui-surface, #11161d);
+  color: var(--ui-muted, #8b949e);
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.scripting-backtest-job-delete > span {
+  display: block;
+  transform: translateY(-1px);
+}
+
+.scripting-backtest-job-delete:hover:not(:disabled) { color: var(--ui-negative, #ff7b72); background: var(--ui-hover, #1c2530); }
+.scripting-backtest-job-delete:disabled { opacity: 0.35; cursor: default; }
 
 .scripting-backtest-job {
   flex: 0 0 auto;
@@ -764,13 +806,12 @@
 
 .scripting-backtest-clear-popover {
   position: absolute;
-  top: calc(100% + 7px);
-  right: 0;
   z-index: 50;
   width: min(270px, calc(100vw - 24px));
   display: grid;
   gap: 7px;
   box-sizing: border-box;
+  overflow-y: auto;
   padding: 10px;
   border: 1px solid var(--ui-border, #3a4350);
   border-radius: 6px;
@@ -858,6 +899,111 @@
 
 .scripting-backtest-summary-page { min-height: 100%; }
 
+.scripting-backtest-script {
+  flex: 0 0 auto;
+  min-width: 0;
+  margin-top: 12px;
+}
+
+.scripting-backtest-script-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-top: 1px solid var(--ui-border, #303843);
+  padding-top: 7px;
+}
+
+.scripting-backtest-script-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--ui-heading, #f0f3f6);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.scripting-backtest-script-toggle .icon {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 180ms ease;
+}
+.scripting-backtest-script.expanded .scripting-backtest-script-toggle .icon { transform: rotate(90deg); }
+.scripting-backtest-script-heading .scripting-backtest-script-copy {
+  position: relative;
+  width: 25px;
+  height: 25px;
+  min-width: 25px;
+  min-height: 25px;
+  padding: 4px;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.scripting-backtest-script-copy .icon { width: 13px; height: 13px; }
+.scripting-backtest-script-copy[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 4px);
+  padding: 4px 7px;
+  border-radius: 4px;
+  background: var(--ui-heading, #f0f3f6);
+  color: var(--ui-surface, #11161d);
+  font-size: 10px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+}
+.scripting-backtest-script-copy[data-tooltip]:hover::after,
+.scripting-backtest-script-copy[data-tooltip]:focus-visible::after { opacity: 1; }
+.scripting-backtest-script-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 180ms ease;
+}
+.scripting-backtest-script.expanded .scripting-backtest-script-body { grid-template-rows: 1fr; }
+.scripting-backtest-script-body > div { min-height: 0; min-width: 0; overflow: hidden; }
+.scripting-backtest-script pre {
+  max-height: 320px;
+  margin: 7px 0 0;
+  padding: 8px;
+  overflow: auto;
+  background: var(--ui-inset, #0d1117);
+  color: var(--ui-text, #c9d1d9);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  tab-size: 4;
+  white-space: pre;
+  overscroll-behavior: contain;
+  touch-action: pan-x pan-y;
+  scrollbar-color: var(--ui-scrollbar, #3a4350) var(--ui-inset, #0d1117);
+  scrollbar-width: thin;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.scripting-backtest-script pre::-webkit-scrollbar { width: 6px; height: 6px; }
+.scripting-backtest-script pre::-webkit-scrollbar-thumb { background: var(--ui-scrollbar, #3a4350); border-radius: 4px; }
+.scripting-backtest-script pre::-webkit-scrollbar-corner { background: transparent; }
+.scripting-backtest-script code { font: inherit; }
+
+@media (prefers-reduced-motion: reduce) {
+  .scripting-backtest-script-toggle .icon,
+  .scripting-backtest-script-body { transition: none; }
+}
+
 .scripting-backtest-summary-title {
   min-width: 0;
   display: flex;
@@ -892,7 +1038,7 @@
 .scripting-backtest-summary-panel.summary-comparison {
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .summary-comparison > .scripting-backtest-summary-title { flex: 0 0 auto; }
@@ -900,7 +1046,7 @@
 .scripting-backtest-compare-scroll {
   flex: 1;
   min-width: 0;
-  min-height: 0;
+  min-height: 120px;
   overflow: auto;
   overscroll-behavior: contain;
   touch-action: pan-x pan-y;
@@ -1620,7 +1766,20 @@
     left: auto;
   }
   .scripting-backtest-log { padding: 10px; font-size: 10.5px; }
-  .scripting-backtest-summary-panel { padding: 9px 11px; }
+  .scripting-backtest-summary-panel { padding: 0 11px 9px; }
+  .scripting-backtest-summary-title { padding-top: 9px; }
+  .scripting-backtest-script.expanded .scripting-backtest-script-heading {
+    position: sticky;
+    top: -1px;
+    z-index: 2;
+    background: var(--ui-inset, #0d1117);
+  }
+  .scripting-backtest-script pre {
+    max-height: none;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-y: auto;
+  }
   .scripting-backtest-summary-panel.summary-pager {
     display: flex;
     padding: 0;
@@ -1638,7 +1797,7 @@
     min-width: 100%;
     height: 100%;
     flex: 0 0 100%;
-    padding: 9px 11px;
+    padding: 0 11px 9px;
     overflow-x: hidden;
     overflow-y: auto;
     scroll-snap-align: start;

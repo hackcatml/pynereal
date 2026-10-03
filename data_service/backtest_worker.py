@@ -282,6 +282,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     script_snapshot = scripts_snapshot / args.script_path
     if not script_snapshot.is_file():
         raise FileNotFoundError(f"script snapshot was not created: {args.script_path}")
+    # Keep the exact executed source after the temporary runtime is removed.
+    shutil.copyfile(script_snapshot, job_dir / "script.py")
     try:
         job = json.loads((job_dir / "job.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):

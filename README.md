@@ -258,6 +258,10 @@ buy-and-hold return, and switchable Sharpe/Sortino ratios. When several summarie
 are available, **Compare** displays them as columns in one table. Hover over a
 column number, or tap it on mobile, to see that run's input values. The table
 keeps metric labels visible while scrolling horizontally on smaller screens.
+Each individual summary has a collapsed **Script** section showing the complete
+source used by that run; use its copy button to copy it. This section is omitted
+from **Compare**. Source snapshots are saved for new runs only.
+Older results without a saved snapshot do not display the current script in its place.
 
 **Equity Curve** opens a new chart tab on desktop and mobile, with candles,
 strategy plots and markers above the equity curve. Zoom the curve and select a
@@ -271,8 +275,10 @@ Unavailable ratios display `-`. Existing result files are not automatically
 recalculated after a statistics update; rerun the backtest for the new values.
 
 Results are stored in `workdir/output/backtests/<job_id>/`, including logs,
-`strategy.csv`, `trades.csv`, plots, and equity data where produced. Temporary
-runtime copies are removed after execution. **Clear** asks for confirmation and
+`strategy.csv`, `trades.csv`, plots, equity data where produced, and the executed
+source in `script.py`. Temporary runtime copies are removed after execution.
+The delete button beside each result removes only that run after confirmation;
+queued or running results cannot be deleted. **Clear** asks for confirmation and
 deletes all stored results for the selected script when no jobs are active.
 
 Backtest calculations run in separate processes with Webhook and Telegram
