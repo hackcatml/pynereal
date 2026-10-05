@@ -1653,7 +1653,7 @@ App.ui = {
   },
   refreshMobileViewportLock() {
     const templateOpen = !this.elements.alertTemplateModal.classList.contains("hidden");
-    this.setMobileViewportLock(App.state.sourcePanelOpen || templateOpen || App.state.manualAlertMenuOpen || App.indicators?.isOpen());
+    this.setMobileViewportLock(App.state.sourcePanelOpen || templateOpen || App.state.manualAlertMenuOpen || App.indicators?.isOpen() || App.volumeProfile?.isOpen());
   },
   getSourcePaneBounds() {
     const viewportWidth = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 1);

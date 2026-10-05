@@ -464,6 +464,7 @@ def build_session_api_router(
         before: int | None = Query(None, ge=0),
         after: int | None = Query(None, ge=0),
         timeframe: str | None = Query(None),
+        candles_only: bool = Query(False),
     ) -> JSONResponse:
         rt = _rt(session_id)
         if rt is None:
@@ -477,7 +478,7 @@ def build_session_api_router(
             path = registry.minute_data.data_dir / "cache" / "minute_candles.sqlite"
             live = registry.minute_data.live_rows(market.key)
             return JSONResponse(read_minute_chart_window(path, market, limit, before, after, live), headers={"Cache-Control": "no-store"})
-        return JSONResponse(read_chart_window(rt, limit, before, after), headers={"Cache-Control": "no-store"})
+        return JSONResponse(read_chart_window(rt, limit, before, after, candles_only=candles_only), headers={"Cache-Control": "no-store"})
 
     @r.websocket("/ws/{session_id}/minute-chart")
     async def minute_chart_ws(ws: WebSocket, session_id: str):

@@ -192,6 +192,7 @@ App.indicators = {
       if (App.measure?.shouldSuppressToolbarClick(event)) return;
       event.stopPropagation();
       if (!this.menu.classList.contains("hidden")) { this.close(); return; }
+      App.volumeProfile?.setActive(false);
       App.measure?.setActive(false);
       App.measure?.closePalette();
       App.trendline?.setActive(false);

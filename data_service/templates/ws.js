@@ -88,6 +88,7 @@ App.ws = {
     }
   },
   handleMessage(msg) {
+    if (msg.type === "bar" && msg.data) App.volumeProfile?.onBar(msg.data);
     const state = App.state;
     const chart = App.chart;
     const collections = App.collections;

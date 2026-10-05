@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Backtest chart</title>
-  <link rel="stylesheet" href="/static/measure.css?v=2" />
+  <link rel="stylesheet" href="/static/measure.css?v=3" />
   <link rel="stylesheet" href="/static/scripting_backtest_chart.css?v=31" />
   <link rel="stylesheet" href="/static/scripting_backtest_chart_embed.css?v=2" />
   <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.9/dist/lightweight-charts.standalone.production.js"></script>
@@ -149,7 +149,29 @@
         </svg>
       </button>
     </div>
-    <button id="trendline-delete" class="drawing-tool-btn hidden" type="button" aria-label="Delete trend line" data-tooltip="Delete trend line">
+  </div>
+  <div id="trendline-toolbar" class="trendline-toolbar hidden" role="toolbar" aria-label="Trend line settings">
+    <button id="trendline-drag-handle" class="drawing-tool-btn trendline-drag-handle" type="button" aria-label="Move trend line toolbar" data-tooltip="Move">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <circle cx="9" cy="5" r="1.5"/><circle cx="15" cy="5" r="1.5"/>
+        <circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/>
+        <circle cx="9" cy="19" r="1.5"/><circle cx="15" cy="19" r="1.5"/>
+      </svg>
+    </button>
+    <label class="drawing-tool-btn trendline-color" data-tooltip="Color">
+      <input id="trendline-color" type="color" value="#2962ff" aria-label="Trend line color" />
+    </label>
+    <button id="trendline-extend-left" class="drawing-tool-btn" type="button" aria-label="Extend left" data-tooltip="Extend left" aria-pressed="false">
+      <svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M4 12h12m-7-5-5 5 5 5"/><circle cx="18" cy="12" r="2"/>
+      </svg>
+    </button>
+    <button id="trendline-extend-right" class="drawing-tool-btn" type="button" aria-label="Extend right" data-tooltip="Extend right" aria-pressed="false">
+      <svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M20 12H8m7-5 5 5-5 5"/><circle cx="6" cy="12" r="2"/>
+      </svg>
+    </button>
+    <button id="trendline-delete" class="drawing-tool-btn" type="button" aria-label="Delete trend line" data-tooltip="Delete">
       <svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M3 6h18M9 6V4h6v2M5 6l1 14h12l1-14M10 10v6M14 10v6"/>
       </svg>
@@ -160,7 +182,7 @@
   <!--BACKTEST_CONFIG-->
   <script src="/static/scripting_backtest_chart_embed.js?v=2"></script>
   <script src="/static/measure.js?v=2"></script>
-  <script src="/static/trendline.js?v=2"></script>
+  <script src="/static/trendline.js?v=4"></script>
   <script src="/static/data.js?v=23"></script>
   <script src="/static/scripting_backtest_chart.js?v=44"></script>
 </body>

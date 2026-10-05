@@ -473,6 +473,46 @@ normal setup and Update do not require Node.js or npm. To rebuild it during
 development, run `npm ci` and `npm run build:indicators`; source lives in
 `data_service/indicators_build/`.
 
+Selecting a drawn trend line opens a draggable toolbar with its color,
+left/right extension toggles, and delete button. Extensions follow the line's
+slope without moving its anchors, and copied lines retain these settings.
+These controls are available in both live and backtest charts.
+
+### Fixed Range Volume Profile
+
+The chart's drawing toolbar includes **Fixed Range Volume Profile (FRVP)**.
+Choose its horizontal-bar icon, then select the first and last candles with
+two clicks or a mouse drag. On touch screens, drag to aim and release to fix the
+first candle, then repeat for the last candle. One profile is shown per chart.
+Selecting a new range replaces it; drag its selected boundary lines to adjust
+the range. Selecting a profile shows a floating toolbar over the chart with settings and delete
+buttons; drag its dotted handle to move it with a mouse or touch. Clicking an
+empty area hides it. The settings button opens row count,
+value-area percentage, width, colors, price levels, available-data range,
+refresh, and delete controls. Range and settings
+are stored per session in this browser, not shared with Telegram screenshots.
+
+FRVP reads all available 1-minute candles in the selected range from the local
+server, in 5,000-candle pages, regardless of the displayed timeframe. Existing
+1-minute sessions use their own candles; higher-timeframe sessions use the
+shared minute dataset. Unavailable history is not replaced with higher-timeframe
+candles. The Available range reports the returned data's boundaries; it is not
+a guarantee that every minute within them exists.
+
+Calculation and history fetching run in a separate browser worker. Each minute's
+volume is distributed proportionally across the price rows overlapping its
+low/high range. A flat candle contributes to one row. Close >= open counts as
+up volume, otherwise down volume. POC is the highest-volume row (lower row on a
+tie); the value area expands from it toward the larger adjacent row until it
+contains at least the selected percentage (default 70%). Rows evenly divide the
+observed price range. This is candle-based volume estimation, not actual bid/ask volume
+or a guarantee of numerical equivalence with TradingView.
+
+Recent auxiliary-minute corrections use the existing local minute WebSocket;
+ordinary 1-minute sessions reuse the chart's live messages. The range stays fixed,
+and updates replace a minute's contribution rather than adding its volume again.
+No exchange subscription, strategy calculation, or runner scheduling is added.
+
 ## Strategy Calculation Timing
 
 When a new candle is confirmed, the runner updates the latest OHLCV data and

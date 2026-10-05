@@ -139,6 +139,7 @@ App.timeframes = {
     if (!option) return;
     const id = ++this.selectionId;
     if (seconds === this.seconds() && !this.switching) return;
+    App.volumeProfile?.setActive(false);
     if (this.isMinute() || (seconds === 60 && App.state.configuredTimeframeSec > 60)) {
       return App.minuteChart.select(seconds, id);
     }
