@@ -104,7 +104,8 @@ export class VolumeProfile {
   }
 
   result() {
-    if (!Number.isFinite(this.min)) return { bins: [], total: 0, candles: this.bars.size };
+    if (!Number.isFinite(this.min)) return { bins: [], total: 0, candles: this.bars.size,
+      first: this.bars.size ? this.first : null, last: this.bars.size ? this.last : null };
     const bins = Array.from({ length: this.count }, (_, index) => ({
       low: this.base + index * this.step, high: this.base + (index + 1) * this.step,
       up: Math.max(0, this.up[index]), down: Math.max(0, this.down[index]),
@@ -127,12 +128,15 @@ export class VolumeProfile {
 
 // Kept independent from chart pagination: never change its viewport or cache.
 export async function loadRange(url, from, to, signal, onProgress = () => {}, fetcher = fetch) {
+  // An open-ended range starts at the server's latest page, not the visible chart.
+  to ??= Infinity;
   let before = to;
   const bars = new Map();
   while (before > from) {
     const pageUrl = new URL(url);
     pageUrl.searchParams.set("limit", "5000");
-    pageUrl.searchParams.set("before", String(before));
+    if (Number.isFinite(before)) pageUrl.searchParams.set("before", String(before));
+    else pageUrl.searchParams.delete("before");
     const response = await fetcher(pageUrl, { signal, cache: "no-store" });
     if (!response.ok) throw new Error(`1m data: HTTP ${response.status}`);
     const page = await response.json();

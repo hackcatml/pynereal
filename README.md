@@ -478,7 +478,7 @@ left/right extension toggles, and delete button. Extensions follow the line's
 slope without moving its anchors, and copied lines retain these settings.
 These controls are available in both live and backtest charts.
 
-### Fixed Range Volume Profile
+### Volume Profiles
 
 The chart's drawing toolbar includes **Fixed Range Volume Profile (FRVP)**.
 Choose its horizontal-bar icon, then select the first and last candles with
@@ -512,6 +512,21 @@ Recent auxiliary-minute corrections use the existing local minute WebSocket;
 ordinary 1-minute sessions reuse the chart's live messages. The range stays fixed,
 and updates replace a minute's contribution rather than adding its volume again.
 No exchange subscription, strategy calculation, or runner scheduling is added.
+
+**Anchored Volume Profile (AVP)** is available beside FRVP in the drawing tools.
+Select its anchored horizontal-bar icon and click a starting candle once. On
+touch screens, drag to aim and release to fix the anchor. It accumulates all
+available 1-minute candles from that point through the latest candle on the
+server, including candles outside the visible chart. New minutes extend the
+profile automatically; same-minute updates replace volume instead of adding it
+twice. Drag the selected start boundary to move the anchor. There is no manual
+end boundary.
+
+AVP shares FRVP's settings, draggable toolbar and browser-local storage. Only
+one volume profile is displayed per chart; creating either type replaces the
+existing profile. Reopening the chart reloads the saved anchor through the
+latest data. Reconnection catches up missing recent history from local storage.
+The same 1-minute availability and candle-based estimation limits apply.
 
 ## Strategy Calculation Timing
 

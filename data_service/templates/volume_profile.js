@@ -4,6 +4,7 @@ var App = window.App || (window.App = {});
 // chart pagination, so selecting a large range never moves or resets the chart.
 App.volumeProfile = {
   active: false, selected: false, draft: null, gesture: null, range: null,
+  mode: "fixed",
   result: null, worker: null, requestId: 0, suppressUntil: 0,
   claimedTouchStart: false,
   toolbarDrag: null, toolbarPosition: null,
@@ -12,6 +13,7 @@ App.volumeProfile = {
 
   init() {
     this.button = document.getElementById("frvp-tool-toggle");
+    this.anchorButton = document.getElementById("avp-tool-toggle");
     this.menu = document.getElementById("frvp-menu");
     this.toolbar = document.getElementById("frvp-selection-toolbar");
     this.toolbarHandle = document.getElementById("frvp-drag-handle");
@@ -20,12 +22,14 @@ App.volumeProfile = {
     if (!this.button || !this.menu) return;
     this.views = [{ renderer: () => this, zOrder: () => "normal" }];
     App.chart.candleSeries.attachPrimitive(this);
-    this.button.addEventListener("click", event => {
-      if (App.measure.shouldSuppressToolbarClick(event)) return;
-      this.close();
-      App.measure.closePalette();
-      this.setActive(!this.active);
-    });
+    for (const [button, mode] of [[this.button, "fixed"], [this.anchorButton, "anchored"]]) {
+      button.addEventListener("click", event => {
+        if (App.measure.shouldSuppressToolbarClick(event)) return;
+        this.close();
+        App.measure.closePalette();
+        this.setActive(!this.active || this.mode !== mode, mode);
+      });
+    }
     this.settingsButton.addEventListener("click", event => {
       event.stopPropagation();
       if (!this.range || !this.selected) return;
@@ -66,7 +70,10 @@ App.volumeProfile = {
       document.addEventListener(type, event => {
         const release = ["touchend", "click", "dblclick"].includes(type);
         const claimedStart = type === "touchstart" && this.claimedTouchStart;
-        if (type === "touchstart") this.claimedTouchStart = false;
+        if (type === "touchstart") {
+          this.claimedTouchStart = false;
+          if (!this.gesture && !claimedStart) this.suppressUntil = 0;
+        }
         if (App.chart.container.contains(event.target) &&
             (this.gesture || claimedStart || (release && performance.now() < this.suppressUntil))) this.consume(event);
       }, { capture: true, passive: false });
@@ -119,7 +126,8 @@ App.volumeProfile = {
       const range = saved.range;
       if (range && Number.isSafeInteger(range.from) && Number.isSafeInteger(range.to) &&
           range.from >= 0 && range.to > range.from && Number.isSafeInteger(range.interval) && range.interval >= 60) {
-        this.range = range;
+        this.range = { from: range.from, to: range.to, interval: range.interval,
+          ...(range.anchored === true ? { anchored: true } : {}) };
         // Session metadata is loaded asynchronously after tool initialization.
         this.restorePending = true;
       }
@@ -128,6 +136,7 @@ App.volumeProfile = {
   ready() {
     if (!this.button) return;
     this.button.disabled = !App.state.minuteChartAvailable && App.state.configuredTimeframeSec !== 60;
+    this.anchorButton.disabled = this.button.disabled;
     if (this.restorePending) { this.restorePending = false; this.load(); }
   },
   stop() {
@@ -150,16 +159,20 @@ App.volumeProfile = {
     socketUrl.protocol = location.protocol === "https:" ? "wss:" : "ws:";
     this.status("Loading 1m data...");
     try {
-      const worker = this.worker = new Worker("/static/volume_profile_worker.js?v=1", { type: "module" });
+      const worker = this.worker = new Worker("/static/volume_profile_worker.js?v=2", { type: "module" });
       worker.onmessage = ({ data }) => {
         if (data.id !== this.requestId) return;
         if (data.type === "result") {
           this.result = data;
+          if (this.range.anchored && Number.isFinite(data.last)) this.range.to = Math.max(this.range.from + 60, data.last + 60);
           this.status(data.total ? `${data.candles.toLocaleString("en-US")} candles \u00b7 1m` : "No traded volume in this range.");
           this.renderDetails();
           this.refresh();
         } else if (data.type === "loading") this.status(`Loading 1m data... ${data.candles.toLocaleString("en-US")}`);
-        else if (data.type === "error") this.status(data.message, true);
+        else if (data.type === "error") {
+          this.stop();
+          this.status(data.message, true);
+        }
       };
       worker.onerror = () => { this.stop(); this.status("Volume Profile failed to load. Retry.", true); };
       worker.postMessage({ type: "load", id, url: url.href, ...this.range,
@@ -169,16 +182,21 @@ App.volumeProfile = {
   },
   onBar(bar) {
     if (App.state.configuredTimeframeSec === 60 && this.worker && this.range &&
-        bar.time >= this.range.from && bar.time < this.range.to) {
+        bar.time >= this.range.from && (this.range.anchored || bar.time < this.range.to)) {
       this.worker.postMessage({ type: "bars", id: this.requestId,
         bars: [{ ...bar, source: "live", updated_at: Date.now() / 1000 }] });
+    }
+  },
+  onReconnect() {
+    if (App.state.configuredTimeframeSec === 60 && this.range?.anchored) {
+      this.worker?.postMessage({ type: "refresh", id: this.requestId });
     }
   },
   status(text, error = false) {
     this.statusElement.textContent = text;
     this.statusElement.classList.toggle("error", error);
     this.settingsButton.classList.toggle("frvp-error", error);
-    this.settingsButton.dataset.tooltip = error ? "FRVP: data unavailable" : text.startsWith("Loading") ? text : "Settings";
+    this.settingsButton.dataset.tooltip = error ? "Volume Profile: data unavailable" : text.startsWith("Loading") ? text : "Settings";
   },
   renderSettings() {
     for (const [key, value] of Object.entries(this.settings)) this.menu.querySelector(`[name="${key}"]`).value = value;
@@ -269,8 +287,15 @@ App.volumeProfile = {
     this.menu.style.top = `${Math.max(top + 8, Math.min(anchor.bottom + 10, top + height - rect.height - 8))}px`;
   },
   refresh() {
-    this.button?.classList.toggle("active", this.active);
-    this.button?.setAttribute("aria-pressed", String(this.active));
+    for (const [button, mode] of [[this.button, "fixed"], [this.anchorButton, "anchored"]]) {
+      button?.classList.toggle("active", this.active && this.mode === mode);
+      button?.setAttribute("aria-pressed", String(this.active && this.mode === mode));
+    }
+    const anchored = this.active ? this.mode === "anchored" : this.range?.anchored;
+    const title = anchored ? "Anchored Volume Profile" : "Fixed Range Volume Profile";
+    const heading = document.getElementById("frvp-title");
+    if (heading) heading.textContent = title;
+    this.menu?.setAttribute("aria-label", title);
     const showToolbar = !!this.range && this.selected && !this.active && !this.draft;
     this.toolbar?.classList.toggle("hidden", !showToolbar);
     if (!showToolbar) this.endToolbarDrag();
@@ -280,9 +305,10 @@ App.volumeProfile = {
     App.measure.toolsButton?.classList.toggle("active", this.active || !!App.trendline.active || !!App.state.measureToolActive);
     this.requestUpdate?.();
   },
-  setActive(active) {
+  setActive(active, mode = "fixed") {
     this.cancel();
     this.active = Boolean(active);
+    if (this.active) this.mode = mode;
     this.selected = false;
     if (this.active) {
       App.measure.setActive(false);
@@ -334,7 +360,10 @@ App.volumeProfile = {
     const range = this.draft ? { from: Math.min(this.draft.start, this.draft.end),
       to: Math.max(this.draft.start, this.draft.end) + this.draft.interval, interval: this.draft.interval } : this.range;
     if (!range) return null;
-    const left = this.xAt(range.from), right = this.xAt(range.to - range.interval);
+    const anchored = this.draft ? this.draft.anchored : range.anchored;
+    const seconds = App.timeframes.seconds(), offset = seconds === 604800 ? 345600 : 0;
+    const end = anchored && !this.draft ? Math.floor((range.to - 60 - offset) / seconds) * seconds + offset : range.to - range.interval;
+    const left = this.xAt(range.from), right = this.xAt(Math.max(range.from, end));
     return left == null || right == null ? null : { left, right };
   },
   pointerDown(event) {
@@ -351,8 +380,8 @@ App.volumeProfile = {
     const rect = App.chart.container.getBoundingClientRect();
     const x = event.clientX - rect.left, edges = this.edges();
     const tolerance = event.pointerType === "touch" ? 16 : 8;
-    const part = this.range && this.selected && edges ?
-      Math.abs(x - edges.left) <= tolerance ? "start" : Math.abs(x - edges.right) <= tolerance ? "end" : null : null;
+    const part = !this.active && this.range && this.selected && edges ?
+      Math.abs(x - edges.left) <= tolerance ? "start" : !this.range.anchored && Math.abs(x - edges.right) <= tolerance ? "end" : null : null;
     if (!this.active && !part) {
       const y = event.clientY - rect.top, result = this.result;
       const low = result?.bins?.[0]?.low, high = result?.bins?.at(-1)?.high;
@@ -367,10 +396,16 @@ App.volumeProfile = {
     const time = this.point(event);
     if (time == null) return;
     this.claim(event);
-    const kind = part || (this.draft ? "finish" : event.pointerType === "touch" ? "touch-start" : "start-draw");
-    if (part) this.draft = { start: this.range.from, end: this.range.to - this.range.interval, interval: this.range.interval };
-    else if (!this.draft) this.draft = { start: time, end: time, interval: App.timeframes.seconds() };
-    if (!part) this.draft.end = time;
+    const anchored = part ? this.range.anchored : this.mode === "anchored";
+    const kind = anchored ? "anchor" : part || (this.draft ? "finish" : event.pointerType === "touch" ? "touch-start" : "start-draw");
+    if (anchored) {
+      const end = App.collections.ohlcvData.findLast(bar => Number.isFinite(bar.close))?.time ?? time;
+      this.draft = { start: time, end: Math.max(time, end), interval: App.timeframes.seconds(), anchored: true };
+    } else {
+      if (part) this.draft = { start: this.range.from, end: this.range.to - this.range.interval, interval: this.range.interval };
+      else if (!this.draft) this.draft = { start: time, end: time, interval: App.timeframes.seconds() };
+      if (!part) this.draft.end = time;
+    }
     this.gesture = { kind, pointerId: event.pointerId, x: event.clientX, y: event.clientY, moved: false };
     try { App.chart.container.setPointerCapture(event.pointerId); } catch {}
     this.refresh();
@@ -390,7 +425,8 @@ App.volumeProfile = {
     const time = clamped && this.point(clamped);
     if (time != null) {
       // Touch places one anchor per release; dragging the first touch aims the start.
-      if (this.gesture.kind === "touch-start") this.draft.start = this.draft.end = time;
+      if (this.gesture.kind === "anchor") this.draft.start = time;
+      else if (this.gesture.kind === "touch-start") this.draft.start = this.draft.end = time;
       else this.draft[this.gesture.kind === "start" ? "start" : "end"] = time;
     }
     this.refresh();
@@ -405,7 +441,10 @@ App.volumeProfile = {
     const gesture = this.gesture;
     this.release();
     if (gesture.kind !== "touch-start" && (gesture.kind !== "start-draw" || gesture.moved)) {
-      this.range = { from: Math.min(this.draft.start, this.draft.end),
+      this.range = this.draft.anchored ? {
+        from: this.draft.start, to: Math.max(this.draft.start, this.draft.end) + this.draft.interval,
+        interval: this.draft.interval, anchored: true,
+      } : { from: Math.min(this.draft.start, this.draft.end),
         to: Math.max(this.draft.start, this.draft.end) + this.draft.interval, interval: this.draft.interval };
       this.draft = null; this.result = null; this.active = false; this.selected = true;
       App.chart.restoreMagnetMode();
@@ -458,7 +497,7 @@ App.volumeProfile = {
       }
       if (this.selected || this.draft) {
         ctx.globalAlpha = 1; ctx.strokeStyle = "#1565c0"; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
-        for (const x of [left, right]) {
+        for (const x of ((this.draft || this.range)?.anchored ? [left] : [left, right])) {
           ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
           ctx.setLineDash([]); ctx.beginPath(); ctx.arc(x, height - 14, 5, 0, Math.PI * 2);
           ctx.fillStyle = "#fff"; ctx.fill(); ctx.stroke(); ctx.setLineDash([4, 4]);

@@ -1,7 +1,8 @@
-import { VolumeProfile, loadRange } from "./volume_profile_core.mjs?v=1";
+import { VolumeProfile, loadRange, accepts } from "./volume_profile_core.mjs?v=2";
 
 let generation = 0, controller, profile, request, socket, reconnect, heartbeat, renderTimer;
 let pending = new Map();
+let catchup = null;
 
 function stop() {
   controller?.abort();
@@ -9,8 +10,10 @@ function stop() {
   clearTimeout(reconnect);
   clearTimeout(heartbeat);
   clearTimeout(renderTimer);
+  catchup?.abort();
+  catchup = null;
   if (socket) {
-    socket.onclose = socket.onerror = socket.onmessage = null;
+    socket.onopen = socket.onclose = socket.onerror = socket.onmessage = null;
     socket.close();
     socket = null;
   }
@@ -25,20 +28,38 @@ function emit() {
 }
 
 function update(bars) {
-  const selected = bars.filter(bar => bar.time >= request.from && bar.time < request.to);
+  const selected = bars.filter(bar => bar.time >= request.from && (request.anchored || bar.time < request.to));
   if (!profile) {
-    for (const bar of selected) pending.set(bar.time, bar);
+    for (const bar of selected) if (accepts(pending.get(bar.time), bar)) pending.set(bar.time, bar);
   } else if (profile.update(selected) && !renderTimer) renderTimer = setTimeout(emit, 250);
 }
 
+async function catchUp(id) {
+  if (id !== generation || !request.anchored || !profile || catchup) return;
+  const current = catchup = new AbortController();
+  const timeout = setTimeout(() => current.abort(), 120000);
+  try {
+    const from = Math.max(request.from, Number.isFinite(profile.last) ? profile.last - 720 : request.from);
+    const bars = await loadRange(request.url, from, null, current.signal);
+    if (id === generation) update(bars);
+  } catch (error) {
+    if (id === generation) postMessage({ type: "error", id: request.id,
+      message: "Recent 1m data could not be refreshed. Retry to reload the profile." });
+  } finally {
+    clearTimeout(timeout);
+    if (catchup === current) catchup = null;
+  }
+}
+
 function connect(id) {
-  if (id !== generation || !request.socketUrl || Date.now() / 1000 > request.to + 720) return;
+  if (id !== generation || !request.socketUrl || (!request.anchored && Date.now() / 1000 > request.to + 720)) return;
   socket = new WebSocket(request.socketUrl);
   const connection = socket;
+  socket.onopen = () => { void catchUp(id); };
   const retry = () => {
     if (socket !== connection || id !== generation) return;
     socket = null;
-    connection.onclose = connection.onerror = null;
+    connection.onopen = connection.onclose = connection.onerror = connection.onmessage = null;
     connection.close();
     clearTimeout(heartbeat);
     reconnect = setTimeout(() => connect(id), 2000);
@@ -52,7 +73,7 @@ function connect(id) {
   socket.onmessage = event => {
     if (id !== generation) return;
     alive();
-    if (Date.now() / 1000 > request.to + 720) {
+    if (!request.anchored && Date.now() / 1000 > request.to + 720) {
       connection.onclose = connection.onerror = null;
       connection.close();
       socket = null;
@@ -68,6 +89,7 @@ function connect(id) {
 
 self.onmessage = async ({ data }) => {
   if (data.type === "bars") { if (request?.id === data.id) update(data.bars); return; }
+  if (data.type === "refresh") { if (request?.id === data.id) await catchUp(generation); return; }
   if (data.type === "settings") {
     if (request && data.id === request.id) {
       Object.assign(request, { rows: data.rows, valueArea: data.valueArea });
@@ -85,7 +107,7 @@ self.onmessage = async ({ data }) => {
   const timeout = setTimeout(() => loadingController.abort(), 120000);
   connect(id);
   try {
-    const bars = await loadRange(data.url, data.from, data.to, signal, candles => {
+    const bars = await loadRange(data.url, data.from, data.anchored ? null : data.to, signal, candles => {
       if (id === generation) postMessage({ type: "loading", id: data.id, candles });
     });
     if (id !== generation) return;

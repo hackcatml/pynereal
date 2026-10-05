@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/static/styles.css?v=48" />
   <link rel="stylesheet" href="/static/measure.css?v=3" />
   <link rel="stylesheet" href="/static/chart_indicators.css?v=8" />
-  <link rel="stylesheet" href="/static/volume_profile.css?v=3" />
+  <link rel="stylesheet" href="/static/volume_profile.css?v=4" />
   <link rel="stylesheet" href="/static/editor.css?v=7" />
   <link rel="stylesheet" href="/static/codemirror.css?v=10" />
   <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.9/dist/lightweight-charts.standalone.production.js"></script>
@@ -64,6 +64,9 @@
       <button id="frvp-tool-toggle" class="drawing-tool-btn" type="button" aria-label="Fixed Range Volume Profile" aria-pressed="false" data-tooltip="Fixed Range Volume Profile" role="menuitem" disabled>
         <svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18M7 7h7M7 12h13M7 17h10"/></svg>
       </button>
+      <button id="avp-tool-toggle" class="drawing-tool-btn" type="button" aria-label="Anchored Volume Profile" aria-pressed="false" data-tooltip="Anchored Volume Profile" role="menuitem" disabled>
+        <svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="4" cy="5" r="2"/><path d="M4 7v14h17M8 7h7M8 12h13M8 17h10"/></svg>
+      </button>
     </div>
     <button id="chart-indicators-toggle" class="drawing-tool-btn" type="button" aria-label="Indicators" data-tooltip="Indicators" aria-expanded="false" aria-controls="chart-indicators-menu">
       <svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -107,7 +110,7 @@
         <circle cx="9" cy="19" r="1.5"/><circle cx="15" cy="19" r="1.5"/>
       </svg>
     </button>
-    <button id="frvp-settings-toggle" class="drawing-tool-btn" type="button" aria-label="FRVP settings" data-tooltip="Settings" aria-expanded="false" aria-controls="frvp-menu">
+    <button id="frvp-settings-toggle" class="drawing-tool-btn" type="button" aria-label="Volume Profile settings" data-tooltip="Settings" aria-expanded="false" aria-controls="frvp-menu">
       <svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <circle cx="12" cy="12" r="3"/>
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
@@ -120,7 +123,7 @@
     </button>
   </div>
   <section id="frvp-menu" class="chart-indicators-menu hidden" role="dialog" aria-label="Fixed Range Volume Profile">
-    <header><strong>Fixed Range Volume Profile</strong><button id="frvp-close" type="button" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m18 6-12 12M6 6l12 12"/></svg></button></header>
+    <header><strong id="frvp-title">Fixed Range Volume Profile</strong><button id="frvp-close" type="button" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m18 6-12 12M6 6l12 12"/></svg></button></header>
     <div class="frvp-fields">
       <label>Rows<input name="rows" type="number" min="1" max="200" step="1" value="48" inputmode="numeric" /></label>
       <label>Value area %<input name="valueArea" type="number" min="1" max="100" step="1" value="70" inputmode="numeric" /></label>
@@ -410,14 +413,14 @@
   <script src="/static/chart.js?v=20"></script>
   <script src="/static/measure.js?v=4"></script>
   <script src="/static/trendline.js?v=4"></script>
-  <script src="/static/volume_profile.js?v=4"></script>
+  <script src="/static/volume_profile.js?v=5"></script>
   <script src="/static/data.js?v=23"></script>
   <script src="/static/chart_timeframe.js?v=7"></script>
   <script src="/static/chart_minute.js?v=3"></script>
   <script src="/static/chart_sessions.js?v=1"></script>
   <script src="/static/chart_indicators.js?v=14"></script>
   <script src="/static/chart_history.js?v=11"></script>
-  <script src="/static/ws.js?v=10"></script>
+  <script src="/static/ws.js?v=11"></script>
   <script src="/static/main.js?v=9"></script>
 </body>
 </html>

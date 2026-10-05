@@ -1,5 +1,5 @@
 body.frvp-active #chart { cursor: crosshair; touch-action: none; }
-#frvp-tool-toggle:disabled { opacity: 0.4; cursor: default; }
+#frvp-tool-toggle:disabled, #avp-tool-toggle:disabled { opacity: 0.4; cursor: default; }
 .frvp-selection-toolbar {
   position: fixed;
   z-index: 16;

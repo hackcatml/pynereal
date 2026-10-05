@@ -51,6 +51,7 @@ App.ws = {
       socket.send(JSON.stringify({ type: "client_hello", role: "chart" }));
       this.syncNeeded = true;
       this.probe();
+      App.volumeProfile?.onReconnect();
     };
 
     socket.onmessage = (ev) => {
