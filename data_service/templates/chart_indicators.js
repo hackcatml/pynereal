@@ -617,14 +617,16 @@ App.indicators = {
     return points.map(point => Number.isFinite(point.value)
       ? { ...point, color: colors[point.value < 0 ? 3 : 2] } : point);
   },
-  reset() {
+  reset({ preserveDisplay = false } = {}) {
     this.failed = false;
     this.status();
     this.revision++;
     this.pending.clear();
     this.needsReset = true;
-    this.series.forEach(lines => lines.forEach(series => series.setData([])));
-    this.clearPaneValues();
+    if (!preserveDisplay) {
+      this.series.forEach(lines => lines.forEach(series => series.setData([])));
+      this.clearPaneValues();
+    }
     if (!this.active().length) { this.stop(); return; }
     this.schedule();
   },

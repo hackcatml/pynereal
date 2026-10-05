@@ -38,6 +38,7 @@ App.history = {
     this.cancelPending(false);
     this.liveBarVersion = null;
     App.timeframes?.reset();
+    App.minuteChart?.reset();
     this.resyncPending = false;
     this.hasBefore = false;
     this.hasAfter = false;
@@ -103,6 +104,10 @@ App.history = {
         window.start = Math.min(window.start, cached.start);
         window.end = Math.max(window.end, cached.end);
         cached.bars.forEach((bar, time) => {
+          if (App.timeframes?.isMinute() && bars.has(time)) {
+            if (!App.minuteChart.acceptBar(bar, bars.get(time))) bars.set(time, bar);
+            return;
+          }
           if (keepCached(time) && !(payload.live_bar_sequence != null && time === end)) bars.set(time, bar);
         });
         for (const [title, plot] of cached.plots) {
@@ -147,7 +152,7 @@ App.history = {
       lastOpenPrice: last.lastOpenPrice
     };
     const bars = [], gaps = [];
-    const interval = App.state.configuredTimeframeSec || first.interval || 60;
+    const interval = first.interval || App.state.configuredTimeframeSec || 60;
     for (let i = 0; i < windows.length; i++) {
       const window = windows[i];
       if (i > 0) {
@@ -285,7 +290,8 @@ App.history = {
     this.plots = combined.plots;
     this.trades = combined.trades;
     this.plotchars = combined.plotchars;
-    this.renderData(bars, gaps, overlays);
+    const preserveIndicators = Boolean(App.timeframes?.isMinute() && mode === "refresh" && state.initialLoadDone);
+    this.renderData(bars, gaps, overlays, { preserveIndicators });
     if (extending && previousRange && anchorIndex != null) {
       await this.settleChart();
       if (generation !== state.loadGeneration) return;
@@ -306,9 +312,9 @@ App.history = {
     App.ui?.applyManualAlertTriggerState?.(state.manualAlertTriggers || []);
     await this.settleChart();
   },
-  renderData(sourceBars, gaps, overlays = true) {
+  renderData(sourceBars, gaps, overlays = true, { preserveIndicators = false } = {}) {
     const { state, chart } = App;
-    const higher = App.timeframes?.isHigher();
+    const alternate = App.timeframes?.isHigher() || App.timeframes?.isMinute();
     const bars = App.timeframes?.project(sourceBars, this.windows) ?? sourceBars;
     state.firstBarTime = bars[0].time;
     const last = bars.findLast(bar => bar.close != null);
@@ -316,20 +322,20 @@ App.history = {
     state.lastPrice = last?.close || 0;
     state.lastOhlcv = last;
     state.lastOpenPrice = { ...this.renderedWindow.lastOpenPrice };
-    state.timeframeInterval = higher ? App.timeframes.seconds() : state.configuredTimeframeSec || this.activeWindow.interval || 60;
+    state.timeframeInterval = alternate ? App.timeframes.seconds() : state.configuredTimeframeSec || this.activeWindow.interval || 60;
     // Release old plots before replacing their shared candle timeline.
-    if (overlays || higher) App.data.clearPlotData();
-    if (higher) {
+    if (overlays || alternate) App.data.clearPlotData();
+    if (alternate) {
       App.data.renderTradeHistory([]);
       App.data.renderPlotcharHistory([]);
     }
-    App.data.rebuildOhlcvCache(bars);
+    App.data.rebuildOhlcvCache(bars, true, { preserveIndicators });
     chart.candleSeries.setData(bars);
     chart.volumeSeries.setData(bars.map(bar => bar.close == null ? { time: bar.time } : ({
       time: bar.time, value: bar.volume,
       color: bar.close >= bar.open ? "#26a69a" : "#ef5350"
     })));
-    if (overlays && !higher) {
+    if (overlays && !alternate) {
       App.data.renderPlotData([...this.plots.values()].map(plot => ({
         ...plot.definition, historyGaps: gaps,
         data: [...plot.points.values()].sort((a, b) => a.time - b.time)
@@ -352,6 +358,7 @@ App.history = {
     });
     try {
       const params = new URLSearchParams({ limit: this.pageSize, ...query });
+      if (App.timeframes?.isMinute()) params.set("timeframe", "1m");
       return await Promise.race([
         (async () => {
           const response = await fetch(`${App.config.apiBase}/chart-window?${params}`, { signal: controller.signal });
@@ -367,6 +374,7 @@ App.history = {
     }
   },
   async requestWindow(query = {}, mode = "replace", initial = false) {
+    App.minuteChart?.connect();
     if (this.loading) return false;
     this.loading = true;
     let finishLoading;
@@ -418,6 +426,7 @@ App.history = {
           this.controller = null;
           this.finishLoading = null;
           this.lastRange = App.chart.chart.timeScale().getVisibleLogicalRange();
+          App.minuteChart?.flush();
         }
       } finally {
         finishLoading();

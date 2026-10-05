@@ -343,6 +343,45 @@ For example, **OKX**, **Binance**, and
 **Bybit** zero-volume candles are **hidden** to match TradingView, while **Bitget** and
 **Hyperliquid** zero-volume candles remain **visible**.
 
+### Shared One-Minute History
+
+Sessions above `1m` also maintain background one-minute history in
+`workdir/data/cache/minute_candles.sqlite`. This is a separate, DB-only dataset;
+it does not change the strategy's candles or create another `.ohlcv` file.
+
+- Collection is shared across sessions with the same exchange, market type,
+  and symbol. An existing `1m` session's actual cache is reused before checking
+  for missing history, including cached data older than its configured start date.
+- Binance, Bitget, and OKX use public candle archives where supported, with REST
+  filling uncovered ranges. Bybit and Hyperliquid use REST.
+- Binance and OKX archive rows with zero volume are preserved. Within valid
+  Bitget USDT-M archives, omitted minutes are stored at the preceding close
+  with zero volume and a separate `archive_no_trade` source. Actual archive,
+  REST, or existing session candles take precedence over these synthesized rows.
+  Failed files and gaps without a known preceding close still use REST.
+- Hyperliquid only exposes the latest 5,000 candles, so older one-minute history
+  cannot be backfilled through its candle API. Available history accumulates
+  while collection is running.
+- Without an existing `1m` feed, live candles reuse a single existing trade
+  stream. The latest ten closed minutes are refreshed by REST each minute,
+  starting at a per-market offset between 15 and 35 seconds. Requests and DB
+  writes avoid the ten seconds before and after every minute boundary.
+- Closing charts or stopping runners does not stop collection. Removing the
+  last session for a market stops its work; stopping data-service closes the
+  worker. Saved history remains for subsequent starts.
+
+Downloads, parsing, and storage run in a separate process. On a supported
+session above `1m`, click the chart timeframe and select **1m** to view this
+dataset. The chart loads up to 5,000 candles per page and retains loaded pages
+when switching back to the strategy timeframe. Strategy plots and trade markers
+are hidden in the minute view; browser indicators use the displayed minute bars.
+An open minute view receives live candle snapshots over WebSocket without
+waiting for DB writes or making additional exchange requests. Existing `1m`
+feeds supply their live snapshots directly; otherwise the shared worker supplies
+its trade-built minute candles. Stored corrections are checked once per second,
+and confirmed REST/session/archive data takes precedence over provisional trades.
+The storage guard remains in place. Charts do not change strategy calculations.
+
 ### Re-sync Historical Data
 
 Open a session's **Data** settings to change its `Data start (UTC)` value after

@@ -35,6 +35,7 @@ _STATIC_FILES = {
     "data.js": "text/javascript",
     "chart_history.js": "text/javascript",
     "chart_timeframe.js": "text/javascript",
+    "chart_minute.js": "text/javascript",
     "chart_sessions.js": "text/javascript",
     "chart_indicators.js": "text/javascript",
     "chart_indicators_worker.js": "text/javascript",

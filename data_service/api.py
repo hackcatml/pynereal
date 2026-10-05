@@ -9,7 +9,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-from fastapi import APIRouter, Body, File, Query, Request, UploadFile
+from fastapi import APIRouter, Body, File, Query, Request, UploadFile, WebSocket
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from markdown_it import MarkdownIt
 
@@ -32,6 +32,7 @@ from asset_transfer import AssetTransferError, AssetTransferService
 from calendar_store import CalendarEventStore, CalendarStoreError
 from chart_history import CHART_PAGE_SIZE, read_chart_window
 from chart_indicator_settings import ChartIndicatorSettings, validate_indicator_settings
+from minute_data.chart import chart_market, read_chart_window as read_minute_chart_window, stream_chart as stream_minute_chart
 from data_integrity import DataIntegrityCancelled, inspect_data_integrity
 from registry import (
     HistoryNotReadyError,
@@ -462,13 +463,25 @@ def build_session_api_router(
         limit: int = Query(CHART_PAGE_SIZE, ge=1, le=CHART_PAGE_SIZE),
         before: int | None = Query(None, ge=0),
         after: int | None = Query(None, ge=0),
+        timeframe: str | None = Query(None),
     ) -> JSONResponse:
         rt = _rt(session_id)
         if rt is None:
             return JSONResponse({"error": "session not found"}, status_code=404)
         if before is not None and after is not None:
             return JSONResponse({"error": "Use before or after, not both"}, status_code=400)
+        if timeframe is not None:
+            market = chart_market(registry.minute_data, rt)
+            if timeframe != "1m" or market is None:
+                return JSONResponse({"error": "Unsupported chart timeframe"}, status_code=400)
+            path = registry.minute_data.data_dir / "cache" / "minute_candles.sqlite"
+            live = registry.minute_data.live_rows(market.key)
+            return JSONResponse(read_minute_chart_window(path, market, limit, before, after, live), headers={"Cache-Control": "no-store"})
         return JSONResponse(read_chart_window(rt, limit, before, after), headers={"Cache-Control": "no-store"})
+
+    @r.websocket("/ws/{session_id}/minute-chart")
+    async def minute_chart_ws(ws: WebSocket, session_id: str):
+        await stream_minute_chart(ws, registry, session_id)
 
     @r.get("/api/{session_id}/trades")
     def get_trades(session_id: str) -> JSONResponse:
@@ -602,6 +615,7 @@ def build_session_api_router(
             "exchange": info.get("exchange"),
             "symbol": info.get("symbol"),
             "timeframe": info.get("timeframe"),
+            "minute_chart_available": chart_market(registry.minute_data, rt) is not None,
             "provider": info.get("provider"),
             "script_title": script_title,
             "script_source_name": script_source_name,

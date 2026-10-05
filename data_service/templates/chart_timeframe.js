@@ -12,10 +12,12 @@ App.timeframes = {
 
   seconds() { return this.selected || App.state.configuredTimeframeSec || 60; },
   isHigher() { return this.selected != null && this.seconds() > App.state.configuredTimeframeSec; },
+  isMinute() { return this.selected === 60 && App.state.configuredTimeframeSec > 60; },
   options() {
     const base = App.state.configuredTimeframeSec;
     if (!base || !App.state.timeframe) return [];
-    return [{ label: App.state.timeframe, seconds: base }, ...this.choices.map(label => ({
+    return [...(base > 60 && App.state.minuteChartAvailable ? [{ label: "1m", seconds: 60 }] : []),
+      { label: App.state.timeframe, seconds: base }, ...this.choices.map(label => ({
       label, seconds: App.data.timeframeToSeconds(label)
     })).filter(option => option.seconds > base && option.seconds % base === 0)];
   },
@@ -137,6 +139,9 @@ App.timeframes = {
     if (!option) return;
     const id = ++this.selectionId;
     if (seconds === this.seconds() && !this.switching) return;
+    if (this.isMinute() || (seconds === 60 && App.state.configuredTimeframeSec > 60)) {
+      return App.minuteChart.select(seconds, id);
+    }
     const generation = App.state.loadGeneration;
     while (App.history.loading) {
       await App.history.loadComplete;
@@ -221,6 +226,7 @@ App.timeframes = {
     this.menu.querySelector('[aria-checked="true"]')?.focus({ preventScroll: true });
   },
   init() {
+    App.minuteChart?.init();
     this.menu = document.getElementById("chart-timeframe-menu");
     if (!this.menu) return;
     App.ui.elements.chartInfoBase.addEventListener("click", event => {
