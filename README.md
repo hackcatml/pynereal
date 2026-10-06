@@ -987,6 +987,22 @@ Existing strategy alert delivery is unchanged; AI output is paced and handles
 429 responses (at least 1.1 seconds between attempts for private chats, 3.1 seconds
 for groups), but does not yet share a global rate-limit queue with alert senders.
 
+Unexpected Telegram command-worker failures restart only the Telegram service,
+with a 5-second exponential backoff capped at 60 seconds. Unfinished commands and
+approved changes are not replayed; send a fresh command after recovery. Network
+errors and 429 responses retain their existing request-level retry behavior.
+Authentication/access errors, invalid requests, competing `getUpdates` receivers
+(409), a configured bot webhook, or a database already owned by another receiver
+stop reception instead of retrying indefinitely. Correct the configuration or
+stop the competing receiver, then restart data-service.
+
+Warnings, failures and recovery events are also kept in
+`workdir/output/telegram_ai.log` (1 MiB per file, two rotated backups). Timestamps
+include the server's local UTC offset. Unexpected failures include the worker
+name and code locations, not exception messages, source lines, conversation
+content or credentials. File writes run on the dedicated Telegram executor;
+strategy runners and their alert-delivery paths are unchanged.
+
 ### Exchange Account Access
 
 Put exchange credentials in the local file below if AI should inspect account
