@@ -12,6 +12,7 @@
   </script>
   <link rel="stylesheet" href="/static/dashboard.css?v=203" />
   <link rel="stylesheet" href="/static/notifications.css?v=8" />
+  <link rel="stylesheet" href="/static/telegram_status.css?v=1" />
   <link rel="stylesheet" href="/static/scripting_backtest.css?v=49" />
   <link rel="stylesheet" href="/static/scripting_ai.css?v=8" />
   <link rel="stylesheet" href="/static/editor.css?v=7" />
@@ -33,6 +34,30 @@
       <span class="clock-hand clock-minute" aria-hidden="true"></span>
       <span class="clock-hand clock-second" aria-hidden="true"></span>
       <span class="clock-center" aria-hidden="true"></span>
+    </div>
+    <div id="telegram-service" class="telegram-service" data-state="unknown">
+      <button id="telegram-service-toggle" type="button" class="notification-icon"
+              aria-label="Telegram commands" aria-expanded="false" aria-controls="telegram-service-panel"
+              data-n-tooltip="Telegram commands">
+        <!-- Official Telegram logo plane, without the background: https://telegram.org/tour/screenshots -->
+        <svg viewBox="150 250 620 550" aria-hidden="true">
+          <path vector-effect="non-scaling-stroke" d="M226.328419,494.722069 C372.088573,431.216685 469.284839,389.350049 517.917216,369.122161 C656.772535,311.36743 685.625481,301.334815 704.431427,301.003532 C708.567621,300.93067 717.815839,301.955743 723.806446,306.816707 C728.864797,310.92121 730.256552,316.46581 730.922551,320.357329 C731.588551,324.248848 732.417879,333.113828 731.758626,340.040666 C724.234007,419.102486 691.675104,610.964674 675.110982,699.515267 C668.10208,736.984342 654.301336,749.547532 640.940618,750.777006 C611.904684,753.448938 589.856115,731.588035 561.733393,713.153237 C517.726886,684.306416 492.866009,666.349181 450.150074,638.200013 C400.78442,605.66878 432.786119,587.789048 460.919462,558.568563 C468.282091,550.921423 596.21508,434.556479 598.691227,424.000355 C599.00091,422.680135 599.288312,417.758981 596.36474,415.160431 C593.441168,412.561881 589.126229,413.450484 586.012448,414.157198 C581.598758,415.158943 511.297793,461.625274 375.109553,553.556189 C355.154858,567.258623 337.080515,573.934908 320.886524,573.585046 C303.033948,573.199351 268.692754,563.490928 243.163606,555.192408 C211.851067,545.013936 186.964484,539.632504 189.131547,522.346309 C190.260287,513.342589 202.659244,504.134509 226.328419,494.722069 Z"/>
+        </svg>
+        <span class="telegram-service-dot" aria-hidden="true"></span>
+      </button>
+      <section id="telegram-service-panel" role="dialog" aria-label="Telegram commands" hidden>
+        <header>
+          <span class="telegram-service-dot" aria-hidden="true"></span>
+          <strong>Telegram</strong>
+          <button id="telegram-service-restart" class="notification-icon" type="button"
+                  aria-label="Restart Telegram service" data-n-tooltip="Restart" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+          </button>
+        </header>
+        <div class="telegram-service-state"><span>Command service</span><span id="telegram-service-state" role="status">Connecting</span></div>
+        <p id="telegram-service-reason" hidden></p>
+        <p id="telegram-service-retry" hidden></p>
+      </section>
     </div>
     <button id="notification-bell" type="button" class="notification-icon" aria-label="Notifications"
             aria-expanded="false" aria-controls="notification-panel" data-n-tooltip="Notifications">
@@ -1896,6 +1921,7 @@
   <script src="/static/scripting_ai.js?v=13"></script>
   <script src="/static/scripting.js?v=55"></script>
   <script src="/static/notifications.js?v=4"></script>
-  <script src="/static/dashboard.js?v=188"></script>
+  <script src="/static/telegram_status.js?v=1"></script>
+  <script src="/static/dashboard.js?v=189"></script>
 </body>
 </html>

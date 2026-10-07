@@ -991,10 +991,22 @@ Unexpected Telegram command-worker failures restart only the Telegram service,
 with a 5-second exponential backoff capped at 60 seconds. Unfinished commands and
 approved changes are not replayed; send a fresh command after recovery. Network
 errors and 429 responses retain their existing request-level retry behavior.
-Authentication/access errors, invalid requests, competing `getUpdates` receivers
-(409), a configured bot webhook, or a database already owned by another receiver
-stop reception instead of retrying indefinitely. Correct the configuration or
-stop the competing receiver, then restart data-service.
+Polling conflicts (409) retry the Telegram service up to three times, with
+5/10/20-second delays for consecutive conflicts. Persistent conflicts,
+authentication/access errors, invalid requests, a configured bot webhook, or a
+database already owned by another receiver stop reception instead of retrying
+indefinitely. Correct the configuration or stop the competing receiver first.
+
+The Telegram icon between the dashboard clock and notification bell shows the
+command-service status. Open it to inspect an error or select **Restart**. This
+restarts only Telegram command reception, workers and replies; running strategies,
+market-data collection and strategy webhook/Telegram alerts are not restarted.
+Status changes use the existing dashboard WebSocket, without periodic browser
+polling. After recovery, resend commands issued while reception was stopped.
+The same controls are available through `GET /api/telegram/status` and
+`POST /api/telegram/restart`, under the same access controls as other dashboard
+APIs. Restart does not reload changed bot credentials or configuration; those
+changes still require a data-service restart.
 
 Warnings, failures and recovery events are also kept in
 `workdir/output/telegram_ai.log` (1 MiB per file, two rotated backups). Timestamps
