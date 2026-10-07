@@ -17,6 +17,8 @@ from runner_supervisor import RunnerSupervisor
 from runtime import Feed, Session
 from tv_logos import TradingViewLogoResolver
 from ws_manager import WSManager
+from minute_data import MinuteDataService
+from pynecore.cli.app import app_state
 
 
 _SCRIPTS_ROOT = (Path(__file__).resolve().parent.parent / "workdir" / "scripts").resolve()
@@ -78,6 +80,7 @@ class SessionRegistry:
     ) -> None:
         self.feeds: Dict[str, Feed] = {}
         self.sessions: Dict[str, Session] = {}
+        self.minute_data = MinuteDataService(app_state.data_dir)
         self.hub_ws = WSManager()  # dashboard clients on /ws/hub
         self.supervisor = RunnerSupervisor(port=port, on_change=self.notify_hub)
         from data_service.notifications import NotificationService
@@ -297,10 +300,15 @@ class SessionRegistry:
 
     def _start_feed_tasks(self, feed: Feed) -> None:
         spec = feed.spec
+
+        def on_trades(trades: list) -> None:
+            new_trades = feed.broadcast_trades(trades)
+            self.minute_data.offer(spec.id, new_trades)
+
         feed.tasks = {
             "watch_trades_loop": asyncio.create_task(self._guard_feed(feed, "watch_trades_loop", watch_trades_loop(
                 spec.exchange, spec.symbol, spec.timeframe, feed.state, feed.broadcast_bar,
-                on_trades=feed.broadcast_trades,
+                on_trades=on_trades,
                 market_type=spec.market_type))),
             "fix_missing_bars_loop": asyncio.create_task(self._guard_feed(feed, "fix_missing_bars_loop", fix_missing_bars_loop(
                 spec.exchange, spec.timeframe, feed.state))),
@@ -460,6 +468,7 @@ class SessionRegistry:
         session.verification.on_ready = self._mark_verification_ready
         feed.subscribers[spec.id] = session
         self.sessions[spec.id] = session
+        self.minute_data.configure(self.sessions.values())
         self._rebalance_prerun_schedule()
         self._schedule_logo_resolution(session)
         if persist:
@@ -481,6 +490,7 @@ class SessionRegistry:
         feed.subscribers.pop(session_id, None)
         await self._sync_verification_probe(feed)
         del self.sessions[session_id]
+        self.minute_data.configure(self.sessions.values())
         self._rebalance_prerun_schedule()
         await self._teardown_feed_if_idle(feed)
         if cleanup_output:
@@ -619,6 +629,7 @@ class SessionRegistry:
             await self.supervisor.stop(s.spec.id)
 
         feed.spec = replace(feed.spec, history_since=history_since)
+        self.minute_data.configure(self.sessions.values())
         await self._restart_file_update(feed)
 
         for s in running:
@@ -866,6 +877,7 @@ class SessionRegistry:
             print(f"[registry] initial persist failed: {e}")
 
     async def shutdown(self) -> None:
+        await self.minute_data.close()
         await self.supervisor.shutdown()
         if self.verification_delivery is not None:
             await self.verification_delivery.close()
@@ -893,6 +905,7 @@ class SessionRegistry:
 
     async def _persist_and_notify(self) -> None:
         self._persist()
+        self.minute_data.configure(self.sessions.values())
         await self.notify_hub()
 
     async def notify_hub(self) -> None:

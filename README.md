@@ -343,6 +343,45 @@ For example, **OKX**, **Binance**, and
 **Bybit** zero-volume candles are **hidden** to match TradingView, while **Bitget** and
 **Hyperliquid** zero-volume candles remain **visible**.
 
+### Shared One-Minute History
+
+Sessions above `1m` also maintain background one-minute history in
+`workdir/data/cache/minute_candles.sqlite`. This is a separate, DB-only dataset;
+it does not change the strategy's candles or create another `.ohlcv` file.
+
+- Collection is shared across sessions with the same exchange, market type,
+  and symbol. An existing `1m` session's actual cache is reused before checking
+  for missing history, including cached data older than its configured start date.
+- Binance, Bitget, and OKX use public candle archives where supported, with REST
+  filling uncovered ranges. Bybit and Hyperliquid use REST.
+- Binance and OKX archive rows with zero volume are preserved. Within valid
+  Bitget USDT-M archives, omitted minutes are stored at the preceding close
+  with zero volume and a separate `archive_no_trade` source. Actual archive,
+  REST, or existing session candles take precedence over these synthesized rows.
+  Failed files and gaps without a known preceding close still use REST.
+- Hyperliquid only exposes the latest 5,000 candles, so older one-minute history
+  cannot be backfilled through its candle API. Available history accumulates
+  while collection is running.
+- Without an existing `1m` feed, live candles reuse a single existing trade
+  stream. The latest ten closed minutes are refreshed by REST each minute,
+  starting at a per-market offset between 15 and 35 seconds. Requests and DB
+  writes avoid the ten seconds before and after every minute boundary.
+- Closing charts or stopping runners does not stop collection. Removing the
+  last session for a market stops its work; stopping data-service closes the
+  worker. Saved history remains for subsequent starts.
+
+Downloads, parsing, and storage run in a separate process. On a supported
+session above `1m`, click the chart timeframe and select **1m** to view this
+dataset. The chart loads up to 5,000 candles per page and retains loaded pages
+when switching back to the strategy timeframe. Strategy plots and trade markers
+are hidden in the minute view; browser indicators use the displayed minute bars.
+An open minute view receives live candle snapshots over WebSocket without
+waiting for DB writes or making additional exchange requests. Existing `1m`
+feeds supply their live snapshots directly; otherwise the shared worker supplies
+its trade-built minute candles. Stored corrections are checked once per second,
+and confirmed REST/session/archive data takes precedence over provisional trades.
+The storage guard remains in place. Charts do not change strategy calculations.
+
 ### Re-sync Historical Data
 
 Open a session's **Data** settings to change its `Data start (UTC)` value after
@@ -433,6 +472,61 @@ of exact TradingView or PyneCore numerical equivalence. The worker is bundled, s
 normal setup and Update do not require Node.js or npm. To rebuild it during
 development, run `npm ci` and `npm run build:indicators`; source lives in
 `data_service/indicators_build/`.
+
+Selecting a drawn trend line opens a draggable toolbar with its color,
+left/right extension toggles, and delete button. Extensions follow the line's
+slope without moving its anchors, and copied lines retain these settings.
+These controls are available in both live and backtest charts.
+
+### Volume Profiles
+
+The chart's drawing toolbar includes **Fixed Range Volume Profile (FRVP)**.
+Choose its horizontal-bar icon, then select the first and last candles with
+two clicks or a mouse drag. On touch screens, drag to aim and release to fix the
+first candle, then repeat for the last candle. One profile is shown per chart.
+Selecting a new range replaces it; drag its selected boundary lines to adjust
+the range. Selecting a profile shows a floating toolbar over the chart with settings and delete
+buttons; drag its dotted handle to move it with a mouse or touch. Clicking an
+empty area hides it. The settings button opens row count,
+value-area percentage, width, colors, price levels, available-data range,
+refresh, and delete controls. Range and settings
+are stored per session in this browser, not shared with Telegram screenshots.
+
+FRVP reads all available 1-minute candles in the selected range from the local
+server, in 5,000-candle pages, regardless of the displayed timeframe. Existing
+1-minute sessions use their own candles; higher-timeframe sessions use the
+shared minute dataset. Unavailable history is not replaced with higher-timeframe
+candles. The Available range reports the returned data's boundaries; it is not
+a guarantee that every minute within them exists.
+
+Calculation and history fetching run in a separate browser worker. Each minute's
+volume is distributed proportionally across the price rows overlapping its
+low/high range. A flat candle contributes to one row. Close >= open counts as
+up volume, otherwise down volume. POC is the highest-volume row (lower row on a
+tie); the value area expands from it toward the larger adjacent row until it
+contains at least the selected percentage (default 70%). Rows evenly divide the
+observed price range. This is candle-based volume estimation, not actual bid/ask volume
+or a guarantee of numerical equivalence with TradingView.
+
+Recent auxiliary-minute corrections use the existing local minute WebSocket;
+ordinary 1-minute sessions reuse the chart's live messages. The range stays fixed,
+and updates replace a minute's contribution rather than adding its volume again.
+No exchange subscription, strategy calculation, or runner scheduling is added.
+
+**Anchored Volume Profile (AVP)** is available beside FRVP in the drawing tools.
+Select its anchored horizontal-bar icon and click a starting candle once. On
+touch screens, drag to aim and release to fix the anchor. It accumulates all
+available 1-minute candles from that point through the latest candle on the
+server, including candles outside the visible chart. New minutes extend the
+profile automatically; same-minute updates replace volume instead of adding it
+twice. Drag the selected start boundary to move the anchor. There is no manual
+end boundary.
+
+AVP shares FRVP's settings, draggable toolbar and browser-local storage. Only
+one volume profile is displayed per chart; creating either type replaces the
+existing profile. Reopening the chart reloads the saved anchor through the
+latest data. Reconnection catches up missing recent history from local storage.
+The same 1-minute availability and candle-based estimation limits apply.
 
 ## Strategy Calculation Timing
 

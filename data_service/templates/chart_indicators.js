@@ -192,6 +192,7 @@ App.indicators = {
       if (App.measure?.shouldSuppressToolbarClick(event)) return;
       event.stopPropagation();
       if (!this.menu.classList.contains("hidden")) { this.close(); return; }
+      App.volumeProfile?.setActive(false);
       App.measure?.setActive(false);
       App.measure?.closePalette();
       App.trendline?.setActive(false);
@@ -617,14 +618,16 @@ App.indicators = {
     return points.map(point => Number.isFinite(point.value)
       ? { ...point, color: colors[point.value < 0 ? 3 : 2] } : point);
   },
-  reset() {
+  reset({ preserveDisplay = false } = {}) {
     this.failed = false;
     this.status();
     this.revision++;
     this.pending.clear();
     this.needsReset = true;
-    this.series.forEach(lines => lines.forEach(series => series.setData([])));
-    this.clearPaneValues();
+    if (!preserveDisplay) {
+      this.series.forEach(lines => lines.forEach(series => series.setData([])));
+      this.clearPaneValues();
+    }
     if (!this.active().length) { this.stop(); return; }
     this.schedule();
   },
