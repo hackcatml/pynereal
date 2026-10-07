@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, UTC
-import struct
 import time
 from typing import Callable, Optional
 from pathlib import Path
@@ -9,7 +8,7 @@ from tempfile import TemporaryDirectory
 
 from dateutil.relativedelta import relativedelta
 from pynecore.core.exchange_policy import fetch_current_open_from_exchange
-from pynecore.core.ohlcv_file import OHLCVReader, OHLCVWriter
+from pynecore.core.ohlcv_file import OHLCVReader, OHLCVWriter, ohlcv_number
 from pynecore.types.ohlcv import OHLCV
 from ohlcv_cache import import_from_ohlcv
 from pynecore.cli.app import app_state
@@ -139,27 +138,25 @@ def download_history_range_to_file(
     return provider_instance.ohlcv_path
 
 
-def _ohlcv_float(value: float) -> float:
-    return struct.unpack("f", struct.pack("f", value))[0]
-
-
 def _preserve_latest_closed_bar(
     rest_bars: list,
     local_closed_bar: OHLCV | None,
+    *,
+    precision: int = 32,
 ) -> list:
     """Protect only the latest closed local candle from a stale REST value."""
     if not rest_bars or local_closed_bar is None:
         return rest_bars
 
     local_timestamp = int(local_closed_bar.timestamp)
-    local_volume = _ohlcv_float(float(local_closed_bar.volume))
+    local_volume = ohlcv_number(local_closed_bar.volume, precision)
     merged: list = []
     for rest in rest_bars:
         preserve_local = (
             isinstance(rest, (list, tuple))
             and len(rest) >= 6
             and int(rest[0] / 1000) == local_timestamp
-            and _ohlcv_float(float(rest[5])) < local_volume
+            and ohlcv_number(rest[5], precision) < local_volume
         )
         if preserve_local:
             merged.append([
@@ -297,6 +294,7 @@ def fix_last_open_if_needed(
     last_timestamp, interval = 0, 0
     with OHLCVReader(ohlcv_path) as reader:
         size = reader.size
+        precision = reader.precision
         last = reader.read(size - 1)
         prev = reader.read(size - 2)
         interval = reader.interval
@@ -340,8 +338,7 @@ def fix_last_open_if_needed(
 
             for bar in res or []:
                 if int(bar[0] / 1000) == last_timestamp:
-                    # fetch 로 받은 bar open 데이터를 float32 타입으로 변경하여 저장
-                    target_open_price = _ohlcv_float(bar[1])
+                    target_open_price = ohlcv_number(bar[1], precision)
                     break
             if target_open_price is not None:
                 break
@@ -440,6 +437,7 @@ def fetch_and_update_ohlcv_data(
     # Read current last candle timestamp
     with OHLCVReader(ohlcv_path) as reader:
         size = reader.size
+        precision = reader.precision
         last_candle = reader.read(size - 1)
         previous_candle = reader.read(size - 2) if size >= 2 else None
         last_timestamp_sec = last_candle.timestamp
@@ -461,7 +459,7 @@ def fetch_and_update_ohlcv_data(
             print(f"[fetch_and_update_ohlcv_data] No data received from exchange")
             return None
 
-        merged = _preserve_latest_closed_bar(res, previous_candle)
+        merged = _preserve_latest_closed_bar(res, previous_candle, precision=precision)
         update_ohlcv_data(ohlcv_path, merged)
         return merged
 
@@ -487,6 +485,7 @@ def fetch_and_update_recent_ohlcv_data(
 
     with OHLCVReader(ohlcv_path) as reader:
         interval = reader.interval
+        precision = reader.precision
         last_bar = reader.read(reader.size - 1)
         previous_bar = reader.read(reader.size - 2) if reader.size >= 2 else None
         reader.close()
@@ -533,7 +532,7 @@ def fetch_and_update_recent_ohlcv_data(
         if not closed_bars:
             return None
 
-        merged_closed_bars = _preserve_latest_closed_bar(closed_bars, previous_bar)
+        merged_closed_bars = _preserve_latest_closed_bar(closed_bars, previous_bar, precision=precision)
         update_ohlcv_data(ohlcv_path, merged_closed_bars + [current_bar])
         # print(f"[fetch_and_update_recent_closed_ohlcv_data] Updated bars:\n{closed_bars}")
         return merged_closed_bars

@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
-import numpy as np
 import websockets
 
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
@@ -34,7 +33,7 @@ from verification import (
     calculate_candle as calculate_verification_candle,
 )
 from pynecore.cli.app import app_state
-from pynecore.core.ohlcv_file import OHLCVReader
+from pynecore.core.ohlcv_file import OHLCVReader, ohlcv_number
 from pynecore.core.exchange_policy import normalize_exchange_name, tradingview_hides_zero_volume
 from pynecore.core.script_runner import ScriptRunner
 from pynecore.core.syminfo import SymInfo
@@ -647,16 +646,16 @@ async def send_strategy_snapshot(
         print(f"[runner] Failed to send strategy snapshot: {e}")
 
 
-def bar_list_to_ohlcv(bar: list) -> OHLCV:
+def bar_list_to_ohlcv(bar: list, *, precision: int = 32) -> OHLCV:
     # bar: [ts_ms, o, h, l, c, v]
     return OHLCV(
         timestamp=int(bar[0] / 1000),
-        # Align realtime bars with file precision (float32) to avoid BB rounding drift.
-        open=float(np.float32(bar[1])),
-        high=float(np.float32(bar[2])),
-        low=float(np.float32(bar[3])),
-        close=float(np.float32(bar[4])),
-        volume=float(np.float32(bar[5])),
+        # Match the file used for warm-up, including legacy float32 files.
+        open=ohlcv_number(bar[1], precision),
+        high=ohlcv_number(bar[2], precision),
+        low=ohlcv_number(bar[3], precision),
+        close=ohlcv_number(bar[4], precision),
+        volume=ohlcv_number(bar[5], precision),
         extra_fields={},
     )
 
@@ -716,6 +715,7 @@ class RunnerCtx:
     reader: OHLCVReader | None
     last_new_bar_ts_sec: int
     generation_id: str = ""
+    data_precision: int = 32
 
 
 def build_calculation_result(
@@ -1167,6 +1167,7 @@ async def main():
                     reader=reader,
                     last_new_bar_ts_sec=last_new_ts_sec,
                     generation_id=str(msg.get("generation_id") or ""),
+                    data_precision=reader.precision,
                 )
                 VERIFICATION_RESUME_STATE.reset(
                     generation_id=ctx.generation_id,
@@ -1293,7 +1294,8 @@ async def main():
                         last_new_ts_sec = int(r.end_timestamp)
                         r.close()
 
-                ctx = RunnerCtx(runner=runner, stream=stream, reader=reader, last_new_bar_ts_sec=last_new_ts_sec)
+                ctx = RunnerCtx(runner=runner, stream=stream, reader=reader, last_new_bar_ts_sec=last_new_ts_sec,
+                                data_precision=reader.precision)
                 # print(f"[runner] prerun done. last_new_bar_ts_sec={ctx.last_new_bar_ts_sec}")
             elif mtype == "prerun_ready_after_history_download":
                 runner.destroy()
@@ -1314,8 +1316,8 @@ async def main():
             confirmed_bar = confirmed_bar_and_new_bar[0]
             new_bar = confirmed_bar_and_new_bar[1]
 
-            confirmed_ohlcv = bar_list_to_ohlcv(confirmed_bar)
-            new_ohlcv = bar_list_to_ohlcv(new_bar)
+            confirmed_ohlcv = bar_list_to_ohlcv(confirmed_bar, precision=ctx.data_precision)
+            new_ohlcv = bar_list_to_ohlcv(new_bar, precision=ctx.data_precision)
             evaluation_intents.begin_candle()
             CURRENT_EVALUATION_TIMESTAMP = int(confirmed_ohlcv.timestamp)
             confirmed_plot_values = None
@@ -1516,7 +1518,7 @@ async def main():
                     calculate_verification_candle(
                         ctx,
                         confirmed_bar_and_new_bar,
-                        bar_list_to_ohlcv=bar_list_to_ohlcv,
+                        bar_list_to_ohlcv=partial(bar_list_to_ohlcv, precision=ctx.data_precision),
                         hide_zero_volume_bars=hide_zero_volume_bars,
                         is_visible_ohlcv=is_visible_ohlcv,
                         plot_values_from_step=_plot_values_from_step,
