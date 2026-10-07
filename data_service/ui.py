@@ -45,6 +45,8 @@ _STATIC_FILES = {
     "dashboard.css": "text/css",
     "notifications.js": "text/javascript",
     "notifications.css": "text/css",
+    "telegram_status.js": "text/javascript",
+    "telegram_status.css": "text/css",
 }
 
 

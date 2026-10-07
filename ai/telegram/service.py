@@ -24,6 +24,10 @@ from .session_control import SessionCommandError
 logger = logging.getLogger(__name__)
 
 
+class TelegramRestartUnavailable(RuntimeError):
+    pass
+
+
 class TelegramAIService:
     def __init__(self, config: TelegramAIConfig, *, path: Path, agent, transport=None, notifications=None,
                  log_path: Path | None = None) -> None:
@@ -34,6 +38,7 @@ class TelegramAIService:
         self.store = TelegramStore(path)
         self._executor: ThreadPoolExecutor | None = None
         self._task: asyncio.Task | None = None
+        self._lifecycle_lock = asyncio.Lock()
         self._active: tuple[dict, asyncio.Task] | None = None
         self._direct_active: dict[str, tuple[dict, asyncio.Task]] = {}
         self._jobs_lock = asyncio.Lock()
@@ -43,11 +48,27 @@ class TelegramAIService:
         self._started_at = 0.0
         self._username = ""
         self._ready_at = 0.0
+        self._poll_healthy_since = 0.0
         self._failure_task = "startup"
         self._recovering = False
         self._log_path = log_path
         self._log_handler: RotatingFileHandler | None = None
         self._log_failed = False
+        self._status = {
+            "enabled": config.enabled,
+            "state": "stopped" if config.enabled else "disabled",
+            "reason": "", "retry_at": None, "updated_at": time.time(),
+        }
+
+    def status(self) -> dict:
+        return dict(self._status)
+
+    def _set_status(self, state: str, reason: str = "", *, retry_in: float | None = None) -> None:
+        self._status = {
+            "enabled": self.config.enabled, "state": state, "reason": reason,
+            "retry_at": time.time() + retry_in if retry_in is not None else None,
+            "updated_at": time.time(),
+        }
 
     def _log(self, level: int, message: str, *args) -> None:
         text = "[%s][telegram-ai] %s" % (
@@ -83,13 +104,34 @@ class TelegramAIService:
         )
 
     async def start(self) -> None:
+        async with self._lifecycle_lock:
+            self._start()
+
+    def _start(self) -> None:
         if self.config.enabled and self._task is None:
             self._started_at = time.time()
             self._log_failed = False
+            self._set_status("starting")
             self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="telegram-ai-db")
             self._task = asyncio.create_task(self._supervise(), name="telegram-ai")
 
     async def close(self) -> None:
+        async with self._lifecycle_lock:
+            await self._stop()
+            self._set_status("stopped" if self.config.enabled else "disabled")
+
+    async def restart(self) -> None:
+        if not self.config.enabled:
+            raise TelegramRestartUnavailable("Telegram commands are disabled in telegram_ai.toml")
+        if self._lifecycle_lock.locked():
+            raise TelegramRestartUnavailable("Telegram service is already restarting or stopping")
+        async with self._lifecycle_lock:
+            self._set_status("restarting")
+            await self._stop()
+            self._recovering = True
+            self._start()
+
+    async def _stop(self) -> None:
         if self._task is not None:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
@@ -116,6 +158,7 @@ class TelegramAIService:
 
     async def _supervise(self) -> None:
         delay = 5
+        conflict_retries = 0
         try:
             while True:
                 self._failure_task = "startup"
@@ -128,10 +171,18 @@ class TelegramAIService:
                         raise
                     if self._ready_at and time.monotonic() - self._ready_at >= 60:
                         delay = 5
+                    if self._poll_healthy_since and time.monotonic() - self._poll_healthy_since >= 60:
+                        conflict_retries = 0
                     permanent = False
                     if isinstance(exc, TelegramError):
                         reason = str(exc)
                         permanent = exc.code in (400, 401, 403, 404, 409)
+                        if (exc.method == "getUpdates" and exc.code == 409
+                                and exc.error_type != "WebhookConflict" and conflict_retries < 3):
+                            # A timed-out long poll can briefly overlap the next request.
+                            # Persistent competing receivers must not restart indefinitely.
+                            conflict_retries += 1
+                            permanent = False
                     elif isinstance(exc, RuntimeError) and str(exc).startswith("Bot webhook"):
                         reason, permanent = "Bot webhook is configured", True
                     elif isinstance(exc, RuntimeError) and str(exc).startswith("Another Telegram"):
@@ -142,6 +193,8 @@ class TelegramAIService:
                     frames = [f"{Path(frame.f_code.co_filename).name}:{line}:{frame.f_code.co_name}"
                               for frame, line in traceback.walk_tb(exc.__traceback__)]
                     action = "manual restart required" if permanent else f"retrying in {delay}s"
+                    self._set_status("stopped" if permanent else "retrying", reason,
+                                     retry_in=None if permanent else delay)
                     self._log(logging.ERROR, "stopped: %s | task=%s | %s | trace=%s",
                               reason, self._failure_task, action, " > ".join(frames[-8:]))
                     if permanent:
@@ -159,6 +212,7 @@ class TelegramAIService:
 
         tasks = []
         try:
+            self._poll_healthy_since = 0.0
             me = await self._receive("getMe")
             webhook = await self._receive("getWebhookInfo")
             if webhook.get("url"):
@@ -168,6 +222,7 @@ class TelegramAIService:
             await self._db("ensure_command_menu", self.config.chat_id)
             self._started_at = time.time()
             self._ready_at = time.monotonic()
+            self._set_status("running")
             if self._recovering:
                 self._log(logging.WARNING, "recovered; unfinished commands were not replayed")
                 self._recovering = False
@@ -199,13 +254,23 @@ class TelegramAIService:
         delay = 1
         while True:
             try:
-                return await self.transport.call(method, **payload)
+                result = await self.transport.call(method, **payload)
+                if method == "getUpdates":
+                    if not self._poll_healthy_since:
+                        self._poll_healthy_since = time.monotonic()
+                    if self._status["state"] == "retrying":
+                        self._set_status("running")
+                return result
             except TelegramError as exc:
                 if exc.code in (400, 401, 403, 404, 409):
                     raise
+                if method == "getUpdates":
+                    self._poll_healthy_since = 0.0
                 self._log(logging.WARNING, "receive retry (method=%s code=%s error=%s)",
                      exc.method, exc.code, exc.error_type or "TelegramAPIError")
-                await asyncio.sleep(max(delay, exc.retry_after))
+                retry_in = max(delay, exc.retry_after)
+                self._set_status("retrying", str(exc), retry_in=retry_in)
+                await asyncio.sleep(retry_in)
                 delay = min(delay * 2, 30)
 
     async def _register_commands(self) -> None:

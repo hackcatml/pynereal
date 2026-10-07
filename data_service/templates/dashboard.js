@@ -10702,6 +10702,7 @@
     ws.onopen = () => {
       if (ws !== hubWs || generation !== hubGeneration) return;
       window.PyneRealNotifications?.sync();
+      window.PyneTelegramStatus?.sync();
       clearTimeout(connectGuard);
       setHubStatus("syncing…");
       if (!aiPending) syncAiChatState({ allowImport: false });
@@ -10726,6 +10727,8 @@
         const msg = JSON.parse(ev.data);
         if (msg.type === "notifications") {
           window.PyneRealNotifications?.update(msg);
+        } else if (msg.type === "telegram_status") {
+          window.PyneTelegramStatus?.update(msg);
         } else if (msg.type === "sessions") {
           applyAiAvailability(msg.ai_enabled);
           applySessions(msg.sessions || []);
@@ -10751,6 +10754,7 @@
       if (ws !== hubWs || generation !== hubGeneration) return; // superseded by a newer socket
       hubWs = null;
       hubLive = false;
+      window.PyneTelegramStatus?.disconnect();
       setHubStatus("reconnecting…");
       scheduleFallbackPoll(0, generation);
       scheduleReconnect(1500, generation);
@@ -10768,6 +10772,7 @@
   // (which iOS then drops, leaving the resumed page unable to re-establish). We reconnect
   // cleanly on return.
   function closeForBackground() {
+    window.PyneTelegramStatus?.disconnect();
     hubGeneration += 1;
     hubLive = false;
     clearReconnectTimer();
