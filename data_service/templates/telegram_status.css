@@ -5,6 +5,7 @@
   --telegram-status-color: var(--ui-warning, #f2cc60);
 }
 #telegram-service-toggle { width: 32px; height: 34px; }
+#telegram-service-toggle[aria-expanded="true"]::after { display: none; }
 #telegram-service-toggle svg { width: 24px; height: 24px; }
 .telegram-service-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
   flex-shrink: 0; background: var(--telegram-status-color); }
