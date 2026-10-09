@@ -639,6 +639,19 @@ class Position:
                     closed_trade.exit_price = price
                     closed_trade.profit = pnl
 
+                    # Include the fill endpoint before adding exit fees, using
+                    # the same entry-fee basis as open-trade excursions.
+                    exit_profit = pnl - closed_trade.commission
+                    entry_cost = abs(closed_trade.size) * closed_trade.entry_price + closed_trade.commission
+                    if -exit_profit > closed_trade.max_drawdown:
+                        closed_trade.max_drawdown = -exit_profit
+                        if entry_cost > 0.0:
+                            closed_trade.max_drawdown_percent = closed_trade.max_drawdown / entry_cost * 100.0
+                    elif exit_profit > closed_trade.max_runup:
+                        closed_trade.max_runup = exit_profit
+                        if entry_cost > 0.0:
+                            closed_trade.max_runup_percent = closed_trade.max_runup / entry_cost * 100.0
+
                     # Add to closed trade
                     new_closed_trades.append(closed_trade)
                     self.closed_trades.append(closed_trade)
