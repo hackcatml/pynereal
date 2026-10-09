@@ -30,7 +30,6 @@ body {
   -webkit-touch-callout: none;
 }
 
-#chart-info,
 .nav-btn {
   touch-action: none;
 }
@@ -40,22 +39,41 @@ body.source-open #chart {
   width: auto;
 }
 #chart-info {
+  --chart-label-padding-x: 10px;
+  --chart-label-padding-y: 6px;
   position: absolute;
   top: 12px;
   left: 12px;
   z-index: 10;
-  padding: 6px 10px;
-  background: rgba(255, 255, 255, 0.9);
+  padding: 0;
+  background: transparent;
+  pointer-events: none;
   color: #000000;
   font-size: 14px;
   border-radius: 6px;
   letter-spacing: 0.2px;
+}
+#chart-info button,
+#chart-info .dropdown {
+  pointer-events: auto;
+}
+#chart-info-line,
+#chart-info-title-row {
+  box-sizing: border-box;
+  width: fit-content;
+  max-width: 100%;
+  padding: var(--chart-label-padding-y) var(--chart-label-padding-x);
+  background: #fff;
 }
 #chart-info-line {
   display: block;
   min-height: 20px;
   line-height: 20px;
   white-space: normal;
+  border-radius: 6px 6px 6px 0;
+}
+#chart-info-line:has(+ #chart-info-title-row.hidden) {
+  border-radius: 6px;
 }
 .chart-info-separator.hidden,
 .chart-runner-status.hidden {
@@ -175,7 +193,7 @@ body.source-open #chart {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 10px;
+  border-radius: 0 0 6px 6px;
 }
 #chart-info-title-row.hidden {
   display: none;
@@ -1580,20 +1598,21 @@ body.source-open .source-panel {
   }
 
   #chart-info {
+    --chart-label-padding-x: 8px;
+    --chart-label-padding-y: 5px;
     top: max(8px, env(safe-area-inset-top));
     left: max(8px, env(safe-area-inset-left));
     right: max(8px, env(safe-area-inset-right));
     width: auto;
-    padding: 5px 8px;
+    padding: 0;
     font-size: 12px;
     border-radius: 0;
-    background: rgba(255, 255, 255, 0.82);
+    background: transparent;
     box-shadow: none;
   }
 
   #chart-info-title-row {
     gap: 6px;
-    margin-top: 6px;
   }
 
   #chart-info .info-main {

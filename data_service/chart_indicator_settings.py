@@ -32,6 +32,8 @@ def validate_indicator_settings(settings: object) -> list[dict]:
         color_count, fields = _FIELDS[name]
         required = {"id", "enabled", "colors", *fields}
         optional = {"collapsed"} if name in {"rsi", "macd", "smi"} else set()
+        if name in {"sma", "ema"}:
+            optional.add("additionalLines")
         if not required <= set(item) or set(item) - required - optional:
             raise ValueError(f"invalid fields for {name}")
         if not isinstance(item["enabled"], bool):
@@ -56,7 +58,23 @@ def validate_indicator_settings(settings: object) -> list[dict]:
                 raise ValueError(f"invalid {field} for {name}")
         if name == "macd" and item["fastPeriod"] >= item["slowPeriod"]:
             raise ValueError("MACD fast period must be smaller than slow period")
-        result.append(dict(item, colors=list(colors)))
+        normalized = dict(item, colors=list(colors))
+        if "additionalLines" in item:
+            lines = item["additionalLines"]
+            if not isinstance(lines, list) or len(lines) > 9:
+                raise ValueError("SMA and EMA support at most ten lines each")
+            for line in lines:
+                if not isinstance(line, dict) or set(line) != {"period", "color"}:
+                    raise ValueError("invalid moving average line")
+                period, color = line["period"], line["color"]
+                if (
+                    isinstance(period, bool) or not isinstance(period, (int, float))
+                    or not 2 <= period <= 500 or period != int(period)
+                    or not isinstance(color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", color)
+                ):
+                    raise ValueError("invalid moving average length or color")
+            normalized["additionalLines"] = [dict(line) for line in lines]
+        result.append(normalized)
     return result
 
 

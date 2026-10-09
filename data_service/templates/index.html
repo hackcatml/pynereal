@@ -4,9 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Chart</title>
-  <link rel="stylesheet" href="/static/styles.css?v=48" />
-  <link rel="stylesheet" href="/static/measure.css?v=2" />
-  <link rel="stylesheet" href="/static/chart_indicators.css?v=8" />
+  <link rel="stylesheet" href="/static/styles.css?v=53" />
+  <link rel="stylesheet" href="/static/measure.css?v=3" />
+  <link rel="stylesheet" href="/static/chart_indicators.css?v=16" />
   <link rel="stylesheet" href="/static/editor.css?v=7" />
   <link rel="stylesheet" href="/static/codemirror.css?v=10" />
   <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.9/dist/lightweight-charts.standalone.production.js"></script>
@@ -116,6 +116,13 @@
         </div>
       </div>
     </div>
+    <div id="chart-indicator-legend" class="hidden"></div>
+    <button id="chart-indicator-legend-toggle" class="hidden" type="button"
+            aria-label="Hide indicator values" aria-expanded="true" aria-controls="chart-indicator-legend"
+            data-tooltip="Hide indicator values">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+    </button>
   </div>
   <div id="source-backdrop" class="source-backdrop"></div>
   <aside id="source-panel" class="source-panel" aria-hidden="true" aria-label="Script source">
@@ -350,7 +357,7 @@
   <script src="/static/data.js?v=21"></script>
   <script src="/static/chart_timeframe.js?v=5"></script>
   <script src="/static/chart_sessions.js?v=1"></script>
-  <script src="/static/chart_indicators.js?v=12"></script>
+  <script src="/static/chart_indicators.js?v=15"></script>
   <script src="/static/chart_history.js?v=8"></script>
   <script src="/static/ws.js?v=8"></script>
   <script src="/static/main.js?v=8"></script>

@@ -24,6 +24,9 @@ App.indicators = {
   failed: false,
   paneFrame: null,
   panels: new Map(),
+  overlays: new Map(),
+  legendCollapsed: false,
+  maxMovingAverages: 10,
   collapsedHeight: 36,
   hovering: false,
   settingsVersion: 0,
@@ -32,6 +35,15 @@ App.indicators = {
   appliedRevision: -1,
 
   active() { return this.settings?.filter(item => item.enabled) || []; },
+  configurations(settings = this.settings) {
+    return settings.flatMap(setting => [
+      { ...setting, key: setting.id },
+      ...(setting.additionalLines || []).map((line, index) => ({
+        id: setting.id, key: `${setting.id}:${index + 1}`, enabled: setting.enabled,
+        period: line.period, colors: [line.color],
+      })),
+    ]);
+  },
   isOpen() { return !!this.menu && !this.menu.classList.contains("hidden"); },
   fields(def) {
     if (def.id === "vwap") return [];
@@ -66,6 +78,13 @@ App.indicators = {
         id: def.id, enabled: old?.enabled === true,
         ...params,
         colors: def.colors.map((color, index) => /^#[0-9a-f]{6}$/i.test(colors?.[index]) ? colors[index] : color),
+        ...(["sma", "ema"].includes(def.id) ? {
+          additionalLines: (Array.isArray(old?.additionalLines) ? old.additionalLines : [])
+            .slice(0, this.maxMovingAverages - 1).map(line => ({
+              period: Number.isInteger(line?.period) && line.period >= 2 && line.period <= 500 ? line.period : def.period,
+              color: /^#[0-9a-f]{6}$/i.test(line?.color) ? line.color : def.colors[0],
+            })),
+        } : {}),
         ...(def.pane ? {
           collapsed: old?.collapsed === true,
           expandedHeight: Number.isFinite(old?.expandedHeight) && old.expandedHeight >= 30 ? old.expandedHeight : undefined,
@@ -74,7 +93,10 @@ App.indicators = {
     });
   },
   sharedSettings(settings = this.settings) {
-    return settings.map(({ expandedHeight, ...shared }) => ({ ...shared, colors: [...shared.colors] }));
+    return settings.map(({ expandedHeight, ...shared }) => ({
+      ...shared, colors: [...shared.colors],
+      ...(shared.additionalLines ? { additionalLines: shared.additionalLines.map(line => ({ ...line })) } : {}),
+    }));
   },
   saveLocal() {
     try { localStorage.setItem(App.config.storageKey("indicators"), JSON.stringify(this.settings)); } catch {}
@@ -180,11 +202,18 @@ App.indicators = {
     let saved = null;
     try { saved = JSON.parse(localStorage.getItem(App.config.storageKey("indicators"))); } catch {}
     this.settings = this.loadSettings(saved);
+    this.initOverlayLegend();
     this.initPanels();
     this.attachPaneResizePersistence();
     if (window.ResizeObserver) {
       this.paneObserver = new ResizeObserver(() => this.schedulePaneLayout());
       this.paneObserver.observe(App.chart.container);
+      const info = document.getElementById("chart-info");
+      this.legendObserver = new ResizeObserver(() => {
+        const bottom = this.overlays.size ? info.getBoundingClientRect().bottom + 6 : 0;
+        document.documentElement.style.setProperty("--chart-indicator-tools-top", `${bottom}px`);
+      });
+      this.legendObserver.observe(info);
     }
     App.chart.chart.subscribeCrosshairMove(param => this.updateCrosshairValue(param));
     this.renderMenu();
@@ -204,6 +233,11 @@ App.indicators = {
     });
     this.menu.addEventListener("change", event => this.changeSetting(event.target));
     this.menu.addEventListener("click", event => {
+      const count = event.target.closest("[data-count-change]");
+      if (count) {
+        this.changeCount(count.dataset.id, Number(count.dataset.countChange));
+        return;
+      }
       const gear = event.target.closest("[data-settings]");
       if (!gear) return;
       const open = gear.getAttribute("aria-expanded") !== "true";
@@ -338,16 +372,23 @@ App.indicators = {
   changeSetting(input) {
     const setting = this.settings.find(item => item.id === input.dataset.id);
     if (!setting) return;
+    const lineIndex = Number(input.dataset.line || 0);
+    const extra = lineIndex > 0 ? setting.additionalLines?.[lineIndex - 1] : null;
+    if (lineIndex > 0 && !extra) return;
+    const target = extra || setting;
     const colorOnly = input.type === "color";
     if (input.type === "checkbox") setting.enabled = input.checked;
     else if (colorOnly) {
       if (!/^#[0-9a-f]{6}$/i.test(input.value)) return;
-      setting.colors[Number(input.dataset.color)] = input.value;
-      this.menu.querySelector(`[data-swatch="${setting.id}"]`).style.background = setting.colors[0];
+      if (extra) extra.color = input.value;
+      else {
+        setting.colors[Number(input.dataset.color)] = input.value;
+        this.menu.querySelector(`[data-swatch="${setting.id}"]`).style.background = setting.colors[0];
+      }
     } else {
       const value = input.valueAsNumber;
       if (!input.checkValidity() || !Number.isFinite(value)) {
-        input.value = setting[input.dataset.field];
+        input.value = target[input.dataset.field];
         return;
       }
       if (setting.id === "macd" && ((input.dataset.field === "fastPeriod" && value >= setting.slowPeriod) ||
@@ -355,14 +396,32 @@ App.indicators = {
         input.value = setting[input.dataset.field];
         return;
       }
-      setting[input.dataset.field] = value;
+      target[input.dataset.field] = value;
     }
     this.save();
     this.syncSeries();
     if (!colorOnly) this.reset();
   },
+  changeCount(id, delta) {
+    const setting = this.settings.find(item => item.id === id);
+    if (!setting?.additionalLines || ![1, -1].includes(delta)) return;
+    const count = setting.additionalLines.length + 1;
+    if (count + delta < 1 || count + delta > this.maxMovingAverages) return;
+    if (delta < 0) setting.additionalLines.pop();
+    else {
+      const periods = [20, 50, 100, 200];
+      const colors = [setting.colors[0], "#00897b", "#c2185b", "#795548", "#1565c0"];
+      setting.additionalLines.push({ period: periods[count] || 20, color: colors[count % colors.length] });
+    }
+    this.save();
+    this.renderMenu();
+    this.syncSeries();
+    this.reset();
+    this.position();
+  },
   renderMenu() {
     const rows = document.getElementById("chart-indicator-options");
+    const openId = this.menu?.querySelector('[data-settings][aria-expanded="true"]')?.dataset.settings;
     rows.replaceChildren(...this.settings.map(setting => {
       const def = this.definitions.find(item => item.id === setting.id);
       const row = document.createElement("div");
@@ -383,13 +442,62 @@ App.indicators = {
       gear.dataset.settings = def.id;
       gear.dataset.tooltip = "Settings";
       gear.setAttribute("aria-label", `${def.name} settings`);
-      gear.setAttribute("aria-expanded", "false");
+      gear.setAttribute("aria-expanded", String(def.id === openId));
       gear.setAttribute("aria-controls", `chart-indicator-settings-${def.id}`);
       gear.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
       const fields = document.createElement("div");
       fields.id = gear.getAttribute("aria-controls");
-      fields.className = "chart-indicator-settings hidden";
+      fields.className = `chart-indicator-settings${def.id === openId ? "" : " hidden"}`;
       row.append(gear, fields);
+      if (setting.additionalLines) {
+        const count = document.createElement("div");
+        count.className = "chart-indicator-count";
+        const name = document.createElement("span");
+        name.textContent = "Count";
+        const value = document.createElement("output");
+        value.textContent = String(setting.additionalLines.length + 1);
+        value.setAttribute("aria-label", `${def.name} count`);
+        const buttons = [-1, 1].map(delta => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.dataset.id = def.id;
+          button.dataset.countChange = String(delta);
+          button.dataset.tooltip = delta > 0 ? "Add line" : "Remove last line";
+          button.setAttribute("aria-label", `${button.dataset.tooltip}: ${def.name}`);
+          button.disabled = delta > 0 ? setting.additionalLines.length >= this.maxMovingAverages - 1 : !setting.additionalLines.length;
+          button.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14${delta > 0 ? "M12 5v14" : ""}"/></svg>`;
+          return button;
+        });
+        count.append(name, buttons[0], value, buttons[1]);
+        fields.append(count);
+        const lines = [{ period: setting.period, color: setting.colors[0] }, ...setting.additionalLines];
+        lines.forEach((line, index) => {
+          const group = document.createElement("div");
+          group.className = "chart-indicator-average";
+          const title = document.createElement("span");
+          title.textContent = `${def.name} ${index + 1}`;
+          group.append(title);
+          for (const field of ["period", "color"]) {
+            const label = document.createElement("label");
+            label.className = "chart-indicator-field";
+            label.textContent = field === "period" ? "Length" : "Color";
+            const input = document.createElement("input");
+            input.type = field === "period" ? "number" : "color";
+            input.value = line[field];
+            input.dataset.id = def.id;
+            input.dataset.line = String(index);
+            if (field === "period") {
+              Object.assign(input, { min: "2", max: "500", step: "1", inputMode: "numeric" });
+              input.dataset.field = field;
+            } else input.dataset.color = "0";
+            input.setAttribute("aria-label", `${def.name} ${index + 1} ${field}`);
+            label.append(input);
+            group.append(label);
+          }
+          fields.append(group);
+        });
+        return row;
+      }
       for (const field of this.fields(def)) {
         const spec = this.fieldSpec(field);
         const fieldLabel = document.createElement("label");
@@ -447,20 +555,20 @@ App.indicators = {
   },
   syncSeries() {
     const chart = App.chart.chart;
+    const configs = this.configurations();
     const heights = new Map();
     let layoutChanged = false;
-    for (const setting of this.settings) {
-      const current = this.series.get(setting.id);
-      if (this.panels.has(setting.id) && current) heights.set(setting.id, this.paneFor(setting.id).getHeight());
-      if (!setting.enabled && current) {
+    for (const [key, current] of this.series) {
+      if (this.panels.has(key)) heights.set(key, this.paneFor(key).getHeight());
+      if (!configs.some(setting => setting.key === key && setting.enabled)) {
         current.forEach(series => chart.removeSeries(series));
-        this.series.delete(setting.id);
-        if (this.panels.has(setting.id)) layoutChanged = true;
+        this.series.delete(key);
+        if (this.panels.has(key)) layoutChanged = true;
       }
     }
-    for (const setting of this.settings) {
+    for (const setting of configs) {
       if (!setting.enabled) continue;
-      const current = this.series.get(setting.id);
+      const current = this.series.get(setting.key);
       const def = this.definitions.find(item => item.id === setting.id);
       if (!current) {
         const paneIndex = def.pane ? chart.panes().length : 0;
@@ -473,7 +581,7 @@ App.indicators = {
             ...(def.range ? { autoscaleInfoProvider: () => ({ priceRange: { minValue: def.range[0], maxValue: def.range[1] } }) } : {}),
           }, paneIndex);
         });
-        this.series.set(setting.id, lines);
+        this.series.set(setting.key, lines);
         if (def.pane) {
           layoutChanged = true;
           heights.set(setting.id, setting.expandedHeight || Math.max(100, Math.round(App.chart.container.clientHeight * 0.25)));
@@ -483,7 +591,7 @@ App.indicators = {
           });
         }
       }
-      this.series.get(setting.id).forEach((series, index) => series.applyOptions({
+      this.series.get(setting.key).forEach((series, index) => series.applyOptions({
         title: def.lineNames?.[index] || (setting.id === "vwap" ? "VWAP (UTC)" : setting.id === "bb" ? `BB ${setting.period} ${["Upper", "Basis", "Lower"][index]}` : `${def.name} ${setting.period}`),
         color: (setting.colors || def.colors)[index],
         ...(def.pane ? { visible: !setting.collapsed, lastValueVisible: !setting.collapsed } : {}),
@@ -498,6 +606,7 @@ App.indicators = {
       }
       // LWC 5.0.9 requires all right-axis widgets during pane layout. The compact header covers the axis instead.
     }
+    this.syncOverlayLegend(configs);
     if (layoutChanged) this.applyPaneHeights(heights);
     this.button?.classList.toggle("active", this.active().length > 0);
     App.chart.syncManualAlertChipPosition();
@@ -552,9 +661,83 @@ App.indicators = {
   },
   updateCrosshairValue(param) {
     this.hovering = param?.time != null;
+    this.crosshairTime = this.hovering ? param.time : null;
     for (const [id, panel] of this.panels) {
       this.showPaneValues(id, this.hovering ? this.series.get(id)?.map(series => param.seriesData?.get(series)?.value) : panel.latest);
     }
+    for (const [key, panel] of this.overlays) {
+      this.showOverlayValues(key, this.hovering ? this.series.get(key)?.map(series => param.seriesData?.get(series)?.value) : panel.latest);
+    }
+  },
+  initOverlayLegend() {
+    this.overlayLegend = document.getElementById("chart-indicator-legend");
+    this.legendToggle = document.getElementById("chart-indicator-legend-toggle");
+    try {
+      this.legendCollapsed = localStorage.getItem(App.config.storageKey("indicator-legend-collapsed")) === "true";
+    } catch {}
+    this.legendToggle?.addEventListener("click", event => {
+      event.stopPropagation();
+      this.legendCollapsed = !this.legendCollapsed;
+      try {
+        localStorage.setItem(App.config.storageKey("indicator-legend-collapsed"), String(this.legendCollapsed));
+      } catch {}
+      this.refreshLegendVisibility();
+    });
+    this.legendToggle?.addEventListener("dblclick", event => event.preventDefault());
+    this.refreshLegendVisibility();
+  },
+  refreshLegendVisibility() {
+    const hasOverlays = this.overlays.size > 0;
+    this.overlayLegend?.classList.toggle("hidden", !hasOverlays || this.legendCollapsed);
+    if (!this.legendToggle) return;
+    this.legendToggle.classList.toggle("hidden", !hasOverlays);
+    this.legendToggle.setAttribute("aria-expanded", String(!this.legendCollapsed));
+    const label = this.legendCollapsed ? "Show indicator values" : "Hide indicator values";
+    this.legendToggle.setAttribute("aria-label", label);
+    this.legendToggle.dataset.tooltip = label;
+  },
+  syncOverlayLegend(configs) {
+    if (!this.overlayLegend) return;
+    const active = configs.filter(setting => setting.enabled && !this.panels.has(setting.id));
+    for (const key of this.overlays.keys()) {
+      if (!active.some(setting => setting.key === key)) this.overlays.delete(key);
+    }
+    const rows = active.map(setting => {
+      const def = this.definitions.find(item => item.id === setting.id);
+      let panel = this.overlays.get(setting.key);
+      if (!panel) {
+        const header = document.createElement("div"), content = document.createElement("span"), title = document.createElement("span");
+        header.className = "chart-indicator-legend-row";
+        content.className = "chart-indicator-legend-content";
+        title.className = "chart-indicator-legend-title";
+        const values = setting.colors.map((_, index) => {
+          const output = document.createElement("output");
+          output.setAttribute("aria-label", def.id === "bb" ? ["Upper", "Basis", "Lower"][index] : def.name);
+          return output;
+        });
+        content.append(title, ...values);
+        header.append(content);
+        panel = { header, title, values, latest: [] };
+        this.overlays.set(setting.key, panel);
+      }
+      panel.title.textContent = setting.id === "vwap" ? "VWAP (UTC)" :
+        `${def.name} ${this.fields(def).map(field => setting[field]).join(" ")}`;
+      panel.colors = setting.colors;
+      this.showOverlayValues(setting.key, this.hovering ? panel.selected : panel.latest);
+      return panel.header;
+    });
+    this.overlayLegend.replaceChildren(...rows);
+    this.refreshLegendVisibility();
+  },
+  showOverlayValues(key, values = []) {
+    const panel = this.overlays.get(key);
+    if (!panel) return;
+    if (this.hovering) panel.selected = values;
+    panel.values.forEach((output, index) => {
+      const value = values[index];
+      output.textContent = Number.isFinite(value) ? this.series.get(key)[index].priceFormatter().format(value) : "--";
+      output.style.color = panel.colors[index];
+    });
   },
   schedulePaneLayout() {
     if (!this.panels.size || this.paneFrame !== null) return;
@@ -605,9 +788,15 @@ App.indicators = {
   },
   clearPaneValues() {
     this.hovering = false;
+    this.crosshairTime = null;
     for (const [id, panel] of this.panels) {
       panel.latest = [];
       this.showPaneValues(id);
+    }
+    for (const [key, panel] of this.overlays) {
+      panel.latest = [];
+      panel.selected = [];
+      this.showOverlayValues(key);
     }
   },
   workerBar(bar) { return { time: bar.time, high: bar.high, low: bar.low, close: bar.close, volume: bar.volume }; },
@@ -655,7 +844,7 @@ App.indicators = {
     if (this.failed || this.busy || !this.active().length || (!this.needsReset && !this.pending.size)) return;
     try {
       if (!this.worker) {
-        const worker = this.worker = new Worker("/static/chart_indicators_worker.js?v=3");
+        const worker = this.worker = new Worker("/static/chart_indicators_worker.js?v=4");
         worker.onmessage = ({ data }) => {
           if (worker !== this.worker) return;
           this.busy = false;
@@ -673,6 +862,23 @@ App.indicators = {
                 panel.latest = item.lines.map(points => points.at(-1)?.value);
                 if (!this.hovering) this.showPaneValues(item.id, panel.latest);
               }
+              const overlay = this.overlays.get(item.id);
+              if (overlay) {
+                overlay.latest = item.lines.map(points => points.at(-1)?.value);
+                if (!this.hovering) this.showOverlayValues(item.id, overlay.latest);
+                else if (data.kind === "reset" || item.lines[0].some(point => point.time === this.crosshairTime)) {
+                  // Use the selected candle even when its value is still warming up.
+                  this.showOverlayValues(item.id, item.lines.map(points => {
+                    let lo = 0, hi = points.length;
+                    while (lo < hi) {
+                      const mid = (lo + hi) >>> 1;
+                      if (points[mid].time < this.crosshairTime) lo = mid + 1;
+                      else hi = mid;
+                    }
+                    return points[lo]?.time === this.crosshairTime ? points[lo].value : undefined;
+                  }));
+                }
+              }
             }
             this.appliedRevision = data.revision;
             this.status();
@@ -688,7 +894,7 @@ App.indicators = {
       const bars = this.needsReset
         ? App.collections.ohlcvData.map(bar => this.workerBar(bar))
         : [...this.pending.values()].sort((a, b) => a.time - b.time);
-      this.worker.postMessage({ kind, revision: this.revision, configs: this.active(), bars });
+      this.worker.postMessage({ kind, revision: this.revision, configs: this.configurations(this.active()), bars });
       this.pending.clear();
       this.needsReset = false;
       this.busy = true;

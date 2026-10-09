@@ -1,7 +1,7 @@
 .drawing-toolbar {
   position: fixed;
   left: 12px;
-  top: 88px;
+  top: max(88px, var(--chart-indicator-tools-top, 0px));
   z-index: 15;
   display: flex;
   flex-direction: column;
@@ -151,7 +151,7 @@ body.trendline-dragging :is(#chart, #backtest-price-chart) {
 @media (max-width: 640px), (hover: none) and (pointer: coarse) {
   .drawing-toolbar {
     left: max(8px, env(safe-area-inset-left));
-    top: max(96px, calc(env(safe-area-inset-top) + 96px));
+    top: max(96px, calc(env(safe-area-inset-top) + 96px), var(--chart-indicator-tools-top, 0px));
     gap: 5px;
     padding: 4px;
   }

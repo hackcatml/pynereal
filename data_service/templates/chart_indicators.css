@@ -18,6 +18,9 @@
 }
 .chart-indicators-menu .hidden,
 .chart-indicators-menu.hidden,
+.chart-indicator-legend-row.hidden,
+#chart-indicator-legend.hidden,
+#chart-indicator-legend-toggle.hidden,
 .chart-indicator-pane-header.hidden { display: none; }
 .chart-indicators-menu header {
   display: flex;
@@ -43,6 +46,7 @@
   touch-action: manipulation;
 }
 .chart-indicators-menu button:hover { background: #eef2f6; }
+.chart-indicators-menu button:disabled { opacity: 0.35; cursor: default; background: transparent; }
 .chart-indicators-menu button[aria-expanded="true"] { color: #1767bc; background: #eef2f6; }
 .chart-indicators-menu button[data-tooltip]::after {
   content: attr(data-tooltip);
@@ -148,6 +152,125 @@
 .chart-indicator-field input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
 .chart-indicator-field input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 2px; }
 .chart-indicator-field input[type="color"]::-moz-color-swatch { border: 0; border-radius: 2px; }
+.chart-indicator-count {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px 28px 28px;
+  align-items: center;
+  gap: 4px;
+  color: #5d6670;
+  font-size: 12px;
+}
+.chart-indicator-count output { text-align: center; font-variant-numeric: tabular-nums; }
+.chart-indicator-average {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 48px 48px;
+  gap: 8px;
+  align-items: end;
+}
+.chart-indicator-average > span { align-self: center; font-size: 12px; }
+#chart-indicator-legend {
+  isolation: isolate;
+  margin-top: 4px;
+  max-width: calc(100vw - 60px);
+  max-height: min(240px, 30vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  touch-action: pan-y;
+  font: 12px/20px system-ui, sans-serif;
+  letter-spacing: 0;
+}
+.chart-indicator-legend-row {
+  position: relative;
+  display: block;
+  box-sizing: border-box;
+  width: fit-content;
+  max-width: 100%;
+  padding: 0 var(--chart-label-padding-x);
+}
+/* Extend only the backdrop at stepped edges, without increasing row spacing. */
+.chart-indicator-legend-row::before {
+  content: "";
+  position: absolute;
+  inset: calc(0px - var(--chart-label-padding-y)) 0;
+  z-index: -1;
+  background: #fff;
+  border-radius: inherit;
+  pointer-events: none;
+}
+.chart-indicator-legend-row:first-child {
+  padding-top: var(--chart-label-padding-y);
+  border-top-left-radius: 6px;
+  border-top-right-radius: 6px;
+}
+.chart-indicator-legend-row:last-child {
+  padding-bottom: var(--chart-label-padding-y);
+  border-bottom-left-radius: 6px;
+  border-bottom-right-radius: 6px;
+}
+.chart-indicator-legend-row:first-child::before { top: 0; }
+.chart-indicator-legend-row:last-child::before { bottom: 0; }
+.chart-indicator-legend-content {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 6px;
+  pointer-events: auto;
+  touch-action: pan-y;
+}
+.chart-indicator-legend-title { color: #333; font: inherit; min-width: 0; }
+.chart-indicator-legend-row output {
+  display: block;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+#chart-indicator-legend-toggle {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 28px;
+  height: 20px;
+  margin-top: 4px;
+  margin-left: var(--chart-label-padding-x);
+  padding: 2px 4px;
+  border: 1px solid #d3d7dd;
+  border-radius: 3px;
+  background: #fff;
+  color: #333;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+#chart-indicator-legend-toggle svg { width: 14px; height: 14px; }
+#chart-indicator-legend-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+#chart-indicator-legend-toggle:focus-visible { outline: 2px solid #1767bc; outline-offset: 1px; }
+#chart-indicator-legend-toggle::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: #222;
+  color: #fff;
+  font: 12px/1.4 system-ui, sans-serif;
+  white-space: nowrap;
+  pointer-events: none;
+  display: none;
+}
+@media (hover: hover) and (pointer: fine) {
+  #chart-indicator-legend-toggle:hover { background: #eef2f6; }
+  #chart-indicator-legend-toggle:hover::after { display: block; }
+}
 .chart-indicators-menu :focus-visible { outline: 2px solid #1767bc; outline-offset: 1px; }
 #chart-indicator-status { margin-top: 6px; color: #b3261e; }
 .chart-indicator-pane-header {
