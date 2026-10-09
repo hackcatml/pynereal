@@ -8,6 +8,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional
 
+from pynecore.core.ohlcv_file import get_ohlcv_precision
+
 from config import MAX_SESSIONS, FeedSpec, SessionSpec, save_sessions
 from collector_loop import fix_missing_bars_loop, watch_trades_loop
 from file_update_loop import _to_thread_cancel_safe, file_update_loop
@@ -78,6 +80,7 @@ class SessionRegistry:
     ) -> None:
         self.feeds: Dict[str, Feed] = {}
         self.sessions: Dict[str, Session] = {}
+        self._history_download_locks: Dict[str, asyncio.Lock] = {}
         self.hub_ws = WSManager()  # dashboard clients on /ws/hub
         self.supervisor = RunnerSupervisor(port=port, on_change=self.notify_hub)
         from data_service.notifications import NotificationService
@@ -246,6 +249,8 @@ class SessionRegistry:
         feed: Feed,
         history_ready_event: asyncio.Event,
     ) -> None:
+        exchange_key = feed.spec.exchange.strip().lower()
+        history_download_lock = self._history_download_locks.setdefault(exchange_key, asyncio.Lock())
         delay = 1.0
         attempt = 0
         while True:
@@ -258,6 +263,7 @@ class SessionRegistry:
                     emit_event=feed.emit_event,
                     get_prerun_offset_seconds=lambda: feed.prerun_prepare_offset_seconds,
                     history_ready_event=history_ready_event,
+                    history_download_lock=history_download_lock,
                 )
                 return
             except asyncio.CancelledError:
@@ -330,6 +336,7 @@ class SessionRegistry:
             market_type=spec.market_type,
             on_event=feed.log_market_data_diagnostic,
             on_authoritative=feed.queue_verification_candle,
+            data_precision=get_ohlcv_precision(feed.paths.ohlcv_path),
         )
         feed.seed_verification_primary_results(probe)
         feed.finalized_candle_probe = probe

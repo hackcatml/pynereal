@@ -232,6 +232,8 @@ class CCXTProvider(Provider):
         }
         if exchange_name == 'binance':
             client_config['options'] = {'defaultType': 'swap'}
+        elif exchange_name == 'bitget':
+            client_config['rateLimit'] = 200
 
         exchange_options = exchange_config.get('options')
         if isinstance(exchange_options, dict):
