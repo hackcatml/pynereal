@@ -21,6 +21,7 @@ _BUSY_TIMEOUT_SECONDS = 30.0
 _BUSY_TIMEOUT_MS = int(_BUSY_TIMEOUT_SECONDS * 1000)
 _POSITION_LIFECYCLE_OPEN_TOLERANCE_SECONDS = 2.0
 _POSITION_UPDATE_TOLERANCE_SECONDS = 1.0
+_POSITION_CLOSE_DETECTION_DELAY_SECONDS = 300.0
 
 
 def _json(value: Any) -> str:
@@ -844,6 +845,76 @@ class AccountCache:
         )
 
     @staticmethod
+    def _has_matching_delayed_native_position(
+        connection: sqlite3.Connection,
+        derived: sqlite3.Row,
+    ) -> bool:
+        payload = _payload_object(derived["payload_json"])
+        last_active_update = next((
+            timestamp
+            for field in ("last_update_timestamp", "timestamp", "datetime")
+            if (timestamp := _epoch_timestamp(payload.get(field))) is not None
+        ), None)
+        entry_price = _decimal(payload.get("entry_price"))
+        if last_active_update is None or entry_price is None or entry_price <= 0:
+            return False
+
+        candidates = connection.execute(
+            """
+            SELECT market_scope, dex, side, opened_at, closed_at, payload_json
+            FROM position_history
+            WHERE account = ? AND exchange = ? AND symbol = ? AND source = 'native'
+              AND (julianday(?) - julianday(closed_at)) * 86400.0
+                  BETWEEN 0 AND ?
+            """,
+            (
+                str(derived["account"]),
+                str(derived["exchange"]),
+                str(derived["symbol"]),
+                str(derived["closed_at"]),
+                _POSITION_CLOSE_DETECTION_DELAY_SECONDS,
+            ),
+        ).fetchall()
+        matches = 0
+        for candidate in candidates:
+            if (
+                not _position_sides_match(candidate["side"], derived["side"])
+                or str(candidate["market_scope"]).lower() != str(derived["market_scope"]).lower()
+                or candidate["dex"] != derived["dex"]
+            ):
+                continue
+            opened_at = _iso_timestamp(candidate["opened_at"])
+            closed_at = _iso_timestamp(candidate["closed_at"])
+            # The saved live update must belong to this lifecycle, before its close.
+            if (
+                opened_at is None
+                or closed_at is None
+                or not (
+                    opened_at <= last_active_update
+                    < closed_at - _POSITION_UPDATE_TOLERANCE_SECONDS
+                )
+            ):
+                continue
+            native = _payload_object(candidate["payload_json"])
+            native_price = _decimal(native.get("entry_price"))
+            if (
+                native_price is None
+                or abs(entry_price - native_price) > entry_price * Decimal("1e-8")
+            ):
+                continue
+            for field in ("quantity", "contracts"):
+                quantity = _decimal(payload.get(field))
+                native_quantity = _decimal(native.get(field))
+                if quantity is not None and native_quantity is not None:
+                    if (
+                        quantity > 0 and native_quantity > 0
+                        and abs(quantity - native_quantity) <= quantity * Decimal("1e-8")
+                    ):
+                        matches += 1
+                    break
+        return matches == 1
+
+    @staticmethod
     def _repair_replaced_derived_position_history(
         connection: sqlite3.Connection,
     ) -> None:
@@ -955,6 +1026,11 @@ class AccountCache:
                 and _position_scopes_match(candidate["dex"], derived["dex"])
             ]
             if not candidates:
+                if AccountCache._has_matching_delayed_native_position(connection, derived):
+                    connection.execute(
+                        "DELETE FROM position_history WHERE id = ?",
+                        (int(derived["id"]),),
+                    )
                 continue
 
             # Fill-reconstructed histories represent a complete flat-to-flat
