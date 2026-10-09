@@ -488,10 +488,10 @@ class ScriptRunner:
                             "0.00",  # No profit percent yet
                             0.0,  # No cumulative profit change
                             "0.00",  # No cumulative profit percent change
-                            0.0,  # No max runup yet
-                            "0.00",  # No max runup percent yet
-                            0.0,  # No max drawdown yet
-                            "0.00",  # No max drawdown percent yet
+                            trade.max_runup,
+                            f"{trade.max_runup_percent:.2f}",
+                            trade.max_drawdown,
+                            f"{trade.max_drawdown_percent:.2f}",
                         )
 
                         # Export the exit part with "Open" signal (TradingView compatibility)
@@ -519,10 +519,10 @@ class ScriptRunner:
                                 f"{pnl_percent:.2f}",
                                 pnl,  # Same as profit for last trade
                                 f"{pnl_percent:.2f}",
-                                max(0.0, pnl),  # Runup
-                                f"{max(0, pnl_percent):.2f}",
-                                max(0.0, -pnl),  # Drawdown
-                                f"{max(0, -pnl_percent):.2f}",
+                                trade.max_runup,
+                                f"{trade.max_runup_percent:.2f}",
+                                trade.max_drawdown,
+                                f"{trade.max_drawdown_percent:.2f}",
                             )
 
                 # Write strategy statistics
