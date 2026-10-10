@@ -490,7 +490,7 @@ class ScriptRunner:
                             trade_num,
                             trade.entry_bar_index,
                             "Entry long" if trade.size > 0 else "Entry short",
-                            trade.entry_id,
+                            trade.entry_comment if trade.entry_comment else trade.entry_id,
                             string.format_time(trade.entry_time),  # type: ignore
                             trade.entry_price,
                             abs(trade.size),
