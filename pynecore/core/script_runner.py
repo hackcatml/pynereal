@@ -472,9 +472,19 @@ class ScriptRunner:
         finally:  # Python reference counter will close this even if the iterator is not exhausted
             if is_strat and position:
                 # Export remaining open trades before closing
-                if self.trades_writer and position.open_trades:
+                if self.trades_writer and position.open_trades and self.last_price is not None:
+                    exit_price = self.last_price
+                    initial_capital = self.script.initial_capital
+                    # netprofit already includes open entry fees; allocate them once per exported trade.
+                    cumulative_pnl = position.netprofit + sum(trade.commission for trade in position.open_trades)
                     for trade in position.open_trades:
                         trade_num += 1  # Continue numbering from closed trades
+                        # Mark an open trade without inventing a closing fill or exit commission.
+                        pnl = trade.size * (exit_price - trade.entry_price) - trade.commission
+                        entry_value = trade.entry_price * abs(trade.size)
+                        pnl_percent = pnl / entry_value * 100 if entry_value else 0.0
+                        cumulative_pnl += pnl
+                        cumulative_percent = cumulative_pnl / initial_capital * 100 if initial_capital else 0.0
                         # Export the entry part
                         self.trades_writer.write(
                             trade_num,
@@ -484,46 +494,34 @@ class ScriptRunner:
                             string.format_time(trade.entry_time),  # type: ignore
                             trade.entry_price,
                             abs(trade.size),
-                            0.0,  # No profit yet for open trades
-                            "0.00",  # No profit percent yet
-                            0.0,  # No cumulative profit change
-                            "0.00",  # No cumulative profit percent change
+                            pnl,
+                            f"{pnl_percent:.2f}",
+                            cumulative_pnl,
+                            f"{cumulative_percent:.2f}",
                             trade.max_runup,
                             f"{trade.max_runup_percent:.2f}",
                             trade.max_drawdown,
                             f"{trade.max_drawdown_percent:.2f}",
                         )
 
-                        # Export the exit part with "Open" signal (TradingView compatibility)
-                        # This simulates automatic closing at the end of backtest
-                        # Use the last price from the iteration
-                        exit_price = self.last_price
-
-                        if exit_price is not None:
-                            # Calculate profit/loss using the same formula as Position._fill_order
-                            # For closing, size is negative of the position
-                            closing_size = -trade.size
-                            pnl = -closing_size * (exit_price - trade.entry_price)
-                            pnl_percent = (pnl / (trade.entry_price * abs(trade.size))) * 100 \
-                                if trade.entry_price != 0 else 0
-
-                            self.trades_writer.write(
-                                trade_num,
-                                self.bar_index - 1,  # Last bar index
-                                "Exit long" if trade.size > 0 else "Exit short",
-                                "Open",  # TradingView uses "Open" signal for automatic closes
-                                string.format_time(lib._time),  # type: ignore
-                                exit_price,
-                                abs(trade.size),
-                                pnl,
-                                f"{pnl_percent:.2f}",
-                                pnl,  # Same as profit for last trade
-                                f"{pnl_percent:.2f}",
-                                trade.max_runup,
-                                f"{trade.max_runup_percent:.2f}",
-                                trade.max_drawdown,
-                                f"{trade.max_drawdown_percent:.2f}",
-                            )
+                        # Export the same valuation on the synthetic "Open" row.
+                        self.trades_writer.write(
+                            trade_num,
+                            self.bar_index - 1,  # Last bar index
+                            "Exit long" if trade.size > 0 else "Exit short",
+                            "Open",
+                            string.format_time(lib._time),  # type: ignore
+                            exit_price,
+                            abs(trade.size),
+                            pnl,
+                            f"{pnl_percent:.2f}",
+                            cumulative_pnl,
+                            f"{cumulative_percent:.2f}",
+                            trade.max_runup,
+                            f"{trade.max_runup_percent:.2f}",
+                            trade.max_drawdown,
+                            f"{trade.max_drawdown_percent:.2f}",
+                        )
 
                 # Write strategy statistics
                 if self.strat_writer and position:
