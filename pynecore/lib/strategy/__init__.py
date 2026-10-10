@@ -1106,6 +1106,21 @@ class Position:
 
             return False
 
+    def _fill_immediate_close(self, order: Order) -> None:
+        closed_start = len(self.new_closed_trades)
+        self.fill_order(order, self.c, self.h, self.l)
+        if len(self.new_closed_trades) == closed_start:
+            return
+
+        # Immediate closes happen after process_orders() finalized cumulative stats.
+        # Only stamp this fill's trades; earlier closes keep their own cumulative mark.
+        initial_capital = lib._script.initial_capital
+        self.cum_profit = self.equity - initial_capital - self.openprofit
+        cum_profit_percent = self.cum_profit / initial_capital * 100.0 if initial_capital else 0.0
+        for closed_trade in self.new_closed_trades[closed_start:]:
+            closed_trade.cum_profit = self.cum_profit
+            closed_trade.cum_profit_percent = cum_profit_percent
+
     def _check_already_filled(self, order: Order) -> bool:
         """
         Check if a stop or limit order would be immediately fillable due to a gap.
@@ -1598,7 +1613,7 @@ def close(id: str, comment: str | NA[str] = na_str, qty: float | NA[float] = na_
     # Add order to position (this will handle orderbook and exit_orders)
     position._add_order(order)
     if immediately:
-        position.fill_order(order, position.c, position.h, position.l)
+        position._fill_immediate_close(order)
 
     if record:
         record_message = (f'{{"time": {str(datetime.fromtimestamp(int(bar_time / 1000)))}, '
@@ -1644,7 +1659,7 @@ def close_all(comment: str | NA[str] = na_str, alert_message: str | NA[str] = na
     # Add order to position (this will handle orderbook and exit_orders)
     position._add_order(order)
     if immediately:
-        position.fill_order(order, position.c, position.h, position.l)
+        position._fill_immediate_close(order)
 
     if record:
         record_message = (f'{{"time": {str(datetime.fromtimestamp(int(bar_time / 1000)))}, '
