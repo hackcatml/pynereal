@@ -541,7 +541,10 @@ class ScriptRunner:
                             risk_free_rate=self.script.risk_free_rate,
                         )
 
-                        write_strategy_statistics_csv(stats, self.strat_writer)
+                        write_strategy_statistics_csv(
+                            stats, self.strat_writer,
+                            position=position, initial_capital=self.script.initial_capital,
+                        )
                         self.strat_writer.close()
 
                     finally:
