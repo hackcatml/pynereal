@@ -383,6 +383,11 @@ class ScriptRunner:
                 # Run the script
                 res = self.script_module.main()
 
+                # The realtime stream also steps a newly opened bar; it is not a closing tick.
+                if (is_strat and position and self.script.process_orders_on_close
+                        and (not self.script.realtime_trade or self.bar_index < self.script.last_bar_index)):
+                    position.process_close_orders()
+
                 # Update plot data with the results
                 if res is not None:
                     assert isinstance(res, dict), "The 'main' function must return a dictionary!"

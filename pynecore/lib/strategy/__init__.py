@@ -388,7 +388,7 @@ class Position:
         'risk_intraday_filled_orders', 'risk_intraday_start_equity', 'risk_halt_trading',
         'on_entry_callback', 'on_close_callback', 'on_alert_callback', 'on_ai_callback',
         'on_order_signal_callback',
-        '_entry_open_ledger'
+        '_entry_open_ledger', '_close_tick_orders'
     )
 
     def __init__(self):
@@ -409,6 +409,7 @@ class Position:
         self.entry_orders = {}  # Entry orders from strategy.entry()
         self.exit_orders = {}  # Exit orders from strategy.exit(), strategy.close(), etc.
         self.orderbook = PriceOrderBook()
+        self._close_tick_orders: list[Order] = []
 
         # Trades
         self.open_trades: list[Trade] = []
@@ -482,6 +483,8 @@ class Position:
         """ Add an order to the strategy """
         # Set the bar_index when the order is placed
         order.bar_index = lib.bar_index
+        if lib._script.process_orders_on_close:
+            self._close_tick_orders.append(order)
 
         # Add market order to market orders dict
         if order.is_market_order:
@@ -1242,6 +1245,8 @@ class Position:
 
     def process_orders(self):
         """ Process orders """
+        if lib._script.process_orders_on_close:
+            self._close_tick_orders.clear()
         # We need to round to the nearest tick to get the same results as in TradingView
         round_to_mintick = lib.math.round_to_mintick
         self.o = round_to_mintick(lib.open)
@@ -1486,6 +1491,114 @@ class Position:
                     closed_trade.cum_profit_percent = (closed_trade.cum_profit / initial_capital) * 100.0
                 except ZeroDivisionError:
                     closed_trade.cum_profit_percent = 0.0
+
+    def process_close_orders(self) -> None:
+        """Process this calculation's surviving orders at the closing tick only."""
+        if not self._close_tick_orders:
+            return
+        orders, self._close_tick_orders = self._close_tick_orders, []
+        for order in orders:
+            pending = self.exit_orders if order.order_type == _order_type_close else self.entry_orders
+            if order.cancelled or pending.get(order.order_id) is not order:
+                # Cancellation/replacement may have left an older market-queue entry.
+                if self.market_orders.get(order.order_id) is order:
+                    self.market_orders.pop(order.order_id)
+                continue
+            if order.order_type == _order_type_close:
+                if not self.open_trades:
+                    continue
+                self._resolve_close_order_prices(order)
+
+            market = (order.limit is None and order.stop is None and order.trail_price is None)
+            stop_hit = order.stop is not None and order.sign * (self.c - order.stop) >= 0.0
+            limit_hit = order.limit is not None and order.sign * (self.c - order.limit) <= 0.0
+            # A stop-limit entry activates its limit; an exit's stop/limit are alternatives.
+            if order.order_type != _order_type_close and order.stop is not None and order.limit is not None:
+                if not stop_hit:
+                    continue
+                self.orderbook.remove_order(order)
+                order.stop = None
+                self.orderbook.add_order(order)
+                stop_hit = False
+            if not (market or stop_hit or limit_hit):
+                continue
+
+            if market and order.order_type == _order_type_entry:
+                if self.sign != order.sign and self.size:
+                    order.size -= self.size
+            price = self.c
+            if not limit_hit:
+                price += lib._script.slippage * syminfo.mintick * order.sign
+            closed_start = len(self.new_closed_trades)
+            filled_before = self.risk_intraday_filled_orders
+            self.fill_order(order, price, self.c, self.c)
+            if self.risk_intraday_filled_orders != filled_before:
+                self._mark_close_fills(closed_start)
+
+    def _resolve_close_order_prices(self, order: Order) -> None:
+        """Resolve entry-relative exit prices without replaying the bar's high/low."""
+        trade = next((trade for trade in self.open_trades if trade.entry_id == order.order_id), None)
+        if trade is not None:
+            self.orderbook.remove_order(order)
+            for field, ticks, sign in (("limit", order.profit_ticks, -order.sign),
+                                       ("stop", order.loss_ticks, order.sign),
+                                       ("trail_price", order.trail_points_ticks, -order.sign)):
+                if ticks is not None and getattr(order, field) is None:
+                    setattr(order, field, _price_round(trade.entry_price + sign * syminfo.mintick * ticks, sign))
+            self.orderbook.add_order(order)
+        if order.limit is not None or order.stop is not None or order.trail_price is not None:
+            if self.market_orders.get(order.order_id) is order:
+                self.market_orders.pop(order.order_id)
+            order.is_market_order = False
+        if order.trail_price is not None:
+            if -order.sign * (self.c - order.trail_price) >= 0.0:
+                order.trail_triggered = True
+            if order.trail_triggered:
+                stop = lib.math.round_to_mintick(self.c + order.sign * syminfo.mintick * order.trail_offset)
+                if order.stop is None or order.sign * (stop - order.stop) < 0.0:
+                    self.orderbook.update_order_stop(order, stop)
+
+    def _mark_close_fills(self, closed_start: int) -> None:
+        """Mark post-calculation fills at close, preserving earlier intrabar excursions."""
+        drawdown = runup = 0.0
+        for trade in self.open_trades:
+            profit = trade.size * (self.c - trade.entry_price) - trade.commission
+            trade.profit = profit - trade.commission
+            trade.max_drawdown = max(trade.max_drawdown, -min(profit, 0.0))
+            trade.max_runup = max(trade.max_runup, max(profit, 0.0))
+            cost = abs(trade.size) * trade.entry_price + trade.commission
+            if cost > 0.0:
+                trade.max_drawdown_percent = trade.max_drawdown / cost * 100.0
+                trade.max_runup_percent = trade.max_runup / cost * 100.0
+            gross = trade.size * (self.c - self.avg_price)
+            drawdown += -min(gross, 0.0)
+            runup += max(gross, 0.0)
+
+        initial_capital = float(lib._script.initial_capital)
+        realized = initial_capital + float(self.netprofit)
+        self.max_realized_equity = max(self.max_realized_equity, realized)
+        peak = max(initial_capital, self.max_realized_equity)
+        close_drawdown = peak - realized + drawdown
+        close_drawdown_percent = close_drawdown / peak * 100.0 if peak > 0.0 else 0.0
+        self.current_drawdown = max(self.current_drawdown, close_drawdown)
+        self.current_drawdown_percent = max(self.current_drawdown_percent, close_drawdown_percent)
+        self.max_drawdown = max(self.max_drawdown, close_drawdown)
+        self.max_drawdown_percent = max(self.max_drawdown_percent, close_drawdown_percent)
+        if self.min_equity < float("inf"):
+            close_runup = realized + runup - self.min_equity
+            self.max_runup = max(self.max_runup, close_runup)
+            top = self.min_equity + close_runup
+            if top > 0.0:
+                self.max_runup_percent = max(self.max_runup_percent, close_runup / top * 100.0)
+
+        if len(self.new_closed_trades) > closed_start:
+            self.cum_profit = self.equity - initial_capital - self.openprofit
+            percent = self.cum_profit / initial_capital * 100.0 if initial_capital else 0.0
+            for trade in self.new_closed_trades[closed_start:]:
+                trade.cum_profit = self.cum_profit
+                trade.cum_profit_percent = percent
+                trade.cum_max_drawdown = self.max_drawdown
+                trade.cum_max_runup = self.max_runup
 
 #
 # Functions
