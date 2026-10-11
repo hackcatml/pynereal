@@ -608,6 +608,7 @@ class Position:
         # Close order - if it is an exit order or a normal order
         if self.size and order.sign != self.sign:
             delete = False
+            initial_capital = script.initial_capital
 
             # TradingView attributes closed trades FIFO by default. With ANY,
             # an entry-bound close consumes only that entry's trade rows.
@@ -686,15 +687,19 @@ class Position:
                         closed_trade.profit -= closed_trade.commission
 
                     # Profit percent
-                    entry_value = abs(closed_trade.size) * closed_trade.entry_price
                     try:
-                        # Use closed_trade.profit which includes commission, not pnl which doesn't
-                        closed_trade.profit_percent = (closed_trade.profit / entry_value) * 100.0
+                        closed_trade.profit_percent = (closed_trade.profit / entry_cost) * 100.0
                     except ZeroDivisionError:
                         closed_trade.profit_percent = 0.0
 
                     # Realize profit or loss
                     self.netprofit += pnl
+                    # Entry fees were already paid. Freeze each fill's realized mark
+                    # before later closes or entries on this bar change netprofit.
+                    closed_trade.cum_profit = self.netprofit
+                    closed_trade.cum_profit_percent = (
+                        self.netprofit / initial_capital * 100.0 if initial_capital else 0.0
+                    )
 
                     # Modify sizes
                     self.size += size
@@ -767,9 +772,15 @@ class Position:
                 if commission_type == _commission.cash_per_order:
                     # Realize commission
                     self.netprofit -= commission_value
+                    allocated_commission = 0.0
                     for trade in new_closed_trades:
                         commission = (commission_value * abs(trade.size)) / closed_trade_size
                         trade.commission += commission
+                        allocated_commission += commission
+                        trade.cum_profit -= allocated_commission
+                        trade.cum_profit_percent = (
+                            trade.cum_profit / initial_capital * 100.0 if initial_capital else 0.0
+                        )
 
             self.new_closed_trades.extend(new_closed_trades)
 
@@ -1116,13 +1127,9 @@ class Position:
             return
 
         # Immediate closes happen after process_orders() finalized cumulative stats.
-        # Only stamp this fill's trades; earlier closes keep their own cumulative mark.
+        # Trade marks are captured by _fill_order; only refresh the position mark.
         initial_capital = lib._script.initial_capital
         self.cum_profit = self.equity - initial_capital - self.openprofit
-        cum_profit_percent = self.cum_profit / initial_capital * 100.0 if initial_capital else 0.0
-        for closed_trade in self.new_closed_trades[closed_start:]:
-            closed_trade.cum_profit = self.cum_profit
-            closed_trade.cum_profit_percent = cum_profit_percent
 
     def _check_already_filled(self, order: Order) -> bool:
         """
@@ -1478,19 +1485,10 @@ class Position:
 
         # Cumulative stats
         if self.new_closed_trades:
-            initial_capital = lib._script.initial_capital
+            self.cum_profit = self.equity - lib._script.initial_capital - self.openprofit
             for closed_trade in self.new_closed_trades:
-                self.cum_profit = self.equity - lib._script.initial_capital - self.openprofit
-                closed_trade.cum_profit = self.cum_profit
                 closed_trade.cum_max_drawdown = self.max_drawdown
                 closed_trade.cum_max_runup = self.max_runup
-
-                # Cumulative profit percent
-                # TradingView calculates this as total return on initial capital
-                try:
-                    closed_trade.cum_profit_percent = (closed_trade.cum_profit / initial_capital) * 100.0
-                except ZeroDivisionError:
-                    closed_trade.cum_profit_percent = 0.0
 
     def process_close_orders(self) -> None:
         """Process this calculation's surviving orders at the closing tick only."""
@@ -1593,10 +1591,7 @@ class Position:
 
         if len(self.new_closed_trades) > closed_start:
             self.cum_profit = self.equity - initial_capital - self.openprofit
-            percent = self.cum_profit / initial_capital * 100.0 if initial_capital else 0.0
             for trade in self.new_closed_trades[closed_start:]:
-                trade.cum_profit = self.cum_profit
-                trade.cum_profit_percent = percent
                 trade.cum_max_drawdown = self.max_drawdown
                 trade.cum_max_runup = self.max_runup
 

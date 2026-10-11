@@ -283,7 +283,7 @@ class ScriptRunner:
             f"Long {syminfo.currency}", "Long %",
             f"Short {syminfo.currency}", "Short %",
         )) if strat_path and not self.script.realtime_trade else None
-        self.trades_writer = CSVWriter(trade_path, headers=(
+        self.trades_writer = CSVWriter(trade_path, float_fmt='.17g', headers=(
             "Trade #", "Bar Index", "Type", "Signal", "Date/Time", f"Price {syminfo.currency}",
             "Contracts", f"Profit {syminfo.currency}", "Profit %", f"Cumulative profit {syminfo.currency}",
             "Cumulative profit %", f"Run-up {syminfo.currency}", "Run-up %", f"Drawdown {syminfo.currency}",
@@ -486,8 +486,8 @@ class ScriptRunner:
                         trade_num += 1  # Continue numbering from closed trades
                         # Mark an open trade without inventing a closing fill or exit commission.
                         pnl = trade.size * (exit_price - trade.entry_price) - trade.commission
-                        entry_value = trade.entry_price * abs(trade.size)
-                        pnl_percent = pnl / entry_value * 100 if entry_value else 0.0
+                        entry_cost = trade.entry_price * abs(trade.size) + trade.commission
+                        pnl_percent = pnl / entry_cost * 100 if entry_cost else 0.0
                         cumulative_pnl += pnl
                         cumulative_percent = cumulative_pnl / initial_capital * 100 if initial_capital else 0.0
                         # Export the entry part
