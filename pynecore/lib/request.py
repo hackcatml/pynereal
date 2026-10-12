@@ -172,6 +172,8 @@ class SecurityContext:
 
     @staticmethod
     def _restore_function_cache(func_cache: dict[Any, Any], snapshot: dict[Any, dict[str, Any]]) -> None:
+        from pynecore.core.native_indicators import is_native_indicator_state
+
         for key, state in snapshot.items():
             func = func_cache.get(key)
             if func is None:
@@ -190,7 +192,8 @@ class SecurityContext:
                         value.restore(restored)
                         globals_dict[name] = restored
                 else:
-                    globals_dict[name] = value
+                    # Native buffers are mutable: never resume into the saved snapshot itself.
+                    globals_dict[name] = copy.copy(value) if is_native_indicator_state(value) else value
 
     def _create_cache(self, timeframe: str) -> _TimeframeCache:
         cache = _TimeframeCache(resampler=Resampler.get_resampler(timeframe))
