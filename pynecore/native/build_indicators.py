@@ -1,4 +1,4 @@
-"""Build the opt-in indicator extension without changing the installed package."""
+"""Build the optional indicator extension, used by default when available on the import path."""
 import argparse
 import os
 from pathlib import Path

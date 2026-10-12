@@ -1,4 +1,4 @@
-"""Opt-in state-owning indicators. Unsupported inputs retain the original Python semantics."""
+"""Use available native indicators by default, retaining Python fallbacks for unsupported inputs."""
 import copy
 import os
 from collections import deque
@@ -13,7 +13,8 @@ _supports_extrema = False
 _supports_valuewhen = False
 _supports_statistics = False
 _supports_scalar_math = False
-if os.environ.get('PYNECORE_NATIVE_INDICATORS') == '1':
+# Set PYNECORE_NATIVE_INDICATORS=0 before import to use only Python indicators.
+if os.environ.get('PYNECORE_NATIVE_INDICATORS', '1') == '1':
     try:
         import _pynereal_native_ta
         from _pynereal_native_ta import State
