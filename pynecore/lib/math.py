@@ -396,3 +396,8 @@ def toradians(angle: TFI | NA[TFI]) -> float | NA[float]:
     if isinstance(angle, NA):
         return NA(float)
     return math.radians(angle)
+
+
+from pynecore.core.native_indicators import install_math as _install_native_math
+_install_native_math(globals())
+del _install_native_math

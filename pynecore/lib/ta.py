@@ -2099,3 +2099,8 @@ def wvad() -> float | NA[float] | Series[float]:
     :return: Weighted Volume Accumulation/Distribution
     """
     return (close - open) / (high - low) * volume
+
+
+# Optional state-owning kernels; disabled unless explicitly requested before import.
+from pynecore.core.native_indicators import install as _install_native_indicators
+_install_native_indicators(globals())
