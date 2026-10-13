@@ -577,7 +577,7 @@ class Position:
         left = self._entry_open_ledger.get(entry_id)
         if left is None:
             return
-        left -= qty
+        left = _size_add(left, -qty)
         if _size_round(left) <= 0.0:
             del self._entry_open_ledger[entry_id]
             for exit_order in list(self.exit_orders.values()):
@@ -703,17 +703,17 @@ class Position:
                     )
 
                     # Modify sizes
-                    self.size += size
+                    self.size = _size_add(self.size, size)
                     # Handle too small sizes because of floating point inaccuracy and rounding
                     position_flat = _size_round(self.size) == 0.0
                     if position_flat:
                         size -= self.size
                         self.size = 0.0
                     self.sign = 0.0 if self.size == 0.0 else 1.0 if self.size > 0.0 else -1.0
-                    trade.size += size
+                    trade.size = _size_add(trade.size, size)
                     if position_flat:
                         trade.size = 0.0
-                    order.size -= size
+                    order.size = _size_add(order.size, -size)
 
                     # Gross P/L and counters
                     if closed_trade.profit == 0.0:
@@ -755,7 +755,7 @@ class Position:
 
             # Trade rows follow FIFO/ANY attribution, while this ledger follows
             # the entry ID that the closing order was bound to.
-            closed_qty = filled_size - abs(order.size)
+            closed_qty = _size_add(filled_size, -abs(order.size))
             if closed_qty > 0.0:
                 if order.order_type == _order_type_close and order.order_id is not None:
                     self._reduce_entry_ledger(order.order_id, closed_qty)
@@ -765,7 +765,7 @@ class Position:
                             break
                         taken = min(self._entry_open_ledger[entry_id], closed_qty)
                         self._reduce_entry_ledger(entry_id, taken)
-                        closed_qty -= taken
+                        closed_qty = _size_add(closed_qty, -taken)
 
             if delete:
                 self._remove_order(order)
@@ -835,13 +835,13 @@ class Position:
 
             self.open_trades.append(trade)
             self._entry_open_ledger[order.order_id] = (
-                self._entry_open_ledger.get(order.order_id, 0.0) + abs(order.size)
+                _size_add(self._entry_open_ledger.get(order.order_id, 0.0), abs(order.size))
             )
             previous_size = abs(self.size)
             if previous_size == 0.0:
                 self.position_open_time = int(lib._time)
                 self.position_open_bar_index = int(lib.bar_index)
-            self.size += trade.size
+            self.size = _size_add(self.size, trade.size)
             self.sign = 0.0 if self.size == 0.0 else 1.0 if self.size > 0.0 else -1.0
 
             # Average entry price
@@ -1047,7 +1047,7 @@ class Position:
         # If position direction is about to change, we split it into two separate orders
         # This is necessary to create a new average entry price
         # Note: The flip quantity is already calculated in entry() for entry orders
-        new_size = self.size + order.size
+        new_size = _size_add(self.size, order.size)
         if _size_round(new_size) == 0.0:
             new_size = 0.0
         new_sign = 0.0 if new_size == 0.0 else 1.0 if new_size > 0.0 else -1.0
@@ -1057,7 +1057,7 @@ class Position:
             if order.order_type == _order_type_close or close_only:
                 # Limit the exit order size to just close the position.
                 # Partial close 가 안되어서 수정. (original: order.size = -self.size)
-                order.size += self.size
+                order.size = _size_add(order.size, self.size)
                 self._fill_order(order, price, h, l)
                 return False
 
@@ -1340,7 +1340,7 @@ class Position:
                 elif self.size != 0.0:
                     # TradingView calculates the flip quantity 1st order processing
                     # then open a new one in the opposite direction.
-                    order.size -= self.size  # Subtract because position.size has opposite sign
+                    order.size = _size_add(order.size, -self.size)
 
             # Apply slippage to market orders
             fill_price = self.o
@@ -1523,7 +1523,7 @@ class Position:
 
             if market and order.order_type == _order_type_entry:
                 if self.sign != order.sign and self.size:
-                    order.size -= self.size
+                    order.size = _size_add(order.size, -self.size)
             price = self.c
             if not limit_hit:
                 price += lib._script.slippage * syminfo.mintick * order.sign
@@ -1598,6 +1598,22 @@ class Position:
 #
 # Functions
 #
+
+# noinspection PyProtectedMember
+def _size_add(qty_a: float, qty_b: float) -> float:
+    """Combine lot-normalized quantities without leaving floating-point dust."""
+    rfactor = syminfo._size_round_factor  # noqa
+    lots_a, lots_b = qty_a * rfactor, qty_b * rfactor
+    if not (abs(lots_a) < 9007199254740992.0 and abs(lots_b) < 9007199254740992.0):
+        return qty_a + qty_b
+    rounded_a, rounded_b = round(lots_a), round(lots_b)
+    # Risk limits can supply off-grid sizes; do not change those quantities here.
+    if (abs(lots_a - rounded_a) > abs(lots_a) * 1e-12 + 1e-9
+            or abs(lots_b - rounded_b) > abs(lots_b) * 1e-12 + 1e-9):
+        return qty_a + qty_b
+    # Keep _size_round's existing float representation, not a new unit grid.
+    return (rounded_a + rounded_b) / rfactor
+
 
 # noinspection PyProtectedMember
 def _size_round(qty: float) -> float:
