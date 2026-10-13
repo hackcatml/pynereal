@@ -4,6 +4,7 @@ from datetime import datetime, UTC
 from collections import deque, defaultdict
 from copy import copy
 from bisect import insort, bisect_left
+from math import floor
 
 from ...core.module_property import module_property
 from ... import lib
@@ -594,6 +595,7 @@ class Position:
         :param h: The high price
         :param l: The low price
         """
+        price = _tick_snap(price)
         position_size_before = float(self.size)
         # Save the original order size before any modifications
         filled_size = abs(order.size)
@@ -1255,11 +1257,10 @@ class Position:
         if lib._script.process_orders_on_close:
             self._close_tick_orders.clear()
         # We need to round to the nearest tick to get the same results as in TradingView
-        round_to_mintick = lib.math.round_to_mintick
-        self.o = round_to_mintick(lib.open)
-        self.h = round_to_mintick(lib.high)
-        self.l = round_to_mintick(lib.low)
-        self.c = round_to_mintick(lib.close)
+        self.o = _tick_snap(lib.open)
+        self.h = _tick_snap(lib.high)
+        self.l = _tick_snap(lib.low)
+        self.c = _tick_snap(lib.close)
 
         # Check if we're in a new trading day for intraday risk management
         # TradingView tracks intraday based on trading session, not calendar day
@@ -1616,6 +1617,14 @@ def _size_round(qty: float) -> float:
 
 
 # noinspection PyShadowingNames
+def _tick_snap(price: float) -> float:
+    """Round simulated prices to ticks without changing raw indicator inputs."""
+    if not (price == price):
+        return price
+    mintick = syminfo.mintick
+    return floor(price / mintick + 0.5) * mintick
+
+
 def _price_round(price: float | NA[float], direction: int | float) -> float | NA[float]:
     """
     Round price to the nearest tick

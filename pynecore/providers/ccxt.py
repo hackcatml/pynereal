@@ -13,6 +13,8 @@ from datetime import datetime, UTC, timedelta
 from pathlib import Path
 from datetime import time
 import tomllib
+from math import isfinite
+from tempfile import NamedTemporaryFile
 
 from .provider import Provider
 
@@ -277,6 +279,63 @@ class CCXTProvider(Provider):
 
         return opening_hours, session_starts, session_ends
 
+    def _derive_qty_step(self, market_details: dict) -> float:
+        """Resolve the exchange's lot grid without confusing decimal places with ticks."""
+        import ccxt
+
+        amount = market_details.get('precision', {}).get('amount')
+        if amount is not None:
+            if self._client.precisionMode == ccxt.TICK_SIZE:
+                step = float(amount)
+            elif self._client.precisionMode == ccxt.DECIMAL_PLACES:
+                step = 10.0 ** -int(amount)
+            else:
+                return 0.0  # Significant digits do not describe a fixed lot grid.
+        else:
+            minimum = market_details.get('limits', {}).get('amount', {}).get('min')
+            step = float(minimum) if minimum is not None else 0.0
+        return step if isfinite(step) and step > 0 else 0.0
+
+    @override
+    def get_symbol_info(self, force_update=False) -> SymInfo:
+        info = super().get_symbol_info(force_update=force_update)
+        if info.mincontract > 0:
+            return info
+        self._client.load_markets()
+        market = self._client.market(self.symbol)
+        step = self._derive_qty_step(market)
+        if step <= 0:
+            return info
+        # Existing TOMLs can express quantities in base units (pointvalue=1)
+        # instead of exchange contracts. Keep that unit and all user metadata.
+        contract_size = float(market.get('contractSize') or 1.0)
+        if (info.pointvalue <= 0 or not isfinite(info.pointvalue)
+                or contract_size <= 0 or not isfinite(contract_size)):
+            return info
+        quantity_step = step * contract_size / info.pointvalue
+        if quantity_step <= 0 or not isfinite(quantity_step):
+            return info
+        import tomlkit
+
+        path = self.ohlcv_path.with_suffix('.toml')
+        document = tomlkit.parse(path.read_text(encoding='utf-8'))
+        if float(document['symbol'].get('mincontract', 0.0)) > 0:
+            return SymInfo.load_toml(path)
+        info.mincontract = quantity_step
+        document['symbol']['mincontract'] = info.mincontract
+        temporary = None
+        try:
+            with NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
+                                    suffix='.toml.tmp', delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(tomlkit.dumps(document))
+            temporary.chmod(path.stat().st_mode)
+            temporary.replace(path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        return info
+
     @override
     def update_symbol_info(self) -> SymInfo:
         """
@@ -319,6 +378,7 @@ class CCXTProvider(Provider):
             pricescale=pricescale,
             minmove=minmove,
             pointvalue=market_details.get('contractSize') or 1.0,
+            mincontract=self._derive_qty_step(market_details),
             timezone=self.timezone,
             opening_hours=opening_hours,
             session_starts=session_starts,
