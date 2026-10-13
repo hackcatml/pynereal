@@ -1329,8 +1329,8 @@ class Position:
 
         # Process Market orders
         for order in list(self.market_orders.values()):
-            if order.limit is None and order.stop is None:
-                # We need to check pyramiding and flip quantity here for market orders :-/
+            if order.order_type != _order_type_normal and order.limit is None and order.stop is None:
+                # Normal orders bypass the existing entry/close quantity normalization.
                 # Check pyramiding limit for entry orders adding to existing position
                 if self.sign == order.sign:
                     if lib._script.pyramiding <= len(self.open_trades):
