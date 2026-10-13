@@ -670,9 +670,8 @@ class Position:
                     # Commission summ
                     self.open_commission -= closed_trade.commission
 
-                    # We realize later if it is cash per order or cash per contract
-                    if (commission_type == _commission.cash_per_contract or
-                            commission_type == _commission.cash_per_order):
+                    # Only per-order fees need allocation across multiple trades.
+                    if commission_type == _commission.cash_per_order:
                         closed_trade_size += abs(size)
                     else:
                         # Calculate exit commission based on commission type
@@ -680,7 +679,7 @@ class Position:
                             # For percentage commission, multiply by exit price
                             commission = abs(size) * price * commission_value * 0.01
                         else:
-                            # For other types (shouldn't reach here normally)
+                            # Contract fees are charged on the quantity closed.
                             commission = abs(size) * commission_value
 
                         closed_trade.commission += commission
