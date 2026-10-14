@@ -45,6 +45,7 @@ optional-dependencies.all = [
     "markdown-it-py",
     "httpx",
     "ccxt",
+    "tomlkit",
     "pycryptodome",
     "tzdata",
     "openai-codex==0.1.0b3",
@@ -61,13 +62,14 @@ optional-dependencies.dev = ["pytest", "pytest-spec"]
 optional-dependencies.providers = [
     "httpx",
     "ccxt",
+    "tomlkit",
     "pycryptodome",
     "websockets>=15,<17",
     "certifi",
 ]
 
 # For CCXT provider to work
-optional-dependencies.ccxt = ["ccxt", "websockets>=15,<17", "certifi"]
+optional-dependencies.ccxt = ["ccxt", "tomlkit", "websockets>=15,<17", "certifi"]
 
 # For Capital.com provider to work
 optional-dependencies.capitalcom = ["httpx", "pycryptodome"]

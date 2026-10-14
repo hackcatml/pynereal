@@ -4,6 +4,7 @@ from datetime import datetime, UTC
 from collections import deque, defaultdict
 from copy import copy
 from bisect import insort, bisect_left
+from math import floor
 
 from ...core.module_property import module_property
 from ... import lib
@@ -576,7 +577,7 @@ class Position:
         left = self._entry_open_ledger.get(entry_id)
         if left is None:
             return
-        left -= qty
+        left = _size_add(left, -qty)
         if _size_round(left) <= 0.0:
             del self._entry_open_ledger[entry_id]
             for exit_order in list(self.exit_orders.values()):
@@ -594,6 +595,7 @@ class Position:
         :param h: The high price
         :param l: The low price
         """
+        price = _tick_snap(price)
         position_size_before = float(self.size)
         # Save the original order size before any modifications
         filled_size = abs(order.size)
@@ -608,6 +610,7 @@ class Position:
         # Close order - if it is an exit order or a normal order
         if self.size and order.sign != self.sign:
             delete = False
+            initial_capital = script.initial_capital
 
             # TradingView attributes closed trades FIFO by default. With ANY,
             # an entry-bound close consumes only that entry's trade rows.
@@ -667,9 +670,8 @@ class Position:
                     # Commission summ
                     self.open_commission -= closed_trade.commission
 
-                    # We realize later if it is cash per order or cash per contract
-                    if (commission_type == _commission.cash_per_contract or
-                            commission_type == _commission.cash_per_order):
+                    # Only per-order fees need allocation across multiple trades.
+                    if commission_type == _commission.cash_per_order:
                         closed_trade_size += abs(size)
                     else:
                         # Calculate exit commission based on commission type
@@ -677,7 +679,7 @@ class Position:
                             # For percentage commission, multiply by exit price
                             commission = abs(size) * price * commission_value * 0.01
                         else:
-                            # For other types (shouldn't reach here normally)
+                            # Contract fees are charged on the quantity closed.
                             commission = abs(size) * commission_value
 
                         closed_trade.commission += commission
@@ -686,28 +688,32 @@ class Position:
                         closed_trade.profit -= closed_trade.commission
 
                     # Profit percent
-                    entry_value = abs(closed_trade.size) * closed_trade.entry_price
                     try:
-                        # Use closed_trade.profit which includes commission, not pnl which doesn't
-                        closed_trade.profit_percent = (closed_trade.profit / entry_value) * 100.0
+                        closed_trade.profit_percent = (closed_trade.profit / entry_cost) * 100.0
                     except ZeroDivisionError:
                         closed_trade.profit_percent = 0.0
 
                     # Realize profit or loss
                     self.netprofit += pnl
+                    # Entry fees were already paid. Freeze each fill's realized mark
+                    # before later closes or entries on this bar change netprofit.
+                    closed_trade.cum_profit = self.netprofit
+                    closed_trade.cum_profit_percent = (
+                        self.netprofit / initial_capital * 100.0 if initial_capital else 0.0
+                    )
 
                     # Modify sizes
-                    self.size += size
+                    self.size = _size_add(self.size, size)
                     # Handle too small sizes because of floating point inaccuracy and rounding
                     position_flat = _size_round(self.size) == 0.0
                     if position_flat:
                         size -= self.size
                         self.size = 0.0
                     self.sign = 0.0 if self.size == 0.0 else 1.0 if self.size > 0.0 else -1.0
-                    trade.size += size
+                    trade.size = _size_add(trade.size, size)
                     if position_flat:
                         trade.size = 0.0
-                    order.size -= size
+                    order.size = _size_add(order.size, -size)
 
                     # Gross P/L and counters
                     if closed_trade.profit == 0.0:
@@ -749,7 +755,7 @@ class Position:
 
             # Trade rows follow FIFO/ANY attribution, while this ledger follows
             # the entry ID that the closing order was bound to.
-            closed_qty = filled_size - abs(order.size)
+            closed_qty = _size_add(filled_size, -abs(order.size))
             if closed_qty > 0.0:
                 if order.order_type == _order_type_close and order.order_id is not None:
                     self._reduce_entry_ledger(order.order_id, closed_qty)
@@ -759,7 +765,7 @@ class Position:
                             break
                         taken = min(self._entry_open_ledger[entry_id], closed_qty)
                         self._reduce_entry_ledger(entry_id, taken)
-                        closed_qty -= taken
+                        closed_qty = _size_add(closed_qty, -taken)
 
             if delete:
                 self._remove_order(order)
@@ -767,9 +773,15 @@ class Position:
                 if commission_type == _commission.cash_per_order:
                     # Realize commission
                     self.netprofit -= commission_value
+                    allocated_commission = 0.0
                     for trade in new_closed_trades:
                         commission = (commission_value * abs(trade.size)) / closed_trade_size
                         trade.commission += commission
+                        allocated_commission += commission
+                        trade.cum_profit -= allocated_commission
+                        trade.cum_profit_percent = (
+                            trade.cum_profit / initial_capital * 100.0 if initial_capital else 0.0
+                        )
 
             self.new_closed_trades.extend(new_closed_trades)
 
@@ -823,13 +835,13 @@ class Position:
 
             self.open_trades.append(trade)
             self._entry_open_ledger[order.order_id] = (
-                self._entry_open_ledger.get(order.order_id, 0.0) + abs(order.size)
+                _size_add(self._entry_open_ledger.get(order.order_id, 0.0), abs(order.size))
             )
             previous_size = abs(self.size)
             if previous_size == 0.0:
                 self.position_open_time = int(lib._time)
                 self.position_open_bar_index = int(lib.bar_index)
-            self.size += trade.size
+            self.size = _size_add(self.size, trade.size)
             self.sign = 0.0 if self.size == 0.0 else 1.0 if self.size > 0.0 else -1.0
 
             # Average entry price
@@ -1035,7 +1047,7 @@ class Position:
         # If position direction is about to change, we split it into two separate orders
         # This is necessary to create a new average entry price
         # Note: The flip quantity is already calculated in entry() for entry orders
-        new_size = self.size + order.size
+        new_size = _size_add(self.size, order.size)
         if _size_round(new_size) == 0.0:
             new_size = 0.0
         new_sign = 0.0 if new_size == 0.0 else 1.0 if new_size > 0.0 else -1.0
@@ -1045,7 +1057,7 @@ class Position:
             if order.order_type == _order_type_close or close_only:
                 # Limit the exit order size to just close the position.
                 # Partial close 가 안되어서 수정. (original: order.size = -self.size)
-                order.size += self.size
+                order.size = _size_add(order.size, self.size)
                 self._fill_order(order, price, h, l)
                 return False
 
@@ -1116,13 +1128,9 @@ class Position:
             return
 
         # Immediate closes happen after process_orders() finalized cumulative stats.
-        # Only stamp this fill's trades; earlier closes keep their own cumulative mark.
+        # Trade marks are captured by _fill_order; only refresh the position mark.
         initial_capital = lib._script.initial_capital
         self.cum_profit = self.equity - initial_capital - self.openprofit
-        cum_profit_percent = self.cum_profit / initial_capital * 100.0 if initial_capital else 0.0
-        for closed_trade in self.new_closed_trades[closed_start:]:
-            closed_trade.cum_profit = self.cum_profit
-            closed_trade.cum_profit_percent = cum_profit_percent
 
     def _check_already_filled(self, order: Order) -> bool:
         """
@@ -1248,11 +1256,10 @@ class Position:
         if lib._script.process_orders_on_close:
             self._close_tick_orders.clear()
         # We need to round to the nearest tick to get the same results as in TradingView
-        round_to_mintick = lib.math.round_to_mintick
-        self.o = round_to_mintick(lib.open)
-        self.h = round_to_mintick(lib.high)
-        self.l = round_to_mintick(lib.low)
-        self.c = round_to_mintick(lib.close)
+        self.o = _tick_snap(lib.open)
+        self.h = _tick_snap(lib.high)
+        self.l = _tick_snap(lib.low)
+        self.c = _tick_snap(lib.close)
 
         # Check if we're in a new trading day for intraday risk management
         # TradingView tracks intraday based on trading session, not calendar day
@@ -1322,8 +1329,8 @@ class Position:
 
         # Process Market orders
         for order in list(self.market_orders.values()):
-            if order.limit is None and order.stop is None:
-                # We need to check pyramiding and flip quantity here for market orders :-/
+            if order.order_type != _order_type_normal and order.limit is None and order.stop is None:
+                # Normal orders bypass the existing entry/close quantity normalization.
                 # Check pyramiding limit for entry orders adding to existing position
                 if self.sign == order.sign:
                     if lib._script.pyramiding <= len(self.open_trades):
@@ -1333,7 +1340,7 @@ class Position:
                 elif self.size != 0.0:
                     # TradingView calculates the flip quantity 1st order processing
                     # then open a new one in the opposite direction.
-                    order.size -= self.size  # Subtract because position.size has opposite sign
+                    order.size = _size_add(order.size, -self.size)
 
             # Apply slippage to market orders
             fill_price = self.o
@@ -1478,19 +1485,10 @@ class Position:
 
         # Cumulative stats
         if self.new_closed_trades:
-            initial_capital = lib._script.initial_capital
+            self.cum_profit = self.equity - lib._script.initial_capital - self.openprofit
             for closed_trade in self.new_closed_trades:
-                self.cum_profit = self.equity - lib._script.initial_capital - self.openprofit
-                closed_trade.cum_profit = self.cum_profit
                 closed_trade.cum_max_drawdown = self.max_drawdown
                 closed_trade.cum_max_runup = self.max_runup
-
-                # Cumulative profit percent
-                # TradingView calculates this as total return on initial capital
-                try:
-                    closed_trade.cum_profit_percent = (closed_trade.cum_profit / initial_capital) * 100.0
-                except ZeroDivisionError:
-                    closed_trade.cum_profit_percent = 0.0
 
     def process_close_orders(self) -> None:
         """Process this calculation's surviving orders at the closing tick only."""
@@ -1525,7 +1523,7 @@ class Position:
 
             if market and order.order_type == _order_type_entry:
                 if self.sign != order.sign and self.size:
-                    order.size -= self.size
+                    order.size = _size_add(order.size, -self.size)
             price = self.c
             if not limit_hit:
                 price += lib._script.slippage * syminfo.mintick * order.sign
@@ -1593,16 +1591,29 @@ class Position:
 
         if len(self.new_closed_trades) > closed_start:
             self.cum_profit = self.equity - initial_capital - self.openprofit
-            percent = self.cum_profit / initial_capital * 100.0 if initial_capital else 0.0
             for trade in self.new_closed_trades[closed_start:]:
-                trade.cum_profit = self.cum_profit
-                trade.cum_profit_percent = percent
                 trade.cum_max_drawdown = self.max_drawdown
                 trade.cum_max_runup = self.max_runup
 
 #
 # Functions
 #
+
+# noinspection PyProtectedMember
+def _size_add(qty_a: float, qty_b: float) -> float:
+    """Combine lot-normalized quantities without leaving floating-point dust."""
+    rfactor = syminfo._size_round_factor  # noqa
+    lots_a, lots_b = qty_a * rfactor, qty_b * rfactor
+    if not (abs(lots_a) < 9007199254740992.0 and abs(lots_b) < 9007199254740992.0):
+        return qty_a + qty_b
+    rounded_a, rounded_b = round(lots_a), round(lots_b)
+    # Risk limits can supply off-grid sizes; do not change those quantities here.
+    if (abs(lots_a - rounded_a) > abs(lots_a) * 1e-12 + 1e-9
+            or abs(lots_b - rounded_b) > abs(lots_b) * 1e-12 + 1e-9):
+        return qty_a + qty_b
+    # Keep _size_round's existing float representation, not a new unit grid.
+    return (rounded_a + rounded_b) / rfactor
+
 
 # noinspection PyProtectedMember
 def _size_round(qty: float) -> float:
@@ -1621,6 +1632,14 @@ def _size_round(qty: float) -> float:
 
 
 # noinspection PyShadowingNames
+def _tick_snap(price: float) -> float:
+    """Round simulated prices to ticks without changing raw indicator inputs."""
+    if not (price == price):
+        return price
+    mintick = syminfo.mintick
+    return floor(price / mintick + 0.5) * mintick
+
+
 def _price_round(price: float | NA[float], direction: int | float) -> float | NA[float]:
     """
     Round price to the nearest tick

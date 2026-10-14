@@ -250,6 +250,9 @@ _setup_main() {
   python -m pip install -e ".[all]" || return 1
   python -m pip install -r requirements-runtime.txt || return 1
 
+  python pynecore/native/build_indicators.py --install \
+    || echo "[setup] native indicators unavailable; continuing with Python indicators" >&2
+
   _setup_ai_sandbox
   _setup_ai_chart_capture || echo "[setup] setup completed without chart capture; retry bash setup.sh --chart-capture-only" >&2
 }

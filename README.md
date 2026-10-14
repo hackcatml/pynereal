@@ -99,6 +99,21 @@ cd pynereal
 source setup.sh
 ```
 
+Setup and backend updates build the optional native indicator module into the
+active Python environment. Updates do this before feeds and runners resume,
+including the first upgrade from an older updater. Unchanged source and Python
+build settings reuse the installed binary; changed sources are rebuilt. Ordinary
+startup and frontend-only updates do not build it.
+
+A C++17 compiler and development headers for the active Python version are
+required (on Ubuntu, `build-essential` and the matching `python3.x-dev` package;
+on macOS, Xcode Command Line Tools). If compilation fails, setup/update warns
+and continues with Python indicators instead of an outdated native binary.
+After installing the prerequisites, activate the server's environment and run
+`python pynecore/native/build_indicators.py --install`, then restart the service.
+Set `PYNECORE_NATIVE_INDICATORS=0` before starting a process to explicitly use
+Python indicators. Native kernels are otherwise used by default when available.
+
 ## Quick Start
 
 Start the hub:

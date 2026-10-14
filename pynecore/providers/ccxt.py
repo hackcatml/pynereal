@@ -13,6 +13,9 @@ from datetime import datetime, UTC, timedelta
 from pathlib import Path
 from datetime import time
 import tomllib
+from decimal import Decimal
+from math import isfinite
+from tempfile import NamedTemporaryFile
 
 from .provider import Provider
 
@@ -277,6 +280,93 @@ class CCXTProvider(Provider):
 
         return opening_hours, session_starts, session_ends
 
+    def _derive_qty_step(self, market_details: dict) -> float:
+        """Resolve the exchange's lot grid without confusing decimal places with ticks."""
+        import ccxt
+
+        amount = market_details.get('precision', {}).get('amount')
+        if amount is not None:
+            if self._client.precisionMode == ccxt.TICK_SIZE:
+                step = float(amount)
+            elif self._client.precisionMode == ccxt.DECIMAL_PLACES:
+                step = 10.0 ** -int(amount)
+            else:
+                return 0.0  # Significant digits do not describe a fixed lot grid.
+        else:
+            minimum = market_details.get('limits', {}).get('amount', {}).get('min')
+            step = float(minimum) if minimum is not None else 0.0
+        return step if isfinite(step) and step > 0 else 0.0
+
+    def _quantity_metadata(self, market: dict) -> tuple[float, float]:
+        step = self._derive_qty_step(market)
+        if market.get('contract') and market.get('linear') and not market.get('inverse'):
+            contract_size = float(market.get('contractSize') or 0.0)
+            if not isfinite(contract_size) or contract_size <= 0:
+                raise ValueError('Linear contract requires a finite positive contractSize')
+            # Strategy quantities and PnL use base assets, not exchange contracts.
+            base_step = float(Decimal(str(step)) * Decimal(str(contract_size)))
+            if not isfinite(base_step) or (step > 0 and base_step <= 0):
+                raise ValueError('Invalid base-asset quantity step')
+            return 1.0, base_step
+        return float(market.get('contractSize') or 1.0), step
+
+    @override
+    def get_symbol_info(self, force_update=False) -> SymInfo:
+        info = super().get_symbol_info(force_update=force_update)
+        if info.mincontract > 0 and info.pointvalue == 1.0:
+            return info
+        self._client.load_markets()
+        market = self._client.market(self.symbol)
+        step = self._derive_qty_step(market)
+        if step <= 0:
+            return info
+        pointvalue, base_step = self._quantity_metadata(market)
+        contract_size = float(market.get('contractSize') or 1.0)
+        # Only migrate the old provider-generated contract-unit pair. Preserve
+        # existing base-unit grids and independently customized quantity fields.
+        migrate_linear = (
+            market.get('contract') and market.get('linear') and not market.get('inverse')
+            and info.pointvalue != 1.0 and info.pointvalue == contract_size
+            and info.mincontract in (0.0, step)
+        )
+        if info.mincontract > 0 and not migrate_linear:
+            return info
+        # Existing TOMLs can express quantities in base units (pointvalue=1)
+        # instead of exchange contracts. Keep that unit and all user metadata.
+        if (info.pointvalue <= 0 or not isfinite(info.pointvalue)
+                or contract_size <= 0 or not isfinite(contract_size)):
+            return info
+        quantity_step = (base_step if migrate_linear else
+                         float(Decimal(str(step)) * Decimal(str(contract_size))
+                               / Decimal(str(info.pointvalue))))
+        if quantity_step <= 0 or not isfinite(quantity_step):
+            return info
+        import tomlkit
+
+        path = self.ohlcv_path.with_suffix('.toml')
+        document = tomlkit.parse(path.read_text(encoding='utf-8'))
+        # A user may edit the file while load_markets() is in flight.
+        if (float(document['symbol'].get('mincontract', 0.0)) != info.mincontract
+                or float(document['symbol']['pointvalue']) != info.pointvalue):
+            return SymInfo.load_toml(path)
+        info.mincontract = quantity_step
+        document['symbol']['mincontract'] = info.mincontract
+        if migrate_linear:
+            info.pointvalue = pointvalue
+            document['symbol']['pointvalue'] = info.pointvalue
+        temporary = None
+        try:
+            with NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
+                                    suffix='.toml.tmp', delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(tomlkit.dumps(document))
+            temporary.chmod(path.stat().st_mode)
+            temporary.replace(path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        return info
+
     @override
     def update_symbol_info(self) -> SymInfo:
         """
@@ -306,6 +396,7 @@ class CCXTProvider(Provider):
                 ticker = market_details['id']
 
         assert self._client.id
+        pointvalue, mincontract = self._quantity_metadata(market_details)
         return SymInfo(
             prefix=self._client.id.upper(),
             description=f"{market_details['base']} / {market_details['quote']} "
@@ -318,7 +409,8 @@ class CCXTProvider(Provider):
             mintick=mintick,
             pricescale=pricescale,
             minmove=minmove,
-            pointvalue=market_details.get('contractSize') or 1.0,
+            pointvalue=pointvalue,
+            mincontract=mincontract,
             timezone=self.timezone,
             opening_hours=opening_hours,
             session_starts=session_starts,
