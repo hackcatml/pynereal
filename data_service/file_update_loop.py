@@ -136,12 +136,13 @@ async def file_update_loop(
 
     if cache_ready:
         timeframe_seconds = int(convert_timeframe(timeframe, to_ms=True) / 1000)
-        # Resolve missing lot metadata once at startup, outside the event loop.
+        # Resolve missing or legacy contract-unit metadata at startup, off-loop.
         missing_toml = not toml_path.exists()
         needs_lot_metadata = False
         if not missing_toml and provider == 'ccxt':
             try:
-                needs_lot_metadata = SymInfo.load_toml(toml_path).mincontract == 0
+                symbol_info = SymInfo.load_toml(toml_path)
+                needs_lot_metadata = symbol_info.mincontract == 0 or symbol_info.pointvalue != 1.0
             except (OSError, KeyError, TypeError, ValueError) as exc:
                 log_with_time(f"[data_service] quantity metadata unavailable: {exc}")
         if missing_toml or needs_lot_metadata:
