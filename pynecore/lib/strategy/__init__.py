@@ -389,7 +389,7 @@ class Position:
         'risk_intraday_filled_orders', 'risk_intraday_start_equity', 'risk_halt_trading',
         'on_entry_callback', 'on_close_callback', 'on_alert_callback', 'on_ai_callback',
         'on_order_signal_callback',
-        '_entry_open_ledger', '_close_tick_orders'
+        '_entry_open_ledger', '_close_tick_orders', '_entry_fill_phases', '_fill_phase'
     )
 
     def __init__(self):
@@ -419,6 +419,8 @@ class Position:
         # Exit orders remain bound to their entry IDs even though the default
         # close_entries_rule attributes closed trade rows FIFO.
         self._entry_open_ledger: dict[str, float] = {}
+        self._entry_fill_phases: dict[Trade, int] = {}
+        self._fill_phase = 3
 
         # Trade statistics
         self.closed_trades_count: int = 0
@@ -586,6 +588,33 @@ class Position:
         else:
             self._entry_open_ledger[entry_id] = left
 
+    def _trade_bar_range(self, trade: Trade, end_price: float | None = None) -> tuple[float, float]:
+        """Limit a new trade's excursion to the part of the bar after its fill."""
+        start = self._entry_fill_phases.get(trade)
+        if start is None:
+            return self.h, self.l
+        end = 3 if end_price is None else self._fill_phase
+        price = self.c if end_price is None else end_price
+        high = max(trade.entry_price, price)
+        low = min(trade.entry_price, price)
+        first, second = (self.h, self.l) if self.h - self.o < self.o - self.l else (self.l, self.h)
+        if start <= 1 < end:
+            high, low = max(high, first), min(low, first)
+        if start <= 2 < end:
+            high, low = max(high, second), min(low, second)
+        return high, low
+
+    @staticmethod
+    def _update_trade_excursions(trade: Trade, high: float, low: float) -> None:
+        high_profit = trade.size * (high - trade.entry_price) - trade.commission
+        low_profit = trade.size * (low - trade.entry_price) - trade.commission
+        trade.max_drawdown = max(-min(high_profit, low_profit, 0.0), trade.max_drawdown)
+        trade.max_runup = max(max(high_profit, low_profit, 0.0), trade.max_runup)
+        entry_cost = abs(trade.size) * trade.entry_price + trade.commission
+        if entry_cost > 0.0:
+            trade.max_drawdown_percent = trade.max_drawdown / entry_cost * 100.0
+            trade.max_runup_percent = trade.max_runup / entry_cost * 100.0
+
     def _fill_order(self, order: Order, price: float, h: float, l: float):
         """
         Fill an order (actually)
@@ -623,6 +652,9 @@ class Position:
 
                     size = order.size if abs(order.size) <= abs(trade.size) else -trade.size
                     pnl = -size * (price - trade.entry_price)
+
+                    if trade in self._entry_fill_phases:
+                        self._update_trade_excursions(trade, *self._trade_bar_range(trade, price))
 
                     # Copy and modify actual trade, because it can be partially filled
                     closed_trade = copy(trade)
@@ -834,6 +866,7 @@ class Position:
             )
 
             self.open_trades.append(trade)
+            self._entry_fill_phases[trade] = self._fill_phase
             self._entry_open_ledger[order.order_id] = (
                 _size_add(self._entry_open_ledger.get(order.order_id, 0.0), abs(order.size))
             )
@@ -1241,25 +1274,34 @@ class Position:
         """ Check close price if trailing stop is triggered """
         if order.stop is None:
             return False
-        # open → high → low → close
-        if ohlc and order.stop <= self.c:
-            self.fill_order(order, order.stop, order.stop, self.l)
-            return True
-        # open → low → high → close
-        elif order.stop >= self.c:
-            self.fill_order(order, order.stop, self.h, order.stop)
-            return True
-        return False
+        phase = self._fill_phase
+        self._fill_phase = 3
+        try:
+            # open → high → low → close
+            if ohlc and order.stop <= self.c:
+                self.fill_order(order, order.stop, order.stop, self.l)
+                return True
+            # open → low → high → close
+            elif order.stop >= self.c:
+                self.fill_order(order, order.stop, self.h, order.stop)
+                return True
+            return False
+        finally:
+            self._fill_phase = phase
 
     def process_orders(self):
         """ Process orders """
         if lib._script.process_orders_on_close:
             self._close_tick_orders.clear()
-        # We need to round to the nearest tick to get the same results as in TradingView
-        self.o = _tick_snap(lib.open)
-        self.h = _tick_snap(lib.high)
-        self.l = _tick_snap(lib.low)
-        self.c = _tick_snap(lib.close)
+        # Match order-level decimal prices for exact stop/limit touches. Keep
+        # _tick_snap for fills so their existing tick-rounding behavior is unchanged.
+        mintick, minmove, pricescale = syminfo.mintick, syminfo.minmove, syminfo.pricescale
+        self.o = floor(lib.open / mintick + 0.5) * minmove / pricescale
+        self.h = floor(lib.high / mintick + 0.5) * minmove / pricescale
+        self.l = floor(lib.low / mintick + 0.5) * minmove / pricescale
+        self.c = floor(lib.close / mintick + 0.5) * minmove / pricescale
+        self._entry_fill_phases.clear()
+        self._fill_phase = 0
 
         # Check if we're in a new trading day for intraday risk management
         # TradingView tracks intraday based on trading session, not calendar day
@@ -1361,6 +1403,7 @@ class Position:
         # Process orders: open → high → low → close
         if ohlc:
             # open -> high
+            self._fill_phase = 1
             for order in self.orderbook.iter_orders(min_price=self.o, max_price=self.h):
                 if self._check_high_stop(order):
                     continue
@@ -1372,6 +1415,7 @@ class Position:
                     self._check_close(order, ohlc)
 
             # open -> low
+            self._fill_phase = 2
             for order in self.orderbook.iter_orders(max_price=self.o, min_price=self.l):
                 if self._check_low_stop(order):
                     continue
@@ -1385,6 +1429,7 @@ class Position:
         # Process orders: open → low → high → close
         else:
             # open -> low
+            self._fill_phase = 1
             for order in self.orderbook.iter_orders(max_price=self.o, min_price=self.l):
                 if self._check_low_stop(order):
                     continue
@@ -1396,6 +1441,7 @@ class Position:
                     self._check_close(order, ohlc)
 
             # open -> high
+            self._fill_phase = 2
             for order in self.orderbook.iter_orders(min_price=self.o, max_price=self.h):
                 if self._check_high_stop(order):
                     continue
@@ -1405,6 +1451,8 @@ class Position:
                     continue
                 if order.trail_triggered and order.stop is not None:
                     self._check_close(order, ohlc)
+
+        self._fill_phase = 3
 
         # Calculate average entry price, unrealized P&L, drawdown and runup...
         if self.open_trades:
@@ -1426,29 +1474,7 @@ class Position:
                 drawdown = -min(hprofit, lprofit, 0.0)
                 runup = max(hprofit, lprofit, 0.0)
 
-                # A trade's own excursion uses its entry price, not a position
-                # average shifted by later pyramiding entries.
-                trade_hprofit = (
-                    trade.size * (self.h - trade.entry_price) - trade.commission
-                )
-                trade_lprofit = (
-                    trade.size * (self.l - trade.entry_price) - trade.commission
-                )
-                trade.max_drawdown = max(
-                    -min(trade_hprofit, trade_lprofit, 0.0),
-                    trade.max_drawdown,
-                )
-                trade.max_runup = max(
-                    max(trade_hprofit, trade_lprofit, 0.0),
-                    trade.max_runup,
-                )
-
-                entry_cost = abs(trade.size) * trade.entry_price + trade.commission
-                if entry_cost > 0.0:
-                    trade.max_drawdown_percent = (
-                        trade.max_drawdown / entry_cost * 100.0
-                    )
-                    trade.max_runup_percent = trade.max_runup / entry_cost * 100.0
+                self._update_trade_excursions(trade, *self._trade_bar_range(trade))
 
                 # Drawdown summ runup summ
                 self.drawdown_summ += drawdown
