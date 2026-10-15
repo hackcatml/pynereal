@@ -90,6 +90,7 @@ class Order:
         "is_market_order",  # Flag to check if this is a market order
         "cancelled",  # Flag to mark order as cancelled by OCA
         "bar_index",  # Bar index when the order was placed
+        "qty_budget", "qty_price", "flip_qty", "follow_entry_qty",
     )
 
     def __init__(
@@ -141,6 +142,10 @@ class Order:
 
         self.cancelled = False
         self.bar_index = -1  # Will be set when order is added to position
+        self.qty_budget = None
+        self.qty_price = None
+        self.flip_qty = 0.0
+        self.follow_entry_qty = False
 
     def __repr__(self):
         return f"Order(order_id={self.order_id}; exit_id={self.exit_id}; size={self.size}; type: {self.order_type}; " \
@@ -562,6 +567,8 @@ class Position:
                 else:
                     # Keep original sign
                     order.size = new_size * order.sign
+                    # OCA has now explicitly fixed the remaining contract quantity.
+                    order.qty_budget = None
 
         # Reduce exit orders
         for order in list(self.exit_orders.values()):
@@ -1022,6 +1029,26 @@ class Position:
                     except Exception as e:
                         print(f"Error in on_ai_callback: {e}")
 
+    def _resolve_price_order_qty(self, order: Order, price: float) -> bool:
+        budget, order.qty_budget = order.qty_budget, None
+        sizing_price = price
+        if order.is_market_order and order.stop is not None and order.limit is None:
+            sizing_price = order.qty_price + lib._script.slippage * syminfo.mintick * order.sign
+        qty = _budget_quantity(budget, sizing_price)
+        if not 0.0 < qty < float("inf"):
+            self._remove_order(order)
+            return False
+        old_size = order.size
+        order.size = _size_round((qty + order.flip_qty) * order.sign)
+        if order.size == 0.0:
+            self._remove_order(order)
+            return False
+        # An exit declared before the entry fills must still cover its full size.
+        bound_exit = self.exit_orders.get(order.order_id)
+        if bound_exit is not None and bound_exit.follow_entry_qty:
+            bound_exit.size = _size_round(bound_exit.size - (order.size - old_size))
+        return True
+
     def fill_order(self, order: Order, price: float, h: float, l: float) -> bool:
         """
         Fill an order
@@ -1033,6 +1060,8 @@ class Position:
         :return: True if the side of the position has changed
         """
         close_only = False
+        if order.qty_budget is not None and not self._resolve_price_order_qty(order, price):
+            return False
         # Apply risk management only to entry orders, not normal orders from strategy.order()
         if order.order_type == _order_type_entry or order.order_type == _order_type_normal:
             # Risk management: Check max intraday filled orders
@@ -1203,6 +1232,7 @@ class Position:
         # Long stop order (size > 0) triggers when price rises to stop level
         if order.size > 0 and order.stop <= self.h:
             p = max(order.stop, self.o)
+            p += lib._script.slippage * syminfo.mintick
             self.fill_order(order, p, p, self.l)
             return True
         return False
@@ -1240,6 +1270,7 @@ class Position:
         # Short stop order (size < 0) triggers when price falls to stop level
         if order.size < 0 and order.stop >= self.l:
             p = min(self.o, order.stop)
+            p -= lib._script.slippage * syminfo.mintick
             self.fill_order(order, p, self.h, p)
             return True
         return False
@@ -1279,11 +1310,13 @@ class Position:
         try:
             # open → high → low → close
             if ohlc and order.stop <= self.c:
-                self.fill_order(order, order.stop, order.stop, self.l)
+                price = order.stop + lib._script.slippage * syminfo.mintick * order.sign
+                self.fill_order(order, price, price, self.l)
                 return True
             # open → low → high → close
             elif order.stop >= self.c:
-                self.fill_order(order, order.stop, self.h, order.stop)
+                price = order.stop + lib._script.slippage * syminfo.mintick * order.sign
+                self.fill_order(order, price, self.h, price)
                 return True
             return False
         finally:
@@ -1386,7 +1419,9 @@ class Position:
 
             # Apply slippage to market orders
             fill_price = self.o
-            if script.slippage > 0:
+            limit_fill = (order.limit is not None and
+                          (self.o <= order.limit if order.sign > 0 else self.o >= order.limit))
+            if script.slippage > 0 and not limit_fill:
                 # Slippage is in ticks, always adverse to trade direction
                 # For long orders (buying), slippage increases the price
                 # For short orders (selling), slippage decreases the price
@@ -1624,6 +1659,41 @@ class Position:
 #
 # Functions
 #
+
+def _price_order_budget(limit, stop, sign, *, normal_order=False):
+    """Freeze money and unit-cost terms only for default money-sized price orders."""
+    limit = None if isinstance(limit, NA) else limit
+    stop = None if isinstance(stop, NA) else stop
+    script = lib._script
+    if (limit is None and stop is None) or script.default_qty_type == fixed:
+        return None, None
+    factor, fee = float(syminfo.pointvalue), 0.0
+    if script.default_qty_type == cash:
+        money = float(script.default_qty_value)
+    elif script.default_qty_type == percent_of_equity:
+        money = float(script.position.equity) * script.default_qty_value * 0.01
+        if script.commission_type == _commission.percent:
+            factor *= 1.0 + script.commission_value * 0.01
+        elif script.commission_type == _commission.cash_per_contract:
+            fee = float(script.commission_value)
+        elif script.commission_type == _commission.cash_per_order:
+            money = max(0.0, money - script.commission_value)
+    else:
+        return None, None
+    price = float(script.position.c)
+    if stop is not None:
+        stop = _price_round(stop, -sign if normal_order else sign)
+        price = max(price, stop) if sign > 0 else min(price, stop)
+    if limit is not None:
+        limit = _price_round(limit, sign if normal_order else -sign)
+        price = min(price, limit) if sign > 0 else max(price, limit)
+    return (money, factor, fee), price
+
+
+def _budget_quantity(budget, price):
+    money, factor, fee = budget
+    cost = price * factor + fee
+    return money / cost if 0.0 < cost < float("inf") else 0.0
 
 # noinspection PyProtectedMember
 def _size_add(qty_a: float, qty_b: float) -> float:
@@ -1863,6 +1933,7 @@ def entry(id: str, direction: direction.Direction, qty: int | float | NA[float] 
         return
 
     # Get default qty by script parameters if no qty is specified
+    default_qty = isinstance(qty, NA)
     if isinstance(qty, NA):
         default_qty_type = script.default_qty_type
         if default_qty_type == fixed:
@@ -1911,18 +1982,23 @@ def entry(id: str, direction: direction.Direction, qty: int | float | NA[float] 
         else:
             raise ValueError("Unknown default qty type: ", default_qty_type)
 
+    direction_sign: float = (-1.0 if direction == short else 1.0)
+    qty_budget, qty_price = _price_order_budget(limit, stop, direction_sign) if default_qty else (None, None)
+    if qty_budget is not None:
+        qty = _budget_quantity(qty_budget, qty_price)
+
     # qty must be greater than 0
     if qty <= 0.0:
         return
 
     # We need a signed size instead of qty, the sign is the direction
-    direction_sign: float = (-1.0 if direction == short else 1.0)
     size = qty * direction_sign
 
     size = _size_round(size)
     if size == 0.0:
         return
 
+    flip_qty = 0.0
     if isinstance(limit, NA):
         limit = None
     elif limit is not None:
@@ -1950,6 +2026,7 @@ def entry(id: str, direction: direction.Direction, qty: int | float | NA[float] 
             # This means the order will first close the existing position,
             # then open a new one in the opposite direction.
             size -= position.size  # Subtract because position.size has opposite sign
+            flip_qty = abs(position.size)
 
     bar_time = lib._time
     alert_message = f'{{"timestamp": {bar_time}, "message": {alert_message}}}' if alert_message else None
@@ -1959,6 +2036,7 @@ def entry(id: str, direction: direction.Direction, qty: int | float | NA[float] 
                   comment=None if isinstance(comment, NA) else comment,
                   alert_message=None if isinstance(alert_message, NA) else alert_message,
                   ai_instruction=ai_instruction or None)
+    order.qty_budget, order.qty_price, order.flip_qty = qty_budget, qty_price, flip_qty
     # Store in entry_orders dict
     position._add_order(order)
 
@@ -2077,6 +2155,7 @@ def exit(id: str, from_entry: str = "",
             profit_ticks=profit_ticks, loss_ticks=loss_ticks, trail_points_ticks=trail_points_ticks,
             oca_name=oca_name, oca_type=oca_type, comment=comment, alert_message=alert_message
         )
+        order.follow_entry_qty = isinstance(qty, NA) and isinstance(qty_percent, NA)
         position._add_order(order)
 
     def _bound_size(entry_id: str) -> tuple[float, float]:
@@ -2149,6 +2228,7 @@ def order(id: str, direction: direction.Direction, qty: int | float | NA[float] 
         return
 
     # Get default qty by script parameters if no qty is specified
+    default_qty = isinstance(qty, NA)
     if isinstance(qty, NA):
         default_qty_type = script.default_qty_type
         if default_qty_type == fixed:
@@ -2183,12 +2263,16 @@ def order(id: str, direction: direction.Direction, qty: int | float | NA[float] 
         else:
             raise ValueError("Unknown default qty type: ", default_qty_type)
 
+    direction_sign: float = (-1.0 if direction == short else 1.0)
+    qty_budget, qty_price = _price_order_budget(limit, stop, direction_sign, normal_order=True) if default_qty else (None, None)
+    if qty_budget is not None:
+        qty = _budget_quantity(qty_budget, qty_price)
+
     # qty must be greater than 0
     if qty <= 0.0:
         return
 
     # We need a signed size instead of qty, the sign is the direction
-    direction_sign: float = (-1.0 if direction == short else 1.0)
     size = qty * direction_sign
 
     # NOTE: Unlike strategy.entry, strategy.order is NOT affected by pyramiding limit
@@ -2214,6 +2298,7 @@ def order(id: str, direction: direction.Direction, qty: int | float | NA[float] 
     order = Order(id, size, order_type=_order_type_normal, limit=limit, stop=stop,
                   oca_name=oca_name, oca_type=oca_type, comment=comment,
                   alert_message=alert_message)
+    order.qty_budget, order.qty_price = qty_budget, qty_price
     position._add_order(order)
 
 
