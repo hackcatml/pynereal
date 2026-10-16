@@ -2003,7 +2003,8 @@ def vwap(source: Series[float], anchor: bool | None = None, stdev_mult: float | 
     # If stdev_mult is specified, calculate bands
     if had_anchor and stdev_mult is not None:
         sum_ppv += source * source * volume
-        std = math.sqrt(builtins.max(0.0, sum_ppv / sum_vol - vwap_value * vwap_value))
+        # A reset has exactly one sample; subtracting second moments can leave a positive residue.
+        std = 0.0 if anchor else math.sqrt(builtins.max(0.0, sum_ppv / sum_vol - vwap_value * vwap_value))
         band_width = std * stdev_mult
         # Return tuple of (vwap, upper_band, lower_band)
         return vwap_value, vwap_value + band_width, vwap_value - band_width

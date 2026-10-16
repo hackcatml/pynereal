@@ -602,6 +602,9 @@
     "cash": {
       "type": "variable"
     },
+    "closedtrades": {
+      "type": "property"
+    },
     "equity": {
       "type": "property"
     },
@@ -642,6 +645,9 @@
       "type": "property"
     },
     "openprofit": {
+      "type": "property"
+    },
+    "opentrades": {
       "type": "property"
     },
     "percent_of_equity": {
