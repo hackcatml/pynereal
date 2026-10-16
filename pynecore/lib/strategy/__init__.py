@@ -520,6 +520,21 @@ class Position:
         """ The current equity """
         return lib._script.initial_capital + self.netprofit + self.openprofit
 
+    def _size_flippable_by_entry(self) -> float:
+        """Position a priced entry would reverse after earlier market requests."""
+        if not self.market_orders:
+            return self.size
+        size = self.size
+        for order in self.market_orders.values():
+            if order.cancelled:
+                continue
+            if order.order_type is _order_type_close and size * order.size < 0.0:
+                remaining = _size_add(size, order.size)
+                size = remaining if remaining * size > 0.0 else 0.0
+            elif order.order_type is _order_type_entry:
+                size = _size_add(size, order.size) if size * order.size >= 0.0 else order.size
+        return size
+
     def _add_order(self, order: Order):
         """ Add an order to the strategy """
         # Set the bar_index when the order is placed
@@ -2133,21 +2148,22 @@ def entry(id: str, direction: direction.Direction, qty: int | float | NA[float] 
     # If it is not a market order, we should check pyramiding and flip conditions here
     # Market orders are checked at the order processing time
     if limit is not None or stop is not None:
+        flippable = position._size_flippable_by_entry()
         # Check if the order has the same direction
-        if position.sign == direction_sign:
+        if flippable * direction_sign > 0.0:
             # Check pyramiding limit for entry orders adding to existing position
             if lib._script.pyramiding <= len(position.open_trades):
                 # Pyramiding limit reached - don't add the order
                 return
 
-        elif position.size != 0.0:
+        elif flippable != 0.0:
             # TradingView calculates the flip quantity at order creation time,
             # not at execution time. If we have an opposite direction position,
             # we need to add the position size to the order size to flip it.
             # This means the order will first close the existing position,
             # then open a new one in the opposite direction.
-            size -= position.size  # Subtract because position.size has opposite sign
-            flip_qty = abs(position.size)
+            size -= flippable
+            flip_qty = abs(flippable)
 
     bar_time = lib._time
     alert_message = f'{{"timestamp": {bar_time}, "message": {alert_message}}}' if alert_message else None
