@@ -106,13 +106,21 @@ build settings reuse the installed binary; changed sources are rebuilt. Ordinary
 startup and frontend-only updates do not build it.
 
 A C++17 compiler and development headers for the active Python version are
-required (on Ubuntu, `build-essential` and the matching `python3.x-dev` package;
-on macOS, Xcode Command Line Tools). If compilation fails, setup/update warns
+required. On Ubuntu/Debian, setup/update installs missing `build-essential` and
+the `python3.x-dev` package matching the active Python environment. Updates use
+non-interactive `sudo`, so installing missing packages requires root or
+passwordless sudo access and a configured repository providing those packages.
+On macOS, install Xcode Command Line Tools. If compilation fails, setup/update warns
 and continues with Python indicators instead of an outdated native binary.
-After installing the prerequisites, activate the server's environment and run
-`python pynecore/native/build_indicators.py --install`, then restart the service.
+To retry interactively, activate the server's environment and run
+`bash setup.sh --native-indicators-only`, then restart the service. For an
+environment outside `./venv`, set `PYNEREAL_SETUP_PYTHON` to its Python executable.
 Set `PYNECORE_NATIVE_INDICATORS=0` before starting a process to explicitly use
 Python indicators. Native kernels are otherwise used by default when available.
+If an older updater already disabled native indicators after a failed build,
+restart the service from its normal launcher once after a successful install to
+clear that inherited fallback. Newer updaters restore their automatic fallback
+on a successful retry while preserving an explicit opt-out.
 
 ## Quick Start
 
