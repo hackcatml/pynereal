@@ -596,14 +596,18 @@ class Position:
             self._entry_open_ledger[entry_id] = left
 
     def _trade_bar_range(self, trade: Trade, end_price: float | None = None) -> tuple[float, float]:
-        """Limit a new trade's excursion to the part of the bar after its fill."""
+        """Return the price range visited while the trade was open in this bar."""
         start = self._entry_fill_phases.get(trade)
         if start is None:
-            return self.h, self.l
+            if end_price is None:
+                return self.h, self.l
+            start, start_price = 0, self.o
+        else:
+            start_price = trade.entry_price
         end = 3 if end_price is None else self._fill_phase
         price = self.c if end_price is None else end_price
-        high = max(trade.entry_price, price)
-        low = min(trade.entry_price, price)
+        high = max(start_price, price)
+        low = min(start_price, price)
         first, second = (self.h, self.l) if self.h - self.o < self.o - self.l else (self.l, self.h)
         if start <= 1 < end:
             high, low = max(high, first), min(low, first)
@@ -660,7 +664,8 @@ class Position:
                     size = order.size if abs(order.size) <= abs(trade.size) else -trade.size
                     pnl = -size * (price - trade.entry_price)
 
-                    if trade in self._entry_fill_phases:
+                    # An intrabar exit must include extrema visited before its fill.
+                    if self._fill_phase > 0 or trade in self._entry_fill_phases:
                         self._update_trade_excursions(trade, *self._trade_bar_range(trade, price))
 
                     # Copy and modify actual trade, because it can be partially filled
