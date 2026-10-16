@@ -2245,8 +2245,15 @@ def exit(id: str, from_entry: str = "",
         limit_price = None if isinstance(limit, NA) or limit is None else _price_round(limit, direction)
         stop_price = None if isinstance(stop, NA) or stop is None else _price_round(stop, -direction)
         trailing_price = None if isinstance(trail_price, NA) or trail_price is None else _price_round(trail_price, -direction)
+        trailing_offset = trail_offset
         if isinstance(trail_offset, NA) or trail_offset is None:
-            trailing_price = trail_points_ticks = None
+            if (trailing_price is not None or trail_points_ticks is not None) and (
+                    limit_price is not None or stop_price is not None or
+                    profit_ticks is not None or loss_ticks is not None):
+                # A fixed exit permits an omitted trailing offset, interpreted as zero ticks.
+                trailing_offset = 0.0
+            else:
+                trailing_price = trail_points_ticks = None
 
         group = None if isinstance(oca_name, NA) else oca_name
 
@@ -2254,7 +2261,7 @@ def exit(id: str, from_entry: str = "",
         order = Order(
             binding.entry_id, size, exit_id=id, order_type=_order_type_close,
             limit=limit_price, stop=stop_price,
-            trail_price=trailing_price, trail_offset=trail_offset,
+            trail_price=trailing_price, trail_offset=trailing_offset,
             profit_ticks=profit_ticks, loss_ticks=loss_ticks, trail_points_ticks=trail_points_ticks,
             oca_name=group, oca_type=oca_type if oca_type is not None else _oca.reduce,
             comment=comment, alert_message=alert_message
