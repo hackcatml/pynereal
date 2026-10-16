@@ -333,23 +333,26 @@ class PriceOrderBook:
             iter_orders(min_price=50.0)  # 50, 51, 52, ... (ascending)
             iter_orders(max_price=60.0)  # 60, 59, 58, ... (descending)
             iter_orders(min_price=50.0, max_price=60.0)  # 50, 51, ..., 60 (ascending)
+            iter_orders(min_price=50.0, max_price=60.0, desc=True)  # 60, 59, ..., 50
 
-        :param desc: If True, iterate in descending order, only if no min_price or max_price is set
+        :param desc: Descending order when both bounds or neither bound are set
         :param min_price: If set, iterate from this price upward (ascending)
         :param max_price: If set, iterate from this price downward (descending)
         :return: Generator yielding Order objects
         """
         if min_price is not None and max_price is not None:
-            # Range query - ascending from min to max
             min_idx = bisect_left(self.price_levels, min_price)
             max_idx = bisect_left(self.price_levels, max_price)
             # Include max_price if it matches exactly
             if max_idx < len(self.price_levels) and self.price_levels[max_idx] == max_price:
                 max_idx += 1
             # Create a copy of price levels to avoid iteration issues when levels are removed
-            for p in list(self.price_levels[min_idx:max_idx]):
+            levels = self.price_levels[min_idx:max_idx]
+            if desc:
+                levels.reverse()
+            for p in levels:
                 # Create a copy to avoid iteration issues when orders are removed during iteration
-                yield from list(self.orders_at_price[p])
+                yield from list(self.orders_at_price.get(p, ()))
 
         elif min_price is not None:
             # Ascending from min_price
@@ -1567,7 +1570,7 @@ class Position:
 
             # open -> low
             self._fill_phase = 2
-            for order in self.orderbook.iter_orders(max_price=self.o, min_price=self.l):
+            for order in self.orderbook.iter_orders(max_price=self.o, min_price=self.l, desc=True):
                 if self._check_low_stop(order):
                     continue
                 if self._check_low(order):
@@ -1581,7 +1584,7 @@ class Position:
         else:
             # open -> low
             self._fill_phase = 1
-            for order in self.orderbook.iter_orders(max_price=self.o, min_price=self.l):
+            for order in self.orderbook.iter_orders(max_price=self.o, min_price=self.l, desc=True):
                 if self._check_low_stop(order):
                     continue
                 if self._check_low(order):
