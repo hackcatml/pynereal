@@ -108,7 +108,7 @@ class Order:
         "order_id", "size", "sign", "order_type", "limit", "stop", "exit_id", "oca_name", "oca_type",
         "comment", "alert_message", "ai_instruction",
         "trail_price", "trail_offset",
-        "trail_triggered",
+        "trail_triggered", "trail_stop",
         "profit_ticks", "loss_ticks", "trail_points_ticks",  # Store tick values for later calculation
         "is_market_order",  # Flag to check if this is a market order
         "cancelled",  # Flag to mark order as cancelled by OCA
@@ -154,8 +154,9 @@ class Order:
         self.ai_instruction = ai_instruction
 
         self.trail_price = trail_price
-        self.trail_offset = trail_offset or 0  # in ticks
+        self.trail_offset = None if isinstance(trail_offset, NA) else trail_offset  # in ticks
         self.trail_triggered = False
+        self.trail_stop = None
 
         self.profit_ticks = profit_ticks
         self.loss_ticks = loss_ticks
@@ -283,7 +284,7 @@ class PriceOrderBook:
             self.order_prices[order].add(price)
 
         # Add to trail price if exists
-        if order.trail_price is not None:
+        if order.trail_price is not None and order.trail_price not in self.order_prices[order]:
             price = order.trail_price
             if price not in self.orders_at_price:
                 insort(self.price_levels, price)
@@ -1327,6 +1328,9 @@ class Position:
             if order.size < 0 and self.o <= order.stop:
                 return True
 
+        if order.trail_stop is not None and order.sign * (self.o - order.trail_stop) >= 0.0:
+            return True
+
         # Check limit orders with gaps
         if order.limit is not None:
             # Long limit order (size > 0): triggers if open gaps below limit level
@@ -1360,22 +1364,6 @@ class Position:
                 return True
         return False
 
-    def _check_high_trailing(self, order: Order) -> bool:
-        # Update trailing stop
-        if order.trail_price is not None and order.sign < 0:
-            # Check if trailing price has been triggered
-            if not order.trail_triggered and self.h > order.trail_price:
-                order.trail_triggered = True
-            # Update stop if trailing price has been triggered
-            if order.trail_triggered:
-                offset_price = syminfo.mintick * order.trail_offset
-                new_stop = max(lib.math.round_to_mintick(self.h - offset_price), order.stop)  # type: ignore
-                if new_stop != order.stop:
-                    # Update the order in the orderbook with the new stop price
-                    self.orderbook.update_order_stop(order, new_stop)
-                return True
-        return False
-
     def _check_low_stop(self, order: Order) -> bool:
         """ Check low stop """
         if order.stop is None:
@@ -1398,42 +1386,66 @@ class Position:
                 return True
         return False
 
-    def _check_low_trailing(self, order: Order) -> bool:
-        # Update trailing stop
-        if order.trail_price is not None and order.sign > 0:
-            # Check if trailing price has been triggered
-            if not order.trail_triggered and self.l < order.trail_price:
-                order.trail_triggered = True
-            # Update stop if trailing price has been triggered
-            if order.trail_triggered:
-                offset_price = syminfo.mintick * order.trail_offset
-                new_stop = min(lib.math.round_to_mintick(self.l + offset_price), order.stop)  # type: ignore
-                if new_stop != order.stop:
-                    # Update the order in the orderbook with the new stop price
-                    self.orderbook.update_order_stop(order, new_stop)
-                return True
-        return False
+    @staticmethod
+    def _advance_trailing(order: Order, price: float) -> None:
+        """Arm at a visited tick and ratchet only in the favorable direction."""
+        if order.trail_price is None or order.trail_offset is None:
+            return
+        if not order.trail_triggered:
+            if order.sign * (price - order.trail_price) > 0.0:
+                return
+            order.trail_triggered = True
+        candidate = price + order.sign * syminfo.mintick * order.trail_offset
+        stop = floor(candidate / syminfo.mintick + 0.5) * syminfo.minmove / syminfo.pricescale
+        if order.trail_stop is None or order.sign * (stop - order.trail_stop) < 0.0:
+            order.trail_stop = stop
 
-    def _check_close(self, order: Order, ohlc: bool) -> bool:
-        """ Check close price if trailing stop is triggered """
-        if order.stop is None:
-            return False
-        phase = self._fill_phase
-        self._fill_phase = 3
-        try:
-            # open → high → low → close
-            if ohlc and order.stop <= self.c:
-                price = order.stop + lib._script.slippage * syminfo.mintick * order.sign
-                self.fill_order(order, price, price, self.l)
-                return True
-            # open → low → high → close
-            elif order.stop >= self.c:
-                price = order.stop + lib._script.slippage * syminfo.mintick * order.sign
-                self.fill_order(order, price, self.h, price)
-                return True
-            return False
-        finally:
+    def _process_trailing_path(self, ohlc: bool) -> None:
+        """Walk trailing and competing price orders in intrabar time order."""
+        first, second = (self.h, self.l) if ohlc else (self.l, self.h)
+        cursor = self.o
+        attempted = set()
+        for phase, end in enumerate((self.o, first, second, self.c)):
             self._fill_phase = phase
+            while True:
+                orders = [order for order in dict.fromkeys(self.orderbook.iter_orders())
+                          if not order.cancelled and order not in attempted and
+                          (order.order_type != _order_type_close or order.exit_binding is None or
+                           (order.exit_binding.price is not None and self.size and order.sign != self.sign))]
+                events = []
+                for order in orders:
+                    self._advance_trailing(order, cursor)
+                    levels = [(order.stop, order.sign, 'stop'),
+                              (order.limit, -order.sign, 'limit'),
+                              (order.trail_stop, order.sign, 'trailing')]
+                    if order.trail_offset is not None and not order.trail_triggered:
+                        levels.append((order.trail_price, -order.sign, 'activate'))
+                    for level, direction, kind in levels:
+                        if level is None:
+                            continue
+                        if direction * (cursor - level) >= 0.0:
+                            tick = cursor
+                        elif direction * (end - level) >= 0.0:
+                            tick = level
+                        else:
+                            continue
+                        events.append((abs(tick - cursor), tick, order, kind))
+                if not events:
+                    for order in orders:
+                        self._advance_trailing(order, end)
+                    cursor = end
+                    break
+                _, cursor, order, kind = min(events, key=lambda event: event[0])
+                # All surviving trails see this tick before an OCA fill can cancel them.
+                for pending in orders:
+                    self._advance_trailing(pending, cursor)
+                if kind == 'activate':
+                    continue
+                price = cursor
+                if kind != 'limit':
+                    price += lib._script.slippage * syminfo.mintick * order.sign
+                attempted.add(order)
+                self.fill_order(order, price, price, price)
 
     def process_orders(self):
         """ Process orders """
@@ -1555,7 +1567,11 @@ class Position:
                 self.fill_order(order, fill_price, self.l, self.o)
 
         # Process orders: open → high → low → close
-        if ohlc:
+        if any(order.trail_offset is not None and
+               (order.trail_price is not None or order.trail_points_ticks is not None)
+               for order in self.exit_orders.values()):
+            self._process_trailing_path(ohlc)
+        elif ohlc:
             # open -> high
             self._fill_phase = 1
             for order in self.orderbook.iter_orders(min_price=self.o, max_price=self.h):
@@ -1563,10 +1579,6 @@ class Position:
                     continue
                 if self._check_high(order):
                     continue
-                if self._check_high_trailing(order):
-                    continue
-                if order.trail_triggered and order.stop is not None:
-                    self._check_close(order, ohlc)
 
             # open -> low
             self._fill_phase = 2
@@ -1575,10 +1587,6 @@ class Position:
                     continue
                 if self._check_low(order):
                     continue
-                if self._check_low_trailing(order):
-                    continue
-                if order.trail_triggered and order.stop is not None:
-                    self._check_close(order, ohlc)
 
         # Process orders: open → low → high → close
         else:
@@ -1589,10 +1597,6 @@ class Position:
                     continue
                 if self._check_low(order):
                     continue
-                if self._check_low_trailing(order):
-                    continue
-                if order.trail_triggered and order.stop is not None:
-                    self._check_close(order, ohlc)
 
             # open -> high
             self._fill_phase = 2
@@ -1601,10 +1605,6 @@ class Position:
                     continue
                 if self._check_high(order):
                     continue
-                if self._check_high_trailing(order):
-                    continue
-                if order.trail_triggered and order.stop is not None:
-                    self._check_close(order, ohlc)
 
         self._fill_phase = 3
 
@@ -1692,6 +1692,8 @@ class Position:
 
             market = (order.limit is None and order.stop is None and order.trail_price is None)
             stop_hit = order.stop is not None and order.sign * (self.c - order.stop) >= 0.0
+            stop_hit = stop_hit or (order.trail_stop is not None and
+                                    order.sign * (self.c - order.trail_stop) >= 0.0)
             limit_hit = order.limit is not None and order.sign * (self.c - order.limit) <= 0.0
             # A stop-limit entry activates its limit; an exit's stop/limit are alternatives.
             if order.order_type != _order_type_close and order.stop is not None and order.limit is not None:
@@ -1734,13 +1736,8 @@ class Position:
             if self.market_orders.get(_market_key(order)) is order:
                 self.market_orders.pop(_market_key(order))
             order.is_market_order = False
-        if order.trail_price is not None and update_trailing:
-            if -order.sign * (self.c - order.trail_price) >= 0.0:
-                order.trail_triggered = True
-            if order.trail_triggered:
-                stop = lib.math.round_to_mintick(self.c + order.sign * syminfo.mintick * order.trail_offset)
-                if order.stop is None or order.sign * (stop - order.stop) < 0.0:
-                    self.orderbook.update_order_stop(order, stop)
+        if update_trailing:
+            self._advance_trailing(order, self.c)
 
     def _mark_close_fills(self, closed_start: int) -> None:
         """Mark post-calculation fills at close, preserving earlier intrabar excursions."""
@@ -2248,6 +2245,8 @@ def exit(id: str, from_entry: str = "",
         limit_price = None if isinstance(limit, NA) or limit is None else _price_round(limit, direction)
         stop_price = None if isinstance(stop, NA) or stop is None else _price_round(stop, -direction)
         trailing_price = None if isinstance(trail_price, NA) or trail_price is None else _price_round(trail_price, -direction)
+        if isinstance(trail_offset, NA) or trail_offset is None:
+            trailing_price = trail_points_ticks = None
 
         group = None if isinstance(oca_name, NA) else oca_name
 
@@ -2270,6 +2269,14 @@ def exit(id: str, from_entry: str = "",
         binding.orders[id] = order
         position._add_order(order)
         position._resolve_close_order_prices(order)
+        if existing is not None and order.trail_offset is not None and (
+                existing.trail_offset == order.trail_offset and
+                existing.trail_points_ticks == order.trail_points_ticks and
+                existing.trail_price == order.trail_price):
+            order.trail_triggered, order.trail_stop = existing.trail_triggered, existing.trail_stop
+        # A new exit first sees the issue tick, never the bar's earlier extrema.
+        if binding.price is not None:
+            position._advance_trailing(order, position.c)
 
     entry_ids = [from_entry] if from_entry else list(dict.fromkeys(
         (*position._exit_entries, *position.entry_orders)))
