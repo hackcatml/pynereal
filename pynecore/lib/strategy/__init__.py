@@ -4,7 +4,7 @@ from datetime import datetime, UTC
 from collections import deque, defaultdict
 from copy import copy
 from bisect import insort, bisect_left
-from math import floor
+from math import ceil, floor
 
 from ...core.module_property import module_property
 from ... import lib
@@ -1875,7 +1875,7 @@ def _tick_snap(price: float) -> float:
 
 def _price_round(price: float | NA[float], direction: int | float) -> float | NA[float]:
     """
-    Round price to the nearest tick
+    Round price down/up to the tick grid, allowing near-boundary float residue.
 
     :param price: The price to round
     :param direction: The direction of the price
@@ -1884,20 +1884,12 @@ def _price_round(price: float | NA[float], direction: int | float) -> float | NA
     if isinstance(price, NA):
         return na_float
     pricescale = syminfo.pricescale
-    pmp = round(cast(float, price * pricescale), 7)
-    pmp_int = int(pmp)
-
+    minmove = syminfo.minmove
+    ticks = price * pricescale / minmove
+    # Upstream's TV-measured tolerance is in ticks, not absolute price units.
     if direction < 0:
-        # Round down
-        return pmp_int / pricescale
-    else:
-        # Round up only if pmp is not already an integer
-        if pmp == pmp_int:
-            # Already an integer, no rounding needed
-            return pmp_int / pricescale
-        else:
-            # Not an integer, round up
-            return (pmp_int + 1) / pricescale
+        return floor(ticks + 1e-4) * minmove / pricescale
+    return ceil(ticks - 1e-4) * minmove / pricescale
 
 
 # noinspection PyShadowingBuiltins,PyProtectedMember

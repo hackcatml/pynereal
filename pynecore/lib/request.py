@@ -86,7 +86,7 @@ class SecurityContext:
         self._base_bar_index: int = -1
         self._last_updated_base_index: int | None = None
         self._cache: dict[str, _TimeframeCache] = {}
-        self._expr_cache: dict[tuple[str, Any], _ExprCache] = {}
+        self._expr_cache: dict[tuple[str, Any, Any, Any], _ExprCache] = {}
         self._persistent_modules: list[_PersistentModule] = []
         self._collect_persistent_modules()
 
@@ -411,18 +411,11 @@ class SecurityContext:
         force_snapshot = False
         if lookahead != barmerge.lookahead_on:
             # For HTF lookahead_off, move to the last confirmed HTF bar.
-            if self._base_bar_index > 0:
-                base_time_ms = int(self._base_bars[self._base_bar_index].timestamp * 1000)
-                prev_time_ms = int(self._base_bars[self._base_bar_index - 1].timestamp * 1000)
-                delta_ms = base_time_ms - prev_time_ms
-                if delta_ms > 0:
-                    base_tf_ms = delta_ms
-
-            if base_tf_ms is None:
-                try:
-                    base_tf_ms = timeframe_module.in_seconds(self._lib.syminfo.period) * 1000
-                except Exception:  # noqa: BLE001
-                    base_tf_ms = None
+            base_time_ms = int(self._base_bars[self._base_bar_index].timestamp * 1000)
+            try:
+                base_tf_ms = timeframe_module.in_seconds(self._lib.syminfo.period) * 1000
+            except Exception:  # noqa: BLE001
+                base_tf_ms = None
 
             try:
                 requested_tf_ms = timeframe_module.in_seconds(timeframe) * 1000
@@ -432,8 +425,15 @@ class SecurityContext:
             if requested_tf_ms is None or base_tf_ms is None:
                 high_index -= 1
             elif requested_tf_ms > base_tf_ms:
-                # Avoid mixing partially built HTF bars into series buffers.
-                high_index -= 1
+                # The last closed chart bar already confirms its HTF bar. A live
+                # runner also steps a new, unconfirmed chart bar to process fills.
+                script = getattr(self._lib, "_script", None)
+                new_live_bar = (getattr(script, "realtime_trade", False)
+                                and self._base_bar_index >= script.last_bar_index)
+                closes_htf = (cache.resampler.get_bar_time(base_time_ms + base_tf_ms)
+                              != cache.bars[high_index]["time"] * 1000)
+                if new_live_bar or not closes_htf:
+                    high_index -= 1
                 force_snapshot = True
 
             if debug_enabled:
@@ -461,13 +461,16 @@ class SecurityContext:
                 print(msg)
         if high_index < 0:
             return NA()
-        # Cache by expression code so lookahead_on can reuse committed values.
-        expr_key = (timeframe, expr.__code__)
+        # One function can contain this expression at several isolated call sites.
+        caller_scope = expr.__globals__.get("__scope_id__")
+        expr_key = (timeframe, expr.__code__, lookahead, caller_scope)
         expr_cache = self._expr_cache.get(expr_key)
         if expr_cache is None:
             expr_cache = _ExprCache()
             self._expr_cache[expr_key] = expr_cache
         should_commit = (high_index != expr_cache.last_committed_index)
+        if force_snapshot and not should_commit:
+            return expr_cache.last_value
         # For lookahead_on, check if HTF bar's OHLCV has changed within the same HTF bar
         bar_changed = False
         if lookahead == barmerge.lookahead_on and not should_commit:
