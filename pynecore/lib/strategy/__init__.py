@@ -2068,10 +2068,20 @@ def entry(id: str, direction: direction.Direction, qty: int | float | NA[float] 
     if position.risk_halt_trading:
         return
 
+    direction_sign: float = (-1.0 if direction == short else 1.0)
+
     # Get default qty by script parameters if no qty is specified
     default_qty = isinstance(qty, NA)
-    if isinstance(qty, NA):
+    if default_qty:
         default_qty_type = script.default_qty_type
+        sizing_price = position.c
+        if (default_qty_type != fixed and script.slippage > 0
+                and (limit is None or isinstance(limit, NA))
+                and (stop is None or isinstance(stop, NA))):
+            # Market quantities are fixed at the slipped placement price, not the next open.
+            sizing_price += script.slippage * syminfo.mintick * direction_sign
+            if sizing_price <= 0.0:
+                return
         if default_qty_type == fixed:
             qty = script.default_qty_value
 
@@ -2093,32 +2103,31 @@ def entry(id: str, direction: direction.Direction, qty: int | float | NA[float] 
             if script.commission_type == _commission.percent:
                 # For percentage commission: qty * price * (1 + commission%)
                 commission_multiplier = 1.0 + script.commission_value * 0.01
-                qty = target_investment / (position.c * syminfo.pointvalue * commission_multiplier)
+                qty = target_investment / (sizing_price * syminfo.pointvalue * commission_multiplier)
 
             elif script.commission_type == _commission.cash_per_contract:
                 # For cash per contract: qty * price + qty * commission_value
                 # qty * (price + commission_value) = target_investment
-                price_plus_commission = position.c * syminfo.pointvalue + script.commission_value
+                price_plus_commission = sizing_price * syminfo.pointvalue + script.commission_value
                 qty = target_investment / price_plus_commission
 
             elif script.commission_type == _commission.cash_per_order:
                 # For cash per order: qty * price + commission_value = target_investment
                 # qty = (target_investment - commission_value) / price
-                qty = (target_investment - script.commission_value) / (position.c * syminfo.pointvalue)
+                qty = (target_investment - script.commission_value) / (sizing_price * syminfo.pointvalue)
                 qty = max(0.0, qty)  # Ensure non-negative
 
             else:
                 # No commission
-                qty = target_investment / (position.c * syminfo.pointvalue)
+                qty = target_investment / (sizing_price * syminfo.pointvalue)
 
         elif default_qty_type == cash:
             default_qty_value = script.default_qty_value
-            qty = default_qty_value / (position.c * syminfo.pointvalue)
+            qty = default_qty_value / (sizing_price * syminfo.pointvalue)
 
         else:
             raise ValueError("Unknown default qty type: ", default_qty_type)
 
-    direction_sign: float = (-1.0 if direction == short else 1.0)
     qty_budget, qty_price = _price_order_budget(limit, stop, direction_sign) if default_qty else (None, None)
     if qty_budget is not None:
         qty = _budget_quantity(qty_budget, qty_price)
