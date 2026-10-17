@@ -276,6 +276,7 @@ async def main() -> None:
     account_data_service = AccountDataService(
         _PROJECT_ROOT / "workdir" / "config" / "providers.toml",
         cache_path=_PROJECT_ROOT / "workdir" / "data" / "cache" / "account_cache.sqlite",
+        on_positions=registry.notifications.observe_positions if registry.notifications else None,
     )
     asset_transfer_service = AssetTransferService(
         _PROJECT_ROOT / "workdir" / "config" / "providers.toml"

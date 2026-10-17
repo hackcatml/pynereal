@@ -70,6 +70,7 @@
   gap: 8px 12px; font-size: 12px; line-height: 1.5; }
 .notification-detail dt { color: var(--muted); }
 .notification-detail dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.notification-detail .notification-duration { color: var(--ui-warning, #e3b341); }
 .notification-detail .failed { color: var(--ui-negative, #f07880); }
 .notification-detail .sent { color: var(--ui-positive, #55bb8a); }
 #notification-more { display: block; margin: 12px auto; background: none; border: 0; color: var(--ui-link, #58a6ff); font-size: 13px; cursor: pointer; touch-action: manipulation; }

@@ -26,6 +26,11 @@
   };
   function summary(item) {
     const context = item.context || {};
+    if (item.kind === "position_duration") {
+      const fragment = document.createDocumentFragment();
+      fragment.append([context.account, context.symbol, item.position?.side].filter(Boolean).join(" · "));
+      return fragment;
+    }
     const repainting = item.finding?.discrepancy === "entry_repainting";
     const kind = item.kind === "verification"
       ? (repainting ? `Repainting: ${item.signal?.order_id || "Entry"} ${item.finding.change === "moved" ? "moved" : "disappeared"}`
@@ -94,6 +99,21 @@
       if (cls) dd.className = cls;
       dl.append(dt, dd);
     };
+    if (item.kind === "position_duration") {
+      const position = item.position || {};
+      const elapsed = Number(position.duration_seconds) || 0;
+      field("Notice", `Position held ${position.threshold_days}+ days`, "notification-duration");
+      field("Account", item.context?.account);
+      field("Market", [item.context?.exchange, position.market_scope, position.dex, item.context?.symbol].filter(Boolean).join(" · "));
+      field("Time", `${date(item.occurred_at)} (${localZone})`);
+      field("Side", position.side);
+      field("Opened", `${date(position.opened_timestamp_ms / 1000, true)} UTC`);
+      field("Duration", `${Math.floor(elapsed / 86400)}d ${Math.floor(elapsed % 86400 / 3600)}h ${Math.floor(elapsed % 3600 / 60)}m`);
+      field("Size", position.quantity);
+      if (item.telegram) field("Telegram", delivery(item.telegram), item.telegram.status);
+      target.replaceChildren(dl);
+      return;
+    }
     field("Session", item.session_id);
     field("Strategy", item.context?.script_title);
     field("Market", [item.context?.exchange, item.context?.symbol, item.context?.timeframe].filter(Boolean).join(" · "));

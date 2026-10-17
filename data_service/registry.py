@@ -86,8 +86,11 @@ class SessionRegistry:
         self.minute_data = MinuteDataService(app_state.data_dir)
         self.hub_ws = WSManager()  # dashboard clients on /ws/hub
         self.supervisor = RunnerSupervisor(port=port, on_change=self.notify_hub)
-        from data_service.notifications import NotificationService
-        self.notifications = NotificationService(notification_path, self.hub_ws.broadcast_json) if notification_path else None
+        from data_service.notifications import NotificationService, send_position_duration_telegram
+        self.notifications = NotificationService(
+            notification_path, self.hub_ws.broadcast_json,
+            position_duration_sender=send_position_duration_telegram,
+        ) if notification_path else None
         if self.notifications:
             self.notifications.start()
             self.supervisor.notification_token = self.notifications.token
