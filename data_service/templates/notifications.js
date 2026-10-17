@@ -33,7 +33,8 @@
       : (item.origin === "manual" ? "Manual alert" : "Strategy alert");
     const reason = document.createElement("span");
     reason.textContent = kind;
-    if (item.kind === "verification") reason.className = "notification-finding";
+    reason.className = item.kind === "verification" ? "notification-finding"
+      : item.origin === "manual" ? "notification-manual" : "notification-strategy";
     const fragment = document.createDocumentFragment();
     [context.symbol || context.script_title || item.session_id, reason,
       repainting ? "" : item.signal?.action, item.webhook ? `Webhook: ${delivery(item.webhook)}` : "",

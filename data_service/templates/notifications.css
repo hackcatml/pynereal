@@ -57,6 +57,9 @@
 .notification-summary:hover { background: var(--ui-hover-overlay, #ffffff06); }
 .notification-summary > span { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .notification-summary .notification-finding { color: var(--ui-negative, #f07880); }
+.notification-summary .notification-strategy { color: var(--ui-link, #58a6ff); }
+.notification-summary .notification-manual { color: #5ac8bc; }
+:root[data-theme="light"] .notification-summary .notification-manual { color: #087f8c; }
 .notification-summary svg { width: 14px; height: 14px; margin-left: auto; flex-shrink: 0; fill: none; stroke: currentColor;
   stroke-width: 2; transition: transform 180ms ease; }
 .notification-summary[aria-expanded="true"] svg { transform: rotate(90deg); }
