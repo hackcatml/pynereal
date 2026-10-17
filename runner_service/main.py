@@ -26,6 +26,7 @@ from notification_sender import NotificationSender
 
 from appendable_iter import AppendableIterable
 from evaluation_intents import EvaluationIntentRecorder
+from entry_repainting import EntryRepaintingMonitor
 from strategy_snapshot import build_strategy_snapshot
 from verification import (
     VerificationContinuityError,
@@ -71,6 +72,9 @@ plot_options = {}
 plotchar_event_queue = deque()
 # Normalized per-candle intents used only for primary/verification comparison.
 evaluation_intents = EvaluationIntentRecorder()
+entry_repainting = EntryRepaintingMonitor()
+entry_repainting_events = deque()
+verification_entry_watches: list[dict] = []
 CURRENT_EVALUATION_TIMESTAMP: int | None = None
 ACTIVE_SOURCE_HASHES: dict[str, str] = {}
 VERIFICATION_RESUME_STATE = VerificationResumeState()
@@ -274,6 +278,9 @@ def clear_local_state() -> None:
     trade_event_queue.clear()
     plotchar_event_queue.clear()
     evaluation_intents.reset()
+    entry_repainting.reset()
+    entry_repainting_events.clear()
+    verification_entry_watches.clear()
     plot_options.clear()
 
 
@@ -297,6 +304,12 @@ def on_entry_event(trade, runner=None):
     We emit only on real-time fills (run_ready, pre_run=False) and on the one-time
     full-history pre-run after a history download (also pre_run=False).
     """
+    if runner is not None:
+        try:
+            entry_repainting.record_entry(trade, runner.script.position)
+        except Exception as exc:
+            entry_repainting.reset()
+            print(f"[runner] Entry repainting capture failed: {type(exc).__name__}")
     if runner is not None and getattr(runner.script, "pre_run", False):
         return
     event = {
@@ -336,6 +349,14 @@ def on_order_signal_event(order_signal: dict[str, Any], runner=None) -> None:
     event = dict(order_signal)
     event["type"] = "order_signal"
     _record_evaluation_intent(event)
+    if RUNNER_ROLE == "verification" and CURRENT_EVALUATION_TIMESTAMP is not None:
+        entry = entry_repainting.entry_for_order(event)
+        if entry is not None:
+            recorded = evaluation_intents.snapshot()[-1]
+            verification_entry_watches.append({
+                "order_id": recorded["order_id"], "exit_id": recorded.get("exit_id") or "",
+                "occurrence_index": recorded["occurrence_index"], "entry": entry,
+            })
 
 
 def on_plot_event(plot_data):
@@ -693,18 +714,29 @@ def run_prerun_steps(
     runner: ScriptRunner,
     prerun_range: int,
     plot_timestamp: int | None = None,
+    entry_findings: list[dict] | None = None,
 ) -> dict[str, float | int | None] | None:
     plot_values = None
+    last_step = None
     for _ in range(prerun_range):
         step_res = runner.step()
         if step_res is None:
             break
+        last_step = step_res
         current_values = _plot_values_from_step(step_res, plot_timestamp)
         if current_values is not None:
             plot_values = current_values
     # Flush plot writer to ensure all data is written
     if runner.plot_writer:
         runner.plot_writer.flush()
+    if entry_findings is not None and last_step is not None:
+        try:
+            entry_findings.extend(entry_repainting.finish_replay(
+                runner._all_ohlcv or [], int(last_step[0].timestamp),
+            ))
+        except Exception as exc:
+            entry_repainting.reset()
+            print(f"[runner] Entry repainting comparison failed: {type(exc).__name__}")
     return plot_values
 
 
@@ -741,6 +773,8 @@ def build_calculation_result(
         "intents": evaluation_intents.snapshot(),
         "plot_values": plot_values,
         "source_hashes": ACTIVE_SOURCE_HASHES,
+        **({"entry_repainting_scope": entry_repainting.scope_id} if role == "primary"
+           else {"entry_repainting_watches": list(verification_entry_watches)}),
         "notification_toggles": {
             "webhook": bool(WEBHOOK_ENABLED),
             "telegram": bool(TELEGRAM_ENABLED),
@@ -1139,18 +1173,31 @@ async def main():
                     and msg.get("history_resync")
                 )
             )
+            entry_findings = [] if RUNNER_ROLE == "primary" else None
+            if entry_findings is not None:
+                entry_repainting.begin_replay(ACTIVE_SOURCE_HASHES, int(reader.start_timestamp))
+                entry_repainting.register_supplemental(msg.get("entry_repainting_watches") or [])
             try:
                 prerun_plot_values = await asyncio.to_thread(
                     run_prerun_steps,
                     runner,
                     prerun_range,
                     confirmed_bar_time,
+                    entry_findings,
                 )
             finally:
                 SUPPRESS_EXTERNAL_NOTIFICATIONS = ALWAYS_SUPPRESS_EXTERNAL_NOTIFICATIONS
             if runner.plot_writer:
                 runner.plot_writer.flush()
             pending_full_reemit = False
+
+            entry_repainting_events.extend(entry_findings or [])
+            if entry_repainting_events:
+                try:
+                    await ws.send(json.dumps(list(entry_repainting_events)))
+                    entry_repainting_events.clear()
+                except Exception as exc:
+                    print(f"[runner] Failed to report entry repainting: {type(exc).__name__}")
 
             if verification_warmup:
                 confirmed_bar_and_new_bar = msg.get("confirmed_bar_and_new_bar")
@@ -1326,6 +1373,11 @@ async def main():
             # new_visible decides whether the newly opened candle should be kept as the next open bar.
             confirmed_visible = is_visible_ohlcv(confirmed_ohlcv, hide_zero_volume=hide_zero_volume)
             new_visible = is_visible_ohlcv(new_ohlcv, hide_zero_volume=hide_zero_volume)
+            if RUNNER_ROLE == "primary":
+                entry_repainting.begin_live(
+                    int(confirmed_ohlcv.timestamp),
+                    int(new_ohlcv.timestamp) if not new_visible else None,
+                )
 
             # Hidden fake/no-trade bars can stay in the raw file with volume 0, but they must not
             # enter the runner stream. BITGET/Hyperliquid leave hide_zero_volume=False, so their
@@ -1481,6 +1533,7 @@ async def main():
                 except Exception as e:
                     print(f"[runner] Failed to send primary_result: {e}")
             CURRENT_EVALUATION_TIMESTAMP = None
+            entry_repainting.end_live()
 
             # Remove the script_module using destroy() (required). If you don't remove it,
             # the ScriptRunner will reuse the previous candle data even when reloading the script.
@@ -1514,6 +1567,11 @@ async def main():
             CURRENT_EVALUATION_TIMESTAMP = evaluation_timestamp
 
             try:
+                entry_repainting.reset()
+                verification_entry_watches.clear()
+                new_bar = confirmed_bar_and_new_bar[1]
+                hidden_fill = hide_zero_volume_bars(getattr(ctx.runner.syminfo, "prefix", None)) and float(new_bar[5]) == 0.0
+                entry_repainting.begin_live(evaluation_timestamp, int(new_bar[0] / 1000) if hidden_fill else None)
                 result_payload, confirmed_ohlcv, new_ohlcv = (
                     calculate_verification_candle(
                         ctx,
@@ -1576,6 +1634,7 @@ async def main():
                     print(f"[runner] Failed to send verification_result: {e}")
             finally:
                 CURRENT_EVALUATION_TIMESTAMP = None
+                entry_repainting.end_live()
                 trade_event_queue.clear()
                 plotchar_event_queue.clear()
 
