@@ -20,6 +20,7 @@ App.measure = {
     if (!this.overlay || !this.label || !this.toolsButton || !this.palette || !this.toggleButton) return;
     this.installToolbarDoubleTapGuard();
     this.installMobileToolbarDrag();
+    window.addEventListener("pointerdown", (e) => this.onShortcutPointerDown(e), { capture: true });
 
     this.toolsButton.addEventListener("click", (e) => {
       if (this.shouldSuppressToolbarClick(e)) return;
@@ -488,6 +489,18 @@ App.measure = {
       x: rect.left + Number(x),
       y: rect.top + Number(y)
     };
+  },
+
+  onShortcutPointerDown(e) {
+    if (e.defaultPrevented || e.pointerType !== "mouse" || e.button !== 0 || e.isPrimary === false ||
+        !e.shiftKey || e.altKey || e.ctrlKey || e.metaKey ||
+        e.target.closest?.("button, input, textarea, select, [contenteditable]") ||
+        !App.chart.container.contains(e.target) || !this.isClientInPlot(e.clientX, e.clientY)) return;
+    this.closePalette();
+    if (!App.state.measureToolActive) {
+      this.clear();
+      this.setActive(true);
+    }
   },
 
   onPointerDown(e) {

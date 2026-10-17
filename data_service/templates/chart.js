@@ -1286,11 +1286,12 @@ App.chart = {
     const startBtn = document.getElementById("nav-to-start");
     const endBtn = document.getElementById("nav-to-end");
     if (!startBtn || !endBtn) return;
+    const rightInset = Math.max(0, window.innerWidth - this.container.getBoundingClientRect().right);
     if ((this.chart.panes?.().length || 1) > 1) {
       const bottom = this.container.clientHeight - this.pricePaneHeight() + 38;
       startBtn.style.bottom = `${bottom}px`;
       endBtn.style.bottom = `${bottom}px`;
-      endBtn.style.right = `${this.chart.priceScale("right").width() + 12}px`;
+      endBtn.style.right = `${rightInset + this.chart.priceScale("right").width() + 12}px`;
       return;
     }
     if (this.isMobileViewport()) {
@@ -1305,7 +1306,7 @@ App.chart = {
     try {
       const priceScaleWidth = this.chart.priceScale("right").width();
       if (priceScaleWidth > 0) {
-        endBtn.style.right = (priceScaleWidth + 12) + "px";
+        endBtn.style.right = (rightInset + priceScaleWidth + 12) + "px";
       }
     } catch {}
 

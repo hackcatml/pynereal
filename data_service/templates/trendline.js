@@ -65,8 +65,15 @@ App.trendline = {
       }, { capture: true, passive: false });
     }
     document.addEventListener("keydown", event => {
-      if (event.target.closest?.("input, textarea, select, [contenteditable=true]")) return;
-      if (event.key === "Escape" && (this.active || this.selectedId != null)) {
+      if (event.defaultPrevented || event.isComposing ||
+          event.target.closest?.("input, textarea, select, [contenteditable], .cm-editor")) return;
+      if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey &&
+          (event.code === "KeyT" || event.key.toLowerCase() === "t")) {
+        if (event.repeat) return;
+        event.preventDefault();
+        App.measure.closePalette();
+        if (!this.active) this.setActive(true);
+      } else if (event.key === "Escape" && (this.active || this.selectedId != null)) {
         event.preventDefault();
         this.setActive(false);
       } else if ((event.key === "Delete" || event.key === "Backspace") && this.selectedId != null) {
