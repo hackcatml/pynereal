@@ -51,6 +51,7 @@ App.ws = {
       socket.send(JSON.stringify({ type: "client_hello", role: "chart" }));
       this.syncNeeded = true;
       this.probe();
+      App.volumeProfile?.onReconnect();
     };
 
     socket.onmessage = (ev) => {
@@ -88,6 +89,7 @@ App.ws = {
     }
   },
   handleMessage(msg) {
+    if (msg.type === "bar" && msg.data) App.volumeProfile?.onBar(msg.data);
     const state = App.state;
     const chart = App.chart;
     const collections = App.collections;
@@ -119,6 +121,7 @@ App.ws = {
       }
       return;
     }
+    if (App.timeframes?.isMinute() && ["bar", "last_bar_open_fix", "plot_data", "plotchar", "trade_entry", "trade_close"].includes(msg.type)) return;
     if (App.history.captureLive(msg)) return;
     try {
         if (App.timeframes?.handleLive(msg)) return;
@@ -127,8 +130,10 @@ App.ws = {
           if (state.sourcePanelOpen) {
             App.ui.updateSourceSaveState();
           }
-          chart.resetChartState(false);
-          App.data.loadInitialWithRetry();
+          if (!App.timeframes?.isMinute()) {
+            chart.resetChartState(false);
+            App.data.loadInitialWithRetry();
+          } else App.minuteChart.caches.delete("primary");
         } else if (msg.type === "chart_reset") {
           // data window changed (history_since edit): drop stale series and
           // reload the freshly regenerated ohlcv/plot/markers
@@ -138,7 +143,8 @@ App.ws = {
           state.runnerConnected = false;
           state.runnerPhase = "stopped";
           state.nextPrerunAt = null;
-          chart.resetChartState(false);
+          if (!App.timeframes?.isMinute()) chart.resetChartState(false);
+          else App.minuteChart.caches.delete("primary");
           App.ui.setChartInfo();
         } else if (msg.type === "runner_connected") {
           state.runnerConnected = true;

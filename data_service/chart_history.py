@@ -172,12 +172,12 @@ def _merge_live_bar(window: dict, snapshot: dict | None, exchange: str, limit: i
     window["live_bar_sequence"] = snapshot["sequence"]
 
 
-def read_chart_window(session, limit=CHART_PAGE_SIZE, before=None, after=None) -> dict:
+def read_chart_window(session, limit=CHART_PAGE_SIZE, before=None, after=None, *, candles_only=False) -> dict:
     snapshot = getattr(getattr(session, "feed", None), "latest_chart_bar", None)
     window = read_candle_window(session.ohlcv_path, session.spec.exchange, limit, before, after)
     _merge_live_bar(window, snapshot, session.spec.exchange, limit, before, after)
     window.update(plots=[], trades=[], plotchars=[], overlays_ready=True)
-    if not window["bars"] or not session.runner_count:
+    if candles_only or not window["bars"] or not session.runner_count:
         return window
     window["overlays_ready"] = False
     if session.runner_phase == "prerun_active":

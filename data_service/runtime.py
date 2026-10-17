@@ -146,7 +146,7 @@ class Feed:
             self._last_raw_trade_time_ms,
         )
 
-    def broadcast_trades(self, trades: list) -> None:
+    def broadcast_trades(self, trades: list) -> list[dict[str, Any]]:
         initial_batch = not self._raw_trade_stream_started
         new_trades: list[tuple[int, dict[str, Any]]] = []
         for index, trade in enumerate(trades):
@@ -189,6 +189,7 @@ class Feed:
                     initial_batch=initial_batch,
                 )
         self._raw_trade_stream_started = True
+        return [trade for _, trade in new_trades]
 
     async def emit_event(self, payload: dict) -> None:
         # prerun_ready / run_ready fan out to every runner subscribed to this feed.

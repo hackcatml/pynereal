@@ -18,6 +18,8 @@ if (App.chart.captureMode) {
 }
 App.measure.init();
 App.trendline.init();
+App.volumeProfile.init();
+void chartInfoReady.then(() => App.volumeProfile.ready());
 App.chart.startJankMonitor();
 App.chart.attachResizeHandler();
 App.chart.attachNavButtons();

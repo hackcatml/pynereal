@@ -74,6 +74,37 @@
   height: 19px;
   display: block;
 }
+.trendline-toolbar {
+  position: fixed;
+  z-index: 16;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid #d3d7dd;
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.12);
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.trendline-toolbar.hidden { display: none; }
+.trendline-toolbar .drawing-tool-btn { border: 0; border-radius: 4px; background: transparent; }
+.trendline-toolbar .drawing-tool-btn.active { background: #eef2ff; color: #0b33e8; }
+.trendline-toolbar .drawing-tool-btn:focus-visible { outline: 2px solid #1767bc; outline-offset: -2px; }
+.trendline-toolbar .trendline-drag-handle { width: 24px; padding: 0; color: #7a838c; cursor: grab; touch-action: none; -webkit-touch-callout: none; }
+.trendline-drag-handle svg { width: 18px; height: 18px; pointer-events: none; }
+.trendline-toolbar .trendline-drag-handle:active { transform: none; }
+.trendline-toolbar.dragging,
+.trendline-toolbar.dragging .trendline-drag-handle { cursor: grabbing; }
+.trendline-toolbar.dragging .trendline-drag-handle::after { opacity: 0; }
+.trendline-toolbar .trendline-color { box-sizing: border-box; }
+.trendline-color input { width: 22px; height: 22px; padding: 0; border: 0; background: transparent; cursor: pointer; touch-action: manipulation; }
+.trendline-color input::-webkit-color-swatch-wrapper { padding: 0; }
+.trendline-color input::-webkit-color-swatch { border: 1px solid rgba(0,0,0,.15); border-radius: 3px; }
+.trendline-color input::-moz-color-swatch { border: 1px solid rgba(0,0,0,.15); border-radius: 3px; }
 .measure-overlay {
   position: fixed;
   inset: 0;
@@ -118,6 +149,7 @@ body.trendline-dragging :is(#chart, #backtest-price-chart) {
   pointer-events: none;
   opacity: 0;
 }
+.trendline-toolbar .drawing-tool-btn[data-tooltip]::after { top: calc(100% + 8px); left: 50%; transform: translateX(-50%); }
 @media (hover: hover) {
   .drawing-tool-btn[data-tooltip]:hover::after,
   .drawing-tool-btn[data-tooltip]:focus-visible::after {
