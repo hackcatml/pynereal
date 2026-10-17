@@ -105,6 +105,7 @@ class AccountDataService:
         cache_ttl_seconds: float = 10.0,
         executor_factory: Callable[[], Executor] | None = None,
         positions_collector: Callable[[str], dict[str, Any]] = collect_positions_snapshot,
+        on_positions: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.config_path = config_path.resolve()
         self.cache_path = (
@@ -115,6 +116,7 @@ class AccountDataService:
         self.cache_ttl_seconds = cache_ttl_seconds
         self._executor_factory = executor_factory or self._new_process_executor
         self._positions_collector = positions_collector
+        self._on_positions = on_positions
         self._executor: Executor | None = None
         self._import_executor: Executor | None = None
         self._positions: dict[str, Any] | None = None
@@ -224,6 +226,8 @@ class AccountDataService:
             result = _add_exchange_logos(result)
             self._positions = result
             self._positions_at = time.monotonic()
+            if self._on_positions is not None:
+                self._on_positions(result)
             if force:
                 self._sync_live_snapshot(result)
             output = copy.deepcopy(result)
@@ -1376,6 +1380,8 @@ class AccountDataService:
             payload = _add_exchange_logos(payload)
             self._positions = payload
             self._positions_at = time.monotonic()
+            if self._on_positions is not None:
+                self._on_positions(payload)
             await self.live_ws.broadcast_json(
                 {"type": "account.positions", "payload": payload}
             )

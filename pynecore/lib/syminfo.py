@@ -7,7 +7,7 @@ from ..core.syminfo import SymInfoSession, SymInfoInterval
 
 __all__ = [
     "prefix", "description", "ticker", "root", "tickerid", "currency", "basecurrency", "period", "type", "volumetype",
-    "mintick", "pricescale", "minmove", "pointvalue", "timezone",
+    "mintick", "pricescale", "minmove", "pointvalue", "mincontract", "timezone",
     "country", "session", "sector", "industry",
     "target_price_average", "target_price_high", "target_price_low", "target_price_date"
 ]
@@ -30,6 +30,7 @@ mintick: float | NA[float] = NA(float)
 pricescale: int | NA[int] = NA(int)
 minmove: int = 1
 pointvalue: float | NA[float] = NA(float)
+mincontract: float = 0.0
 timezone: str | NA[str] = NA(str)
 country: str | NA[str] = NA(str)
 session: Session = regular

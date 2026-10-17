@@ -10,6 +10,7 @@ from config import FeedSpec
 from pynecore.cli.commands.data import parse_date_or_days
 from pynecore.core.ohlcv_file import OHLCVReader
 from pynecore.core.exchange_policy import previous_close_is_next_open
+from pynecore.core.syminfo import SymInfo
 from pynecore.cli.app import app_state
 from ohlcv_io import (
     convert_timeframe,
@@ -87,7 +88,10 @@ async def file_update_loop(
     get_prerun_offset_seconds: Callable[[], int] | None = None,
     poll_sec: float = 0.1,
     history_ready_event: asyncio.Event | None = None,
+    history_download_lock: asyncio.Lock | None = None,
 ) -> None:
+    if history_download_lock is None:
+        history_download_lock = asyncio.Lock()
     provider = config.provider
     exchange = config.exchange
     symbol = config.symbol
@@ -132,28 +136,40 @@ async def file_update_loop(
 
     if cache_ready:
         timeframe_seconds = int(convert_timeframe(timeframe, to_ms=True) / 1000)
-        # Ensure toml exists before using cached data.
-        if not toml_path.exists():
+        # Resolve missing or legacy contract-unit metadata at startup, off-loop.
+        missing_toml = not toml_path.exists()
+        needs_lot_metadata = False
+        if not missing_toml and provider == 'ccxt':
             try:
-                provider_module = __import__(f"pynecore.providers.{provider}", fromlist=[""])
-                provider_class = getattr(
-                    provider_module,
-                    [p for p in dir(provider_module) if p.endswith("Provider")][0],
-                )
-                provider_instance = provider_class(
-                    symbol=f"{exchange}:{symbol}".upper(),
-                    timeframe=convert_timeframe(timeframe),
-                    ohlv_dir=ohlcv_path.parent,
-                    config_dir=app_state.config_dir,
-                )
-                sym_info = provider_instance.get_symbol_info(force_update=False)
-                sym_info.save_toml(toml_path)
-                print("[data_service] toml regenerated from provider symbol info")
+                symbol_info = SymInfo.load_toml(toml_path)
+                needs_lot_metadata = symbol_info.mincontract == 0 or symbol_info.pointvalue != 1.0
+            except (OSError, KeyError, TypeError, ValueError) as exc:
+                log_with_time(f"[data_service] quantity metadata unavailable: {exc}")
+        if missing_toml or needs_lot_metadata:
+            try:
+                def ensure_symbol_info():
+                    provider_module = __import__(f"pynecore.providers.{provider}", fromlist=[""])
+                    provider_class = getattr(
+                        provider_module,
+                        [p for p in dir(provider_module) if p.endswith("Provider")][0],
+                    )
+                    provider_instance = provider_class(
+                        symbol=f"{exchange}:{symbol}".upper(),
+                        timeframe=convert_timeframe(timeframe),
+                        ohlv_dir=ohlcv_path.parent,
+                        config_dir=app_state.config_dir,
+                    )
+                    provider_instance.get_symbol_info(force_update=False)
+
+                await _to_thread_cancel_safe(ensure_symbol_info)
+                if missing_toml:
+                    print("[data_service] toml regenerated from provider symbol info")
             except Exception as e:
                 import traceback
-                print(f"[data_service] toml regeneration failed: {e!r}")
+                print(f"[data_service] symbol metadata update failed: {e!r}")
                 print(traceback.format_exc())
-                cache_ready = False
+                if missing_toml:
+                    cache_ready = False
         else:
             print("[data_service] sqlite cache found; syncing from last_ts")
         # Backfill cache if desired history is older than cached min_ts.
@@ -315,9 +331,69 @@ async def file_update_loop(
     prerun_sent_for_bar_ts: Optional[int] = None
 
     first_fetch_after_download_done: bool = False
+    history_retry_delay = 1.0
 
     while True:
         await asyncio.sleep(poll_sec)
+
+        # Wait outside state.lock so queued feeds can keep collecting live trades.
+        if not ohlcv_path.exists():
+            since = None
+            if start_timestamp is not None:
+                since = datetime.fromtimestamp(start_timestamp).strftime("%Y-%m-%d")
+            elif history_since != "":
+                since = history_since
+
+            async with history_download_lock:
+                ok = await _to_thread_cancel_safe(
+                    download_history,
+                    provider,
+                    exchange,
+                    symbol,
+                    timeframe,
+                    since,
+                )
+                if not ok:
+                    for fp in (ohlcv_path, toml_path):
+                        if fp.exists():
+                            fp.unlink()
+                    log_with_time(
+                        f"[data_service] {exchange} {symbol} {timeframe} history download "
+                        f"failed; retrying after {history_retry_delay:g}s"
+                    )
+                    # Cool down this exchange's queue as well as this failed feed.
+                    await asyncio.sleep(history_retry_delay)
+                    history_retry_delay = min(history_retry_delay * 2, 30.0)
+                    continue
+
+                await _to_thread_cancel_safe(
+                    import_from_ohlcv,
+                    cache_path,
+                    provider,
+                    exchange,
+                    symbol,
+                    timeframe,
+                    ohlcv_path,
+                )
+
+            history_retry_delay = 1.0
+            history_download_complete = True
+            first_fetch_after_download_done = False
+            async with state.lock:
+                # Resume with the latest live pair, not old candles queued during startup.
+                state.live_bars = state.live_bars[-2:]
+                state.pending_prerun_event = {
+                    "type": "prerun_ready_after_history_download",
+                    "ohlcv_path": str(ohlcv_path),
+                    "toml_path": str(toml_path),
+                    "confirmed_bar_and_new_bar": None,
+                }
+                if history_ready_event is not None:
+                    history_ready_event.set()
+
+            fixed_open_price = 0.0
+            open_fix_done = False
+            prerun_sent_for_bar_ts = None
 
         async with state.lock:
             bars = state.live_bars
@@ -339,59 +415,6 @@ async def file_update_loop(
                     ])
                 except Exception as e:
                     print(f"[data_service] cold-start live_bars seed skipped: {e}")
-
-            # 1) file missing -> download history
-            if not ohlcv_path.exists():
-                # Compute since date for history download.
-                since = None
-                if start_timestamp is not None:
-                    since = datetime.fromtimestamp(start_timestamp).strftime("%Y-%m-%d")
-                elif history_since != "":
-                    since = history_since
-
-                ok = await _to_thread_cancel_safe(
-                    download_history,
-                    provider,
-                    exchange,
-                    symbol,
-                    timeframe,
-                    since,
-                )
-
-                if not ok:
-                    for fp in (ohlcv_path, toml_path):
-                        if fp.exists():
-                            fp.unlink()
-                    continue
-                else:
-                    history_download_complete = True
-                    first_fetch_after_download_done = False
-                    await _to_thread_cancel_safe(
-                        import_from_ohlcv,
-                        cache_path,
-                        provider,
-                        exchange,
-                        symbol,
-                        timeframe,
-                        ohlcv_path,
-                    )
-                    # print("[data_service] sqlite cache populated from downloaded ohlcv")
-
-                    # Store pending event instead of emitting immediately
-                    # This will be sent when runner_service connects
-                    state.pending_prerun_event = {
-                        "type": "prerun_ready_after_history_download",
-                        "ohlcv_path": str(ohlcv_path),
-                        "toml_path": str(toml_path),
-                        "confirmed_bar_and_new_bar": None,
-                    }
-                    if history_ready_event is not None:
-                        history_ready_event.set()
-                    # print("[file_update_loop] History download complete. Event will be sent when client connects.")
-
-                fixed_open_price = 0.0
-                open_fix_done = False
-                prerun_sent_for_bar_ts = None
 
             # 2) pre-run open fix timing
             if (

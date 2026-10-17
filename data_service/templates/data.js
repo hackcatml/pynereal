@@ -88,7 +88,7 @@ App.data = {
   STYLE_CIRCLES: 2,
   STYLE_CROSS: 4,
   STYLE_LINEBR: 7,
-  rebuildOhlcvCache(data, notifyBgcolor = true) {
+  rebuildOhlcvCache(data, notifyBgcolor = true, { preserveIndicators = false } = {}) {
     const collections = App.collections;
     collections.ohlcvData = Array.isArray(data)
       ? data
@@ -117,7 +117,7 @@ App.data = {
     if (notifyBgcolor && App.chart && App.chart.bgcolorPrimitive) {
       App.chart.bgcolorPrimitive.onOhlcvChanged();
     }
-    App.indicators?.reset();
+    App.indicators?.reset({ preserveDisplay: preserveIndicators });
   },
   upsertOhlcvCache(bar) {
     if (!bar || !Number.isFinite(Number(bar.time))) return;
@@ -499,11 +499,12 @@ App.data = {
       state.exchange = exchange;
       state.symbol = symbol;
       state.timeframe = timeframe;
+      state.minuteChartAvailable = info.minute_chart_available === true;
       document.title = `Chart (${symbol})`;
       const tfSeconds = App.data.timeframeToSeconds(info.timeframe);
       if (tfSeconds) {
         state.configuredTimeframeSec = tfSeconds;
-        state.timeframeInterval = App.timeframes?.isHigher() ? App.timeframes.seconds() : tfSeconds;
+        state.timeframeInterval = App.timeframes?.seconds() || tfSeconds;
       }
       if (info.script_title) {
         state.scriptTitle = info.script_title || "No title";

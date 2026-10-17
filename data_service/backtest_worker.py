@@ -282,6 +282,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     script_snapshot = scripts_snapshot / args.script_path
     if not script_snapshot.is_file():
         raise FileNotFoundError(f"script snapshot was not created: {args.script_path}")
+    # Keep the exact executed source after the temporary runtime is removed.
+    shutil.copyfile(script_snapshot, job_dir / "script.py")
     try:
         job = json.loads((job_dir / "job.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -296,6 +298,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     time_to = int(args.time_to)
     skip_zero_volume = tradingview_hides_zero_volume(syminfo.prefix)
     with OHLCVReader(source_data) as reader:
+        data_precision = reader.precision
         candles = list(
             reader.read_from(
                 time_from,
@@ -305,7 +308,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         )
     if not candles:
         raise ValueError("no OHLCV candles found in the selected range")
-    with OHLCVWriter(data_snapshot, truncate=True) as writer:
+    with OHLCVWriter(data_snapshot, truncate=True, precision=data_precision) as writer:
         for candle in candles:
             writer.write(candle)
     shutil.copy2(source_metadata, metadata_snapshot)

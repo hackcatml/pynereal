@@ -2,6 +2,7 @@ from typing import Literal, NamedTuple, Self
 from pathlib import Path
 from dataclasses import dataclass
 from datetime import time
+from math import isfinite
 
 SymInfoInterval = NamedTuple("SymInfoInterval", [('day', int), ('start', time), ('end', time)])
 SymInfoSession = NamedTuple("SymInfoSession", [('day', int), ('time', time)])
@@ -33,6 +34,7 @@ class SymInfo:
     pricescale: int
     minmove: int = 1
     pointvalue: float
+    mincontract: float = 0.0
     opening_hours: list[SymInfoInterval]
     session_starts: list[SymInfoSession]
     session_ends: list[SymInfoSession]
@@ -47,6 +49,10 @@ class SymInfo:
     target_price_high: float | None = None
     target_price_low: float | None = None
     target_price_date: int | None = None  # UNIX timestamp
+
+    def __post_init__(self):
+        if not isfinite(self.mincontract) or self.mincontract < 0:
+            raise ValueError('mincontract must be a finite non-negative quantity step')
 
     @classmethod
     def load_toml(cls, path: Path) -> Self:
@@ -111,6 +117,7 @@ class SymInfo:
             pricescale=symbol['pricescale'],
             minmove=symbol.get('minmove', 1),
             pointvalue=symbol['pointvalue'],
+            mincontract=float(symbol.get('mincontract', 0.0)),
             opening_hours=opening_hours,
             session_starts=session_starts,
             session_ends=session_ends,
@@ -148,6 +155,8 @@ class SymInfo:
             if isinstance(value, bool):
                 return f"{key} = {str(value).lower()}"
             if isinstance(value, float):
+                if key == 'mincontract':
+                    return f"{key} = {value!r}"
                 return f"{key} = {value:.8f}"
             return f"{key} = {value}"
 
@@ -155,7 +164,7 @@ class SymInfo:
 
         # Basic fields
         for key in ['prefix', 'description', 'ticker', 'currency', 'basecurrency',
-                    'period', 'type', 'mintick', 'pricescale', 'minmove', 'pointvalue',
+                    'period', 'type', 'mintick', 'pricescale', 'minmove', 'pointvalue', 'mincontract',
                     'timezone', 'volumetype', 'avg_spread', 'taker_fee', 'maker_fee',
                     'target_price_average', 'target_price_high', 'target_price_low', 'target_price_date']:
             lines.append(format_field(key, getattr(self, key)))

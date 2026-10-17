@@ -152,6 +152,22 @@ def build_scripting_backtest_router(
             return _error_response(exc)
         return JSONResponse(payload)
 
+    @router.delete("/api/scripting/backtests/{job_id}")
+    async def delete_backtest_result(job_id: str) -> JSONResponse:
+        try:
+            payload = await manager.delete_result(job_id)
+        except ScriptingBacktestError as exc:
+            return _error_response(exc)
+        return JSONResponse(payload)
+
+    @router.get("/api/scripting/backtests/{job_id}/script")
+    async def get_backtest_script(job_id: str) -> JSONResponse:
+        try:
+            payload = await manager.read_script(job_id)
+        except ScriptingBacktestError as exc:
+            return _error_response(exc)
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
     @router.get("/api/scripting/backtests/{job_id}/log")
     async def get_backtest_log(
         job_id: str,

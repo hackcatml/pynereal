@@ -10,6 +10,17 @@ from pathlib import Path
 class PyneLoader(importlib.machinery.SourceFileLoader):
     """Loader that handles AST transformation"""
 
+    @staticmethod
+    def cache_path(path):
+        # Invalidate scripts compiled before the trade-count and persistent-target transforms.
+        return path[:-4] + '.pyne-cmp5.pyc' if path.endswith('.pyc') else path
+
+    def get_data(self, path):
+        return super().get_data(self.cache_path(path))
+
+    def set_data(self, path, data, *, _mode=0o666):
+        return super().set_data(self.cache_path(path), data, _mode=_mode)
+
     # noinspection PyMethodOverriding
     def source_to_code(self, data: bytes | str, path: str, *, _optimize: int = -1):
         """Transform source to code if needed"""
@@ -18,7 +29,7 @@ class PyneLoader(importlib.machinery.SourceFileLoader):
         # Create marker file for pynecore site-packages to indicate we processed this file
         if (os.path.sep + 'site-packages' + os.path.sep in str(path).lower()
                 and os.path.sep + 'pynecore' + os.path.sep in str(path).lower()):
-            pyc_path = Path(importlib.util.cache_from_source(str(path)))
+            pyc_path = Path(self.cache_path(importlib.util.cache_from_source(str(path))))
             cache_dir = pyc_path.parent
             marker_path = pyc_path.parent / f'{pyc_path.name}.pyne'
             try:
@@ -71,6 +82,7 @@ class PyneLoader(importlib.machinery.SourceFileLoader):
             from pynecore.transformers.input_transformer import InputTransformer
             from pynecore.transformers.safe_convert_transformer import SafeConvertTransformer
             from pynecore.transformers.safe_division_transformer import SafeDivisionTransformer
+            from pynecore.transformers.comparison_transformer import ComparisonTransformer
 
             transformed = ImportLifterTransformer().visit(transformed)
             transformed = ImportNormalizerTransformer().visit(transformed)
@@ -86,6 +98,10 @@ class PyneLoader(importlib.machinery.SourceFileLoader):
             transformed = InputTransformer().visit(transformed)
             transformed = SafeConvertTransformer().visit(transformed)
             transformed = SafeDivisionTransformer().visit(transformed)
+            # Engine internals implement numerical algorithms in Python; only
+            # user @pyne scripts/libraries use Pine's tolerant comparisons.
+            if not path.resolve().is_relative_to(Path(__file__).resolve().parents[1]):
+                transformed = ComparisonTransformer().visit(transformed)
 
             ast.fix_missing_locations(transformed)
 
@@ -144,7 +160,7 @@ class PyneImportHook:
                     # Check if pynecore site-packages bytecode needs recompilation
                     if (os.path.sep + 'site-packages' + os.path.sep in str(py_path).lower() and
                             os.path.sep + 'pynecore' + os.path.sep in str(py_path).lower()):
-                        pyc_path = Path(importlib.util.cache_from_source(str(py_path)))
+                        pyc_path = Path(PyneLoader.cache_path(importlib.util.cache_from_source(str(py_path))))
                         marker_path = pyc_path.parent / f'{pyc_path.name}.pyne'
 
                         need_recompile = False

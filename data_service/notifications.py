@@ -2,24 +2,58 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
+import math
 import queue
 import secrets
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from data_service.notification_events import notification_error, safe_value, valid_telegram_reference
+from data_service.notification_events import delivery_result, notification_error, recorded_result, safe_value, valid_telegram_reference
+
+
+_POSITION_TELEGRAM_INTERVAL_SECONDS = 3.1
+
+
+def send_position_duration_telegram(event: dict) -> dict:
+    from data_service.config import default_telegram_chat_id, default_telegram_token
+    from data_service.manual_alerts import post_telegram_message
+
+    token, chat_id = default_telegram_token(), default_telegram_chat_id()
+    if not token or not chat_id:
+        return {"status": "configuration_error", "attempts": 0}
+    context, position = event["context"], event["position"]
+    opened = datetime.fromtimestamp(position["opened_timestamp_ms"] / 1000, UTC)
+    observed = datetime.fromtimestamp(event["occurred_at"], UTC)
+    elapsed = position["duration_seconds"]
+    text = (
+        f"\U0001f6a8 [Position duration] Position held {position['threshold_days']}+ days\n"
+        f"Account: {context['account']}\n"
+        f"Market: {context['exchange']} {context['symbol']}\n"
+        f"Side: {position['side']}\n"
+        f"Opened: {opened:%Y-%m-%d %H:%M:%S} UTC\n"
+        f"Duration: {elapsed // 86400}d {elapsed % 86400 // 3600}h {elapsed % 3600 // 60}m\n"
+        f"Size: {position['quantity']}\n"
+        f"Time: {observed:%Y-%m-%d %H:%M:%S} UTC"
+    )
+    try:
+        response = post_telegram_message(token, chat_id, text)
+        return {**recorded_result({"sent": True, **response}), "attempts": 1}
+    except Exception as exc:
+        return {**delivery_result(error=exc.__cause__ or exc), "attempts": 1}
 
 
 class NotificationService:
-    def __init__(self, path: Path, broadcast):
+    def __init__(self, path: Path, broadcast, *, position_duration_sender=None):
         self.path = Path(path)
         self.token = secrets.token_urlsafe(32)
         self.broadcast = broadcast
@@ -31,6 +65,11 @@ class NotificationService:
         self._push_task = None
         self._push_version = 0
         self._closed = False
+        self._position_duration_keys: set[str] = set()
+        self._position_duration_sender = position_duration_sender
+        self._position_delivery_tasks: set[asyncio.Task] = set()
+        self._position_delivery_lock = asyncio.Lock()
+        self._position_next_send = 0.0
 
     def start(self):
         if self._worker is None:
@@ -50,6 +89,57 @@ class NotificationService:
             self._loop.call_soon_threadsafe(self._wake.set)
         return True
 
+    def observe_positions(self, snapshot: dict) -> None:
+        now = time.time()
+        for result in snapshot.get("results", []):
+            if not isinstance(result, dict) or result.get("status") != "ok":
+                continue
+            account, exchange = result.get("account"), result.get("exchange")
+            if not account or not exchange:
+                continue
+            for position in result.get("positions") or []:
+                if not isinstance(position, dict):
+                    continue
+                raw_opened = position.get("opened_timestamp")
+                raw_quantity = position.get("quantity")
+                if raw_quantity is None:
+                    raw_quantity = position.get("contracts")
+                if isinstance(raw_opened, bool) or isinstance(raw_quantity, bool):
+                    continue
+                try:
+                    opened_ms, quantity = float(raw_opened), float(raw_quantity)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if (not math.isfinite(opened_ms) or not 0 < opened_ms <= now * 1000
+                        or not math.isfinite(quantity) or quantity == 0):
+                    continue
+                symbol, side = position.get("symbol"), position.get("side")
+                if not symbol or side not in {"long", "short"}:
+                    continue
+                duration = max(0, int(now - opened_ms / 1000))
+                if duration < 5 * 86400:
+                    continue
+                identity = [exchange, account, position.get("market_scope") or "",
+                            position.get("dex") or "", symbol, side, int(opened_ms)]
+                digest = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
+                for days in (5, 7):
+                    key = f"position-duration:{digest}:{days}"
+                    if duration < days * 86400 or key in self._position_duration_keys:
+                        continue
+                    event = {
+                        "event_key": key, "kind": "position_duration", "origin": "account",
+                        "occurred_at": now,
+                        "context": {"account": str(account), "exchange": str(exchange), "symbol": str(symbol)},
+                        "position": {
+                            "side": side, "quantity": quantity, "opened_timestamp_ms": int(opened_ms),
+                            "duration_seconds": duration, "threshold_days": days,
+                            "market_scope": str(position.get("market_scope") or ""),
+                            "dex": str(position.get("dex") or ""),
+                        },
+                    }
+                    if self.publish(event):
+                        self._position_duration_keys.add(key)
+
     async def _run(self):
         while True:
             self._wake.clear()
@@ -57,13 +147,40 @@ class NotificationService:
                 event = self._queue.get_nowait()
                 try:
                     await self.apply(event)
+                    if (event.get("kind") == "position_duration" and "telegram" not in event
+                            and self._position_duration_sender is not None):
+                        task = asyncio.create_task(self._deliver_position_duration(event), name="position-duration-telegram")
+                        self._position_delivery_tasks.add(task)
+                        task.add_done_callback(self._position_delivery_tasks.discard)
                 except Exception as exc:
+                    if event.get("kind") == "position_duration":
+                        self._position_duration_keys.discard(event.get("event_key"))
                     notification_error(f"save failed: {type(exc).__name__}")
                 finally:
                     self._queue.task_done()
             if self._closed:
                 return
             await self._wake.wait()
+
+    async def _deliver_position_duration(self, event: dict) -> None:
+        try:
+            async with self._position_delivery_lock:
+                loop = asyncio.get_running_loop()
+                await asyncio.sleep(max(0, self._position_next_send - loop.time()))
+                claim = await self.query("claim_position_telegram", event_key=event["event_key"])
+                if not claim["claimed"]:
+                    return
+                try:
+                    outcome = await asyncio.to_thread(self._position_duration_sender, event)
+                except Exception as exc:
+                    outcome = delivery_result(error=exc)
+                self._position_next_send = loop.time() + _POSITION_TELEGRAM_INTERVAL_SECONDS
+                await self.apply({**event, "telegram": outcome})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._position_duration_keys.discard(event["event_key"])
+            notification_error(f"position duration delivery failed: {type(exc).__name__}")
 
     async def close(self):
         self._closed = True
@@ -73,6 +190,11 @@ class NotificationService:
                 await asyncio.wait_for(self._worker, 5)
             except TimeoutError:
                 notification_error("shutdown timed out; pending events may not be saved")
+        if self._position_delivery_tasks:
+            try:
+                await asyncio.wait_for(asyncio.gather(*self._position_delivery_tasks), 5)
+            except TimeoutError:
+                notification_error("shutdown timed out; position duration delivery may be incomplete")
         if self._push_task:
             self._push_task.cancel()
             await asyncio.gather(self._push_task, return_exceptions=True)
@@ -122,13 +244,14 @@ class NotificationService:
 
     @staticmethod
     def _validate(event):
-        if not isinstance(event, dict) or event.get("kind") not in {"signal", "verification"}:
+        if not isinstance(event, dict) or event.get("kind") not in {"signal", "verification", "position_duration"}:
             raise ValueError("invalid notification kind")
-        for field in ("event_key", "session_id", "origin"):
+        required = ("event_key", "origin") if event["kind"] == "position_duration" else ("event_key", "session_id", "origin")
+        for field in required:
             if not isinstance(event.get(field), str) or not 0 < len(event[field]) <= 256:
                 raise ValueError(f"invalid {field}")
         allowed = {"event_key", "kind", "origin", "session_id", "occurred_at", "candle_timestamp_ms",
-                   "context", "signal", "finding", "webhook", "telegram"}
+                   "context", "signal", "finding", "webhook", "telegram", "position"}
         result = safe_value({k: v for k, v in event.items() if k in allowed})
         for channel in ("webhook", "telegram"):
             if channel in result:
@@ -170,6 +293,17 @@ class NotificationService:
                     db.execute("INSERT INTO notifications(event_key,data,created_at,updated_at) VALUES (?,?,?,?)",
                                (event["event_key"], json.dumps(event, ensure_ascii=False), now, now))
                     changed = True
+            elif operation == "claim_position_telegram":
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute("SELECT data FROM notifications WHERE event_key=?", (kwargs["event_key"],)).fetchone()
+                event = json.loads(row["data"]) if row else {}
+                result["claimed"] = event.get("kind") == "position_duration" and "telegram" not in event
+                if result["claimed"]:
+                    # Persist the attempt before sending so a restart cannot send it twice.
+                    event["telegram"] = {"status": "unknown", "attempts": 0}
+                    db.execute("UPDATE notifications SET data=?,revision=revision+1,updated_at=? WHERE event_key=?",
+                               (json.dumps(event, ensure_ascii=False), time.time(), kwargs["event_key"]))
+                    changed = True
             elif operation == "telegram_context":
                 row = db.execute("SELECT n.data FROM telegram_notification_refs r "
                                  "JOIN notifications n ON n.event_key=r.event_key "
@@ -178,7 +312,7 @@ class NotificationService:
                 data = json.loads(row["data"]) if row else None
                 result = {"context": ({key: data[key] for key in (
                     "event_key", "session_id", "origin", "occurred_at", "candle_timestamp_ms",
-                    "context", "signal", "finding",
+                    "context", "signal", "finding", "position",
                 ) if key in data} if data else None)}
             elif operation == "list":
                 rows = db.execute("""SELECT * FROM notifications WHERE id<?

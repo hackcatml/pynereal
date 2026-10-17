@@ -1,13 +1,9 @@
 """
 Fast and efficient OHLCV data reader/writer
 
-The file is a binary file with the following 24 bytes structure:
- - timestamp: uint32 (4 bytes) - good until 2106 (I will fix this then, I promise ;))
- - open:     float32 (4 bytes)
- - high:     float32 (4 bytes)
- - low:      float32 (4 bytes)
- - close:    float32 (4 bytes)
- - volume:   float32 (4 bytes)
+New files use a versioned header and little-endian uint32 + five float64
+records (44 bytes). Legacy headerless uint32 + five float32 files (24 bytes)
+remain readable and retain their precision when updated or truncated.
 
 The .ohlcv format cannot have gaps in it. All gaps are filled with the previous close price and -1 volume.
 """
@@ -21,6 +17,7 @@ import mmap
 import os
 import struct
 from collections import Counter
+from dataclasses import dataclass
 try:
     from collections.abc import Buffer
 except ImportError:
@@ -35,15 +32,82 @@ from zoneinfo import ZoneInfo
 from pynecore.types.ohlcv import OHLCV
 from ..core.syminfo import SymInfoInterval
 
-RECORD_SIZE = 24  # 6 * 4
-STRUCT_FORMAT = 'Ifffff'  # I: uint32, f: float32
+RECORD_SIZE = 24  # Legacy headerless format; retained for external callers.
+STRUCT_FORMAT = 'Ifffff'  # Legacy native-endian uint32 + five float32 values.
 
-__all__ = ['OHLCVWriter', 'OHLCVReader']
+_MAGIC = b'\x89OHLCV\r\n'
+_HEADER = struct.Struct('<8sHHI')
+
+
+@dataclass(frozen=True, slots=True)
+class _FileFormat:
+    precision: int
+    record: struct.Struct
+    timestamp: struct.Struct
+    header: bytes = b''
+
+    @property
+    def offset(self) -> int:
+        return len(self.header)
+
+
+_FORMATS = {
+    32: _FileFormat(32, struct.Struct(STRUCT_FORMAT), struct.Struct('I')),
+    64: _FileFormat(64, struct.Struct('<I5d'), struct.Struct('<I'),
+                    _HEADER.pack(_MAGIC, 2, 44, 0)),
+}
+
+
+def _file_format(precision: int) -> _FileFormat:
+    try:
+        return _FORMATS[precision]
+    except KeyError:
+        raise ValueError('OHLCV precision must be 32 or 64') from None
+
+
+def _read_format(handle) -> _FileFormat:
+    handle.seek(0)
+    header = handle.read(_HEADER.size)
+    if header.startswith(_MAGIC):
+        if len(header) != _HEADER.size:
+            raise ValueError('Incomplete OHLCV header')
+        _, version, record_size, flags = _HEADER.unpack(header)
+        if version != 2 or record_size != 44 or flags != 0:
+            raise ValueError(f'Unsupported OHLCV format: version={version}, record_size={record_size}, flags={flags}')
+        return _FORMATS[64]
+    if header and _MAGIC.startswith(header):
+        raise ValueError('Incomplete OHLCV header')
+    return _FORMATS[32]
+
+
+def get_ohlcv_precision(path: str | Path, *, default: int = 64) -> int:
+    """Read storage precision without mapping the candle data."""
+    _file_format(default)
+    try:
+        with open(path, 'rb') as handle:
+            if os.fstat(handle.fileno()).st_size:
+                return _read_format(handle).precision
+    except FileNotFoundError:
+        pass
+    return default
+
+
+def ohlcv_number(value: float, precision: int = 32) -> float:
+    """Match a live value to the precision used during historical warm-up."""
+    value = float(value)
+    if precision == 64:
+        return value
+    if precision != 32:
+        raise ValueError('OHLCV precision must be 32 or 64')
+    return struct.unpack('f', struct.pack('f', value))[0]
+
+
+__all__ = ['OHLCVWriter', 'OHLCVReader', 'get_ohlcv_precision', 'ohlcv_number']
 
 
 def _format_float(value: float) -> str:
-    """Format float with max 8 decimal places, removing trailing zeros"""
-    return f"{value:.8g}"
+    """Shortest representation that round-trips without losing precision."""
+    return repr(value)
 
 
 def _parse_timezone_param(tz: str | None) -> dt_timezone | ZoneInfo | None:
@@ -199,9 +263,11 @@ class OHLCVWriter:
                  '_price_changes', '_price_decimals', '_last_close', '_analyzed_tick_size',
                  '_analyzed_price_scale', '_analyzed_min_move', '_confidence',
                  '_trading_hours', '_analyzed_opening_hours', '_timestamp_offsets', '_analyzed_timezone',
-                 '_truncate')
+                 '_truncate', '_format', '_requested_precision')
 
-    def __init__(self, path: str | Path, truncate: bool = False):
+    def __init__(self, path: str | Path, truncate: bool = False, *, precision: int | None = None):
+        self._requested_precision = precision
+        self._format = _file_format(64 if precision is None else precision)
         self.path: str = str(path)
         self._file: BufferedWriter | BufferedRandom | None = None
         self._truncate: bool = truncate
@@ -235,6 +301,10 @@ class OHLCVWriter:
         Check if file is open
         """
         return self._file is not None
+
+    @property
+    def precision(self) -> int:
+        return self._format.precision
 
     @property
     def size(self) -> int:
@@ -332,22 +402,42 @@ class OHLCVWriter:
         """
         Open file for writing
         """
-        # If truncate is True, always open in write mode to clear existing data
-        if self._truncate:
-            self._file = open(self.path, 'wb+')
-        else:
-            # Open in rb+ mode to allow both reading and writing
-            self._file = open(self.path, 'rb+') if os.path.exists(self.path) else open(self.path, 'wb+')
-        self._size = os.path.getsize(self.path) // RECORD_SIZE
+        # Detect before truncation so cache regeneration cannot silently change
+        # a running session's historical precision. Explicit replacement is opt-in.
+        self._file = open(self.path, 'rb+') if os.path.exists(self.path) else open(self.path, 'wb+')
+        try:
+            file_size = os.fstat(self._file.fileno()).st_size
+            if file_size:
+                existing = _read_format(self._file)
+                if self._requested_precision is None:
+                    self._format = existing
+                elif not self._truncate and existing != self._format:
+                    raise ValueError('Cannot append a different OHLCV precision; rebuild from original data')
+            if self._truncate or not file_size:
+                self._file.seek(0)
+                self._file.truncate()
+                self._file.write(self._format.header)
+                self._file.flush()
+                file_size = self._format.offset
+            payload_size = file_size - self._format.offset
+            if payload_size < 0 or payload_size % self._format.record.size:
+                raise ValueError('Incomplete OHLCV record')
+            self._size = payload_size // self._format.record.size
+        except Exception:
+            self.close()
+            raise
+        self._start_timestamp = self._last_timestamp = self._interval = None
 
         # Read initial metadata if file exists
+        if self._size:
+            self._file.seek(self._format.offset)
+            data: Buffer = self._file.read(4)
+            first_timestamp = self._format.timestamp.unpack(data)[0]
+            self._start_timestamp = self._last_timestamp = first_timestamp
         if self._size >= 2:
-            self._file.seek(0)
+            self._file.seek(self._format.offset + self._format.record.size)
             data: Buffer = self._file.read(4)
-            first_timestamp = struct.unpack('I', data)[0]
-            self._file.seek(RECORD_SIZE)
-            data: Buffer = self._file.read(4)
-            second_timestamp = struct.unpack('I', data)[0]
+            second_timestamp = self._format.timestamp.unpack(data)[0]
             self._start_timestamp = first_timestamp
             self._interval = second_timestamp - first_timestamp
             assert self._interval is not None
@@ -377,7 +467,7 @@ class OHLCVWriter:
 
         if self._size == 0:
             self._start_timestamp = candle.timestamp
-        elif self._size == 1:
+        elif self._size == 1 and self._current_pos != 0:
             # First interval detection
             assert self._start_timestamp is not None
             self._interval = candle.timestamp - self._start_timestamp
@@ -411,27 +501,25 @@ class OHLCVWriter:
                 # Fill gap if needed
                 if candle.timestamp > expected_ts:
                     # Get previous candle's close price
-                    self._file.seek((self._current_pos - 1) * RECORD_SIZE)
-                    data: Buffer = self._file.read(RECORD_SIZE)
-                    prev_data = struct.unpack(STRUCT_FORMAT, data)
+                    self._file.seek(self._format.offset + (self._current_pos - 1) * self._format.record.size)
+                    data: Buffer = self._file.read(self._format.record.size)
+                    prev_data = self._format.record.unpack(data)
                     prev_close = prev_data[4]  # 4th index is close price
 
                     # Fill gap with previous close and -1 volume (gap indicator)
                     while expected_ts < candle.timestamp:
-                        gap_data: Buffer = struct.pack(STRUCT_FORMAT,
-                                                       expected_ts, prev_close, prev_close,
-                                                       prev_close, prev_close, -1.0)
-                        self._file.seek(self._current_pos * RECORD_SIZE)
+                        gap_data: Buffer = self._format.record.pack(
+                            expected_ts, prev_close, prev_close, prev_close, prev_close, -1.0)
+                        self._file.seek(self._format.offset + self._current_pos * self._format.record.size)
                         self._file.write(gap_data)
                         self._current_pos += 1
                         self._size = max(self._size, self._current_pos)
                         expected_ts += self._interval
 
         # Write actual data
-        self._file.seek(self._current_pos * RECORD_SIZE)
-        data: Buffer = struct.pack(STRUCT_FORMAT,
-                                   candle.timestamp, candle.open, candle.high,
-                                   candle.low, candle.close, candle.volume)
+        self._file.seek(self._format.offset + self._current_pos * self._format.record.size)
+        data: Buffer = self._format.record.pack(
+            candle.timestamp, candle.open, candle.high, candle.low, candle.close, candle.volume)
         self._file.write(data)
         self._file.flush()
 
@@ -457,6 +545,9 @@ class OHLCVWriter:
         Move write position to specific timestamp.
         Uses interval between bars to calculate position.
         """
+        if self._size == 1 and timestamp == self._start_timestamp:
+            self.seek(0)
+            return
         if self._interval is None or self._start_timestamp is None:
             return
 
@@ -475,7 +566,7 @@ class OHLCVWriter:
         assert self._file is not None
 
         self._current_pos = position
-        self._file.seek(position * RECORD_SIZE)
+        self._file.seek(self._format.offset + position * self._format.record.size)
 
     def truncate(self) -> None:
         """
@@ -486,7 +577,7 @@ class OHLCVWriter:
             raise IOError("File not opened!")
 
         # Calculate new size in bytes
-        new_size = self._current_pos * RECORD_SIZE
+        new_size = self._format.offset + self._current_pos * self._format.record.size
 
         # Truncate the file
         self._file.truncate(new_size)
@@ -804,13 +895,13 @@ class OHLCVWriter:
             sample_interval = max(1, self._size // 1000)  # Sample up to 1000 points
 
             for i in range(0, self._size, sample_interval):
-                self._file.seek(i * RECORD_SIZE)
-                data = self._file.read(RECORD_SIZE)
+                self._file.seek(self._format.offset + i * self._format.record.size)
+                data = self._file.read(self._format.record.size)
 
-                if len(data) == RECORD_SIZE:
+                if len(data) == self._format.record.size:
                     # Unpack the record
                     timestamp, open_val, high, low, close, volume = \
-                        struct.unpack('Ifffff', cast(Buffer, data))
+                        self._format.record.unpack(cast(Buffer, data))
 
                     # Only collect if volume > 0 (real trading)
                     if volume > 0:
@@ -987,11 +1078,11 @@ class OHLCVWriter:
         # Read all existing records
         self._file.seek(0)
         for i in range(self._size):
-            offset = i * RECORD_SIZE
+            offset = self._format.offset + i * self._format.record.size
             self._file.seek(offset)
-            data = self._file.read(RECORD_SIZE)
-            if len(cast(bytes, data)) == RECORD_SIZE:
-                record = struct.unpack(STRUCT_FORMAT, cast(Buffer, data))
+            data = self._file.read(self._format.record.size)
+            if len(cast(bytes, data)) == self._format.record.size:
+                record = self._format.record.unpack(cast(Buffer, data))
                 current_records.append(OHLCV(*record, extra_fields={}))
 
         # Create temp file for rebuilding
@@ -1001,7 +1092,7 @@ class OHLCVWriter:
             os.close(temp_fd)
 
             # Create new writer with temp file
-            with OHLCVWriter(temp_path) as temp_writer:
+            with OHLCVWriter(temp_path, precision=self.precision) as temp_writer:
                 # Write all records with correct interval
                 # The writer will now properly handle gaps
                 for record in current_records:
@@ -1015,7 +1106,7 @@ class OHLCVWriter:
 
             # Reopen the file
             self._file = open(self.path, 'rb+')
-            self._size = os.path.getsize(self.path) // RECORD_SIZE
+            self._size = (os.path.getsize(self.path) - self._format.offset) // self._format.record.size
 
             # Reset interval to the correct one
             self._interval = new_interval
@@ -1026,9 +1117,9 @@ class OHLCVWriter:
 
             # Update last timestamp
             if self._size > 0:
-                self._file.seek((self._size - 1) * RECORD_SIZE)
+                self._file.seek(self._format.offset + (self._size - 1) * self._format.record.size)
                 data: Buffer = self._file.read(4)
-                self._last_timestamp = struct.unpack('I', data)[0]
+                self._last_timestamp = self._format.timestamp.unpack(data)[0]
                 self._file.seek(0, os.SEEK_END)
 
         except Exception as e:
@@ -1381,10 +1472,11 @@ class OHLCVReader:
     Very fast OHLCV data reader using memory mapping.
     """
 
-    __slots__ = ('path', '_file', '_mmap', '_size', '_start_timestamp', '_interval')
+    __slots__ = ('path', '_file', '_mmap', '_size', '_start_timestamp', '_interval', '_format')
 
     def __init__(self, path: str | Path):
         self.path = str(path)
+        self._format = _FORMATS[64]
         self._file = None
         self._mmap = None
         # print(f"Called from: {sys._getframe(1).f_code.co_name}")
@@ -1399,6 +1491,10 @@ class OHLCVReader:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
+    @property
+    def precision(self) -> int:
+        return self._format.precision
 
     @property
     def size(self) -> int:
@@ -1432,8 +1528,8 @@ class OHLCVReader:
         # Read the actual timestamp from the last record instead of calculating it
         # This is necessary because gap filling may create non-uniform intervals
         if self._mmap and self._size > 0:
-            last_record_offset = (self._size - 1) * RECORD_SIZE
-            return struct.unpack('I', cast(Buffer, self._mmap[last_record_offset:last_record_offset + 4]))[0]
+            last_record_offset = self._format.offset + (self._size - 1) * self._format.record.size
+            return self._format.timestamp.unpack(cast(Buffer, self._mmap[last_record_offset:last_record_offset + 4]))[0]
 
         return None
 
@@ -1455,8 +1551,20 @@ class OHLCVReader:
         """
         Open file and create memory mapping
         """
+        self.close()
+        self._size = 0
+        self._start_timestamp = self._interval = None
         self._file = open(self.path, 'rb')
-        if os.path.getsize(self.path) > 0:
+        try:
+            return self._open_file()
+        except Exception:
+            self.close()
+            raise
+
+    def _open_file(self) -> 'OHLCVReader':
+        file_size = os.fstat(self._file.fileno()).st_size
+        if file_size > 0:
+            self._format = _read_format(self._file)
             # Detect if this is a text file masquerading as binary OHLCV
             self._file.seek(0)
             first_chunk = self._file.read(32)
@@ -1477,13 +1585,18 @@ class OHLCVReader:
                 # Can't decode as ASCII → it's binary, proceed normally
                 pass
 
+            payload_size = file_size - self._format.offset
+            if payload_size < 0 or payload_size % self._format.record.size:
+                raise ValueError('Incomplete OHLCV record')
             self._mmap = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
             # print(f"[{datetime.now().strftime("%y-%m-%d %H:%M:%S")}] [OHLCVReader] open: mmap created for {self.path}")
-            self._size = os.path.getsize(self.path) // RECORD_SIZE
+            self._size = payload_size // self._format.record.size
 
+            if self._size:
+                self._start_timestamp = self._format.timestamp.unpack_from(self._mmap, self._format.offset)[0]
             if self._size >= 2:
-                self._start_timestamp = struct.unpack('I', cast(Buffer, self._mmap[0:4]))[0]
-                second_timestamp = struct.unpack('I', cast(Buffer, self._mmap[RECORD_SIZE:RECORD_SIZE + 4]))[0]
+                second_timestamp = self._format.timestamp.unpack_from(
+                    self._mmap, self._format.offset + self._format.record.size)[0]
                 self._interval = second_timestamp - self._start_timestamp
         else:
             print(f"[{datetime.now().strftime("%y-%m-%d %H:%M:%S")}] [OHLCVReader] open: File is empty, mmap remains None for {self.path}")
@@ -1509,8 +1622,8 @@ class OHLCVReader:
             # print(f"[{datetime.now().strftime("%y-%m-%d %H:%M:%S")}] [OHLCVReader] read: mmap is None for {self.path}")
             return None
 
-        offset = position * RECORD_SIZE
-        data = struct.unpack(STRUCT_FORMAT, self._mmap[offset:offset + RECORD_SIZE])
+        offset = self._format.offset + position * self._format.record.size
+        data = self._format.record.unpack_from(self._mmap, offset)
         return OHLCV(*data, extra_fields={})
 
     def read_from(self, start_timestamp: int, end_timestamp: int | None = None, skip_gaps: bool = True,

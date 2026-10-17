@@ -4,9 +4,11 @@ import asyncio
 import logging
 import json
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from functools import partial
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from ai.scripts.session_evaluation_tool import SessionEvaluationToolError
@@ -22,12 +24,13 @@ from .session_control import SessionCommandError
 logger = logging.getLogger(__name__)
 
 
-def _log(level: int, message: str, *args) -> None:
-    logger.log(level, "[%s][telegram-ai] " + message, datetime.now().astimezone().isoformat(timespec="seconds"), *args)
+class TelegramRestartUnavailable(RuntimeError):
+    pass
 
 
 class TelegramAIService:
-    def __init__(self, config: TelegramAIConfig, *, path: Path, agent, transport=None, notifications=None) -> None:
+    def __init__(self, config: TelegramAIConfig, *, path: Path, agent, transport=None, notifications=None,
+                 log_path: Path | None = None) -> None:
         self.config = config
         self.agent = agent
         self.notifications = notifications
@@ -35,6 +38,7 @@ class TelegramAIService:
         self.store = TelegramStore(path)
         self._executor: ThreadPoolExecutor | None = None
         self._task: asyncio.Task | None = None
+        self._lifecycle_lock = asyncio.Lock()
         self._active: tuple[dict, asyncio.Task] | None = None
         self._direct_active: dict[str, tuple[dict, asyncio.Task]] = {}
         self._jobs_lock = asyncio.Lock()
@@ -43,6 +47,56 @@ class TelegramAIService:
         self._send_ready = asyncio.Event()
         self._started_at = 0.0
         self._username = ""
+        self._ready_at = 0.0
+        self._poll_healthy_since = 0.0
+        self._failure_task = "startup"
+        self._recovering = False
+        self._log_path = log_path
+        self._log_handler: RotatingFileHandler | None = None
+        self._log_failed = False
+        self._status = {
+            "enabled": config.enabled,
+            "state": "stopped" if config.enabled else "disabled",
+            "reason": "", "retry_at": None, "updated_at": time.time(),
+        }
+
+    def status(self) -> dict:
+        return dict(self._status)
+
+    def _set_status(self, state: str, reason: str = "", *, retry_in: float | None = None) -> None:
+        self._status = {
+            "enabled": self.config.enabled, "state": state, "reason": reason,
+            "retry_at": time.time() + retry_in if retry_in is not None else None,
+            "updated_at": time.time(),
+        }
+
+    def _log(self, level: int, message: str, *args) -> None:
+        text = "[%s][telegram-ai] %s" % (
+            datetime.now().astimezone().isoformat(timespec="seconds"), message % args if args else message,
+        )
+        logger.log(level, text)
+        if self._executor is not None and self._log_path is not None:
+            self._executor.submit(self._write_log, level, text)
+
+    def _write_log(self, level: int, text: str) -> None:
+        # File I/O shares the dedicated Telegram executor, never the event loop.
+        if self._log_failed:
+            return
+        try:
+            if self._log_handler is None:
+                self._log_path.parent.mkdir(parents=True, exist_ok=True)
+                self._log_handler = RotatingFileHandler(
+                    self._log_path, maxBytes=1024 * 1024, backupCount=2, encoding="utf-8",
+                )
+            self._log_handler.handle(logging.LogRecord(logger.name, level, "", 0, text, (), None))
+        except Exception as exc:
+            self._log_failed = True
+            logger.error("[telegram-ai] diagnostic file unavailable (%s)", type(exc).__name__)
+
+    def _close_log(self) -> None:
+        if self._log_handler is not None:
+            self._log_handler.close()
+            self._log_handler = None
 
     async def _db(self, method: str, *args, **kwargs):
         return await asyncio.get_running_loop().run_in_executor(
@@ -50,12 +104,34 @@ class TelegramAIService:
         )
 
     async def start(self) -> None:
+        async with self._lifecycle_lock:
+            self._start()
+
+    def _start(self) -> None:
         if self.config.enabled and self._task is None:
             self._started_at = time.time()
+            self._log_failed = False
+            self._set_status("starting")
             self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="telegram-ai-db")
-            self._task = asyncio.create_task(self._serve(), name="telegram-ai")
+            self._task = asyncio.create_task(self._supervise(), name="telegram-ai")
 
     async def close(self) -> None:
+        async with self._lifecycle_lock:
+            await self._stop()
+            self._set_status("stopped" if self.config.enabled else "disabled")
+
+    async def restart(self) -> None:
+        if not self.config.enabled:
+            raise TelegramRestartUnavailable("Telegram commands are disabled in telegram_ai.toml")
+        if self._lifecycle_lock.locked():
+            raise TelegramRestartUnavailable("Telegram service is already restarting or stopping")
+        async with self._lifecycle_lock:
+            self._set_status("restarting")
+            await self._stop()
+            self._recovering = True
+            self._start()
+
+    async def _stop(self) -> None:
         if self._task is not None:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
@@ -66,17 +142,77 @@ class TelegramAIService:
         if self._executor is None:
             return
         try:
-            await self.transport.close()
+            await self._close_connection()
         finally:
             try:
-                await self._db("close")
+                await asyncio.get_running_loop().run_in_executor(self._executor, self._close_log)
             finally:
                 self._executor.shutdown(wait=False, cancel_futures=True)
                 self._executor = None
 
+    async def _close_connection(self) -> None:
+        try:
+            await self.transport.close()
+        finally:
+            await self._db("close")
+
+    async def _supervise(self) -> None:
+        delay = 5
+        conflict_retries = 0
+        try:
+            while True:
+                self._failure_task = "startup"
+                self._ready_at = 0.0
+                try:
+                    await self._serve()
+                    raise RuntimeError("Telegram service returned unexpectedly")
+                except (Exception, asyncio.CancelledError) as exc:
+                    if isinstance(exc, asyncio.CancelledError) and asyncio.current_task().cancelling():
+                        raise
+                    if self._ready_at and time.monotonic() - self._ready_at >= 60:
+                        delay = 5
+                    if self._poll_healthy_since and time.monotonic() - self._poll_healthy_since >= 60:
+                        conflict_retries = 0
+                    permanent = False
+                    if isinstance(exc, TelegramError):
+                        reason = str(exc)
+                        permanent = exc.code in (400, 401, 403, 404, 409)
+                        if (exc.method == "getUpdates" and exc.code == 409
+                                and exc.error_type != "WebhookConflict" and conflict_retries < 3):
+                            # A timed-out long poll can briefly overlap the next request.
+                            # Persistent competing receivers must not restart indefinitely.
+                            conflict_retries += 1
+                            permanent = False
+                    elif isinstance(exc, RuntimeError) and str(exc).startswith("Bot webhook"):
+                        reason, permanent = "Bot webhook is configured", True
+                    elif isinstance(exc, RuntimeError) and str(exc).startswith("Another Telegram"):
+                        reason, permanent = "Another Telegram AI receiver owns this database", True
+                    else:
+                        reason = type(exc).__name__
+                    # Keep locations, but never exception text, source lines or frame locals.
+                    frames = [f"{Path(frame.f_code.co_filename).name}:{line}:{frame.f_code.co_name}"
+                              for frame, line in traceback.walk_tb(exc.__traceback__)]
+                    action = "manual restart required" if permanent else f"retrying in {delay}s"
+                    self._set_status("stopped" if permanent else "retrying", reason,
+                                     retry_in=None if permanent else delay)
+                    self._log(logging.ERROR, "stopped: %s | task=%s | %s | trace=%s",
+                              reason, self._failure_task, action, " > ".join(frames[-8:]))
+                    if permanent:
+                        return
+                self._recovering = True
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 60)
+        finally:
+            await self._cleanup()
+
     async def _serve(self) -> None:
+        async def required(call, *args):
+            await call(*args)
+            raise RuntimeError("Telegram worker returned unexpectedly")
+
         tasks = []
         try:
+            self._poll_healthy_since = 0.0
             me = await self._receive("getMe")
             webhook = await self._receive("getWebhookInfo")
             if webhook.get("url"):
@@ -84,46 +220,57 @@ class TelegramAIService:
             self._username = str(me["username"])
             await self._db("open", int(me["id"]))
             await self._db("ensure_command_menu", self.config.chat_id)
+            self._started_at = time.time()
+            self._ready_at = time.monotonic()
+            self._set_status("running")
+            if self._recovering:
+                self._log(logging.WARNING, "recovered; unfinished commands were not replayed")
+                self._recovering = False
             tasks = [
-                asyncio.create_task(self._poll(), name="telegram-ai-receiver"),
-                asyncio.create_task(self._work(), name="telegram-ai-worker"),
-                asyncio.create_task(self._direct_work("screenshot"), name="telegram-screenshot-worker"),
-                asyncio.create_task(self._direct_work("account"), name="telegram-account-worker"),
-                asyncio.create_task(self._direct_work("session"), name="telegram-session-worker"),
-                asyncio.create_task(self._direct_work("alert"), name="telegram-alert-worker"),
-                asyncio.create_task(self._direct_work("price"), name="telegram-price-worker"),
-                asyncio.create_task(self._send(), name="telegram-ai-sender"),
+                asyncio.create_task(required(self._poll), name="telegram-ai-receiver"),
+                asyncio.create_task(required(self._work), name="telegram-ai-worker"),
+                asyncio.create_task(required(self._direct_work, "screenshot"), name="telegram-screenshot-worker"),
+                asyncio.create_task(required(self._direct_work, "account"), name="telegram-account-worker"),
+                asyncio.create_task(required(self._direct_work, "session"), name="telegram-session-worker"),
+                asyncio.create_task(required(self._direct_work, "alert"), name="telegram-alert-worker"),
+                asyncio.create_task(required(self._direct_work, "price"), name="telegram-price-worker"),
+                asyncio.create_task(required(self._send), name="telegram-ai-sender"),
                 asyncio.create_task(self._register_commands(), name="telegram-command-menu"),
             ]
             await asyncio.gather(*tasks)
-        except asyncio.CancelledError:
+        except BaseException:
+            for task in tasks:
+                if task.done() and (task.cancelled() or task.exception() is not None):
+                    self._failure_task = task.get_name()
+                    break
             raise
-        except Exception as exc:
-            # Never log upstream descriptions, URLs, input text or credentials.
-            if isinstance(exc, TelegramError):
-                reason = str(exc)
-            elif isinstance(exc, RuntimeError) and str(exc).startswith(("Bot webhook", "Another Telegram")):
-                reason = str(exc)
-            else:
-                reason = type(exc).__name__
-            _log(logging.ERROR, "stopped: %s", reason)
         finally:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            await self._cleanup()
+            await self._close_connection()
 
     async def _receive(self, method: str, **payload):
         delay = 1
         while True:
             try:
-                return await self.transport.call(method, **payload)
+                result = await self.transport.call(method, **payload)
+                if method == "getUpdates":
+                    if not self._poll_healthy_since:
+                        self._poll_healthy_since = time.monotonic()
+                    if self._status["state"] == "retrying":
+                        self._set_status("running")
+                return result
             except TelegramError as exc:
                 if exc.code in (400, 401, 403, 404, 409):
                     raise
-                _log(logging.WARNING, "receive retry (method=%s code=%s error=%s)",
+                if method == "getUpdates":
+                    self._poll_healthy_since = 0.0
+                self._log(logging.WARNING, "receive retry (method=%s code=%s error=%s)",
                      exc.method, exc.code, exc.error_type or "TelegramAPIError")
-                await asyncio.sleep(max(delay, exc.retry_after))
+                retry_in = max(delay, exc.retry_after)
+                self._set_status("retrying", str(exc), retry_in=retry_in)
+                await asyncio.sleep(retry_in)
                 delay = min(delay * 2, 30)
 
     async def _register_commands(self) -> None:
@@ -133,7 +280,7 @@ class TelegramAIService:
                     scope={"type": "chat", "chat_id": self.config.chat_id}, language_code="")
                 return
             except TelegramError as exc:
-                _log(logging.WARNING, "command registration failed (code=%s error=%s)", exc.code, exc.error_type)
+                self._log(logging.WARNING, "command registration failed (code=%s error=%s)", exc.code, exc.error_type)
                 if attempt == 2 or (400 <= exc.code < 500 and exc.code != 429):
                     return
                 await asyncio.sleep(max(2 ** attempt, exc.retry_after))
@@ -155,7 +302,7 @@ class TelegramAIService:
                         try:
                             await self.transport.call("answerCallbackQuery", callback_query_id=query["id"], text=text)
                         except TelegramError as exc:
-                            _log(logging.WARNING, "callback acknowledgement failed (code=%s error=%s)", exc.code, exc.error_type)
+                            self._log(logging.WARNING, "callback acknowledgement failed (code=%s error=%s)", exc.code, exc.error_type)
                     offset = max(offset, update["update_id"] + 1)
                     self._job_ready.set()
                     for event in self._direct_ready.values():
@@ -180,19 +327,19 @@ class TelegramAIService:
                             async with asyncio.timeout(5):
                                 sessions = await self.agent.screenshot_sessions()
                         except Exception as exc:
-                            _log(logging.WARNING, "screenshot sessions unavailable (%s)", type(exc).__name__)
+                            self._log(logging.WARNING, "screenshot sessions unavailable (%s)", type(exc).__name__)
                     elif command == "/assets" and len(text.split()) == 1 and (not target or target.lower() == self._username.lower()):
                         try:
                             async with asyncio.timeout(5):
                                 exchanges = await self.agent.asset_exchanges()
                         except Exception as exc:
-                            _log(logging.WARNING, "asset exchange options unavailable (%s)", type(exc).__name__)
+                            self._log(logging.WARNING, "asset exchange options unavailable (%s)", type(exc).__name__)
                     elif command == "/model" and self.agent.available and (not target or target.lower() == self._username.lower()):
                         try:
                             async with asyncio.timeout(5):
                                 catalog = await self.agent.model_catalog()
                         except Exception as exc:
-                            _log(logging.WARNING, "model options unavailable (%s)", type(exc).__name__)
+                            self._log(logging.WARNING, "model options unavailable (%s)", type(exc).__name__)
                 async with self._jobs_lock:
                     cancel = await self._db(
                         "accept", update["update_id"], message, now=time.time(),
@@ -252,7 +399,7 @@ class TelegramAIService:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            _log(logging.ERROR, "account command failed (%s)", type(exc).__name__)
+            self._log(logging.ERROR, "account command failed (%s)", type(exc).__name__)
             await self._db("finish", job, "Account lookup failed or timed out. Please retry the command.", "failed")
 
     async def _session_command(self, job: dict) -> None:
@@ -266,7 +413,7 @@ class TelegramAIService:
         except SessionCommandError as exc:
             await self._db("finish_session_command", job, None, str(exc))
         except Exception as exc:
-            _log(logging.ERROR, "session command failed (%s)", type(exc).__name__)
+            self._log(logging.ERROR, "session command failed (%s)", type(exc).__name__)
             await self._db("finish_session_command", job, None,
                            "Session request failed. Check /sessions for current state before retrying; changes were not retried.")
 
@@ -279,7 +426,7 @@ class TelegramAIService:
         except SessionCommandError as exc:
             await self._db("finish_session_command", job, None, str(exc))
         except Exception as exc:
-            _log(logging.ERROR, "price command failed (%s)", type(exc).__name__)
+            self._log(logging.ERROR, "price command failed (%s)", type(exc).__name__)
             await self._db("finish_session_command", job, None, "Price lookup failed. Please retry /price.")
 
     async def _alert_command(self, job: dict) -> None:
@@ -293,7 +440,7 @@ class TelegramAIService:
         except SessionCommandError as exc:
             await self._db("finish_alert_command", job, None, str(exc))
         except Exception as exc:
-            _log(logging.ERROR, "alert command failed (%s)", type(exc).__name__)
+            self._log(logging.ERROR, "alert command failed (%s)", type(exc).__name__)
             notice = ("Alert delivery could not be confirmed. Check the webhook receiver before sending again. Not retried."
                       if json.loads(job["input"]).get("operation") == "send_alert" else
                       "Alert request failed. Check the current alerts/templates before retrying; changes were not retried.")
@@ -321,7 +468,7 @@ class TelegramAIService:
                                    "Retry /screenshot; check the server if it persists.",
                 "chart_not_ready": "Chart OHLCV data is still loading. Retry /screenshot after it is ready.",
             }
-            _log(logging.ERROR, "screenshot failed (%s reason=%s)", type(exc).__name__, reason)
+            self._log(logging.ERROR, "screenshot failed (%s reason=%s)", type(exc).__name__, reason)
             await self._db("finish", job, messages.get(reason,
                            "Chart capture failed. Check the session and retry /screenshot."), "failed")
 
@@ -386,7 +533,7 @@ class TelegramAIService:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            _log(logging.ERROR, "request failed (%s)", type(exc).__name__)
+            self._log(logging.ERROR, "request failed (%s)", type(exc).__name__)
             await self._db("finish", job, "The AI request failed. Please retry with /ai. No change was applied.", "failed")
 
     async def queue_chart(self, job: dict, data: bytes, session_id: str) -> None:
@@ -409,7 +556,7 @@ class TelegramAIService:
                            "Server stopped while applying the change. Check the current file/settings before requesting it again. It will not be replayed.")
             raise
         except Exception as exc:
-            _log(logging.ERROR, "approved action failed (%s)", type(exc).__name__)
+            self._log(logging.ERROR, "approved action failed (%s)", type(exc).__name__)
             await self._db("finish_action", proposal["nonce"], "unknown",
                            "The change could not be confirmed. Check the current file/settings before retrying; it was not automatically replayed.")
 
@@ -487,7 +634,7 @@ class TelegramAIService:
                     )
                 if exc.code == 429:
                     pause = max(pause, exc.retry_after)
-                _log(logging.WARNING, "delivery %s (method=%s code=%s error=%s)",
+                self._log(logging.WARNING, "delivery %s (method=%s code=%s error=%s)",
                      "failed" if permanent else "retry", exc.method, exc.code,
                      exc.error_type or "TelegramAPIError")
             # Existing alert senders are not queued behind AI output.

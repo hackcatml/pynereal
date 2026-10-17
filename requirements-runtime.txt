@@ -7,3 +7,4 @@ uvicorn[standard]
 fastapi
 python-multipart
 tomlkit
+setuptools>=61.0

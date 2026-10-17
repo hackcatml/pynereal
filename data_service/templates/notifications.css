@@ -55,7 +55,11 @@
 .notification-summary::before { content: ""; width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background: transparent; }
 .notification-row.unread .notification-summary::before { background: #e5484d; }
 .notification-summary:hover { background: var(--ui-hover-overlay, #ffffff06); }
-.notification-summary span { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.notification-summary > span { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.notification-summary .notification-finding { color: var(--ui-negative, #f07880); }
+.notification-summary .notification-strategy { color: var(--ui-link, #58a6ff); }
+.notification-summary .notification-manual { color: #5ac8bc; }
+:root[data-theme="light"] .notification-summary .notification-manual { color: #087f8c; }
 .notification-summary svg { width: 14px; height: 14px; margin-left: auto; flex-shrink: 0; fill: none; stroke: currentColor;
   stroke-width: 2; transition: transform 180ms ease; }
 .notification-summary[aria-expanded="true"] svg { transform: rotate(90deg); }
@@ -66,6 +70,7 @@
   gap: 8px 12px; font-size: 12px; line-height: 1.5; }
 .notification-detail dt { color: var(--muted); }
 .notification-detail dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.notification-detail .notification-duration { color: var(--ui-warning, #e3b341); }
 .notification-detail .failed { color: var(--ui-negative, #f07880); }
 .notification-detail .sent { color: var(--ui-positive, #55bb8a); }
 #notification-more { display: block; margin: 12px auto; background: none; border: 0; color: var(--ui-link, #58a6ff); font-size: 13px; cursor: pointer; touch-action: manipulation; }

@@ -147,11 +147,17 @@ def _set_lib_syminfo_properties(syminfo: SymInfo, lib: ModuleType):
     lib.syminfo._session_starts = syminfo.session_starts
     lib.syminfo._session_ends = syminfo.session_ends
 
-    if syminfo.type == 'crypto':
-        decimals = 6 if syminfo.basecurrency == 'BTC' else 4  # TODO: is it correct?
+    if syminfo.mincontract > 0:
+        lib.syminfo._size_round_factor = 1.0 / syminfo.mincontract
+    elif syminfo.type == 'crypto':
+        # Preserve legacy files until their provider quantity step is available.
+        decimals = 6 if syminfo.basecurrency == 'BTC' else 4
         lib.syminfo._size_round_factor = 10 ** decimals
     else:
         lib.syminfo._size_round_factor = 1
+
+    if syminfo.mincontract == 0:
+        lib.syminfo.mincontract = 1.0 / lib.syminfo._size_round_factor
 
 
 def _reset_lib_vars(lib: ModuleType):
@@ -283,7 +289,7 @@ class ScriptRunner:
             f"Long {syminfo.currency}", "Long %",
             f"Short {syminfo.currency}", "Short %",
         )) if strat_path and not self.script.realtime_trade else None
-        self.trades_writer = CSVWriter(trade_path, headers=(
+        self.trades_writer = CSVWriter(trade_path, float_fmt='.17g', headers=(
             "Trade #", "Bar Index", "Type", "Signal", "Date/Time", f"Price {syminfo.currency}",
             "Contracts", f"Profit {syminfo.currency}", "Profit %", f"Cumulative profit {syminfo.currency}",
             "Cumulative profit %", f"Run-up {syminfo.currency}", "Run-up %", f"Drawdown {syminfo.currency}",
@@ -383,6 +389,11 @@ class ScriptRunner:
                 # Run the script
                 res = self.script_module.main()
 
+                # The realtime stream also steps a newly opened bar; it is not a closing tick.
+                if (is_strat and position and self.script.process_orders_on_close
+                        and (not self.script.realtime_trade or self.bar_index < self.script.last_bar_index)):
+                    position.process_close_orders()
+
                 # Update plot data with the results
                 if res is not None:
                     assert isinstance(res, dict), "The 'main' function must return a dictionary!"
@@ -472,58 +483,56 @@ class ScriptRunner:
         finally:  # Python reference counter will close this even if the iterator is not exhausted
             if is_strat and position:
                 # Export remaining open trades before closing
-                if self.trades_writer and position.open_trades:
+                if self.trades_writer and position.open_trades and self.last_price is not None:
+                    exit_price = self.last_price
+                    initial_capital = self.script.initial_capital
+                    # netprofit already includes open entry fees; allocate them once per exported trade.
+                    cumulative_pnl = position.netprofit + sum(trade.commission for trade in position.open_trades)
                     for trade in position.open_trades:
                         trade_num += 1  # Continue numbering from closed trades
+                        # Mark an open trade without inventing a closing fill or exit commission.
+                        pnl = trade.size * (exit_price - trade.entry_price) - trade.commission
+                        entry_cost = trade.entry_price * abs(trade.size) + trade.commission
+                        pnl_percent = pnl / entry_cost * 100 if entry_cost else 0.0
+                        cumulative_pnl += pnl
+                        cumulative_percent = cumulative_pnl / initial_capital * 100 if initial_capital else 0.0
                         # Export the entry part
                         self.trades_writer.write(
                             trade_num,
                             trade.entry_bar_index,
                             "Entry long" if trade.size > 0 else "Entry short",
-                            trade.entry_id,
+                            trade.entry_comment if trade.entry_comment else trade.entry_id,
                             string.format_time(trade.entry_time),  # type: ignore
                             trade.entry_price,
                             abs(trade.size),
-                            0.0,  # No profit yet for open trades
-                            "0.00",  # No profit percent yet
-                            0.0,  # No cumulative profit change
-                            "0.00",  # No cumulative profit percent change
-                            0.0,  # No max runup yet
-                            "0.00",  # No max runup percent yet
-                            0.0,  # No max drawdown yet
-                            "0.00",  # No max drawdown percent yet
+                            pnl,
+                            f"{pnl_percent:.2f}",
+                            cumulative_pnl,
+                            f"{cumulative_percent:.2f}",
+                            trade.max_runup,
+                            f"{trade.max_runup_percent:.2f}",
+                            trade.max_drawdown,
+                            f"{trade.max_drawdown_percent:.2f}",
                         )
 
-                        # Export the exit part with "Open" signal (TradingView compatibility)
-                        # This simulates automatic closing at the end of backtest
-                        # Use the last price from the iteration
-                        exit_price = self.last_price
-
-                        if exit_price is not None:
-                            # Calculate profit/loss using the same formula as Position._fill_order
-                            # For closing, size is negative of the position
-                            closing_size = -trade.size
-                            pnl = -closing_size * (exit_price - trade.entry_price)
-                            pnl_percent = (pnl / (trade.entry_price * abs(trade.size))) * 100 \
-                                if trade.entry_price != 0 else 0
-
-                            self.trades_writer.write(
-                                trade_num,
-                                self.bar_index - 1,  # Last bar index
-                                "Exit long" if trade.size > 0 else "Exit short",
-                                "Open",  # TradingView uses "Open" signal for automatic closes
-                                string.format_time(lib._time),  # type: ignore
-                                exit_price,
-                                abs(trade.size),
-                                pnl,
-                                f"{pnl_percent:.2f}",
-                                pnl,  # Same as profit for last trade
-                                f"{pnl_percent:.2f}",
-                                max(0.0, pnl),  # Runup
-                                f"{max(0, pnl_percent):.2f}",
-                                max(0.0, -pnl),  # Drawdown
-                                f"{max(0, -pnl_percent):.2f}",
-                            )
+                        # Export the same valuation on the synthetic "Open" row.
+                        self.trades_writer.write(
+                            trade_num,
+                            self.bar_index - 1,  # Last bar index
+                            "Exit long" if trade.size > 0 else "Exit short",
+                            "Open",
+                            string.format_time(lib._time),  # type: ignore
+                            exit_price,
+                            abs(trade.size),
+                            pnl,
+                            f"{pnl_percent:.2f}",
+                            cumulative_pnl,
+                            f"{cumulative_percent:.2f}",
+                            trade.max_runup,
+                            f"{trade.max_runup_percent:.2f}",
+                            trade.max_drawdown,
+                            f"{trade.max_drawdown_percent:.2f}",
+                        )
 
                 # Write strategy statistics
                 if self.strat_writer and position:
@@ -543,7 +552,10 @@ class ScriptRunner:
                             risk_free_rate=self.script.risk_free_rate,
                         )
 
-                        write_strategy_statistics_csv(stats, self.strat_writer)
+                        write_strategy_statistics_csv(
+                            stats, self.strat_writer,
+                            position=position, initial_capital=self.script.initial_capital,
+                        )
                         self.strat_writer.close()
 
                     finally:

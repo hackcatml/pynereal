@@ -232,6 +232,84 @@ print(next(item["url"] for item in downloads if item["platform"] == "linux64"))
   fi
 }
 
+_native_build_packages() {
+  "$1" - <<'PY'
+import os
+from pathlib import Path
+import shlex
+import shutil
+import sys
+import sysconfig
+
+for name, default in (("CC", "cc"), ("CXX", "c++")):
+    command = shlex.split(os.environ.get(name) or sysconfig.get_config_var(name) or default)
+    if not command or not shutil.which(command[0]):
+        print("build-essential")
+        break
+include = Path(sysconfig.get_config_var("INCLUDEPY") or sysconfig.get_path("include"))
+config_include = Path(sysconfig.get_config_var("CONFINCLUDEPY") or include)
+if not (include / "Python.h").is_file() or not (config_include / "pyconfig.h").is_file():
+    print(f"python{sys.version_info.major}.{sys.version_info.minor}-dev")
+PY
+}
+
+_setup_native_build_dependencies() {
+  [ "$(uname -s)" = "Linux" ] || return 0
+
+  local missing package
+  local -a packages=() sudo_cmd=()
+  missing="$(_native_build_packages "$1")" || return 1
+  [ -n "$missing" ] || return 0
+  while IFS= read -r package; do
+    [ -n "$package" ] && packages+=("$package")
+  done <<< "$missing"
+
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "[setup] install a C++17 compiler and development headers matching $1, then retry --native-indicators-only" >&2
+    return 1
+  fi
+  if [ "$(id -u)" != "0" ]; then
+    if ! command -v sudo >/dev/null 2>&1; then
+      echo "[setup] native build dependencies need administrator access: ${packages[*]}" >&2
+      return 1
+    fi
+    sudo_cmd=(sudo)
+    if [ "${PYNEREAL_SETUP_NONINTERACTIVE:-0}" = "1" ]; then
+      sudo_cmd+=(-n)
+      if ! "${sudo_cmd[@]}" true; then
+        echo "[setup] run bash setup.sh --native-indicators-only in a terminal to install: ${packages[*]}" >&2
+        return 1
+      fi
+    fi
+  fi
+
+  echo "[setup] installing native build dependencies: ${packages[*]}"
+  "${sudo_cmd[@]}" timeout --kill-after=5s 120 apt-get -o Acquire::Retries=2 update || return 1
+  "${sudo_cmd[@]}" timeout --kill-after=5s 600 env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l \
+    apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=2 install --no-upgrade -y "${packages[@]}" || return 1
+  missing="$(_native_build_packages "$1")" || return 1
+  if [ -n "$missing" ]; then
+    echo "[setup] build tools or headers are still missing for $1: $missing" >&2
+    return 1
+  fi
+}
+
+_setup_native_indicators() {
+  local python_bin="${PYNEREAL_SETUP_PYTHON:-}"
+  if [ -z "$python_bin" ]; then
+    if [ -x ./venv/bin/python ]; then
+      python_bin=./venv/bin/python
+    else
+      python_bin="$(_find_python)"
+    fi
+  fi
+  [ -n "$python_bin" ] || { echo "Need Python 3.11+" >&2; return 1; }
+  _setup_native_build_dependencies "$python_bin" \
+    || echo "[setup] native build dependency setup failed; checking the existing build environment" >&2
+  # The builder also removes a stale binary when a required rebuild fails.
+  "$python_bin" pynecore/native/build_indicators.py --install
+}
+
 _setup_main() {
   local python_bin
 
@@ -250,15 +328,20 @@ _setup_main() {
   python -m pip install -e ".[all]" || return 1
   python -m pip install -r requirements-runtime.txt || return 1
 
+  PYNEREAL_SETUP_PYTHON="$(command -v python)" _setup_native_indicators \
+    || echo "[setup] native indicators unavailable; continuing with Python indicators" >&2
+
   _setup_ai_sandbox
   _setup_ai_chart_capture || echo "[setup] setup completed without chart capture; retry bash setup.sh --chart-capture-only" >&2
 }
 
 if [ "${1:-}" = "--chart-capture-only" ]; then
   _setup_ai_chart_capture
+elif [ "${1:-}" = "--native-indicators-only" ]; then
+  _setup_native_indicators
 else
   _setup_main "$@"
 fi
 _setup_status=$?
-unset -f _find_python _setup_main _setup_ai_sandbox _setup_ai_chart_capture _chart_capture_browser _chart_capture_ready 2>/dev/null || true
+unset -f _find_python _setup_main _setup_ai_sandbox _setup_ai_chart_capture _chart_capture_browser _chart_capture_ready _native_build_packages _setup_native_build_dependencies _setup_native_indicators 2>/dev/null || true
 return "$_setup_status" 2>/dev/null || exit "$_setup_status"

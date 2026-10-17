@@ -554,16 +554,70 @@ def calculate_strategy_statistics(
     return stats
 
 
+def _calculate_csv_direction_statistics(
+        closed_trades: Sequence[Trade],
+        open_trades: Sequence[Trade],
+        initial_capital: float,
+) -> StrategyStatistics:
+    """Calculate missing directional columns only when exporting a backtest CSV."""
+    stats = StrategyStatistics()
+    stats.commission_paid = sum(t.commission for t in closed_trades)
+    stats.total_open_trades = len(open_trades)
+    wins = [t for t in closed_trades if float(t.profit) > 0]
+    losses = [t for t in closed_trades if float(t.profit) < 0]
+    stats.losing_trades = len(losses)
+    gross_profit = sum(float(t.profit) for t in wins)
+    gross_loss = sum(float(t.profit) for t in losses)
+    if wins:
+        stats.avg_winning_trade = gross_profit / len(wins)
+        durations = [t.exit_bar_index - t.entry_bar_index for t in wins if t.exit_bar_index >= 0]
+        if durations:
+            stats.avg_bars_in_winning_trades = sum(durations) / len(durations)
+    if losses:
+        stats.avg_losing_trade = gross_loss / len(losses)
+        durations = [t.exit_bar_index - t.entry_bar_index for t in losses if t.exit_bar_index >= 0]
+        if durations:
+            stats.avg_bars_in_losing_trades = sum(durations) / len(durations)
+        stats.ratio_avg_win_loss = abs(stats.avg_winning_trade / stats.avg_losing_trade)
+        stats.profit_factor = abs(gross_profit / gross_loss)
+    if initial_capital > 0:
+        stats.avg_winning_trade_percent = stats.avg_winning_trade / initial_capital * 100
+        stats.avg_losing_trade_percent = stats.avg_losing_trade / initial_capital * 100
+
+    # Use the same holding intervals as All, including split partial exits and open trades.
+    active: list[Trade] = []
+    for trade in sorted([*closed_trades, *open_trades], key=lambda t: t.entry_time):
+        active.append(trade)
+        active = [t for t in active if t.exit_time < 0 or t.exit_time > trade.entry_time]
+        stats.max_contracts_held = max(stats.max_contracts_held, sum(abs(t.size) for t in active))
+    return stats
+
+
 def write_strategy_statistics_csv(
         stats: StrategyStatistics,
-        csv_writer: CSVWriter
+        csv_writer: CSVWriter,
+        *,
+        position: Position,
+        initial_capital: float,
 ) -> None:
     """
     Write strategy statistics to CSV file in TradingView format.
 
     :param stats: Calculated strategy statistics
     :param csv_writer: CSV writer instance (already opened)
+    :param position: Trade history for CSV-only directional statistics
+    :param initial_capital: Initial capital, using the existing All percentage basis
     """
+    long_stats = _calculate_csv_direction_statistics(
+        [t for t in position.closed_trades if t.sign > 0],
+        [t for t in position.open_trades if t.sign > 0],
+        initial_capital,
+    )
+    short_stats = _calculate_csv_direction_statistics(
+        [t for t in position.closed_trades if t.sign < 0],
+        [t for t in position.open_trades if t.sign < 0],
+        initial_capital,
+    )
     # Row 1: Net profit
     csv_writer.write("Net profit",
                      stats.net_profit, stats.net_profit_percent,
@@ -585,8 +639,8 @@ def write_strategy_statistics_csv(
     # Row 4: Commission paid
     csv_writer.write("Commission paid",
                      stats.commission_paid, "",
-                     stats.commission_paid, "",
-                     0, ""
+                     long_stats.commission_paid, "",
+                     short_stats.commission_paid, ""
                      )
     # Row 5: Buy & hold return
     csv_writer.write("Buy & hold return",
@@ -606,8 +660,8 @@ def write_strategy_statistics_csv(
     # Row 8: Max contracts held
     csv_writer.write("Max contracts held",
                      stats.max_contracts_held, "",
-                     stats.max_contracts_held, "",
-                     0, ""
+                     long_stats.max_contracts_held, "",
+                     short_stats.max_contracts_held, ""
                      )
 
     # Empty row
@@ -621,8 +675,8 @@ def write_strategy_statistics_csv(
                      )
     csv_writer.write("Total open trades",
                      stats.total_open_trades, "",
-                     stats.total_open_trades, "",
-                     0, ""
+                     long_stats.total_open_trades, "",
+                     short_stats.total_open_trades, ""
                      )
     csv_writer.write("Winning trades",
                      stats.winning_trades, "",
@@ -631,8 +685,8 @@ def write_strategy_statistics_csv(
                      )
     csv_writer.write("Losing trades",
                      stats.losing_trades, "",
-                     stats.long_trades - stats.long_winning_trades, "",
-                     stats.short_trades - stats.short_winning_trades, ""
+                     long_stats.losing_trades, "",
+                     short_stats.losing_trades, ""
                      )
 
     # Calculate percentages with safe division
@@ -652,18 +706,18 @@ def write_strategy_statistics_csv(
                      )
     csv_writer.write("Avg winning trade",
                      stats.avg_winning_trade, stats.avg_winning_trade_percent,
-                     stats.avg_winning_trade, stats.avg_winning_trade_percent,
-                     0, ""
+                     long_stats.avg_winning_trade, long_stats.avg_winning_trade_percent,
+                     short_stats.avg_winning_trade, short_stats.avg_winning_trade_percent
                      )
     csv_writer.write("Avg losing trade",
                      stats.avg_losing_trade, stats.avg_losing_trade_percent,
-                     stats.avg_losing_trade, stats.avg_losing_trade_percent,
-                     0, ""
+                     long_stats.avg_losing_trade, long_stats.avg_losing_trade_percent,
+                     short_stats.avg_losing_trade, short_stats.avg_losing_trade_percent
                      )
     csv_writer.write("Ratio avg win / avg loss",
                      stats.ratio_avg_win_loss, "",
-                     stats.ratio_avg_win_loss, "",
-                     0, ""
+                     long_stats.ratio_avg_win_loss, "",
+                     short_stats.ratio_avg_win_loss, ""
                      )
     csv_writer.write("Largest winning trade",
                      stats.largest_winning_trade, "",
@@ -692,13 +746,13 @@ def write_strategy_statistics_csv(
                      )
     csv_writer.write("Avg # bars in winning trades",
                      stats.avg_bars_in_winning_trades, "",
-                     stats.avg_bars_in_winning_trades, "",
-                     0, ""
+                     long_stats.avg_bars_in_winning_trades, "",
+                     short_stats.avg_bars_in_winning_trades, ""
                      )
     csv_writer.write("Avg # bars in losing trades",
                      stats.avg_bars_in_losing_trades, "",
-                     stats.avg_bars_in_losing_trades, "",
-                     0, ""
+                     long_stats.avg_bars_in_losing_trades, "",
+                     short_stats.avg_bars_in_losing_trades, ""
                      )
 
     # Empty row
@@ -715,8 +769,8 @@ def write_strategy_statistics_csv(
                      )
     csv_writer.write("Profit factor",
                      stats.profit_factor, "",
-                     stats.profit_factor, "",
-                     0, ""
+                     long_stats.profit_factor, "",
+                     short_stats.profit_factor, ""
                      )
     csv_writer.write("Margin calls",
                      stats.margin_calls, "",

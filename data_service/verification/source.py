@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import math
-import struct
 import time
 from types import MethodType
 from typing import Any, Callable
 
 import ccxt.async_support as ccxt_async
 import ccxt.pro as ccxt_pro
+from pynecore.core.ohlcv_file import ohlcv_number
 
 from exchange_clock import release_exchange_clock, retain_exchange_clock
 from market_data_diagnostics import ohlcv_bar_data
@@ -67,22 +67,16 @@ def _normalize_bar(bar: Any) -> dict[str, int | float] | None:
     return ohlcv_bar_data(bar)
 
 
-def _float32_bar(
+def _storage_bar(
     bar: dict[str, int | float] | None,
+    precision: int,
 ) -> dict[str, int | float] | None:
     if bar is None:
         return None
 
-    def as_float32(value: int | float) -> float:
-        return struct.unpack("f", struct.pack("f", float(value)))[0]
-
     return {
         "timestamp_ms": int(bar["timestamp_ms"]),
-        "open": as_float32(bar["open"]),
-        "high": as_float32(bar["high"]),
-        "low": as_float32(bar["low"]),
-        "close": as_float32(bar["close"]),
-        "volume": as_float32(bar["volume"]),
+        **{key: ohlcv_number(bar[key], precision) for key in ("open", "high", "low", "close", "volume")},
     }
 
 
@@ -104,6 +98,7 @@ class FinalizedCandleProbe:
         market_type: str,
         on_event: Callable[[dict[str, Any]], None],
         on_authoritative: Callable[[dict[str, Any]], None] | None = None,
+        data_precision: int = 32,
     ) -> None:
         self.exchange_name = exchange_name.lower()
         self.symbol = symbol
@@ -111,6 +106,7 @@ class FinalizedCandleProbe:
         self.market_type = market_type
         self.on_event = on_event
         self.on_authoritative = on_authoritative
+        self.data_precision = data_precision
         self._timeframe_ms = timeframe_seconds(timeframe) * 1000
         self._finalized_bars: dict[int, dict[str, int | float]] = {}
         self._published_timestamps: set[int] = set()
@@ -410,7 +406,7 @@ class FinalizedCandleProbe:
             normalized = [
                 bar
                 for bar in (
-                    _float32_bar(_normalize_bar(row)) for row in rows or []
+                    _storage_bar(_normalize_bar(row), self.data_precision) for row in rows or []
                 )
                 if bar is not None
             ]

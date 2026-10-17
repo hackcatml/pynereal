@@ -67,6 +67,17 @@ def verification_event_id(request: VerificationDeliveryRequest) -> str:
         "exit_id": signal.get("exit_id") or "",
         "occurrence_index": int(signal.get("occurrence_index") or 0),
     }
+    if request.discrepancy == "entry_repainting":
+        repainting = signal["repainting"]
+        original = repainting["original"]
+        replacement = repainting.get("replacement") or {}
+        identity["repainting"] = {
+            "source_hashes": repainting.get("source_hashes"),
+            "original_time": original["time"],
+            "direction": original["direction"],
+            "change": repainting["change"],
+            "replacement_time": replacement.get("time"),
+        }
     encoded = json.dumps(
         identity,
         ensure_ascii=True,
@@ -472,6 +483,35 @@ class VerificationDeliveryService:
         webhook_outcome: dict[str, Any],
     ) -> str:
         signal = request.order_signal
+        if request.discrepancy == "entry_repainting":
+            repainting = signal["repainting"]
+            original = repainting["original"]
+            replacement = repainting.get("replacement")
+            entry_source = (
+                "Entry source: Verification supplemental webhook\n"
+                if original.get("origin") == "verification_supplemental" else ""
+            )
+            current = "The original entry is absent from the recalculated history."
+            if replacement is not None:
+                current += (
+                    "\nRecalculated entry with the same ID: "
+                    f"{_format_timestamp(replacement['time'] * 1000)}"
+                    f" | Fill: {replacement['price']} | Size: {replacement['size']}"
+                )
+            return (
+                "[Repainting] Historical strategy entry changed\n"
+                f"Session: {request.session_id} ({request.script_title or 'No title'})\n"
+                f"Market: {request.exchange} {request.symbol} {request.timeframe}\n"
+                f"Entry: {original['entry_id']} ({original['direction']})\n"
+                f"{entry_source}"
+                f"Originally observed on: {_format_timestamp(request.candle_timestamp_ms)}\n"
+                f"Original fill: {_format_timestamp(original['time'] * 1000)}"
+                f" | Price: {original['price']} | Size: {original['size']}\n"
+                f"{current}\n"
+                f"Replay through: {_format_timestamp(repainting['calculated_through'] * 1000)}\n"
+                "These are strategy simulation records, not exchange fill confirmations.\n"
+                "No corrective, cancel, or reverse webhook was sent."
+            )
         duration_ms = timeframe_seconds(request.timeframe) * 1000
         delay_seconds = max(
             0.0,

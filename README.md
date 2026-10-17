@@ -99,6 +99,29 @@ cd pynereal
 source setup.sh
 ```
 
+Setup and backend updates build the optional native indicator module into the
+active Python environment. Updates do this before feeds and runners resume,
+including the first upgrade from an older updater. Unchanged source and Python
+build settings reuse the installed binary; changed sources are rebuilt. Ordinary
+startup and frontend-only updates do not build it.
+
+A C++17 compiler and development headers for the active Python version are
+required. On Ubuntu/Debian, setup/update installs missing `build-essential` and
+the `python3.x-dev` package matching the active Python environment. Updates use
+non-interactive `sudo`, so installing missing packages requires root or
+passwordless sudo access and a configured repository providing those packages.
+On macOS, install Xcode Command Line Tools. If compilation fails, setup/update warns
+and continues with Python indicators instead of an outdated native binary.
+To retry interactively, activate the server's environment and run
+`bash setup.sh --native-indicators-only`, then restart the service. For an
+environment outside `./venv`, set `PYNEREAL_SETUP_PYTHON` to its Python executable.
+Set `PYNECORE_NATIVE_INDICATORS=0` before starting a process to explicitly use
+Python indicators. Native kernels are otherwise used by default when available.
+If an older updater already disabled native indicators after a failed build,
+restart the service from its normal launcher once after a successful install to
+clear that inherited fallback. Newer updaters restore their automatic fallback
+on a successful retry while preserving an explicit opt-out.
+
 ## Quick Start
 
 Start the hub:
@@ -258,6 +281,10 @@ buy-and-hold return, and switchable Sharpe/Sortino ratios. When several summarie
 are available, **Compare** displays them as columns in one table. Hover over a
 column number, or tap it on mobile, to see that run's input values. The table
 keeps metric labels visible while scrolling horizontally on smaller screens.
+Each individual summary has a collapsed **Script** section showing the complete
+source used by that run; use its copy button to copy it. This section is omitted
+from **Compare**. Source snapshots are saved for new runs only.
+Older results without a saved snapshot do not display the current script in its place.
 
 **Equity Curve** opens a new chart tab on desktop and mobile, with candles,
 strategy plots and markers above the equity curve. Zoom the curve and select a
@@ -271,8 +298,10 @@ Unavailable ratios display `-`. Existing result files are not automatically
 recalculated after a statistics update; rerun the backtest for the new values.
 
 Results are stored in `workdir/output/backtests/<job_id>/`, including logs,
-`strategy.csv`, `trades.csv`, plots, and equity data where produced. Temporary
-runtime copies are removed after execution. **Clear** asks for confirmation and
+`strategy.csv`, `trades.csv`, plots, equity data where produced, and the executed
+source in `script.py`. Temporary runtime copies are removed after execution.
+The delete button beside each result removes only that run after confirmation;
+queued or running results cannot be deleted. **Clear** asks for confirmation and
 deletes all stored results for the selected script when no jobs are active.
 
 Backtest calculations run in separate processes with Webhook and Telegram
@@ -336,6 +365,45 @@ Supported exchange behavior is handled per exchange.<br>
 For example, **OKX**, **Binance**, and
 **Bybit** zero-volume candles are **hidden** to match TradingView, while **Bitget** and
 **Hyperliquid** zero-volume candles remain **visible**.
+
+### Shared One-Minute History
+
+Sessions above `1m` also maintain background one-minute history in
+`workdir/data/cache/minute_candles.sqlite`. This is a separate, DB-only dataset;
+it does not change the strategy's candles or create another `.ohlcv` file.
+
+- Collection is shared across sessions with the same exchange, market type,
+  and symbol. An existing `1m` session's actual cache is reused before checking
+  for missing history, including cached data older than its configured start date.
+- Binance, Bitget, and OKX use public candle archives where supported, with REST
+  filling uncovered ranges. Bybit and Hyperliquid use REST.
+- Binance and OKX archive rows with zero volume are preserved. Within valid
+  Bitget USDT-M archives, omitted minutes are stored at the preceding close
+  with zero volume and a separate `archive_no_trade` source. Actual archive,
+  REST, or existing session candles take precedence over these synthesized rows.
+  Failed files and gaps without a known preceding close still use REST.
+- Hyperliquid only exposes the latest 5,000 candles, so older one-minute history
+  cannot be backfilled through its candle API. Available history accumulates
+  while collection is running.
+- Without an existing `1m` feed, live candles reuse a single existing trade
+  stream. The latest ten closed minutes are refreshed by REST each minute,
+  starting at a per-market offset between 15 and 35 seconds. Requests and DB
+  writes avoid the ten seconds before and after every minute boundary.
+- Closing charts or stopping runners does not stop collection. Removing the
+  last session for a market stops its work; stopping data-service closes the
+  worker. Saved history remains for subsequent starts.
+
+Downloads, parsing, and storage run in a separate process. On a supported
+session above `1m`, click the chart timeframe and select **1m** to view this
+dataset. The chart loads up to 5,000 candles per page and retains loaded pages
+when switching back to the strategy timeframe. Strategy plots and trade markers
+are hidden in the minute view; browser indicators use the displayed minute bars.
+An open minute view receives live candle snapshots over WebSocket without
+waiting for DB writes or making additional exchange requests. Existing `1m`
+feeds supply their live snapshots directly; otherwise the shared worker supplies
+its trade-built minute candles. Stored corrections are checked once per second,
+and confirmed REST/session/archive data takes precedence over provisional trades.
+The storage guard remains in place. Charts do not change strategy calculations.
 
 ### Re-sync Historical Data
 
@@ -427,6 +495,61 @@ of exact TradingView or PyneCore numerical equivalence. The worker is bundled, s
 normal setup and Update do not require Node.js or npm. To rebuild it during
 development, run `npm ci` and `npm run build:indicators`; source lives in
 `data_service/indicators_build/`.
+
+Selecting a drawn trend line opens a draggable toolbar with its color,
+left/right extension toggles, and delete button. Extensions follow the line's
+slope without moving its anchors, and copied lines retain these settings.
+These controls are available in both live and backtest charts.
+
+### Volume Profiles
+
+The chart's drawing toolbar includes **Fixed Range Volume Profile (FRVP)**.
+Choose its horizontal-bar icon, then select the first and last candles with
+two clicks or a mouse drag. On touch screens, drag to aim and release to fix the
+first candle, then repeat for the last candle. One profile is shown per chart.
+Selecting a new range replaces it; drag its selected boundary lines to adjust
+the range. Selecting a profile shows a floating toolbar over the chart with settings and delete
+buttons; drag its dotted handle to move it with a mouse or touch. Clicking an
+empty area hides it. The settings button opens row count,
+value-area percentage, width, colors, price levels, available-data range,
+refresh, and delete controls. Range and settings
+are stored per session in this browser, not shared with Telegram screenshots.
+
+FRVP reads all available 1-minute candles in the selected range from the local
+server, in 5,000-candle pages, regardless of the displayed timeframe. Existing
+1-minute sessions use their own candles; higher-timeframe sessions use the
+shared minute dataset. Unavailable history is not replaced with higher-timeframe
+candles. The Available range reports the returned data's boundaries; it is not
+a guarantee that every minute within them exists.
+
+Calculation and history fetching run in a separate browser worker. Each minute's
+volume is distributed proportionally across the price rows overlapping its
+low/high range. A flat candle contributes to one row. Close >= open counts as
+up volume, otherwise down volume. POC is the highest-volume row (lower row on a
+tie); the value area expands from it toward the larger adjacent row until it
+contains at least the selected percentage (default 70%). Rows evenly divide the
+observed price range. This is candle-based volume estimation, not actual bid/ask volume
+or a guarantee of numerical equivalence with TradingView.
+
+Recent auxiliary-minute corrections use the existing local minute WebSocket;
+ordinary 1-minute sessions reuse the chart's live messages. The range stays fixed,
+and updates replace a minute's contribution rather than adding its volume again.
+No exchange subscription, strategy calculation, or runner scheduling is added.
+
+**Anchored Volume Profile (AVP)** is available beside FRVP in the drawing tools.
+Select its anchored horizontal-bar icon and click a starting candle once. On
+touch screens, drag to aim and release to fix the anchor. It accumulates all
+available 1-minute candles from that point through the latest candle on the
+server, including candles outside the visible chart. New minutes extend the
+profile automatically; same-minute updates replace volume instead of adding it
+twice. Drag the selected start boundary to move the anchor. There is no manual
+end boundary.
+
+AVP shares FRVP's settings, draggable toolbar and browser-local storage. Only
+one volume profile is displayed per chart; creating either type replaces the
+existing profile. Reopening the chart reloads the saved anchor through the
+latest data. Reconnection catches up missing recent history from local storage.
+The same 1-minute availability and candle-based estimation limits apply.
 
 ## Strategy Calculation Timing
 
@@ -980,6 +1103,34 @@ approval message can authorize its one-time operation.
 Existing strategy alert delivery is unchanged; AI output is paced and handles
 429 responses (at least 1.1 seconds between attempts for private chats, 3.1 seconds
 for groups), but does not yet share a global rate-limit queue with alert senders.
+
+Unexpected Telegram command-worker failures restart only the Telegram service,
+with a 5-second exponential backoff capped at 60 seconds. Unfinished commands and
+approved changes are not replayed; send a fresh command after recovery. Network
+errors and 429 responses retain their existing request-level retry behavior.
+Polling conflicts (409) retry the Telegram service up to three times, with
+5/10/20-second delays for consecutive conflicts. Persistent conflicts,
+authentication/access errors, invalid requests, a configured bot webhook, or a
+database already owned by another receiver stop reception instead of retrying
+indefinitely. Correct the configuration or stop the competing receiver first.
+
+The Telegram icon between the dashboard clock and notification bell shows the
+command-service status. Open it to inspect an error or select **Restart**. This
+restarts only Telegram command reception, workers and replies; running strategies,
+market-data collection and strategy webhook/Telegram alerts are not restarted.
+Status changes use the existing dashboard WebSocket, without periodic browser
+polling. After recovery, resend commands issued while reception was stopped.
+The same controls are available through `GET /api/telegram/status` and
+`POST /api/telegram/restart`, under the same access controls as other dashboard
+APIs. Restart does not reload changed bot credentials or configuration; those
+changes still require a data-service restart.
+
+Warnings, failures and recovery events are also kept in
+`workdir/output/telegram_ai.log` (1 MiB per file, two rotated backups). Timestamps
+include the server's local UTC offset. Unexpected failures include the worker
+name and code locations, not exception messages, source lines, conversation
+content or credentials. File writes run on the dedicated Telegram executor;
+strategy runners and their alert-delivery paths are unchanged.
 
 ### Exchange Account Access
 

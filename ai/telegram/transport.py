@@ -110,6 +110,14 @@ class TelegramTransport:
                 if response.status >= 400 or not data.get("ok"):
                     retry = (data.get("parameters") or {}).get("retry_after", 0)
                     error_type = ""
+                    if method == "getUpdates" and (data.get("error_code") or response.status) == 409:
+                        description = str(data.get("description", "")).lower()
+                        if "webhook" in description:
+                            error_type = "WebhookConflict"
+                        elif "other getupdates" in description:
+                            error_type = "PollingConflict"
+                        else:
+                            error_type = "UpdateConflict"
                     if method == "editMessageText" and data.get("error_code") == 400:
                         # Keep only known classifications, never the upstream description/URL.
                         description = str(data.get("description", "")).lower()

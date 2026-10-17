@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import secrets
+import signal
 import shutil
 import subprocess
 import sys
@@ -369,6 +370,13 @@ class UpdateService:
                 request["chart_capture_checked"] = True
                 _write_json_atomic(self.request_path, request)
                 write_update_state(self.state_path, warning=warning)
+            if not request.get("native_indicators_checked") and not read_update_state(self.state_path).get("error"):
+                write_update_state(self.state_path, message="Checking native indicators")
+                warning = self._install_native_indicators()
+                request["native_indicators_checked"] = True
+                _write_json_atomic(self.request_path, request)
+                existing = str(read_update_state(self.state_path).get("warning") or "")
+                write_update_state(self.state_path, warning=" ".join(filter(None, (existing, warning))))
             write_update_state(
                 self.state_path,
                 status="restarting",
@@ -537,6 +545,62 @@ class UpdateService:
         except (OSError, subprocess.SubprocessError) as exc:
             print(f"[update] chart-capture setup failed: {type(exc).__name__}", file=sys.stderr)
         warning = "Chart capture is unavailable; run bash setup.sh --chart-capture-only in a terminal."
+        print(f"[update] {warning}", file=sys.stderr)
+        return warning
+
+    def _install_native_indicators(self) -> str:
+        command = [sys.executable, str(self.repo_root / "pynecore/native/build_indicators.py"), "--install"]
+        env = os.environ.copy()
+        timeout = 180
+        if sys.platform.startswith("linux"):
+            command = ["bash", str(self.repo_root / "setup.sh"), "--native-indicators-only"]
+            env["PYNEREAL_SETUP_NONINTERACTIVE"] = "1"
+            env["PYNEREAL_SETUP_PYTHON"] = sys.executable
+            timeout = 900
+        try:
+            with subprocess.Popen(
+                command, cwd=self.repo_root, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                start_new_session=os.name != "nt", env=env,
+            ) as process:
+                try:
+                    output, _ = process.communicate(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    # Stop compiler children too; do not leave them competing with resumed runners.
+                    if os.name != "nt":
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    else:
+                        process.kill()
+                    process.communicate()
+                    raise
+                if output.strip():
+                    print(f"[update] {output[-4000:].strip()}")
+                if process.returncode == 0:
+                    # Undo only our own fallback, not the user's explicit opt-out.
+                    previous = os.environ.pop("PYNEREAL_NATIVE_FALLBACK_PREVIOUS", None)
+                    if previous is not None and os.environ.get("PYNECORE_NATIVE_INDICATORS") == "0":
+                        if previous == "unset":
+                            os.environ.pop("PYNECORE_NATIVE_INDICATORS", None)
+                        else:
+                            os.environ["PYNECORE_NATIVE_INDICATORS"] = previous
+                    return ""
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"[update] native indicator setup failed: {exc}", file=sys.stderr)
+        # Covers an interrupted build or a filesystem error preventing stale-binary removal.
+        if os.environ.get("PYNECORE_NATIVE_INDICATORS") != "0":
+            os.environ["PYNEREAL_NATIVE_FALLBACK_PREVIOUS"] = os.environ.get("PYNECORE_NATIVE_INDICATORS", "unset")
+        os.environ["PYNECORE_NATIVE_INDICATORS"] = "0"
+        repair = (
+            "Run bash setup.sh --native-indicators-only in the server environment "
+            "to install build prerequisites and the module, then restart the service."
+            if sys.platform.startswith("linux") else
+            "Install build prerequisites, run python pynecore/native/build_indicators.py --install "
+            "in the server environment, and restart the service."
+        )
+        warning = f"Native indicators unavailable; using Python indicators. {repair}"
         print(f"[update] {warning}", file=sys.stderr)
         return warning
 

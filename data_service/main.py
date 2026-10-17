@@ -17,6 +17,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ai.provider.codex_service import CodexService
 from ai.telegram.agent import TelegramAgent
+from ai.telegram.api import build_telegram_router
 from ai.telegram.config import TelegramAIConfig
 from ai.telegram.service import TelegramAIService
 from ai.scripts.asset import eprint
@@ -227,14 +228,22 @@ def _default_session(registry: SessionRegistry):
     return None
 
 
-async def _hub_status_heartbeat(registry: SessionRegistry, interval: float = 1.0) -> None:
+async def _hub_status_heartbeat(
+    registry: SessionRegistry, interval: float = 1.0, telegram: TelegramAIService | None = None,
+) -> None:
     """Periodically push the session snapshot to /ws/hub clients so the dashboard's
     'Last bar' / price / status stay fresh without each client polling /api/sessions.
     One broadcast serves all connected dashboards (no-op when none are connected)."""
+    last_telegram_status = None
     while True:
         await asyncio.sleep(interval)
         try:
             await registry.notify_hub()
+            if telegram is not None:
+                status = telegram.status()
+                if status != last_telegram_status:
+                    await registry.hub_ws.broadcast_json({"type": "telegram_status", **status})
+                    last_telegram_status = status
         except Exception:
             pass
 
@@ -267,6 +276,7 @@ async def main() -> None:
     account_data_service = AccountDataService(
         _PROJECT_ROOT / "workdir" / "config" / "providers.toml",
         cache_path=_PROJECT_ROOT / "workdir" / "data" / "cache" / "account_cache.sqlite",
+        on_positions=registry.notifications.observe_positions if registry.notifications else None,
     )
     asset_transfer_service = AssetTransferService(
         _PROJECT_ROOT / "workdir" / "config" / "providers.toml"
@@ -322,7 +332,6 @@ async def main() -> None:
         await account_data_service.start()
     except Exception as exc:
         eprint(f"[account] service startup failed: {type(exc).__name__}: {exc}")
-    heartbeat = asyncio.create_task(_hub_status_heartbeat(registry))
 
     try:
         telegram_config = await asyncio.to_thread(
@@ -336,10 +345,13 @@ async def main() -> None:
     telegram_ai = TelegramAIService(
         telegram_config,
         path=_PROJECT_ROOT / "workdir" / "data" / "telegram_ai.sqlite",
+        log_path=_PROJECT_ROOT / "workdir" / "output" / "telegram_ai.log",
         agent=TelegramAgent(codex_service, account_data_service, asset_portfolio_service,
                             workspace=app.state.scripting_workspace, executor=app.state.scripting_executor, registry=registry),
         notifications=registry.notifications,
     )
+    app.include_router(build_telegram_router(telegram_ai))
+    heartbeat = asyncio.create_task(_hub_status_heartbeat(registry, telegram=telegram_ai))
 
     server = uvicorn.Server(
         uvicorn.Config(app, host=cfg.host, port=cfg.port, loop="asyncio", lifespan="off",

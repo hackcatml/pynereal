@@ -63,7 +63,7 @@ export class IndicatorEngine {
 
   emptySeries() {
     return this.configs.map(config => ({
-      id: config.id,
+      id: config.key || config.id,
       lines: Array.from({ length: lineCount(config.id) }, () => []),
     }));
   }

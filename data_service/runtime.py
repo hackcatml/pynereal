@@ -146,7 +146,7 @@ class Feed:
             self._last_raw_trade_time_ms,
         )
 
-    def broadcast_trades(self, trades: list) -> None:
+    def broadcast_trades(self, trades: list) -> list[dict[str, Any]]:
         initial_batch = not self._raw_trade_stream_started
         new_trades: list[tuple[int, dict[str, Any]]] = []
         for index, trade in enumerate(trades):
@@ -189,6 +189,7 @@ class Feed:
                     initial_batch=initial_batch,
                 )
         self._raw_trade_stream_started = True
+        return [trade for _, trade in new_trades]
 
     async def emit_event(self, payload: dict) -> None:
         # prerun_ready / run_ready fan out to every runner subscribed to this feed.
@@ -433,6 +434,8 @@ class Session:
 
     async def _send_runner_event(self, payload: dict[str, Any]) -> None:
         session_payload = dict(payload)
+        if session_payload.get("type") in {"prerun_ready", "prerun_ready_after_history_download"}:
+            session_payload = self.verification.with_supplemental_entries(session_payload)
         if (
             session_payload.get("type") == "run_ready"
             and self.verification.enabled
@@ -744,7 +747,7 @@ class Session:
                         if generation_id is not None:
                             pending_prerun_event["calculation_generation_id"] = generation_id
                             pending_prerun_event["strategy_evaluation_enabled"] = True
-                    await ws_manager.send(ws, pending_prerun_event)
+                    await ws_manager.send(ws, self.verification.with_supplemental_entries(pending_prerun_event))
 
                 self.client_roles[ws] = role
                 self.runner_count += 1

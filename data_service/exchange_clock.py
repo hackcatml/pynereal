@@ -13,6 +13,7 @@ from schedule_utils import seconds_until_post_bar_task_window
 
 
 _DEFAULT_SYNC_INTERVAL_SECONDS = 10 * 60
+_MAX_TIME_HTTP_DURATION_MS = 200.0
 
 
 @dataclass
@@ -56,9 +57,29 @@ class ExchangeClock:
             self.ex = make_ccxt_pro_client(ccxt, self.exchange_name)
 
         try:
-            server_ms = await self.ex.fetch_time()
+            exchange = self.ex
+            original_fetch = exchange.fetch
+            http_duration_ms: float | None = None
+
+            # fetch() runs after CCXT's throttle; only time the HTTP response
+            # supplying the server timestamp, not request-rate-limit waits.
+            async def timed_fetch(*args, **kwargs):
+                nonlocal http_duration_ms
+                started_ns = time.monotonic_ns()
+                try:
+                    return await original_fetch(*args, **kwargs)
+                finally:
+                    http_duration_ms = (time.monotonic_ns() - started_ns) / 1_000_000
+
+            exchange.fetch = timed_fetch
+            try:
+                server_ms = await exchange.fetch_time()
+            finally:
+                exchange.fetch = original_fetch
             if server_ms is None:
                 raise RuntimeError("fetch_time returned None")
+            if http_duration_ms is None:
+                raise RuntimeError("fetch_time returned without an HTTP timing sample")
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -73,7 +94,17 @@ class ExchangeClock:
             )
             return delay + jitter
 
-        self.time_offset_ms = server_ms - time.time() * 1000
+        candidate_offset_ms = server_ms - time.time() * 1000
+        if http_duration_ms > _MAX_TIME_HTTP_DURATION_MS:
+            log_with_time(
+                f"[exchange_clock] {self.exchange_name} slow time response ignored: "
+                f"http={http_duration_ms:.3f}ms "
+                f"limit={_MAX_TIME_HTTP_DURATION_MS:g}ms "
+                f"retained_offset={self.time_offset_ms:.1f}ms "
+                f"candidate_offset={candidate_offset_ms:.1f}ms"
+            )
+        else:
+            self.time_offset_ms = candidate_offset_ms
         self.backoff_sec = 5.0
         return self.sync_interval_sec + random.uniform(
             0.0,

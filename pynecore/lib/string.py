@@ -402,7 +402,7 @@ def match(source: str, regex: str) -> str:
     :param regex: Regular expression
     :return: New substring of the source string if it matches a regex regular expression, an empty string otherwise.
     """
-    m = re.match(regex, source)
+    m = re.search(regex, source)
     if m is None:
         return ""
     return m.group()

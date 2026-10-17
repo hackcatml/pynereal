@@ -454,18 +454,47 @@ class ScriptingBacktestManager:
                 for job in self._jobs.values()
                 if job.script_path == normalized
             ]
-            if any(job.status in _ACTIVE_STATUSES for job in targets):
-                raise ScriptingBacktestError(
-                    "stop the running backtest before deleting its results",
-                    code="backtest_active",
-                    status_code=409,
-                )
-            job_ids = [job.id for job in targets]
-            await self.run_io(self._delete_job_directories, job_ids)
-            for job_id in job_ids:
-                self._jobs.pop(job_id, None)
-                self._plot_index_cache.pop(job_id, None)
+            job_ids = await self._delete_results_locked(targets)
         return {"ok": True, "deleted": len(job_ids), "script_path": normalized}
+
+    async def delete_result(self, job_id: str) -> dict[str, Any]:
+        async with self._lock:
+            job = self._get_job(job_id)
+            await self._delete_results_locked([job])
+        return {"ok": True, "deleted": 1, "job_id": job.id}
+
+    async def _delete_results_locked(self, targets: list[BacktestJob]) -> list[str]:
+        if any(
+            job.status not in _TERMINAL_STATUSES
+            or (job.monitor_task is not None and not job.monitor_task.done())
+            for job in targets
+        ):
+            raise ScriptingBacktestError(
+                "wait for the backtest to finish before deleting its results",
+                code="backtest_active",
+                status_code=409,
+            )
+        job_ids = [job.id for job in targets]
+        await self.run_io(self._delete_job_directories, job_ids)
+        for job_id in job_ids:
+            self._jobs.pop(job_id, None)
+            self._plot_index_cache.pop(job_id, None)
+        return job_ids
+
+    async def read_script(self, job_id: str) -> dict[str, Any]:
+        job = self._get_job(job_id)
+        content = await self.run_io(self._read_script_file, job.id)
+        return {"job_id": job.id, "path": job.script_path, "content": content}
+
+    def _read_script_file(self, job_id: str) -> str:
+        try:
+            return (self._job_dir(job_id) / "script.py").read_bytes().decode("utf-8")
+        except FileNotFoundError as exc:
+            raise ScriptingBacktestError(
+                "no script snapshot was saved for this backtest",
+                code="script_snapshot_unavailable",
+                status_code=404,
+            ) from exc
 
     async def data_progress(self, progress_id: str) -> dict[str, int | None]:
         path = self._data_progress_path
@@ -1568,7 +1597,16 @@ class ScriptingBacktestManager:
 
     def _delete_job_directories(self, job_ids: list[str]) -> None:
         for job_id in job_ids:
-            shutil.rmtree(self._job_dir(job_id), ignore_errors=True)
+            try:
+                shutil.rmtree(self._job_dir(job_id))
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise ScriptingBacktestError(
+                    "backtest result files could not be deleted",
+                    code="result_delete_failed",
+                    status_code=500,
+                ) from exc
 
     def _delete_runtime_directory(self, job_id: str) -> None:
         shutil.rmtree(self._job_dir(job_id) / "runtime", ignore_errors=True)
@@ -1683,6 +1721,7 @@ class ScriptingBacktestManager:
                 "strategy": (job_dir / "strategy.csv").is_file(),
                 "trades": (job_dir / "trades.csv").is_file(),
                 "equity": (job_dir / "equity.csv").is_file(),
+                "script": (job_dir / "script.py").is_file(),
             },
         }
 

@@ -399,7 +399,7 @@ class PersistentTransformer(ast.NodeTransformer):
     def visit_AnnAssign(self, node: ast.AnnAssign) -> ast.AST | None:
         """Convert any Persistent type annotated assignments"""
         if not isinstance(node.target, ast.Name):
-            return node
+            return self.generic_visit(node)
 
         if self._is_persistent_type(node.annotation):
             var_name = node.target.id
@@ -544,7 +544,9 @@ class PersistentTransformer(ast.NodeTransformer):
                     value=transformed_value
                 )
 
-        # If not a persistent assignment, still visit the value part
+        # Field and item writes keep their target, but must resolve its persistent owner.
+        node.targets = [self.visit(target) if isinstance(target, (ast.Attribute, ast.Subscript)) else target
+                        for target in node.targets]
         node.value = self.visit(cast(ast.AST, node.value))
         return node
 

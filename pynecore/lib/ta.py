@@ -2003,7 +2003,8 @@ def vwap(source: Series[float], anchor: bool | None = None, stdev_mult: float | 
     # If stdev_mult is specified, calculate bands
     if had_anchor and stdev_mult is not None:
         sum_ppv += source * source * volume
-        std = math.sqrt(builtins.max(0.0, sum_ppv / sum_vol - vwap_value * vwap_value))
+        # A reset has exactly one sample; subtracting second moments can leave a positive residue.
+        std = 0.0 if anchor else math.sqrt(builtins.max(0.0, sum_ppv / sum_vol - vwap_value * vwap_value))
         band_width = std * stdev_mult
         # Return tuple of (vwap, upper_band, lower_band)
         return vwap_value, vwap_value + band_width, vwap_value - band_width
@@ -2041,34 +2042,56 @@ def wma(source: Series[float], length: int) -> float | NA[float]:
     :return: The WMA of the source series
     """
     assert length > 0, "Invalid length, length must be greater than 0!"
-    if isinstance(source, NA):
-        return NA(float)
     length = int(length)
+    if length == 1:
+        return source
 
-    # Calculate denominator only once
+    last: Persistent[float | NA[float]] = NA(float)
+    missing = isinstance(source, NA)
+    if missing:
+        if isinstance(last, NA):
+            return NA(float)
+        # Fill only this call's history; the current output remains NA.
+        source = last
+    else:
+        last = source
+
     denom: Persistent[float] = length * (length + 1) / 2
-
     count: Persistent[int] = 0
     summ: Persistent[float] = 0.0
+    sum_low: Persistent[float] = 0.0
     weighted_summ: Persistent[float] = 0.0
+    weighted_low: Persistent[float] = 0.0
 
-    # Warming up phase
-    if count < length:
+    warming = count < length
+    weight = count + 1 if warming else length
+    product = source * weight
+    # Preserve the integer-weight product residual without requiring Python 3.13's fma.
+    fraction, exponent = math.frexp(source)
+    split = 134217729.0 * fraction
+    source_high = math.ldexp(split - (split - fraction), exponent)
+    source_low = source - source_high
+    product_low = (source_high * weight - product) + source_low * weight
+
+    if warming:
         count += 1
-        summ += source
-        weighted_summ += source * count
-        if count < length:
-            return NA(float)
-
-    # Normal calculation phase
+        sum_terms = (summ, sum_low, source)
+        weighted_terms = (weighted_summ, weighted_low, product, product_low)
     else:
-        old_summ = summ
-        # Substract the oldest value and add the newest value
-        summ -= source[length] - source
-        # Substract the oldest weighted value and add the newest weighted value
-        weighted_summ -= old_summ - length * source
+        sum_terms = (summ, sum_low, -source[length], source)
+        weighted_terms = (weighted_summ, weighted_low, -summ, -sum_low, product, product_low)
 
-    val = weighted_summ / denom
+    # Fixed-size sums retain both components, including the old sum's residual in the weighted update.
+    updated_sum = math.fsum(sum_terms)
+    sum_low = math.fsum((*sum_terms, -updated_sum))
+    summ = updated_sum
+    updated_weighted = math.fsum(weighted_terms)
+    weighted_low = math.fsum((*weighted_terms, -updated_weighted))
+    weighted_summ = updated_weighted
+    if missing or count < length:
+        return NA(float)
+
+    val = (weighted_summ + weighted_low) / denom
     return val  # type: ignore
 
 
@@ -2099,3 +2122,8 @@ def wvad() -> float | NA[float] | Series[float]:
     :return: Weighted Volume Accumulation/Distribution
     """
     return (close - open) / (high - low) * volume
+
+
+# Prefer available native kernels unless explicitly disabled before import.
+from pynecore.core.native_indicators import install as _install_native_indicators
+_install_native_indicators(globals())

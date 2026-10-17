@@ -4,6 +4,7 @@ from datetime import datetime, UTC
 from collections import deque, defaultdict
 from copy import copy
 from bisect import insort, bisect_left
+from math import ceil, floor
 
 from ...core.module_property import module_property
 from ... import lib
@@ -75,6 +76,29 @@ if True:
 # Classes
 #
 
+class _ExitBinding:
+    """Logical entry quantity, independent of FIFO trade-row attribution."""
+
+    __slots__ = ('entry_id', 'sign', 'initial_size', 'size', 'price', 'trade', 'orders')
+
+    def __init__(self, entry_id, sign, size, trade=None):
+        self.entry_id, self.sign = entry_id, sign
+        self.initial_size = self.size = size
+        self.trade = trade
+        self.price = trade.entry_price if trade is not None else None
+        self.orders = {}
+
+
+def _order_key(order):
+    if order.order_type == _order_type_close and order.exit_binding is not None:
+        return order.exit_id, order.order_id, order.exit_binding
+    return order.order_id
+
+
+def _market_key(order):
+    return ('close', _order_key(order)) if order.order_type == _order_type_close else order.order_id
+
+
 class Order:
     """
     Represents an order
@@ -84,11 +108,13 @@ class Order:
         "order_id", "size", "sign", "order_type", "limit", "stop", "exit_id", "oca_name", "oca_type",
         "comment", "alert_message", "ai_instruction",
         "trail_price", "trail_offset",
-        "trail_triggered",
+        "trail_triggered", "trail_stop",
         "profit_ticks", "loss_ticks", "trail_points_ticks",  # Store tick values for later calculation
         "is_market_order",  # Flag to check if this is a market order
         "cancelled",  # Flag to mark order as cancelled by OCA
         "bar_index",  # Bar index when the order was placed
+        "qty_budget", "qty_price", "flip_qty", "follow_entry_qty",
+        "exit_binding", "reserved_size", "consumed", "exit_qty", "exit_percent",
     )
 
     def __init__(
@@ -128,8 +154,9 @@ class Order:
         self.ai_instruction = ai_instruction
 
         self.trail_price = trail_price
-        self.trail_offset = trail_offset or 0  # in ticks
+        self.trail_offset = None if isinstance(trail_offset, NA) else trail_offset  # in ticks
         self.trail_triggered = False
+        self.trail_stop = None
 
         self.profit_ticks = profit_ticks
         self.loss_ticks = loss_ticks
@@ -140,6 +167,14 @@ class Order:
 
         self.cancelled = False
         self.bar_index = -1  # Will be set when order is added to position
+        self.qty_budget = None
+        self.qty_price = None
+        self.flip_qty = 0.0
+        self.follow_entry_qty = False
+        self.exit_binding = None
+        self.reserved_size = 0.0
+        self.consumed = False
+        self.exit_qty = self.exit_percent = None
 
     def __repr__(self):
         return f"Order(order_id={self.order_id}; exit_id={self.exit_id}; size={self.size}; type: {self.order_type}; " \
@@ -249,7 +284,7 @@ class PriceOrderBook:
             self.order_prices[order].add(price)
 
         # Add to trail price if exists
-        if order.trail_price is not None:
+        if order.trail_price is not None and order.trail_price not in self.order_prices[order]:
             price = order.trail_price
             if price not in self.orders_at_price:
                 insort(self.price_levels, price)
@@ -299,23 +334,26 @@ class PriceOrderBook:
             iter_orders(min_price=50.0)  # 50, 51, 52, ... (ascending)
             iter_orders(max_price=60.0)  # 60, 59, 58, ... (descending)
             iter_orders(min_price=50.0, max_price=60.0)  # 50, 51, ..., 60 (ascending)
+            iter_orders(min_price=50.0, max_price=60.0, desc=True)  # 60, 59, ..., 50
 
-        :param desc: If True, iterate in descending order, only if no min_price or max_price is set
+        :param desc: Descending order when both bounds or neither bound are set
         :param min_price: If set, iterate from this price upward (ascending)
         :param max_price: If set, iterate from this price downward (descending)
         :return: Generator yielding Order objects
         """
         if min_price is not None and max_price is not None:
-            # Range query - ascending from min to max
             min_idx = bisect_left(self.price_levels, min_price)
             max_idx = bisect_left(self.price_levels, max_price)
             # Include max_price if it matches exactly
             if max_idx < len(self.price_levels) and self.price_levels[max_idx] == max_price:
                 max_idx += 1
             # Create a copy of price levels to avoid iteration issues when levels are removed
-            for p in list(self.price_levels[min_idx:max_idx]):
+            levels = self.price_levels[min_idx:max_idx]
+            if desc:
+                levels.reverse()
+            for p in levels:
                 # Create a copy to avoid iteration issues when orders are removed during iteration
-                yield from list(self.orders_at_price[p])
+                yield from list(self.orders_at_price.get(p, ()))
 
         elif min_price is not None:
             # Ascending from min_price
@@ -388,7 +426,7 @@ class Position:
         'risk_intraday_filled_orders', 'risk_intraday_start_equity', 'risk_halt_trading',
         'on_entry_callback', 'on_close_callback', 'on_alert_callback', 'on_ai_callback',
         'on_order_signal_callback',
-        '_entry_open_ledger'
+        '_entry_open_ledger', '_close_tick_orders', '_entry_fill_phases', '_fill_phase', '_exit_entries'
     )
 
     def __init__(self):
@@ -409,6 +447,7 @@ class Position:
         self.entry_orders = {}  # Entry orders from strategy.entry()
         self.exit_orders = {}  # Exit orders from strategy.exit(), strategy.close(), etc.
         self.orderbook = PriceOrderBook()
+        self._close_tick_orders: list[Order] = []
 
         # Trades
         self.open_trades: list[Trade] = []
@@ -417,6 +456,9 @@ class Position:
         # Exit orders remain bound to their entry IDs even though the default
         # close_entries_rule attributes closed trade rows FIFO.
         self._entry_open_ledger: dict[str, float] = {}
+        self._exit_entries: dict[str, list[_ExitBinding]] = {}
+        self._entry_fill_phases: dict[Trade, int] = {}
+        self._fill_phase = 3
 
         # Trade statistics
         self.closed_trades_count: int = 0
@@ -478,57 +520,121 @@ class Position:
         """ The current equity """
         return lib._script.initial_capital + self.netprofit + self.openprofit
 
+    def _size_flippable_by_entry(self) -> float:
+        """Position a priced entry would reverse after earlier market requests."""
+        if not self.market_orders:
+            return self.size
+        size = self.size
+        for order in self.market_orders.values():
+            if order.cancelled:
+                continue
+            if order.order_type is _order_type_close and size * order.size < 0.0:
+                remaining = _size_add(size, order.size)
+                size = remaining if remaining * size > 0.0 else 0.0
+            elif order.order_type is _order_type_entry:
+                size = _size_add(size, order.size) if size * order.size >= 0.0 else order.size
+        return size
+
     def _add_order(self, order: Order):
         """ Add an order to the strategy """
         # Set the bar_index when the order is placed
         order.bar_index = lib.bar_index
-
-        # Add market order to market orders dict
-        if order.is_market_order:
-            self.market_orders[order.order_id] = order
+        if lib._script.process_orders_on_close:
+            self._close_tick_orders.append(order)
 
         # Check if an order with this ID already exists and remove it first
         if order.order_type == _order_type_close:
-            existing_order = self.exit_orders.get(order.order_id)
-            self.exit_orders[order.order_id] = order
+            key = _order_key(order)
+            existing_order = self.exit_orders.get(key)
+            self.exit_orders[key] = order
         else:
             # Both entry and normal orders are stored in entry_orders dict
             existing_order = self.entry_orders.get(order.order_id)
             self.entry_orders[order.order_id] = order
+            if existing_order is not None and existing_order.exit_binding is not None:
+                order.exit_binding = existing_order.exit_binding
+                self._resize_pending_binding(order)
 
         # Remove existing order from order book before adding new one
         if existing_order is not None:
+            existing_order.cancelled = True
             self.orderbook.remove_order(existing_order)
+            if self.market_orders.get(_market_key(existing_order)) is existing_order:
+                self.market_orders.pop(_market_key(existing_order))
+
+        if order.is_market_order:
+            self.market_orders[_market_key(order)] = order
 
         # Add order to order book (automatically adds to all relevant prices)
         self.orderbook.add_order(order)
 
-    def _remove_order(self, order: Order):
+    def _remove_order(self, order: Order, *, filled=False):
         """ Remove an order from the strategy """
         order.cancelled = True
         if order.order_type == _order_type_close:
-            self.exit_orders.pop(order.order_id, None)
+            key = _order_key(order)
+            if self.exit_orders.get(key) is order:
+                self.exit_orders.pop(key)
+            binding = order.exit_binding
+            if binding is not None:
+                if filled:
+                    order.consumed = True
+                elif not order.consumed and binding.orders.get(order.exit_id) is order:
+                    binding.orders.pop(order.exit_id)
         else:
             # Both entry and normal orders are stored in entry_orders dict
-            self.entry_orders.pop(order.order_id, None)
+            if self.entry_orders.get(order.order_id) is order:
+                self.entry_orders.pop(order.order_id)
+            if not filled and order.exit_binding is not None and order.exit_binding.price is None:
+                for leg in list(order.exit_binding.orders.values()):
+                    self._remove_order(leg)
         # Remove market order from market orders dict
-        if order.is_market_order:
-            self.market_orders.pop(order.order_id, None)
+        if self.market_orders.get(_market_key(order)) is order:
+            self.market_orders.pop(_market_key(order))
         # Remove order from order book
         self.orderbook.remove_order(order)
 
     def _remove_order_by_id(self, order_id: str):
         """ Remove order by id """
-        # First check in exit orders
-        order = self.exit_orders.get(order_id)
-        if order:
-            self._remove_order(order)
-            return
+        for order in list(self.exit_orders.values()):
+            if order.exit_id == order_id or (order.exit_binding is None and order.order_id == order_id):
+                self._remove_order(order)
 
         # Then check in entry orders
         order = self.entry_orders.get(order_id)
         if order:
             self._remove_order(order)
+
+    def _resize_pending_binding(self, order, *, filled_size=None):
+        binding = order.exit_binding
+        binding.initial_size = binding.size = (filled_size if filled_size is not None else
+                                               max(0.0, _size_add(abs(order.size), -order.flip_qty)))
+        binding.sign = order.sign
+        available = binding.size
+        for leg in binding.orders.values():
+            qty = leg.exit_qty
+            if qty is None:
+                qty = binding.size * leg.exit_percent if leg.exit_percent is not None else available
+            leg.reserved_size = _size_round(max(0.0, min(qty, available)))
+            leg.size, leg.sign = -binding.sign * leg.reserved_size, -binding.sign
+            available = _size_add(available, -leg.reserved_size)
+
+    def _settle_exit_bindings(self, entry_id, qty, binding=None):
+        entries = self._exit_entries.get(entry_id, [])
+        for entry in ([binding] if binding is not None else list(entries)):
+            taken = min(entry.size, qty)
+            entry.size = _size_add(entry.size, -taken)
+            qty = _size_add(qty, -taken)
+            if _size_round(entry.size) == 0.0:
+                for leg in list(entry.orders.values()):
+                    self._remove_order(leg)
+                entry.orders.clear()
+                if entry in entries:
+                    entries.remove(entry)
+            if qty <= 0.0:
+                break
+        if not entries:
+            self._exit_entries.pop(entry_id, None)
 
     def _cancel_oca_group(self, oca_name: str, executed_order: Order):
         """Cancel all orders in the same OCA group except the executed one"""
@@ -556,6 +662,8 @@ class Position:
                 else:
                     # Keep original sign
                     order.size = new_size * order.sign
+                    # OCA has now explicitly fixed the remaining contract quantity.
+                    order.qty_budget = None
 
         # Reduce exit orders
         for order in list(self.exit_orders.values()):
@@ -566,21 +674,53 @@ class Position:
                 else:
                     order.size = new_size * order.sign
 
-    def _reduce_entry_ledger(self, entry_id: str | None, qty: float) -> None:
+    def _reduce_entry_ledger(self, entry_id: str | None, qty: float, binding=None) -> None:
         """Settle a closing fill against the entry ID that sized the order."""
         if entry_id is None:
             return
         left = self._entry_open_ledger.get(entry_id)
         if left is None:
             return
-        left -= qty
+        self._settle_exit_bindings(entry_id, qty, binding)
+        left = _size_add(left, -qty)
         if _size_round(left) <= 0.0:
             del self._entry_open_ledger[entry_id]
             for exit_order in list(self.exit_orders.values()):
-                if exit_order.order_id == entry_id:
+                if exit_order.order_id == entry_id and exit_order.exit_binding is None:
                     self._remove_order(exit_order)
         else:
             self._entry_open_ledger[entry_id] = left
+
+    def _trade_bar_range(self, trade: Trade, end_price: float | None = None) -> tuple[float, float]:
+        """Return the price range visited while the trade was open in this bar."""
+        start = self._entry_fill_phases.get(trade)
+        if start is None:
+            if end_price is None:
+                return self.h, self.l
+            start, start_price = 0, self.o
+        else:
+            start_price = trade.entry_price
+        end = 3 if end_price is None else self._fill_phase
+        price = self.c if end_price is None else end_price
+        high = max(start_price, price)
+        low = min(start_price, price)
+        first, second = (self.h, self.l) if self.h - self.o < self.o - self.l else (self.l, self.h)
+        if start <= 1 < end:
+            high, low = max(high, first), min(low, first)
+        if start <= 2 < end:
+            high, low = max(high, second), min(low, second)
+        return high, low
+
+    @staticmethod
+    def _update_trade_excursions(trade: Trade, high: float, low: float) -> None:
+        high_profit = trade.size * (high - trade.entry_price) - trade.commission
+        low_profit = trade.size * (low - trade.entry_price) - trade.commission
+        trade.max_drawdown = max(-min(high_profit, low_profit, 0.0), trade.max_drawdown)
+        trade.max_runup = max(max(high_profit, low_profit, 0.0), trade.max_runup)
+        entry_cost = abs(trade.size) * trade.entry_price + trade.commission
+        if entry_cost > 0.0:
+            trade.max_drawdown_percent = trade.max_drawdown / entry_cost * 100.0
+            trade.max_runup_percent = trade.max_runup / entry_cost * 100.0
 
     def _fill_order(self, order: Order, price: float, h: float, l: float):
         """
@@ -591,6 +731,7 @@ class Position:
         :param h: The high price
         :param l: The low price
         """
+        price = _tick_snap(price)
         position_size_before = float(self.size)
         # Save the original order size before any modifications
         filled_size = abs(order.size)
@@ -605,18 +746,27 @@ class Position:
         # Close order - if it is an exit order or a normal order
         if self.size and order.sign != self.sign:
             delete = False
+            initial_capital = script.initial_capital
 
             # TradingView attributes closed trades FIFO by default. With ANY,
             # an entry-bound close consumes only that entry's trade rows.
             close_any = (order.order_type == _order_type_close and order.order_id is not None
                          and getattr(script, 'close_entries_rule', 'FIFO') == 'ANY')
+            bound_trade = order.exit_binding.trade if close_any and order.exit_binding is not None else None
+            if bound_trade is not None and bound_trade not in self.open_trades:
+                bound_trade = None
             new_open_trades = []
             for trade in self.open_trades:
-                if order.size != 0.0 and (not close_any or trade.entry_id == order.order_id):
+                if order.size != 0.0 and (not close_any or
+                        (trade is bound_trade if bound_trade is not None else trade.entry_id == order.order_id)):
                     delete = True
 
                     size = order.size if abs(order.size) <= abs(trade.size) else -trade.size
                     pnl = -size * (price - trade.entry_price)
+
+                    # An intrabar exit must include extrema visited before its fill.
+                    if self._fill_phase > 0 or trade in self._entry_fill_phases:
+                        self._update_trade_excursions(trade, *self._trade_bar_range(trade, price))
 
                     # Copy and modify actual trade, because it can be partially filled
                     closed_trade = copy(trade)
@@ -639,6 +789,19 @@ class Position:
                     closed_trade.exit_price = price
                     closed_trade.profit = pnl
 
+                    # Include the fill endpoint before adding exit fees, using
+                    # the same entry-fee basis as open-trade excursions.
+                    exit_profit = pnl - closed_trade.commission
+                    entry_cost = abs(closed_trade.size) * closed_trade.entry_price + closed_trade.commission
+                    if -exit_profit > closed_trade.max_drawdown:
+                        closed_trade.max_drawdown = -exit_profit
+                        if entry_cost > 0.0:
+                            closed_trade.max_drawdown_percent = closed_trade.max_drawdown / entry_cost * 100.0
+                    elif exit_profit > closed_trade.max_runup:
+                        closed_trade.max_runup = exit_profit
+                        if entry_cost > 0.0:
+                            closed_trade.max_runup_percent = closed_trade.max_runup / entry_cost * 100.0
+
                     # Add to closed trade
                     new_closed_trades.append(closed_trade)
                     self.closed_trades.append(closed_trade)
@@ -651,9 +814,8 @@ class Position:
                     # Commission summ
                     self.open_commission -= closed_trade.commission
 
-                    # We realize later if it is cash per order or cash per contract
-                    if (commission_type == _commission.cash_per_contract or
-                            commission_type == _commission.cash_per_order):
+                    # Only per-order fees need allocation across multiple trades.
+                    if commission_type == _commission.cash_per_order:
                         closed_trade_size += abs(size)
                     else:
                         # Calculate exit commission based on commission type
@@ -661,7 +823,7 @@ class Position:
                             # For percentage commission, multiply by exit price
                             commission = abs(size) * price * commission_value * 0.01
                         else:
-                            # For other types (shouldn't reach here normally)
+                            # Contract fees are charged on the quantity closed.
                             commission = abs(size) * commission_value
 
                         closed_trade.commission += commission
@@ -670,28 +832,32 @@ class Position:
                         closed_trade.profit -= closed_trade.commission
 
                     # Profit percent
-                    entry_value = abs(closed_trade.size) * closed_trade.entry_price
                     try:
-                        # Use closed_trade.profit which includes commission, not pnl which doesn't
-                        closed_trade.profit_percent = (closed_trade.profit / entry_value) * 100.0
+                        closed_trade.profit_percent = (closed_trade.profit / entry_cost) * 100.0
                     except ZeroDivisionError:
                         closed_trade.profit_percent = 0.0
 
                     # Realize profit or loss
                     self.netprofit += pnl
+                    # Entry fees were already paid. Freeze each fill's realized mark
+                    # before later closes or entries on this bar change netprofit.
+                    closed_trade.cum_profit = self.netprofit
+                    closed_trade.cum_profit_percent = (
+                        self.netprofit / initial_capital * 100.0 if initial_capital else 0.0
+                    )
 
                     # Modify sizes
-                    self.size += size
+                    self.size = _size_add(self.size, size)
                     # Handle too small sizes because of floating point inaccuracy and rounding
                     position_flat = _size_round(self.size) == 0.0
                     if position_flat:
                         size -= self.size
                         self.size = 0.0
                     self.sign = 0.0 if self.size == 0.0 else 1.0 if self.size > 0.0 else -1.0
-                    trade.size += size
+                    trade.size = _size_add(trade.size, size)
                     if position_flat:
                         trade.size = 0.0
-                    order.size -= size
+                    order.size = _size_add(order.size, -size)
 
                     # Gross P/L and counters
                     if closed_trade.profit == 0.0:
@@ -733,27 +899,37 @@ class Position:
 
             # Trade rows follow FIFO/ANY attribution, while this ledger follows
             # the entry ID that the closing order was bound to.
-            closed_qty = filled_size - abs(order.size)
+            closed_qty = _size_add(filled_size, -abs(order.size))
             if closed_qty > 0.0:
                 if order.order_type == _order_type_close and order.order_id is not None:
-                    self._reduce_entry_ledger(order.order_id, closed_qty)
+                    if order.exit_binding is not None:
+                        order.consumed = True
+                    self._reduce_entry_ledger(order.order_id, closed_qty, order.exit_binding)
                 else:
                     for entry_id in list(self._entry_open_ledger):
                         if closed_qty <= 0.0:
                             break
                         taken = min(self._entry_open_ledger[entry_id], closed_qty)
                         self._reduce_entry_ledger(entry_id, taken)
-                        closed_qty -= taken
+                        closed_qty = _size_add(closed_qty, -taken)
 
             if delete:
-                self._remove_order(order)
+                # A reducing normal order never opens the entry its predeclared
+                # exits awaited. Cancel those bindings instead of retaining them.
+                self._remove_order(order, filled=order.order_type == _order_type_close)
 
                 if commission_type == _commission.cash_per_order:
                     # Realize commission
                     self.netprofit -= commission_value
+                    allocated_commission = 0.0
                     for trade in new_closed_trades:
                         commission = (commission_value * abs(trade.size)) / closed_trade_size
                         trade.commission += commission
+                        allocated_commission += commission
+                        trade.cum_profit -= allocated_commission
+                        trade.cum_profit_percent = (
+                            trade.cum_profit / initial_capital * 100.0 if initial_capital else 0.0
+                        )
 
             self.new_closed_trades.extend(new_closed_trades)
 
@@ -806,14 +982,24 @@ class Position:
             )
 
             self.open_trades.append(trade)
+            binding = order.exit_binding
+            if binding is None:
+                binding = _ExitBinding(order.order_id, order.sign, abs(order.size), trade)
+            else:
+                self._resize_pending_binding(order, filled_size=abs(order.size))
+                binding.price, binding.trade = price, trade
+            self._exit_entries.setdefault(order.order_id, []).append(binding)
+            for leg in binding.orders.values():
+                self._resolve_close_order_prices(leg)
+            self._entry_fill_phases[trade] = self._fill_phase
             self._entry_open_ledger[order.order_id] = (
-                self._entry_open_ledger.get(order.order_id, 0.0) + abs(order.size)
+                _size_add(self._entry_open_ledger.get(order.order_id, 0.0), abs(order.size))
             )
             previous_size = abs(self.size)
             if previous_size == 0.0:
                 self.position_open_time = int(lib._time)
                 self.position_open_bar_index = int(lib.bar_index)
-            self.size += trade.size
+            self.size = _size_add(self.size, trade.size)
             self.sign = 0.0 if self.size == 0.0 else 1.0 if self.size > 0.0 else -1.0
 
             # Average entry price
@@ -837,7 +1023,7 @@ class Position:
             self.open_commission += commission
 
             # Remove order
-            self._remove_order(order)
+            self._remove_order(order, filled=True)
 
             # Call entry callback for the new trade
             if self.on_entry_callback:
@@ -858,12 +1044,14 @@ class Position:
             self.position_open_bar_index = None
             self.open_commission = 0.0
             self._entry_open_ledger.clear()
+            self._exit_entries.clear()
 
             # Cancel all exit orders when position is closed (TradingView behavior)
             # Exit orders without from_entry are canceled when position is flat
             exit_orders_to_remove = list(self.exit_orders.values())
             for exit_order in exit_orders_to_remove:
-                self._remove_order(exit_order)
+                if exit_order.exit_binding is None or exit_order.exit_binding.price is not None:
+                    self._remove_order(exit_order)
 
         # Increment intraday filled orders counter for ALL filled orders
         # TradingView counts ALL filled orders (entry, exit, normal) toward the limit
@@ -961,6 +1149,23 @@ class Position:
                     except Exception as e:
                         print(f"Error in on_ai_callback: {e}")
 
+    def _resolve_price_order_qty(self, order: Order, price: float) -> bool:
+        budget, order.qty_budget = order.qty_budget, None
+        sizing_price = price
+        if order.is_market_order and order.stop is not None and order.limit is None:
+            sizing_price = order.qty_price + lib._script.slippage * syminfo.mintick * order.sign
+        qty = _budget_quantity(budget, sizing_price)
+        if not 0.0 < qty < float("inf"):
+            self._remove_order(order)
+            return False
+        order.size = _size_round((qty + order.flip_qty) * order.sign)
+        if order.size == 0.0:
+            self._remove_order(order)
+            return False
+        if order.exit_binding is not None:
+            self._resize_pending_binding(order)
+        return True
+
     def fill_order(self, order: Order, price: float, h: float, l: float) -> bool:
         """
         Fill an order
@@ -971,7 +1176,19 @@ class Position:
         :param l: The low price
         :return: True if the side of the position has changed
         """
+        if order.cancelled:
+            return False
+        if order.order_type == _order_type_close and order.exit_binding is not None:
+            binding = order.exit_binding
+            if binding.price is None or not self.size or order.sign == self.sign:
+                return False
+            order.size = order.sign * min(abs(order.size), binding.size, abs(self.size))
+            if order.size == 0.0:
+                self._remove_order(order)
+                return False
         close_only = False
+        if order.qty_budget is not None and not self._resolve_price_order_qty(order, price):
+            return False
         # Apply risk management only to entry orders, not normal orders from strategy.order()
         if order.order_type == _order_type_entry or order.order_type == _order_type_normal:
             # Risk management: Check max intraday filled orders
@@ -1019,7 +1236,7 @@ class Position:
         # If position direction is about to change, we split it into two separate orders
         # This is necessary to create a new average entry price
         # Note: The flip quantity is already calculated in entry() for entry orders
-        new_size = self.size + order.size
+        new_size = _size_add(self.size, order.size)
         if _size_round(new_size) == 0.0:
             new_size = 0.0
         new_sign = 0.0 if new_size == 0.0 else 1.0 if new_size > 0.0 else -1.0
@@ -1029,13 +1246,14 @@ class Position:
             if order.order_type == _order_type_close or close_only:
                 # Limit the exit order size to just close the position.
                 # Partial close 가 안되어서 수정. (original: order.size = -self.size)
-                order.size += self.size
+                order.size = _size_add(order.size, self.size)
                 self._fill_order(order, price, h, l)
                 return False
 
             # Create a copy for closing existing position
             order1 = copy(order)
             order1.order_type = _order_type_close
+            order1.exit_binding = None
             # The AI instruction belongs to the requested entry, not the
             # internal close leg used to reverse an existing position.
             order1.ai_instruction = None
@@ -1073,9 +1291,8 @@ class Position:
                     self.risk_intraday_filled_orders >= self.risk_max_intraday_filled_orders and self.size != 0.0):
                 # Max intraday filled orders reached - close all positions immediately
                 # Cancel all pending orders first
-                self.entry_orders.clear()
-                self.exit_orders.clear()
-                self.orderbook.clear()
+                for pending in list(self.entry_orders.values()) + list(self.exit_orders.values()):
+                    self._remove_order(pending)
 
                 # Create an immediate close order with special comment
                 close_comment = "Close Position (Max number of filled orders in one day)"
@@ -1093,6 +1310,17 @@ class Position:
 
             return False
 
+    def _fill_immediate_close(self, order: Order) -> None:
+        closed_start = len(self.new_closed_trades)
+        self.fill_order(order, self.c, self.h, self.l)
+        if len(self.new_closed_trades) == closed_start:
+            return
+
+        # Immediate closes happen after process_orders() finalized cumulative stats.
+        # Trade marks are captured by _fill_order; only refresh the position mark.
+        initial_capital = lib._script.initial_capital
+        self.cum_profit = self.equity - initial_capital - self.openprofit
+
     def _check_already_filled(self, order: Order) -> bool:
         """
         Check if a stop or limit order would be immediately fillable due to a gap.
@@ -1104,6 +1332,8 @@ class Position:
         :param order: The order to check
         :return: True if the order should be filled immediately at open price
         """
+        if order.order_type == _order_type_close and order.exit_binding is not None and order.exit_binding.price is None:
+            return False
         # Check stop orders with gaps
         if order.stop is not None:
             # Long stop order (size > 0): triggers if open gaps above stop level
@@ -1112,6 +1342,9 @@ class Position:
             # Short stop order (size < 0): triggers if open gaps below stop level
             if order.size < 0 and self.o <= order.stop:
                 return True
+
+        if order.trail_stop is not None and order.sign * (self.o - order.trail_stop) >= 0.0:
+            return True
 
         # Check limit orders with gaps
         if order.limit is not None:
@@ -1131,6 +1364,7 @@ class Position:
         # Long stop order (size > 0) triggers when price rises to stop level
         if order.size > 0 and order.stop <= self.h:
             p = max(order.stop, self.o)
+            p += lib._script.slippage * syminfo.mintick
             self.fill_order(order, p, p, self.l)
             return True
         return False
@@ -1145,22 +1379,6 @@ class Position:
                 return True
         return False
 
-    def _check_high_trailing(self, order: Order) -> bool:
-        # Update trailing stop
-        if order.trail_price is not None and order.sign < 0:
-            # Check if trailing price has been triggered
-            if not order.trail_triggered and self.h > order.trail_price:
-                order.trail_triggered = True
-            # Update stop if trailing price has been triggered
-            if order.trail_triggered:
-                offset_price = syminfo.mintick * order.trail_offset
-                new_stop = max(lib.math.round_to_mintick(self.h - offset_price), order.stop)  # type: ignore
-                if new_stop != order.stop:
-                    # Update the order in the orderbook with the new stop price
-                    self.orderbook.update_order_stop(order, new_stop)
-                return True
-        return False
-
     def _check_low_stop(self, order: Order) -> bool:
         """ Check low stop """
         if order.stop is None:
@@ -1168,6 +1386,7 @@ class Position:
         # Short stop order (size < 0) triggers when price falls to stop level
         if order.size < 0 and order.stop >= self.l:
             p = min(self.o, order.stop)
+            p -= lib._script.slippage * syminfo.mintick
             self.fill_order(order, p, self.h, p)
             return True
         return False
@@ -1182,44 +1401,80 @@ class Position:
                 return True
         return False
 
-    def _check_low_trailing(self, order: Order) -> bool:
-        # Update trailing stop
-        if order.trail_price is not None and order.sign > 0:
-            # Check if trailing price has been triggered
-            if not order.trail_triggered and self.l < order.trail_price:
-                order.trail_triggered = True
-            # Update stop if trailing price has been triggered
-            if order.trail_triggered:
-                offset_price = syminfo.mintick * order.trail_offset
-                new_stop = min(lib.math.round_to_mintick(self.l + offset_price), order.stop)  # type: ignore
-                if new_stop != order.stop:
-                    # Update the order in the orderbook with the new stop price
-                    self.orderbook.update_order_stop(order, new_stop)
-                return True
-        return False
+    @staticmethod
+    def _advance_trailing(order: Order, price: float) -> None:
+        """Arm at a visited tick and ratchet only in the favorable direction."""
+        if order.trail_price is None or order.trail_offset is None:
+            return
+        if not order.trail_triggered:
+            if order.sign * (price - order.trail_price) > 0.0:
+                return
+            order.trail_triggered = True
+        candidate = price + order.sign * syminfo.mintick * order.trail_offset
+        stop = floor(candidate / syminfo.mintick + 0.5) * syminfo.minmove / syminfo.pricescale
+        if order.trail_stop is None or order.sign * (stop - order.trail_stop) < 0.0:
+            order.trail_stop = stop
 
-    def _check_close(self, order: Order, ohlc: bool) -> bool:
-        """ Check close price if trailing stop is triggered """
-        if order.stop is None:
-            return False
-        # open → high → low → close
-        if ohlc and order.stop <= self.c:
-            self.fill_order(order, order.stop, order.stop, self.l)
-            return True
-        # open → low → high → close
-        elif order.stop >= self.c:
-            self.fill_order(order, order.stop, self.h, order.stop)
-            return True
-        return False
+    def _process_trailing_path(self, ohlc: bool) -> None:
+        """Walk trailing and competing price orders in intrabar time order."""
+        first, second = (self.h, self.l) if ohlc else (self.l, self.h)
+        cursor = self.o
+        attempted = set()
+        for phase, end in enumerate((self.o, first, second, self.c)):
+            self._fill_phase = phase
+            while True:
+                orders = [order for order in dict.fromkeys(self.orderbook.iter_orders())
+                          if not order.cancelled and order not in attempted and
+                          (order.order_type != _order_type_close or order.exit_binding is None or
+                           (order.exit_binding.price is not None and self.size and order.sign != self.sign))]
+                events = []
+                for order in orders:
+                    self._advance_trailing(order, cursor)
+                    levels = [(order.stop, order.sign, 'stop'),
+                              (order.limit, -order.sign, 'limit'),
+                              (order.trail_stop, order.sign, 'trailing')]
+                    if order.trail_offset is not None and not order.trail_triggered:
+                        levels.append((order.trail_price, -order.sign, 'activate'))
+                    for level, direction, kind in levels:
+                        if level is None:
+                            continue
+                        if direction * (cursor - level) >= 0.0:
+                            tick = cursor
+                        elif direction * (end - level) >= 0.0:
+                            tick = level
+                        else:
+                            continue
+                        events.append((abs(tick - cursor), tick, order, kind))
+                if not events:
+                    for order in orders:
+                        self._advance_trailing(order, end)
+                    cursor = end
+                    break
+                _, cursor, order, kind = min(events, key=lambda event: event[0])
+                # All surviving trails see this tick before an OCA fill can cancel them.
+                for pending in orders:
+                    self._advance_trailing(pending, cursor)
+                if kind == 'activate':
+                    continue
+                price = cursor
+                if kind != 'limit':
+                    price += lib._script.slippage * syminfo.mintick * order.sign
+                attempted.add(order)
+                self.fill_order(order, price, price, price)
 
     def process_orders(self):
         """ Process orders """
-        # We need to round to the nearest tick to get the same results as in TradingView
-        round_to_mintick = lib.math.round_to_mintick
-        self.o = round_to_mintick(lib.open)
-        self.h = round_to_mintick(lib.high)
-        self.l = round_to_mintick(lib.low)
-        self.c = round_to_mintick(lib.close)
+        if lib._script.process_orders_on_close:
+            self._close_tick_orders.clear()
+        # Match order-level decimal prices for exact stop/limit touches. Keep
+        # _tick_snap for fills so their existing tick-rounding behavior is unchanged.
+        mintick, minmove, pricescale = syminfo.mintick, syminfo.minmove, syminfo.pricescale
+        self.o = floor(lib.open / mintick + 0.5) * minmove / pricescale
+        self.h = floor(lib.high / mintick + 0.5) * minmove / pricescale
+        self.l = floor(lib.low / mintick + 0.5) * minmove / pricescale
+        self.c = floor(lib.close / mintick + 0.5) * minmove / pricescale
+        self._entry_fill_phases.clear()
+        self._fill_phase = 0
 
         # Check if we're in a new trading day for intraday risk management
         # TradingView tracks intraday based on trading session, not calendar day
@@ -1245,11 +1500,15 @@ class Position:
         if not self.open_trades:
             # Remove all exit orders when position is flat
             for order in exit_orders:
-                self._remove_order(order)
+                if order.exit_binding is None or order.exit_binding.price is not None:
+                    self._remove_order(order)
             exit_orders = []
 
         # For exit orders, calculate limit/stop from entry price if ticks are specified
         for order in exit_orders:
+            if order.exit_binding is not None:
+                self._resolve_close_order_prices(order)
+                continue
             # Try to find the trade with matching entry_id
             entry_price = None
             for trade in self.open_trades:
@@ -1285,12 +1544,14 @@ class Position:
                 # Convert to market order
                 order.is_market_order = True
                 # Add to market orders dict
-                self.market_orders[order.order_id] = order
+                self.market_orders[_market_key(order)] = order
 
         # Process Market orders
         for order in list(self.market_orders.values()):
-            if order.limit is None and order.stop is None:
-                # We need to check pyramiding and flip quantity here for market orders :-/
+            if order.cancelled:
+                continue
+            if order.order_type == _order_type_entry and order.limit is None and order.stop is None:
+                # Normal orders bypass the existing entry/close quantity normalization.
                 # Check pyramiding limit for entry orders adding to existing position
                 if self.sign == order.sign:
                     if lib._script.pyramiding <= len(self.open_trades):
@@ -1300,11 +1561,13 @@ class Position:
                 elif self.size != 0.0:
                     # TradingView calculates the flip quantity 1st order processing
                     # then open a new one in the opposite direction.
-                    order.size -= self.size  # Subtract because position.size has opposite sign
+                    order.size = _size_add(order.size, -self.size)
 
             # Apply slippage to market orders
             fill_price = self.o
-            if script.slippage > 0:
+            limit_fill = (order.limit is not None and
+                          (self.o <= order.limit if order.sign > 0 else self.o >= order.limit))
+            if script.slippage > 0 and not limit_fill:
                 # Slippage is in ticks, always adverse to trade direction
                 # For long orders (buying), slippage increases the price
                 # For short orders (selling), slippage decreases the price
@@ -1319,52 +1582,46 @@ class Position:
                 self.fill_order(order, fill_price, self.l, self.o)
 
         # Process orders: open → high → low → close
-        if ohlc:
+        if any(order.trail_offset is not None and
+               (order.trail_price is not None or order.trail_points_ticks is not None)
+               for order in self.exit_orders.values()):
+            self._process_trailing_path(ohlc)
+        elif ohlc:
             # open -> high
+            self._fill_phase = 1
             for order in self.orderbook.iter_orders(min_price=self.o, max_price=self.h):
                 if self._check_high_stop(order):
                     continue
                 if self._check_high(order):
                     continue
-                if self._check_high_trailing(order):
-                    continue
-                if order.trail_triggered and order.stop is not None:
-                    self._check_close(order, ohlc)
 
             # open -> low
-            for order in self.orderbook.iter_orders(max_price=self.o, min_price=self.l):
+            self._fill_phase = 2
+            for order in self.orderbook.iter_orders(max_price=self.o, min_price=self.l, desc=True):
                 if self._check_low_stop(order):
                     continue
                 if self._check_low(order):
                     continue
-                if self._check_low_trailing(order):
-                    continue
-                if order.trail_triggered and order.stop is not None:
-                    self._check_close(order, ohlc)
 
         # Process orders: open → low → high → close
         else:
             # open -> low
-            for order in self.orderbook.iter_orders(max_price=self.o, min_price=self.l):
+            self._fill_phase = 1
+            for order in self.orderbook.iter_orders(max_price=self.o, min_price=self.l, desc=True):
                 if self._check_low_stop(order):
                     continue
                 if self._check_low(order):
                     continue
-                if self._check_low_trailing(order):
-                    continue
-                if order.trail_triggered and order.stop is not None:
-                    self._check_close(order, ohlc)
 
             # open -> high
+            self._fill_phase = 2
             for order in self.orderbook.iter_orders(min_price=self.o, max_price=self.h):
                 if self._check_high_stop(order):
                     continue
                 if self._check_high(order):
                     continue
-                if self._check_high_trailing(order):
-                    continue
-                if order.trail_triggered and order.stop is not None:
-                    self._check_close(order, ohlc)
+
+        self._fill_phase = 3
 
         # Calculate average entry price, unrealized P&L, drawdown and runup...
         if self.open_trades:
@@ -1386,29 +1643,7 @@ class Position:
                 drawdown = -min(hprofit, lprofit, 0.0)
                 runup = max(hprofit, lprofit, 0.0)
 
-                # A trade's own excursion uses its entry price, not a position
-                # average shifted by later pyramiding entries.
-                trade_hprofit = (
-                    trade.size * (self.h - trade.entry_price) - trade.commission
-                )
-                trade_lprofit = (
-                    trade.size * (self.l - trade.entry_price) - trade.commission
-                )
-                trade.max_drawdown = max(
-                    -min(trade_hprofit, trade_lprofit, 0.0),
-                    trade.max_drawdown,
-                )
-                trade.max_runup = max(
-                    max(trade_hprofit, trade_lprofit, 0.0),
-                    trade.max_runup,
-                )
-
-                entry_cost = abs(trade.size) * trade.entry_price + trade.commission
-                if entry_cost > 0.0:
-                    trade.max_drawdown_percent = (
-                        trade.max_drawdown / entry_cost * 100.0
-                    )
-                    trade.max_runup_percent = trade.max_runup / entry_cost * 100.0
+                self._update_trade_excursions(trade, *self._trade_bar_range(trade))
 
                 # Drawdown summ runup summ
                 self.drawdown_summ += drawdown
@@ -1445,23 +1680,173 @@ class Position:
 
         # Cumulative stats
         if self.new_closed_trades:
-            initial_capital = lib._script.initial_capital
+            self.cum_profit = self.equity - lib._script.initial_capital - self.openprofit
             for closed_trade in self.new_closed_trades:
-                self.cum_profit = self.equity - lib._script.initial_capital - self.openprofit
-                closed_trade.cum_profit = self.cum_profit
                 closed_trade.cum_max_drawdown = self.max_drawdown
                 closed_trade.cum_max_runup = self.max_runup
 
-                # Cumulative profit percent
-                # TradingView calculates this as total return on initial capital
-                try:
-                    closed_trade.cum_profit_percent = (closed_trade.cum_profit / initial_capital) * 100.0
-                except ZeroDivisionError:
-                    closed_trade.cum_profit_percent = 0.0
+    def process_close_orders(self) -> None:
+        """Process this calculation's surviving orders at the closing tick only."""
+        if not self._close_tick_orders:
+            return
+        orders, self._close_tick_orders = self._close_tick_orders, []
+        for order in orders:
+            pending = self.exit_orders if order.order_type == _order_type_close else self.entry_orders
+            if order.cancelled or pending.get(_order_key(order)) is not order:
+                # Cancellation/replacement may have left an older market-queue entry.
+                if self.market_orders.get(_market_key(order)) is order:
+                    self.market_orders.pop(_market_key(order))
+                continue
+            if order.order_type == _order_type_close:
+                if not self.open_trades:
+                    continue
+                self._resolve_close_order_prices(order, update_trailing=True)
+                if order.exit_binding is not None and not any(value is not None for value in
+                        (order.limit, order.stop, order.trail_price)):
+                    continue
+
+            market = (order.limit is None and order.stop is None and order.trail_price is None)
+            stop_hit = order.stop is not None and order.sign * (self.c - order.stop) >= 0.0
+            stop_hit = stop_hit or (order.trail_stop is not None and
+                                    order.sign * (self.c - order.trail_stop) >= 0.0)
+            limit_hit = order.limit is not None and order.sign * (self.c - order.limit) <= 0.0
+            # A stop-limit entry activates its limit; an exit's stop/limit are alternatives.
+            if order.order_type != _order_type_close and order.stop is not None and order.limit is not None:
+                if not stop_hit:
+                    continue
+                self.orderbook.remove_order(order)
+                order.stop = None
+                self.orderbook.add_order(order)
+                stop_hit = False
+            if not (market or stop_hit or limit_hit):
+                continue
+
+            if market and order.order_type == _order_type_entry:
+                if self.sign != order.sign and self.size:
+                    order.size = _size_add(order.size, -self.size)
+            price = self.c
+            if not limit_hit:
+                price += lib._script.slippage * syminfo.mintick * order.sign
+            closed_start = len(self.new_closed_trades)
+            filled_before = self.risk_intraday_filled_orders
+            self.fill_order(order, price, self.c, self.c)
+            if self.risk_intraday_filled_orders != filled_before:
+                self._mark_close_fills(closed_start)
+
+    def _resolve_close_order_prices(self, order: Order, *, update_trailing=False) -> None:
+        """Resolve entry-relative exit prices without replaying the bar's high/low."""
+        binding = order.exit_binding
+        trade = (binding.trade if binding is not None else
+                 next((trade for trade in self.open_trades if trade.entry_id == order.order_id), None))
+        if trade is not None and any(ticks is not None and getattr(order, field) is None for field, ticks in
+                (("limit", order.profit_ticks), ("stop", order.loss_ticks), ("trail_price", order.trail_points_ticks))):
+            self.orderbook.remove_order(order)
+            for field, ticks, sign in (("limit", order.profit_ticks, -order.sign),
+                                       ("stop", order.loss_ticks, order.sign),
+                                       ("trail_price", order.trail_points_ticks, -order.sign)):
+                if ticks is not None and getattr(order, field) is None:
+                    setattr(order, field, _price_round(trade.entry_price + sign * syminfo.mintick * ticks, sign))
+            self.orderbook.add_order(order)
+        if order.limit is not None or order.stop is not None or order.trail_price is not None:
+            if self.market_orders.get(_market_key(order)) is order:
+                self.market_orders.pop(_market_key(order))
+            order.is_market_order = False
+        if update_trailing:
+            self._advance_trailing(order, self.c)
+
+    def _mark_close_fills(self, closed_start: int) -> None:
+        """Mark post-calculation fills at close, preserving earlier intrabar excursions."""
+        drawdown = runup = 0.0
+        for trade in self.open_trades:
+            profit = trade.size * (self.c - trade.entry_price) - trade.commission
+            trade.profit = profit - trade.commission
+            trade.max_drawdown = max(trade.max_drawdown, -min(profit, 0.0))
+            trade.max_runup = max(trade.max_runup, max(profit, 0.0))
+            cost = abs(trade.size) * trade.entry_price + trade.commission
+            if cost > 0.0:
+                trade.max_drawdown_percent = trade.max_drawdown / cost * 100.0
+                trade.max_runup_percent = trade.max_runup / cost * 100.0
+            gross = trade.size * (self.c - self.avg_price)
+            drawdown += -min(gross, 0.0)
+            runup += max(gross, 0.0)
+
+        initial_capital = float(lib._script.initial_capital)
+        realized = initial_capital + float(self.netprofit)
+        self.max_realized_equity = max(self.max_realized_equity, realized)
+        peak = max(initial_capital, self.max_realized_equity)
+        close_drawdown = peak - realized + drawdown
+        close_drawdown_percent = close_drawdown / peak * 100.0 if peak > 0.0 else 0.0
+        self.current_drawdown = max(self.current_drawdown, close_drawdown)
+        self.current_drawdown_percent = max(self.current_drawdown_percent, close_drawdown_percent)
+        self.max_drawdown = max(self.max_drawdown, close_drawdown)
+        self.max_drawdown_percent = max(self.max_drawdown_percent, close_drawdown_percent)
+        if self.min_equity < float("inf"):
+            close_runup = realized + runup - self.min_equity
+            self.max_runup = max(self.max_runup, close_runup)
+            top = self.min_equity + close_runup
+            if top > 0.0:
+                self.max_runup_percent = max(self.max_runup_percent, close_runup / top * 100.0)
+
+        if len(self.new_closed_trades) > closed_start:
+            self.cum_profit = self.equity - initial_capital - self.openprofit
+            for trade in self.new_closed_trades[closed_start:]:
+                trade.cum_max_drawdown = self.max_drawdown
+                trade.cum_max_runup = self.max_runup
 
 #
 # Functions
 #
+
+def _price_order_budget(limit, stop, sign):
+    """Freeze money and unit-cost terms only for default money-sized price orders."""
+    limit = None if isinstance(limit, NA) else limit
+    stop = None if isinstance(stop, NA) else stop
+    script = lib._script
+    if (limit is None and stop is None) or script.default_qty_type == fixed:
+        return None, None
+    factor, fee = float(syminfo.pointvalue), 0.0
+    if script.default_qty_type == cash:
+        money = float(script.default_qty_value)
+    elif script.default_qty_type == percent_of_equity:
+        money = float(script.position.equity) * script.default_qty_value * 0.01
+        if script.commission_type == _commission.percent:
+            factor *= 1.0 + script.commission_value * 0.01
+        elif script.commission_type == _commission.cash_per_contract:
+            fee = float(script.commission_value)
+        elif script.commission_type == _commission.cash_per_order:
+            money = max(0.0, money - script.commission_value)
+    else:
+        return None, None
+    price = float(script.position.c)
+    if stop is not None:
+        stop = _price_round(stop, sign)
+        price = max(price, stop) if sign > 0 else min(price, stop)
+    if limit is not None:
+        limit = _price_round(limit, -sign)
+        price = min(price, limit) if sign > 0 else max(price, limit)
+    return (money, factor, fee), price
+
+
+def _budget_quantity(budget, price):
+    money, factor, fee = budget
+    cost = price * factor + fee
+    return money / cost if 0.0 < cost < float("inf") else 0.0
+
+# noinspection PyProtectedMember
+def _size_add(qty_a: float, qty_b: float) -> float:
+    """Combine lot-normalized quantities without leaving floating-point dust."""
+    rfactor = syminfo._size_round_factor  # noqa
+    lots_a, lots_b = qty_a * rfactor, qty_b * rfactor
+    if not (abs(lots_a) < 9007199254740992.0 and abs(lots_b) < 9007199254740992.0):
+        return qty_a + qty_b
+    rounded_a, rounded_b = round(lots_a), round(lots_b)
+    # Risk limits can supply off-grid sizes; do not change those quantities here.
+    if (abs(lots_a - rounded_a) > abs(lots_a) * 1e-12 + 1e-9
+            or abs(lots_b - rounded_b) > abs(lots_b) * 1e-12 + 1e-9):
+        return qty_a + qty_b
+    # Keep _size_round's existing float representation, not a new unit grid.
+    return (rounded_a + rounded_b) / rfactor
+
 
 # noinspection PyProtectedMember
 def _size_round(qty: float) -> float:
@@ -1480,9 +1865,17 @@ def _size_round(qty: float) -> float:
 
 
 # noinspection PyShadowingNames
+def _tick_snap(price: float) -> float:
+    """Round simulated prices to ticks without changing raw indicator inputs."""
+    if not (price == price):
+        return price
+    mintick = syminfo.mintick
+    return floor(price / mintick + 0.5) * mintick
+
+
 def _price_round(price: float | NA[float], direction: int | float) -> float | NA[float]:
     """
-    Round price to the nearest tick
+    Round price down/up to the tick grid, allowing near-boundary float residue.
 
     :param price: The price to round
     :param direction: The direction of the price
@@ -1491,20 +1884,12 @@ def _price_round(price: float | NA[float], direction: int | float) -> float | NA
     if isinstance(price, NA):
         return na_float
     pricescale = syminfo.pricescale
-    pmp = round(cast(float, price * pricescale), 7)
-    pmp_int = int(pmp)
-
+    minmove = syminfo.minmove
+    ticks = price * pricescale / minmove
+    # Upstream's TV-measured tolerance is in ticks, not absolute price units.
     if direction < 0:
-        # Round down
-        return pmp_int / pricescale
-    else:
-        # Round up only if pmp is not already an integer
-        if pmp == pmp_int:
-            # Already an integer, no rounding needed
-            return pmp_int / pricescale
-        else:
-            # Not an integer, round up
-            return (pmp_int + 1) / pricescale
+        return floor(ticks + 1e-4) * minmove / pricescale
+    return ceil(ticks - 1e-4) * minmove / pricescale
 
 
 # noinspection PyShadowingBuiltins,PyProtectedMember
@@ -1529,9 +1914,8 @@ def cancel_all():
     if lib._lib_semaphore:
         return
     position = lib._script.position
-    position.entry_orders.clear()
-    position.exit_orders.clear()
-    position.orderbook.clear()
+    for order in list(position.entry_orders.values()) + list(position.exit_orders.values()):
+        position._remove_order(order)
 
 
 # noinspection PyProtectedMember,PyShadowingBuiltins,PyShadowingNames
@@ -1585,7 +1969,7 @@ def close(id: str, comment: str | NA[str] = na_str, qty: float | NA[float] = na_
     # Add order to position (this will handle orderbook and exit_orders)
     position._add_order(order)
     if immediately:
-        position.fill_order(order, position.c, position.h, position.l)
+        position._fill_immediate_close(order)
 
     if record:
         record_message = (f'{{"time": {str(datetime.fromtimestamp(int(bar_time / 1000)))}, '
@@ -1631,7 +2015,7 @@ def close_all(comment: str | NA[str] = na_str, alert_message: str | NA[str] = na
     # Add order to position (this will handle orderbook and exit_orders)
     position._add_order(order)
     if immediately:
-        position.fill_order(order, position.c, position.h, position.l)
+        position._fill_immediate_close(order)
 
     if record:
         record_message = (f'{{"time": {str(datetime.fromtimestamp(int(bar_time / 1000)))}, '
@@ -1676,9 +2060,20 @@ def entry(id: str, direction: direction.Direction, qty: int | float | NA[float] 
     if position.risk_halt_trading:
         return
 
+    direction_sign: float = (-1.0 if direction == short else 1.0)
+
     # Get default qty by script parameters if no qty is specified
-    if isinstance(qty, NA):
+    default_qty = isinstance(qty, NA)
+    if default_qty:
         default_qty_type = script.default_qty_type
+        sizing_price = position.c
+        if (default_qty_type != fixed and script.slippage > 0
+                and (limit is None or isinstance(limit, NA))
+                and (stop is None or isinstance(stop, NA))):
+            # Market quantities are fixed at the slipped placement price, not the next open.
+            sizing_price += script.slippage * syminfo.mintick * direction_sign
+            if sizing_price <= 0.0:
+                return
         if default_qty_type == fixed:
             qty = script.default_qty_value
 
@@ -1700,43 +2095,47 @@ def entry(id: str, direction: direction.Direction, qty: int | float | NA[float] 
             if script.commission_type == _commission.percent:
                 # For percentage commission: qty * price * (1 + commission%)
                 commission_multiplier = 1.0 + script.commission_value * 0.01
-                qty = target_investment / (position.c * syminfo.pointvalue * commission_multiplier)
+                qty = target_investment / (sizing_price * syminfo.pointvalue * commission_multiplier)
 
             elif script.commission_type == _commission.cash_per_contract:
                 # For cash per contract: qty * price + qty * commission_value
                 # qty * (price + commission_value) = target_investment
-                price_plus_commission = position.c * syminfo.pointvalue + script.commission_value
+                price_plus_commission = sizing_price * syminfo.pointvalue + script.commission_value
                 qty = target_investment / price_plus_commission
 
             elif script.commission_type == _commission.cash_per_order:
                 # For cash per order: qty * price + commission_value = target_investment
                 # qty = (target_investment - commission_value) / price
-                qty = (target_investment - script.commission_value) / (position.c * syminfo.pointvalue)
+                qty = (target_investment - script.commission_value) / (sizing_price * syminfo.pointvalue)
                 qty = max(0.0, qty)  # Ensure non-negative
 
             else:
                 # No commission
-                qty = target_investment / (position.c * syminfo.pointvalue)
+                qty = target_investment / (sizing_price * syminfo.pointvalue)
 
         elif default_qty_type == cash:
             default_qty_value = script.default_qty_value
-            qty = default_qty_value / (position.c * syminfo.pointvalue)
+            qty = default_qty_value / (sizing_price * syminfo.pointvalue)
 
         else:
             raise ValueError("Unknown default qty type: ", default_qty_type)
+
+    qty_budget, qty_price = _price_order_budget(limit, stop, direction_sign) if default_qty else (None, None)
+    if qty_budget is not None:
+        qty = _budget_quantity(qty_budget, qty_price)
 
     # qty must be greater than 0
     if qty <= 0.0:
         return
 
     # We need a signed size instead of qty, the sign is the direction
-    direction_sign: float = (-1.0 if direction == short else 1.0)
     size = qty * direction_sign
 
     size = _size_round(size)
     if size == 0.0:
         return
 
+    flip_qty = 0.0
     if isinstance(limit, NA):
         limit = None
     elif limit is not None:
@@ -1750,20 +2149,22 @@ def entry(id: str, direction: direction.Direction, qty: int | float | NA[float] 
     # If it is not a market order, we should check pyramiding and flip conditions here
     # Market orders are checked at the order processing time
     if limit is not None or stop is not None:
+        flippable = position._size_flippable_by_entry()
         # Check if the order has the same direction
-        if position.sign == direction_sign:
+        if flippable * direction_sign > 0.0:
             # Check pyramiding limit for entry orders adding to existing position
             if lib._script.pyramiding <= len(position.open_trades):
                 # Pyramiding limit reached - don't add the order
                 return
 
-        elif position.size != 0.0:
+        elif flippable != 0.0:
             # TradingView calculates the flip quantity at order creation time,
             # not at execution time. If we have an opposite direction position,
             # we need to add the position size to the order size to flip it.
             # This means the order will first close the existing position,
             # then open a new one in the opposite direction.
-            size -= position.size  # Subtract because position.size has opposite sign
+            size -= flippable
+            flip_qty = abs(flippable)
 
     bar_time = lib._time
     alert_message = f'{{"timestamp": {bar_time}, "message": {alert_message}}}' if alert_message else None
@@ -1773,6 +2174,7 @@ def entry(id: str, direction: direction.Direction, qty: int | float | NA[float] 
                   comment=None if isinstance(comment, NA) else comment,
                   alert_message=None if isinstance(alert_message, NA) else alert_message,
                   ai_instruction=ai_instruction or None)
+    order.qty_budget, order.qty_price, order.flip_qty = qty_budget, qty_price, flip_qty
     # Store in entry_orders dict
     position._add_order(order)
 
@@ -1833,93 +2235,84 @@ def exit(id: str, from_entry: str = "",
     if qty < 0.0:
         return
 
-    direction = 0
-    size = 0.0
-
     # noinspection PyProtectedMember,PyShadowingNames
-    def _exit():
-        nonlocal limit, stop, trail_price, from_entry, direction, size, oca_name, oca_type
-
-        if isinstance(qty, NA):
-            size = -size * (qty_percent * 0.01) if not isinstance(qty_percent, NA) else -size
-        else:
-            size = -direction * qty
-
-        size = _size_round(size)
-        if size == 0.0:
+    def _exit(binding):
+        existing = binding.orders.get(id)
+        if existing is not None and existing.consumed:
             return
+        # Consumed siblings keep their share until this entry closes. Reissuing
+        # an exit changes its levels, not the size basis of its original entry.
+        available = binding.initial_size
+        for sibling in binding.orders.values():
+            if sibling is not existing:
+                available = _size_add(available, -sibling.reserved_size)
+        requested = (qty if not isinstance(qty, NA) else
+                     binding.initial_size * qty_percent * 0.01 if not isinstance(qty_percent, NA) else available)
+        reserved = _size_round(max(0.0, min(requested, available)))
+        if reserved == 0.0:
+            return
+        direction = binding.sign
+        size = -direction * reserved
 
         # Store tick values for later calculation when entry price is known
         profit_ticks = None if isinstance(profit, NA) else profit
         loss_ticks = None if isinstance(loss, NA) else loss
         trail_points_ticks = None if isinstance(trail_points, NA) else trail_points
 
-        # We need to have limit, stop or both
-        if isinstance(limit, NA) and isinstance(stop, NA) and not isinstance(trail_price, NA):
-            return
+        limit_price = None if isinstance(limit, NA) or limit is None else _price_round(limit, direction)
+        stop_price = None if isinstance(stop, NA) or stop is None else _price_round(stop, -direction)
+        trailing_price = None if isinstance(trail_price, NA) or trail_price is None else _price_round(trail_price, -direction)
+        trailing_offset = trail_offset
+        if isinstance(trail_offset, NA) or trail_offset is None:
+            if (trailing_price is not None or trail_points_ticks is not None) and (
+                    limit_price is not None or stop_price is not None or
+                    profit_ticks is not None or loss_ticks is not None):
+                # A fixed exit permits an omitted trailing offset, interpreted as zero ticks.
+                trailing_offset = 0.0
+            else:
+                trailing_price = trail_points_ticks = None
 
-        if isinstance(limit, NA):
-            limit = None
-        elif limit is not None:
-            limit = _price_round(limit, direction)
-        if isinstance(stop, NA):
-            stop = None
-        elif stop is not None:
-            stop = _price_round(stop, -direction)  # TODO: test this if the direction here is correct
-        if isinstance(trail_price, NA):
-            trail_price = None
-        elif trail_price is not None:
-            trail_price = _price_round(trail_price, -direction)
-
-        # Default OCA settings for strategy.exit() - matches TradingView behavior
-        # If no oca_name is specified, create a default OCA reduce group
-        if isinstance(oca_name, NA):
-            # Use a unique name based on the exit id and from_entry
-            oca_name = f"__exit_{id}_{from_entry}_oca__"
-            # Default to reduce type (TradingView behavior)
-            oca_type = _oca.reduce
-        else:
-            # If oca_name is provided but no type, default to reduce
-            if oca_type is None:
-                oca_type = _oca.reduce
+        group = None if isinstance(oca_name, NA) else oca_name
 
         # Add order
         order = Order(
-            from_entry, size, exit_id=id, order_type=_order_type_close,
-            limit=limit, stop=stop,
-            trail_price=trail_price, trail_offset=trail_offset,
+            binding.entry_id, size, exit_id=id, order_type=_order_type_close,
+            limit=limit_price, stop=stop_price,
+            trail_price=trailing_price, trail_offset=trailing_offset,
             profit_ticks=profit_ticks, loss_ticks=loss_ticks, trail_points_ticks=trail_points_ticks,
-            oca_name=oca_name, oca_type=oca_type, comment=comment, alert_message=alert_message
+            oca_name=group, oca_type=oca_type if oca_type is not None else _oca.reduce,
+            comment=comment, alert_message=alert_message
         )
+        # The stop and limit are alternatives of this reserved slice. Sibling
+        # slices do not reduce each other unless an explicit OCA group is used.
+        order.is_market_order = False
+        order.exit_binding, order.reserved_size = binding, reserved
+        order.exit_qty = None if isinstance(qty, NA) else qty
+        order.exit_percent = None if isinstance(qty_percent, NA) else qty_percent * 0.01
+        order.follow_entry_qty = isinstance(qty, NA) and isinstance(qty_percent, NA)
+        binding.orders[id] = order
         position._add_order(order)
+        position._resolve_close_order_prices(order)
+        if existing is not None and order.trail_offset is not None and (
+                existing.trail_offset == order.trail_offset and
+                existing.trail_points_ticks == order.trail_points_ticks and
+                existing.trail_price == order.trail_price):
+            order.trail_triggered, order.trail_stop = existing.trail_triggered, existing.trail_stop
+        # A new exit first sees the issue tick, never the bar's earlier extrema.
+        if binding.price is not None:
+            position._advance_trailing(order, position.c)
 
-    def _bound_size(entry_id: str) -> tuple[float, float]:
+    entry_ids = [from_entry] if from_entry else list(dict.fromkeys(
+        (*position._exit_entries, *position.entry_orders)))
+    for entry_id in entry_ids:
+        for binding in position._exit_entries.get(entry_id, ()):
+            _exit(binding)
         pending = position.entry_orders.get(entry_id)
-        pending_size = abs(pending.size) if pending is not None else 0.0
-        open_size = position._entry_open_ledger.get(entry_id, 0.0)
-        if open_size:
-            return position.sign, position.sign * (open_size + pending_size)
         if pending is not None:
-            return pending.sign, pending.size
-        return 0.0, 0.0
-
-    # Find direction and size
-    if from_entry:
-        direction, size = _bound_size(from_entry)
-        if not direction:
-            return
-        _exit()
-
-    else:
-        entry_ids = list(position.entry_orders)
-        entry_ids.extend(
-            entry_id for entry_id in position._entry_open_ledger
-            if entry_id not in position.entry_orders
-        )
-        for from_entry in entry_ids:
-            direction, size = _bound_size(from_entry)
-            if direction:
-                _exit()
+            if pending.exit_binding is None:
+                pending.exit_binding = _ExitBinding(entry_id, pending.sign,
+                    max(0.0, _size_add(abs(pending.size), -pending.flip_qty)))
+            _exit(pending.exit_binding)
 
 
 # noinspection PyProtectedMember,PyShadowingNames,PyShadowingBuiltins,PyUnusedLocal
@@ -1963,6 +2356,7 @@ def order(id: str, direction: direction.Direction, qty: int | float | NA[float] 
         return
 
     # Get default qty by script parameters if no qty is specified
+    default_qty = isinstance(qty, NA)
     if isinstance(qty, NA):
         default_qty_type = script.default_qty_type
         if default_qty_type == fixed:
@@ -1997,12 +2391,16 @@ def order(id: str, direction: direction.Direction, qty: int | float | NA[float] 
         else:
             raise ValueError("Unknown default qty type: ", default_qty_type)
 
+    direction_sign: float = (-1.0 if direction == short else 1.0)
+    qty_budget, qty_price = _price_order_budget(limit, stop, direction_sign) if default_qty else (None, None)
+    if qty_budget is not None:
+        qty = _budget_quantity(qty_budget, qty_price)
+
     # qty must be greater than 0
     if qty <= 0.0:
         return
 
     # We need a signed size instead of qty, the sign is the direction
-    direction_sign: float = (-1.0 if direction == short else 1.0)
     size = qty * direction_sign
 
     # NOTE: Unlike strategy.entry, strategy.order is NOT affected by pyramiding limit
@@ -2016,11 +2414,11 @@ def order(id: str, direction: direction.Direction, qty: int | float | NA[float] 
     if isinstance(limit, NA):
         limit = None
     elif limit is not None:
-        limit = _price_round(limit, direction_sign)  # TODO: test this if the direction here is correct
+        limit = _price_round(limit, -direction_sign)
     if isinstance(stop, NA):
         stop = None
     elif stop is not None:
-        stop = _price_round(stop, -direction_sign)  # TODO: test this if the direction here is correct
+        stop = _price_round(stop, direction_sign)
 
     # Create the order with _order_type_normal
     # This is a "normal" order that simply adds to or subtracts from position
@@ -2028,6 +2426,7 @@ def order(id: str, direction: direction.Direction, qty: int | float | NA[float] 
     order = Order(id, size, order_type=_order_type_normal, limit=limit, stop=stop,
                   oca_name=oca_name, oca_type=oca_type, comment=comment,
                   alert_message=alert_message)
+    order.qty_budget, order.qty_price = qty_budget, qty_price
     position._add_order(order)
 
 
