@@ -59,6 +59,8 @@ class VerificationCoordinator:
         self._warmup_timeout_task: asyncio.Task | None = None
         self._initial_pending_timestamp_ms: int | None = None
         self._initial_primary_pending_resolved = False
+        self._primary_entry_scope: str | None = None
+        self._supplemental_entry_watches: dict[str, dict[str, Any]] = {}
 
         self.on_recovery: Callable[[Session, str], Awaitable[None]] | None = None
         self.on_connected: Callable[[Session], Awaitable[None]] | None = None
@@ -318,6 +320,10 @@ class VerificationCoordinator:
 
     async def handle_message(self, ws: WebSocket, event: dict[str, Any]) -> bool:
         msg_type = event.get("type")
+        if msg_type == "entry_repainting_detected":
+            if self.session.client_roles.get(ws) == "runner":
+                self._record_entry_repainting(event)
+            return True
         if msg_type == "client_hello" and event.get("role") == "verification_runner":
             await self.handle_client_hello(ws, event)
             return True
@@ -354,6 +360,59 @@ class VerificationCoordinator:
             await self.request_recovery(reason)
             return True
         return False
+
+    def _record_entry_repainting(self, event: dict[str, Any]) -> None:
+        original = event.get("original") or {}
+        if not original.get("entry_id") or event.get("change") not in {"disappeared", "moved"}:
+            return
+        self._log({**event, "event": "entry_repainting_detected"})
+        config = dict(self.session.spec.webhook)
+        request = VerificationDeliveryRequest(
+            session_id=self.session.spec.id,
+            script_title=str(self.session.chart_info.get("script_title") or ""),
+            exchange=self.session.spec.exchange,
+            symbol=self.session.spec.symbol,
+            timeframe=self.session.spec.timeframe,
+            candle_timestamp_ms=int(original["evaluation_candle_time"]) * 1000,
+            discrepancy="entry_repainting",
+            order_signal={
+                "action": "entry", "order_id": original["entry_id"],
+                "occurrence_index": original.get("occurrence_index", 0),
+                "repainting": dict(event),
+            },
+            primary_bar=None, finalized_bar=None, bar_difference={},
+            authoritative_source="primary_prerun_replay",
+            notification_toggles={"webhook": False, "telegram": bool(config.get("telegram_notification"))},
+            webhook_config=config,
+            on_result=self._log,
+        )
+        notifications = getattr(self.session, "notifications", None)
+        if notifications is not None:
+            notification = {
+                "event_key": "verification:" + verification_event_id(request),
+                "kind": "verification", "origin": "primary",
+                "session_id": request.session_id, "occurred_at": time.time(),
+                "candle_timestamp_ms": request.candle_timestamp_ms,
+                "context": {
+                    "script_title": request.script_title, "exchange": request.exchange,
+                    "symbol": request.symbol, "timeframe": request.timeframe,
+                },
+                "signal": {"action": "entry", "order_id": original["entry_id"]},
+                "finding": {
+                    "discrepancy": "entry_repainting", "change": event["change"],
+                    "original": dict(original), "replacement": event.get("replacement"),
+                    "calculated_through": event.get("calculated_through"),
+                    "authoritative_source": request.authoritative_source,
+                },
+            }
+            notifications.publish(notification)
+
+            def report(channel, outcome):
+                notifications.publish({**notification, channel: recorded_result(outcome)})
+
+            request = replace(request, on_channel_result=report)
+        if self.delivery is not None and request.notification_toggles["telegram"]:
+            self.delivery.enqueue(request)
 
     async def _handle_runner_ready(
         self,
@@ -562,6 +621,10 @@ class VerificationCoordinator:
             if target is self._primary_results:
                 self._primary_delivery_context.pop(expired_timestamp, None)
         if event.get("type") == "primary_result":
+            scope = event.get("entry_repainting_scope")
+            if scope != self._primary_entry_scope:
+                self._supplemental_entry_watches.clear()
+                self._primary_entry_scope = scope
             self._primary_delivery_context[timestamp_ms] = {
                 "webhook_config": dict(self.session.spec.webhook),
                 "script_title": str(
@@ -666,6 +729,34 @@ class VerificationCoordinator:
         except RuntimeError:
             pass
 
+    def with_supplemental_entries(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self._supplemental_entry_watches:
+            return payload
+        # Retain the registrations for retries; the runner rejects stale scopes.
+        return {**payload, "entry_repainting_watches": list(self._supplemental_entry_watches.values())}
+
+    def _register_supplemental_entry(self, event_id: str, watch: dict[str, Any]) -> None:
+        if watch["scope_id"] != self._primary_entry_scope:
+            return
+        if event_id in self._supplemental_entry_watches:
+            return
+        self._supplemental_entry_watches[event_id] = watch
+        self._log({"event": "entry_repainting_supplemental_registered", "event_id": event_id,
+                   "entry": watch["entry"]})
+
+    def _supplemental_entry_watch(self, primary: dict, finalized: dict, signal: dict) -> dict | None:
+        scope = primary.get("entry_repainting_scope")
+        if signal.get("action") != "entry" or not scope or scope != self._primary_entry_scope:
+            return None
+        for watch in finalized.get("entry_repainting_watches") or []:
+            if (watch.get("order_id") == signal.get("order_id")
+                    and (watch.get("exit_id") or "") == (signal.get("exit_id") or "")
+                    and watch.get("occurrence_index", 0) == signal.get("occurrence_index", 0)):
+                return {"scope_id": scope, "entry": {
+                    **watch["entry"], "origin": "verification_supplemental",
+                }}
+        return None
+
     def _enqueue_supplemental_delivery(
         self,
         primary: dict[str, Any],
@@ -727,10 +818,15 @@ class VerificationCoordinator:
                     order_signal=dict(signal),
                     **common,
                 )
+                watch = (self._supplemental_entry_watch(primary, finalized, signal)
+                         if discrepancy == "missing" and common["notification_toggles"]["webhook"] else None)
+                loop = asyncio.get_running_loop() if watch is not None else None
+                event_id = verification_event_id(request)
                 notifications = getattr(self.session, "notifications", None)
+                event = None
                 if notifications is not None:
                     event = {
-                        "event_key": "verification:" + verification_event_id(request),
+                        "event_key": "verification:" + event_id,
                         "kind": "verification", "origin": "verification",
                         "session_id": request.session_id, "occurred_at": time.time(),
                         "candle_timestamp_ms": timestamp_ms,
@@ -742,8 +838,13 @@ class VerificationCoordinator:
                                     "authoritative_source": authoritative_source},
                     }
                     notifications.publish(event)
-                    def report(channel, outcome, base=event, publish=notifications.publish):
-                        publish({**base, channel: recorded_result(outcome)})
+                if notifications is not None or watch is not None:
+                    def report(channel, outcome, base=event, service=notifications,
+                               registration=watch, delivery_id=event_id, event_loop=loop):
+                        if service is not None:
+                            service.publish({**base, channel: recorded_result(outcome)})
+                        if channel == "webhook" and outcome.get("status") == "sent" and registration is not None:
+                            event_loop.call_soon_threadsafe(self._register_supplemental_entry, delivery_id, registration)
                     request = replace(request, on_channel_result=report)
                 if enabled and self.delivery is not None:
                     self.delivery.enqueue(request)

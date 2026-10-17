@@ -26,12 +26,23 @@
   };
   function summary(item) {
     const context = item.context || {};
+    const repainting = item.finding?.discrepancy === "entry_repainting";
     const kind = item.kind === "verification"
-      ? (item.finding?.discrepancy === "missing" ? "Missing signal" : "Primary-only signal")
+      ? (repainting ? `Repainting: ${item.signal?.order_id || "Entry"} ${item.finding.change === "moved" ? "moved" : "disappeared"}`
+        : item.finding?.discrepancy === "missing" ? "Missing signal" : "Primary-only signal")
       : (item.origin === "manual" ? "Manual alert" : "Strategy alert");
-    return [context.symbol || context.script_title || item.session_id, kind,
-      item.signal?.action, item.webhook ? `Webhook: ${delivery(item.webhook)}` : "",
-      item.telegram ? `Telegram: ${delivery(item.telegram)}` : ""].filter(Boolean).join(" · ");
+    const reason = document.createElement("span");
+    reason.textContent = kind;
+    reason.className = item.kind === "verification" ? "notification-finding"
+      : item.origin === "manual" ? "notification-manual" : "notification-strategy";
+    const fragment = document.createDocumentFragment();
+    [context.symbol || context.script_title || item.session_id, reason,
+      repainting ? "" : item.signal?.action, item.webhook ? `Webhook: ${delivery(item.webhook)}` : "",
+      item.telegram ? `Telegram: ${delivery(item.telegram)}` : ""].filter(Boolean).forEach((part, index) => {
+        if (index) fragment.append(" · ");
+        fragment.append(part);
+      });
+    return fragment;
   }
   function message(text = "") { status.textContent = text; status.hidden = !text; }
   function updateBroom() {
@@ -88,7 +99,25 @@
     field("Market", [item.context?.exchange, item.context?.symbol, item.context?.timeframe].filter(Boolean).join(" · "));
     field("Time", `${date(item.occurred_at)} (${localZone})`);
     if (item.candle_timestamp_ms) field("Candle", `${date(item.candle_timestamp_ms / 1000, true)} UTC`);
-    if (item.finding) {
+    if (item.finding?.discrepancy === "entry_repainting") {
+      const finding = item.finding, original = finding.original || {}, replacement = finding.replacement;
+      field("Finding", finding.change === "moved"
+        ? "The original entry is absent from the recalculated history; an entry with the same ID appears at a different time."
+        : "The original entry is absent from the recalculated history.");
+      field("Source", "Primary warm-up replay");
+      field("Entry", [original.entry_id, original.direction].filter(Boolean).join(" · "));
+      if (original.origin === "verification_supplemental") field("Entry source", "Verification supplemental webhook");
+      field("Original fill", `${date(original.time, true)} UTC`);
+      field("Original price", original.price);
+      field("Original size", original.size);
+      if (replacement) {
+        field("Recalculated fill", `${date(replacement.time, true)} UTC`);
+        field("Recalculated price", replacement.price);
+        field("Recalculated size", replacement.size);
+      }
+      field("Replay through", `${date(finding.calculated_through, true)} UTC`);
+      field("Note", "Strategy simulation records, not exchange fill confirmations. No corrective, cancel, or reverse webhook was sent.");
+    } else if (item.finding) {
       field("Finding", item.finding.discrepancy === "missing" ? "Verification detected an order signal absent from the primary calculation."
         : "The primary calculation emitted an order signal absent from verification.");
       field("Source", item.finding.authoritative_source);
@@ -96,7 +125,7 @@
       field("Verified", item.finding.finalized_bar);
       field("Difference", item.finding.bar_difference);
     }
-    field("Signal", item.signal);
+    if (item.finding?.discrepancy !== "entry_repainting") field("Signal", item.signal);
     if (item.webhook) field("Webhook", delivery(item.webhook), item.webhook.status);
     if (item.telegram) field("Telegram", delivery(item.telegram), item.telegram.status);
     target.replaceChildren(dl);
@@ -118,7 +147,7 @@
       row.dataset.id = String(item.id); list.insertBefore(row, next || null);
     }
     row.classList.toggle("unread", item.unread);
-    row.querySelector("span").textContent = summary(item);
+    row.querySelector(".notification-summary > span").replaceChildren(summary(item));
     row.querySelector("button").setAttribute("aria-expanded", String(expanded === item.id));
     row.querySelector(".notification-detail").classList.toggle("open", expanded === item.id);
     if (expanded === item.id) details(item, row.querySelector(".notification-detail > div"));
