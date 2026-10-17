@@ -288,6 +288,11 @@
   align-items: center;
   background: #fff;
   pointer-events: auto;
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
 }
 .chart-indicator-pane-header button {
   display: inline-flex;

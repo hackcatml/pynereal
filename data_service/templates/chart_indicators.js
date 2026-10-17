@@ -291,9 +291,9 @@ App.indicators = {
         return value;
       });
       this.panels.set(def.id, { header, toggle, title, values, latest: [] });
-      header.addEventListener("dblclick", event => event.preventDefault());
       header.addEventListener("pointerdown", event => event.stopPropagation());
       this.attachPaneToggle(def.id, toggle);
+      this.attachPaneToggle(def.id, header, true);
       document.body.append(header);
     }
   },
@@ -327,26 +327,35 @@ App.indicators = {
     setting.expandedHeight = height;
     this.save();
   },
-  attachPaneToggle(id, button) {
-    let touch = null, ignoreClickUntil = 0;
+  attachPaneToggle(id, button, doubleTap = false) {
+    let touch = null, lastTap = null, ignoreClickUntil = 0;
+    const accepts = event => !doubleTap ||
+      (this.settings.find(item => item.id === id)?.collapsed && !event.target?.closest?.("button"));
     const consume = event => {
       if (event.cancelable) event.preventDefault();
       event.stopPropagation();
     };
     // Cancel compatibility mouse events before resizing moves the button away from the finger.
     button.addEventListener("touchstart", event => {
+      if (!accepts(event)) return;
       consume(event);
       ignoreClickUntil = Date.now() + 750;
       const point = event.touches[0];
-      touch = event.touches.length === 1 ? { id: point.identifier, x: point.clientX, y: point.clientY } : null;
+      touch = event.touches.length === 1 ? { id: point.identifier, x: point.clientX, y: point.clientY, at: Date.now() } : null;
+      if (!touch) lastTap = null;
     }, { passive: false });
     button.addEventListener("touchmove", event => {
+      if (!accepts(event)) return;
       consume(event);
       const point = event.touches[0];
       if (touch && (event.touches.length !== 1 || point.identifier !== touch.id ||
-          Math.hypot(point.clientX - touch.x, point.clientY - touch.y) > 10)) touch = null;
+          Math.hypot(point.clientX - touch.x, point.clientY - touch.y) > 10)) {
+        touch = null;
+        lastTap = null;
+      }
     }, { passive: false });
     button.addEventListener("touchend", event => {
+      if (!accepts(event)) return;
       consume(event);
       ignoreClickUntil = Date.now() + 750;
       const start = touch;
@@ -354,20 +363,39 @@ App.indicators = {
       const point = Array.from(event.changedTouches).find(item => item.identifier === start?.id);
       if (!start || !point || event.touches.length || Math.hypot(point.clientX - start.x, point.clientY - start.y) > 10) return;
       const rect = button.getBoundingClientRect();
-      if (point.clientX >= rect.left && point.clientX <= rect.right && point.clientY >= rect.top && point.clientY <= rect.bottom) this.togglePane(id);
+      if (point.clientX < rect.left || point.clientX > rect.right || point.clientY < rect.top || point.clientY > rect.bottom) {
+        lastTap = null;
+        return;
+      }
+      if (doubleTap) {
+        const now = Date.now();
+        const previous = lastTap;
+        lastTap = now - start.at <= 350 ? { at: now, x: point.clientX, y: point.clientY } : null;
+        if (!lastTap || !previous || now - previous.at > 320 || Math.hypot(point.clientX - previous.x, point.clientY - previous.y) > 24) return;
+        lastTap = null;
+      }
+      this.togglePane(id);
     }, { passive: false });
     button.addEventListener("touchcancel", event => {
+      if (!accepts(event)) return;
       consume(event);
       touch = null;
+      lastTap = null;
       ignoreClickUntil = Date.now() + 750;
     }, { passive: false });
+    button.addEventListener("dblclick", event => {
+      if (!accepts(event)) return;
+      consume(event);
+      if (doubleTap && Date.now() >= ignoreClickUntil) this.togglePane(id);
+    });
     button.addEventListener("click", event => {
+      if (!accepts(event)) return;
       event.stopPropagation();
       if (event.detail !== 0 && Date.now() < ignoreClickUntil) {
         event.preventDefault();
         return;
       }
-      this.togglePane(id);
+      if (!doubleTap) this.togglePane(id);
     });
   },
   changeSetting(input) {

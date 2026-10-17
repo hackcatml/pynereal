@@ -740,6 +740,28 @@ App.measure = {
     ].join("<br>");
   },
 
+  rangePriceLabelsSvg(measure, left, top, rectWidth, rectHeight, color) {
+    const bounds = this.plotBoundsClient();
+    if (!bounds) return "";
+    const middleY = top + rectHeight / 2;
+    const middlePoint = this.pointFromClient(left + rectWidth / 2, middleY);
+    const middlePrice = middlePoint?.price ?? (measure.start.price + measure.end.price) / 2;
+    const prices = [Math.max(measure.start.price, measure.end.price), middlePrice,
+      Math.min(measure.start.price, measure.end.price)];
+    const formatter = App.chart.candleSeries.priceFormatter?.();
+    const labels = prices.map(price => formatter ? formatter.format(price) : this.formatReticlePrice(price));
+    const labelWidth = Math.max(...labels.map(text => text.length)) * 8 + 8;
+    const right = left + rectWidth;
+    const fitsOutside = right + labelWidth + 6 <= bounds.right;
+    const x = fitsOutside ? right + 6 : Math.max(bounds.left + labelWidth, Math.min(right - 6, bounds.right - 6));
+    const anchor = fitsOutside ? "start" : "end";
+    const gap = Math.min(Math.max(16, rectHeight / 2), Math.max(16, (bounds.height - 16) / 2));
+    const center = Math.max(bounds.top + gap + 8, Math.min(middleY, bounds.bottom - gap - 8));
+    return labels.map((text, index) =>
+      `<text class="measure-price-label" x="${x}" y="${center + (index - 1) * gap}" fill="${color}" text-anchor="${anchor}" dominant-baseline="central">${this.escapeSvgText(text)}</text>`
+    ).join("");
+  },
+
   mobileHitAreaSvg() {
     if (!this.isMobileMode() || !App.state.measureToolActive) return "";
     const bounds = this.plotBoundsClient();
@@ -837,16 +859,19 @@ App.measure = {
     const color = stats.delta > 0 ? "#26a69a" : (stats.delta < 0 ? "#ef5350" : "#666666");
     const fill = stats.delta > 0 ? "rgba(38,166,154,0.14)" : (stats.delta < 0 ? "rgba(239,83,80,0.14)" : "rgba(90,90,90,0.12)");
     const reticle = this.isMobileMode() ? this.reticleSvg(x2, y2, width, height) : "";
+    const centerX = left + rectWidth / 2;
+    const centerY = top + rectHeight / 2;
+    const arrowX = Math.min(5, rectWidth / 2);
+    const arrowY = Math.min(5, rectHeight / 2);
+    const horizontalTail = x2 - Math.sign(x2 - x1) * arrowX;
+    const verticalTail = y2 - Math.sign(y2 - y1) * arrowY;
 
     this.overlay.setAttribute("viewBox", `0 0 ${width} ${height}`);
     this.overlay.innerHTML =
       this.mobileHitAreaSvg() +
-      `<rect x="${left}" y="${top}" width="${rectWidth}" height="${rectHeight}" fill="${fill}" stroke="${color}" stroke-opacity="0.36" stroke-width="1"></rect>` +
-      `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="1.5"></line>` +
-      `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y1}" stroke="${color}" stroke-width="1" stroke-dasharray="4 3" stroke-opacity="0.75"></line>` +
-      `<line x1="${x2}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="1" stroke-dasharray="4 3" stroke-opacity="0.75"></line>` +
-      `<circle cx="${x1}" cy="${y1}" r="4" fill="#ffffff" stroke="${color}" stroke-width="1.5"></circle>` +
-      `<circle cx="${x2}" cy="${y2}" r="4" fill="${color}" stroke="#ffffff" stroke-width="1.5"></circle>` +
+      `<rect x="${left}" y="${top}" width="${rectWidth}" height="${rectHeight}" fill="${fill}"></rect>` +
+      `<path class="measure-cross" d="M${x1} ${centerY}H${x2}M${horizontalTail} ${centerY - arrowX}L${x2} ${centerY}L${horizontalTail} ${centerY + arrowX}M${centerX} ${y1}V${y2}M${centerX - arrowY} ${verticalTail}L${centerX} ${y2}L${centerX + arrowY} ${verticalTail}" fill="none" stroke="${color}" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"></path>` +
+      this.rangePriceLabelsSvg(measure, left, top, rectWidth, rectHeight, color) +
       reticle;
 
     this.label.classList.toggle("up", stats.delta > 0);
@@ -858,11 +883,10 @@ App.measure = {
     const labelRect = this.label.getBoundingClientRect();
     const chartRect = this.chartRect();
     const margin = 8;
-    let labelLeft = x2 - labelRect.width / 2;
-    let labelTop = y2 + 12;
-    if (labelTop + labelRect.height > chartRect.bottom - margin) {
-      labelTop = y2 - labelRect.height - 12;
-    }
+    let labelLeft = centerX - labelRect.width / 2;
+    let labelTop = stats.delta >= 0
+      ? top - labelRect.height - 12
+      : top + rectHeight + 12;
     labelLeft = Math.max(chartRect.left + margin, Math.min(labelLeft, chartRect.right - labelRect.width - margin));
     labelTop = Math.max(chartRect.top + margin, Math.min(labelTop, chartRect.bottom - labelRect.height - margin));
     this.label.style.left = `${Math.round(labelLeft)}px`;

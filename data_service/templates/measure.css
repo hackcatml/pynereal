@@ -121,6 +121,13 @@
 .measure-overlay .measure-hit-area {
   pointer-events: all;
 }
+.measure-price-label {
+  font: 12px system-ui, -apple-system, sans-serif;
+  stroke: #fff;
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  paint-order: stroke;
+}
 body.measure-active .measure-overlay {
   touch-action: none;
 }
