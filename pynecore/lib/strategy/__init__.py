@@ -692,16 +692,18 @@ class Position:
             self._entry_open_ledger[entry_id] = left
 
     def _trade_bar_range(self, trade: Trade, end_price: float | None = None) -> tuple[float, float]:
-        """Return the price range visited while the trade was open in this bar."""
+        """Return post-entry price marks up to this bar's close or exit fill."""
         start = self._entry_fill_phases.get(trade)
+        end = 3 if end_price is None else self._fill_phase
+        price = self.c if end_price is None else end_price
         if start is None:
             if end_price is None:
                 return self.h, self.l
             start, start_price = 0, self.o
         else:
-            start_price = trade.entry_price
-        end = 3 if end_price is None else self._fill_phase
-        price = self.c if end_price is None else end_price
+            # Paid fees must not impose an MAE floor at the entry price alone.
+            # Preserve zero-fee/rebate marks; later price returns still count.
+            start_price = price if trade.commission > 0.0 else trade.entry_price
         high = max(start_price, price)
         low = min(start_price, price)
         first, second = (self.h, self.l) if self.h - self.o < self.o - self.l else (self.l, self.h)
