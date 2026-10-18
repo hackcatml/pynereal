@@ -55,7 +55,8 @@ App.LineBreakPrimitive = class {
       ctx.lineWidth = this.options.lineWidth * ry;
       ctx.lineCap = 'butt';
       ctx.lineJoin = 'round';
-      let count = 0, singleX = 0, singleY = 0;
+      let strokeColor = this.options.color;
+      let count = 0, singleX = 0, singleY = 0, lastX = 0, lastY = 0;
       const flush = () => {
         if (count === 1) {
           const half = scale.options().barSpacing * rx / 2;
@@ -70,12 +71,22 @@ App.LineBreakPrimitive = class {
         const x = point.value == null ? null : scale.timeToCoordinate(point.time);
         const y = point.value == null ? null : this.series.priceToCoordinate(point.value);
         if (x == null || y == null) { flush(); continue; }
+        const color = point.color || this.options.color;
+        if (count && strokeColor !== color) {
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(lastX, lastY);
+        }
+        if (strokeColor !== color) ctx.strokeStyle = color;
+        strokeColor = color;
         if (!count) {
           ctx.beginPath();
           ctx.moveTo(x * rx, y * ry);
           singleX = x * rx;
           singleY = y * ry;
         } else ctx.lineTo(x * rx, y * ry);
+        lastX = x * rx;
+        lastY = y * ry;
         count++;
       }
       flush();
@@ -246,6 +257,10 @@ App.data = {
     return controller;
   },
   createPlotSeries(chart, collections, plot, seriesData) {
+    if (App.PlotVisuals?.isVisual(plot.kind)) {
+      collections.plotSeriesMap.set(plot.title, { type: plot.kind, target: plot.target });
+      return;
+    }
     if (plot.kind === "bgcolor") {
       if (chart.bgcolorPrimitive) {
         chart.bgcolorPrimitive.setLayer(plot, seriesData);
@@ -286,10 +301,19 @@ App.data = {
       return;
     }
 
-    const linePoint = this.toLinePoint(time, value);
+    const visualLayer = chart.plotVisuals?.update(title, Number(time), value);
+    if (App.PlotVisuals?.isVisual(controller.type)) {
+      if (visualLayer?.kind === 'plot_color') {
+        const lineValue = chart.plotVisuals.lines.get(visualLayer.target)?.get(Number(time));
+        if (lineValue != null) this.updatePlotSeries(chart, collections, visualLayer.target, time, lineValue);
+      }
+      return;
+    }
+    let linePoint = this.toLinePoint(time, value);
     if (!linePoint) {
       return;
     }
+    if (chart.plotVisuals) linePoint = chart.plotVisuals.colorPoint(title, linePoint);
 
     if (controller.type !== "linebr") {
       controller.series.update(linePoint);
@@ -460,11 +484,21 @@ App.data = {
     collections.plotSeriesList.length = 0;
     collections.plotSeriesMap.clear();
     if (chart.bgcolorPrimitive) chart.bgcolorPrimitive.clear();
+    if (chart.plotVisuals) {
+      const hadColors = chart.plotVisuals.bars.size > 0;
+      chart.plotVisuals.clear();
+      if (hadColors) chart.candleSeries.setData(collections.ohlcvData);
+    }
   },
   renderPlotData(plots) {
     const collections = App.collections;
     const chart = App.chart;
     this.clearPlotData();
+    if (App.PlotVisuals && plots.some(plot => App.PlotVisuals.isVisual(plot.kind))) {
+      chart.plotVisuals ||= new App.PlotVisuals(chart, collections);
+      chart.plotVisuals.load(plots);
+      chart.candleSeries.setData(collections.ohlcvData.map(bar => chart.plotVisuals.colorBar(bar)));
+    }
     for (const plot of plots) {
       const seriesData = [];
       for (const point of plot.data || []) {
@@ -473,7 +507,7 @@ App.data = {
           if (Number.isFinite(pointTime)) seriesData.push({ time: pointTime, value: point.value });
         } else {
           const linePoint = this.toLinePoint(point.time, point.value);
-          if (linePoint) seriesData.push(linePoint);
+          if (linePoint) seriesData.push(chart.plotVisuals?.colorPoint(plot.title, linePoint) || linePoint);
         }
       }
       this.createPlotSeries(chart, collections, plot, seriesData);

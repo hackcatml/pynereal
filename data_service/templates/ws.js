@@ -179,7 +179,7 @@ App.ws = {
             msg.data.open = state.lastOpenPrice.value;
           }
 
-          chart.candleSeries.update(msg.data);
+          chart.candleSeries.update(chart.plotVisuals?.colorBar(msg.data) || msg.data);
           chart.volumeSeries.update({
             time: msg.data.time,
             value: msg.data.volume,
@@ -219,7 +219,7 @@ App.ws = {
           // Only the opening price is corrected; keep live high/low/close/volume intact.
           if (state.lastOhlcv && state.lastOhlcv.time === msg.data.time) {
             const fixedBar = { ...state.lastOhlcv, open: msg.data.open };
-            chart.candleSeries.update(fixedBar);
+            chart.candleSeries.update(chart.plotVisuals?.colorBar(fixedBar) || fixedBar);
             App.data.upsertOhlcvCache(fixedBar);
             state.lastOhlcv = fixedBar;
           }

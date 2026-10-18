@@ -28,6 +28,7 @@ _STATIC_FILES = {
     "scripting_backtest_chart_embed.css": "text/css",
     "ui.js": "text/javascript",
     "bgcolor.js": "text/javascript",
+    "plot_visuals.js": "text/javascript",
     "chart.js": "text/javascript",
     "measure.js": "text/javascript",
     "trendline.js": "text/javascript",

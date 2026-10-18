@@ -85,7 +85,9 @@ def _plot_option(plot_data: dict[str, Any], order: int) -> dict[str, Any]:
         "kind": kind,
         "order": order,
     }
-    if kind == "bgcolor":
+    if kind in ("plot_color", "barcolor", "fill"):
+        option.update(plot_data)
+    elif kind == "bgcolor":
         option.update({
             "offset": int(plot_data.get("offset") or 0),
             "show_last": plot_data.get("show_last"),

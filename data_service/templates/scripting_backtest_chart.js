@@ -984,14 +984,25 @@
   }
 
   function applyPlotData() {
+    if (state.plotDefinitions.some(plot => window.App.PlotVisuals?.isVisual(plot.kind))) {
+      state.plotVisuals ||= new window.App.PlotVisuals(
+        { chart: state.priceChart, candleSeries: state.candleSeries }, window.App.collections,
+      );
+      state.plotVisuals.load(state.plotDefinitions.map(plot => ({
+        ...plot, data: state.priceBars.map(bar => ({ time: Number(bar.time), value: bar.plots?.[plot.title] })),
+      })));
+      state.candleSeries.setData(state.priceBars.map(bar => state.plotVisuals.colorBar(bar)));
+    }
     state.plotDefinitions.forEach((plot) => {
       const title = String(plot.title || "");
+      if (window.App.PlotVisuals?.isVisual(plot.kind)) return;
       const points = state.priceBars.map((bar) => {
         const raw = bar.plots?.[title];
         const value = raw == null ? NaN : Number(raw);
-        return Number.isFinite(value)
+        const point = Number.isFinite(value)
           ? { time: Number(bar.time), value }
           : { time: Number(bar.time) };
+        return state.plotVisuals?.colorPoint(title, point) || point;
       });
       if (plot.kind === "bgcolor") {
         if (state.bgcolorPrimitive) state.bgcolorPrimitive.setLayer(plot, points);

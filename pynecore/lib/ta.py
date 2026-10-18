@@ -14,6 +14,7 @@ from ..core.module_property import module_property
 from pynecore.core.overload import overload
 
 from ..core import safe_convert
+from ..core.pine_comparison import EPSILON as _CROSS_EPSILON
 
 # We need to use this kind of import to make transformer work
 from pynecore.lib import open, high, low, close, volume, hl2, bar_index, array, session, math as lib_math
@@ -400,7 +401,18 @@ def cross(source1: float, source2: float) -> bool | NA[bool]:
     :param source2: The second source series
     :return: True if the source series crossed over the given series
     """
-    return crossover(source1, source2) or crossunder(source1, source2)
+    # Upstream's TV probes keep the last strict side through equality plateaus.
+    # A separate state also avoids skipping crossunder after an upward cross.
+    armed: Persistent[int] = 0
+    if not (source1 == source1 and source2 == source2):
+        return NA(bool)
+    result = (armed < 0 and source1 > source2) or (armed > 0 and source1 < source2)
+    difference = source1 - source2
+    if difference < -_CROSS_EPSILON:
+        armed = -1
+    elif difference > _CROSS_EPSILON:
+        armed = 1
+    return result
 
 
 # noinspection PyUnusedLocal
@@ -412,7 +424,9 @@ def crossover(source1: float, source2: float) -> bool | NA[bool]:
     :param source2: The second source series
     :return: True if the source series crossed over the given series
     """
-    l1_lte_l2: Persistent[bool] = NA(bool)
+    l1_lte_l2: Persistent[bool] = False
+    if not (source1 == source1 and source2 == source2):
+        return NA(bool)
     res = source1 > source2 and l1_lte_l2
     l1_lte_l2 = source1 <= source2
     return res
@@ -427,7 +441,9 @@ def crossunder(source1: float, source2: float) -> bool | NA[bool]:
     :param source2: The second source series
     :return: True if the source series crossed under the given series
     """
-    l1_gte_l2: Persistent[bool] = NA(bool)
+    l1_gte_l2: Persistent[bool] = False
+    if not (source1 == source1 and source2 == source2):
+        return NA(bool)
     res = source1 < source2 and l1_gte_l2
     l1_gte_l2 = source1 >= source2
     return res
@@ -620,17 +636,18 @@ def highest(length: int) -> float | NA[float]:
 def highestbars(source: Series[float], length: int) -> float | NA[float]:
     """
     Calculate the number of bars since the highest value of the source series with the given length.
+    Equal highs select the most recent bar.
 
     :param source: The source series
     :param length: The length of the highest value
     :return: The number of bars since the highest value of the source series
     """
-    return highest(source, length, _bars=True)
+    return highest(source, length, _bars=True, _check_eq=True)
 
 
 @overload
 def highestbars(length: int) -> float | NA[float]:
-    return highest(high, length, _bars=True)
+    return highest(high, length, _bars=True, _check_eq=True)
 
 
 def hma(source: float, length: int) -> float | NA[float]:
@@ -818,17 +835,18 @@ def lowest(length: int) -> float | NA:
 def lowestbars(source: Series[float], length: int) -> float | NA[float]:
     """
     Calculate the number of bars since the lowest value of the source series with the given length.
+    Equal lows select the most recent bar.
 
     :param source: The source series
     :param length: The length of the lowest value
     :return: The number of bars since the lowest value of the source series
     """
-    return lowest(source, length, _bars=True)
+    return lowest(source, length, _bars=True, _check_eq=True)
 
 
 @overload
 def lowestbars(length: int) -> float | NA[float]:
-    return lowest(low, length, _bars=True)
+    return lowest(low, length, _bars=True, _check_eq=True)
 
 
 def macd(source: float, fastlen: int, slowlen: int, siglen: int) \

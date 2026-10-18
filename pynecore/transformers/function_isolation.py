@@ -134,6 +134,7 @@ class FunctionIsolationTransformer(ast.NodeTransformer):
         self.shadowed_builtins_by_scope: dict[str, set[str]] = {}
         # Track counter variables that need to be initialized per function
         self.function_counters: dict[str, set[str]] = {}
+        self.security_expression_counters: list[set[str]] = []
 
     def _is_dataclass_constructor(self, func: ast.Name | ast.Attribute) -> bool:
         """
@@ -425,15 +426,8 @@ class FunctionIsolationTransformer(ast.NodeTransformer):
     def visit_Call(self, node: ast.Call) -> ast.Call:
         """Transform function calls to use isolate_function wrapper"""
         # First visit all arguments and keywords to handle nested calls
-        if self._is_request_security_call(node):
-            new_args = []
-            for idx, arg in enumerate(node.args):
-                new_args.append(arg if idx == 2 else self.visit(cast(ast.AST, arg)))
-            node.args = new_args
-            node.keywords = [self.visit(cast(ast.AST, kw)) for kw in node.keywords]
-        else:
-            node.args = [self.visit(cast(ast.AST, arg)) for arg in node.args]
-            node.keywords = [self.visit(cast(ast.AST, kw)) for kw in node.keywords]
+        node.args = [self.visit(cast(ast.AST, arg)) for arg in node.args]
+        node.keywords = [self.visit(cast(ast.AST, kw)) for kw in node.keywords]
 
         # Skip if already processed or not a relevant call
         if (getattr(node, '_call_processed', False) or
@@ -466,7 +460,9 @@ class FunctionIsolationTransformer(ast.NodeTransformer):
         # Track this counter for initialization
         func_key = ('.'.join(self.parent_functions + [self.current_function])
                     if self.parent_functions else self.current_function)
-        if func_key in self.function_counters:
+        if self.security_expression_counters:
+            self.security_expression_counters[-1].add(counter_var_name)
+        elif func_key in self.function_counters:
             self.function_counters[func_key].add(counter_var_name)
 
         # Create a walrus expression to increment the counter
@@ -500,17 +496,21 @@ class FunctionIsolationTransformer(ast.NodeTransformer):
         return wrapped
 
     def visit_Lambda(self, node: ast.Lambda) -> ast.AST:
-        if getattr(node, "_skip_function_isolation", False):
-            return node
-        return self.generic_visit(node)
-
-    @staticmethod
-    def _is_request_security_call(node: ast.Call) -> bool:
-        if not isinstance(node.func, ast.Attribute) or node.func.attr != "security":
-            return False
-        value = node.func.value
-        if isinstance(value, ast.Name) and value.id == "request":
-            return True
-        if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name):
-            return value.value.id == "lib" and value.attr == "request"
-        return False
+        if not getattr(node, "_security_expression", False):
+            return self.generic_visit(node)
+        counters: set[str] = set()
+        self.security_expression_counters.append(counters)
+        try:
+            node.body = self.visit(node.body)
+        finally:
+            self.security_expression_counters.pop()
+        if counters:
+            # The expression runs later, in its requested timeframe. Its call
+            # counters must reset on each evaluation, inside the lambda's scope.
+            initializers = [ast.NamedExpr(target=ast.Name(id=name, ctx=ast.Store()),
+                                         value=ast.Constant(value=0))
+                            for name in sorted(counters)]
+            node.body = ast.copy_location(ast.Subscript(
+                value=ast.Tuple(elts=[*initializers, node.body], ctx=ast.Load()),
+                slice=ast.Constant(value=-1), ctx=ast.Load()), node.body)
+        return node
