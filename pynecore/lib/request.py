@@ -174,6 +174,11 @@ class SecurityContext:
     def _restore_function_cache(func_cache: dict[Any, Any], snapshot: dict[Any, dict[str, Any]]) -> None:
         from pynecore.core.native_indicators import is_native_indicator_state
 
+        # Calls first created while evaluating the open HTF candle have no
+        # committed state yet. Drop them before replaying that candle.
+        for key in list(func_cache):
+            if key not in snapshot:
+                del func_cache[key]
         for key, state in snapshot.items():
             func = func_cache.get(key)
             if func is None:
