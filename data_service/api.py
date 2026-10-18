@@ -548,10 +548,11 @@ def build_session_api_router(
                             "value": (
                                 None
                                 if value is None or str(value) == ""
-                                else int(value) if kind == "bgcolor" else float(value)
+                                else int(value) if kind in ("bgcolor", "plot_color", "barcolor", "fill") else float(value)
                             ),
                         })
                     result.append({
+                        **options,
                         "title": title,
                         "kind": kind,
                         "color": options.get("color"),

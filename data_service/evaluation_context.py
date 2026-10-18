@@ -216,7 +216,10 @@ def _read_plots(
     end_time: int | None,
     limit: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    options_items = list(seed.plot_options.items())[:MAX_PLOT_SERIES]
+    options_items = [
+        (title, options) for title, options in seed.plot_options.items()
+        if options.get("kind") not in ("plot_color", "barcolor", "fill")
+    ][:MAX_PLOT_SERIES]
     if not options_items or not seed.plot_path.exists() or start_time is None:
         return [], [], []
     rows = []

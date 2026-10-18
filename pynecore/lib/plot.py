@@ -42,7 +42,8 @@ class PlotModule(CallableModule):
 #
 
 # noinspection PyProtectedMember
-def plot(series: Any, title: str | None = None, color: Any = None, linewidth: int = 1, style: Any = None, *_, **__):
+def plot(series: Any, title: str | None = None, color: Any = None, linewidth: int = 1, style: Any = None,
+         *_, dynamic_color: bool = False, **__):
     """
     Plot series, by default a CSV is generated, but this can be extended
 
@@ -52,6 +53,7 @@ def plot(series: Any, title: str | None = None, color: Any = None, linewidth: in
     :param color: The color of the plot, can be a string or a Color object
     :param linewidth: The width of the plot line
     :param style: The style of the plot, can be a PlotEnum value or a string
+    :param dynamic_color: Record the supplied color on each bar for chart rendering
     :return: The a Plot object, can be used to reference the plot in other functions
     """
     from .. import lib
@@ -77,6 +79,10 @@ def plot(series: Any, title: str | None = None, color: Any = None, linewidth: in
     # Store plot data
     lib._plot_data[title] = series
 
+    if dynamic_color:
+        from .plot_visuals import record_color
+        record_color(f"{title} Color", color, "plot_color", target=title)
+
     # Call plot callback only on the first bar to register plot options
     if lib.bar_index == 0 and lib._script and lib._script.on_plot_callback:
         # print(f"on_plot_callback: {title}, {color}, {linewidth}, {style}")
@@ -88,8 +94,8 @@ def plot(series: Any, title: str | None = None, color: Any = None, linewidth: in
                     color_str = str(color)
                 from ..types.color import Color
                 if isinstance(color, Color):
-                    # Convert Color object to hex string (without alpha)
-                    color_str = f'#{color.r:02X}{color.g:02X}{color.b:02X}'
+                    color_str = (f'#{color.value:08X}' if dynamic_color
+                                 else f'#{color.r:02X}{color.g:02X}{color.b:02X}')
                 else:
                     color_str = str(color)
 
@@ -110,7 +116,7 @@ def plot(series: Any, title: str | None = None, color: Any = None, linewidth: in
         except Exception:
             pass  # Ignore callback errors
 
-    return Plot()
+    return Plot(title)
 
 
 #

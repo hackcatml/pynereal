@@ -31,7 +31,7 @@ _MAX_RECENT_RAW_TRADE_KEYS = 10_000
 def _plot_wire_value(value: Any, kind: str) -> float | int | None:
     if value is None or str(value) == "":
         return None
-    return int(value) if kind == "bgcolor" else float(value)
+    return int(value) if kind in ("bgcolor", "plot_color", "barcolor", "fill") else float(value)
 
 
 # ======================================================================

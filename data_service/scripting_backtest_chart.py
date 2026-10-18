@@ -172,7 +172,7 @@ def _read_bars(
                             value = float(row[column])
                             if math.isfinite(value):
                                 bar["plots"][plot["title"]] = (
-                                    int(value) if plot.get("kind") == "bgcolor" else value
+                                    int(value) if plot.get("kind") in ("bgcolor", "plot_color", "barcolor", "fill") else value
                                 )
                         bars.append(bar)
                     except (TypeError, ValueError):
