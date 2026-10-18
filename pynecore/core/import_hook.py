@@ -12,8 +12,8 @@ class PyneLoader(importlib.machinery.SourceFileLoader):
 
     @staticmethod
     def cache_path(path):
-        # Invalidate scripts compiled before the trade-count and persistent-target transforms.
-        return path[:-4] + '.pyne-cmp5.pyc' if path.endswith('.pyc') else path
+        # Recompile inline security expressions with per-request function isolation.
+        return path[:-4] + '.pyne-cmp6.pyc' if path.endswith('.pyc') else path
 
     def get_data(self, path):
         return super().get_data(self.cache_path(path))

@@ -26,10 +26,12 @@ class RequestSecurityTransformer(ast.NodeTransformer):
         if not self._is_request_security_call(node):
             return node
         self._found = True
-        if len(node.args) < 3:
+        expression_keyword = next((kw for kw in node.keywords if kw.arg == "expression"), None)
+        if len(node.args) < 3 and expression_keyword is None:
             return node
-        expr = node.args[2]
+        expr = node.args[2] if len(node.args) >= 3 else expression_keyword.value
         if isinstance(expr, ast.Lambda):
+            setattr(expr, "_security_expression", True)
             return node
         lambda_node = ast.Lambda(
             args=ast.arguments(
@@ -41,9 +43,12 @@ class RequestSecurityTransformer(ast.NodeTransformer):
             ),
             body=expr
         )
-        setattr(lambda_node, "_skip_function_isolation", True)
+        setattr(lambda_node, "_security_expression", True)
         ast.copy_location(lambda_node, expr)
-        node.args[2] = lambda_node
+        if len(node.args) >= 3:
+            node.args[2] = lambda_node
+        else:
+            expression_keyword.value = lambda_node
         return node
 
     def visit_Module(self, node: ast.Module) -> ast.AST:
