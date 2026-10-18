@@ -636,17 +636,18 @@ def highest(length: int) -> float | NA[float]:
 def highestbars(source: Series[float], length: int) -> float | NA[float]:
     """
     Calculate the number of bars since the highest value of the source series with the given length.
+    Equal highs select the most recent bar.
 
     :param source: The source series
     :param length: The length of the highest value
     :return: The number of bars since the highest value of the source series
     """
-    return highest(source, length, _bars=True)
+    return highest(source, length, _bars=True, _check_eq=True)
 
 
 @overload
 def highestbars(length: int) -> float | NA[float]:
-    return highest(high, length, _bars=True)
+    return highest(high, length, _bars=True, _check_eq=True)
 
 
 def hma(source: float, length: int) -> float | NA[float]:
@@ -834,17 +835,18 @@ def lowest(length: int) -> float | NA:
 def lowestbars(source: Series[float], length: int) -> float | NA[float]:
     """
     Calculate the number of bars since the lowest value of the source series with the given length.
+    Equal lows select the most recent bar.
 
     :param source: The source series
     :param length: The length of the lowest value
     :return: The number of bars since the lowest value of the source series
     """
-    return lowest(source, length, _bars=True)
+    return lowest(source, length, _bars=True, _check_eq=True)
 
 
 @overload
 def lowestbars(length: int) -> float | NA[float]:
-    return lowest(low, length, _bars=True)
+    return lowest(low, length, _bars=True, _check_eq=True)
 
 
 def macd(source: float, fastlen: int, slowlen: int, siglen: int) \
