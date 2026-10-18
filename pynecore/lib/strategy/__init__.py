@@ -4,7 +4,8 @@ from datetime import datetime, UTC
 from collections import deque, defaultdict
 from copy import copy
 from bisect import insort, bisect_left
-from math import ceil, floor
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
+from math import ceil, floor, isfinite
 
 from ...core.module_property import module_property
 from ... import lib
@@ -25,7 +26,7 @@ __all__ = [
     "long", "short", 'direction',
 
     'Trade', 'Order', 'Position',
-    "cancel", "cancel_all", "close", "close_all", "entry", "exit", "order",
+    "cancel", "cancel_all", "close", "close_all", "entry", "exit", "order", "default_entry_qty",
 
     "closedtrades", "opentrades",
 ]
@@ -54,6 +55,8 @@ class _OrderType(IntEnum):
 fixed = QtyType("fixed")
 cash = QtyType("cash")
 percent_of_equity = QtyType("percent_of_equity")
+
+_explicit_qty_grid = None
 
 long = direction.long
 short = direction.short
@@ -615,7 +618,9 @@ class Position:
             qty = leg.exit_qty
             if qty is None:
                 qty = binding.size * leg.exit_percent if leg.exit_percent is not None else available
-            leg.reserved_size = _size_round(max(0.0, min(qty, available)))
+            reserved = max(0.0, min(qty, available))
+            leg.reserved_size = (_explicit_qty_round(reserved)
+                                 if leg.exit_qty is not None and qty < available else _size_round(reserved))
             leg.size, leg.sign = -binding.sign * leg.reserved_size, -binding.sign
             available = _size_add(available, -leg.reserved_size)
 
@@ -1799,6 +1804,62 @@ class Position:
 # Functions
 #
 
+def default_entry_qty(fill_price: float | NA[float]) -> float:
+    """Return the default order size at a price, without placing or reversing an order.
+
+    Uses the engine's account/quote currency convention, tick grid and lot grid.
+    Fixed quantities ignore the price; money-sized quantities return zero when
+    the price cannot be sized. No position is added to the returned quantity.
+    """
+    script = lib._script
+    if script.default_qty_type == fixed:
+        return _explicit_qty_round(script.default_qty_value)
+    else:
+        if isinstance(fill_price, NA) or not isfinite(fill_price):
+            return 0.0
+        price = _tick_snap(fill_price)
+        if price == 0.0:
+            return 0.0
+        cost = price * syminfo.pointvalue
+        if script.default_qty_type == cash:
+            money = script.default_qty_value
+        elif script.default_qty_type == percent_of_equity:
+            money = script.position.equity * script.default_qty_value * 0.01
+            if script.commission_type == _commission.percent:
+                cost *= 1.0 + script.commission_value * 0.01
+            elif script.commission_type == _commission.cash_per_contract:
+                cost += script.commission_value
+            elif script.commission_type == _commission.cash_per_order:
+                money = max(0.0, money - script.commission_value)
+        else:
+            raise ValueError("Unknown default qty type: ", script.default_qty_type)
+        if not isfinite(money) or not isfinite(cost) or cost == 0.0:
+            return 0.0
+        # Upstream's TV probes size a default budget at ten significant digits.
+        if money > 0.0:
+            dec = Decimal(repr(float(money)))
+            money = float(dec.quantize(Decimal(1).scaleb(dec.adjusted() - 9), rounding=ROUND_HALF_UP))
+        qty = money / cost
+    if isinstance(qty, NA) or not isfinite(qty):
+        return 0.0
+    factor = syminfo._size_round_factor
+    return (1 if qty > 0 else -1) * int(abs(qty) * factor) / factor
+
+
+def _explicit_qty_round(qty: float) -> float:
+    """Floor the requested decimal quantity; keep internal lot cleanup separate."""
+    global _explicit_qty_grid
+    if not isfinite(qty):
+        return 0.0
+    factor = syminfo._size_round_factor
+    cached = _explicit_qty_grid
+    if cached is None or cached[0] != factor:
+        cached = (factor, Decimal(repr(1.0 / factor)))
+        _explicit_qty_grid = cached
+    lots = int((Decimal(repr(float(abs(qty)))) / cached[1]).to_integral_value(rounding=ROUND_DOWN))
+    return (1 if qty > 0 else -1) * lots / factor
+
+
 def _price_order_budget(limit, stop, sign):
     """Freeze money and unit-cost terms only for default money-sized price orders."""
     limit = None if isinstance(limit, NA) else limit
@@ -1943,7 +2004,7 @@ def close(id: str, comment: str | NA[str] = na_str, qty: float | NA[float] = na_
 
     position = lib._script.position
 
-    if not isinstance(qty, NA) and qty <= 0.0:
+    if not isinstance(qty, NA) and (not isfinite(qty) or qty <= 0.0):
         return
 
     if position.size == 0.0:
@@ -1954,7 +2015,8 @@ def close(id: str, comment: str | NA[str] = na_str, qty: float | NA[float] = na_
         size = _size_round(-bound_size * (qty_percent * 0.01)) \
             if not isinstance(qty_percent, NA) else -bound_size
     else:
-        size = _size_round(-position.sign * min(qty, abs(bound_size)))
+        size = (-position.sign * _explicit_qty_round(qty)
+                if qty < abs(bound_size) else -bound_size)
 
     if size == 0.0:
         return
@@ -2133,7 +2195,7 @@ def entry(id: str, direction: direction.Direction, qty: int | float | NA[float] 
     # We need a signed size instead of qty, the sign is the direction
     size = qty * direction_sign
 
-    size = _size_round(size)
+    size = _size_round(size) if default_qty else direction_sign * _explicit_qty_round(qty)
     if size == 0.0:
         return
 
@@ -2250,7 +2312,9 @@ def exit(id: str, from_entry: str = "",
                 available = _size_add(available, -sibling.reserved_size)
         requested = (qty if not isinstance(qty, NA) else
                      binding.initial_size * qty_percent * 0.01 if not isinstance(qty_percent, NA) else available)
-        reserved = _size_round(max(0.0, min(requested, available)))
+        reserved = max(0.0, min(requested, available))
+        reserved = (_explicit_qty_round(reserved)
+                    if not isinstance(qty, NA) and requested < available else _size_round(reserved))
         if reserved == 0.0:
             return
         direction = binding.sign
@@ -2409,7 +2473,7 @@ def order(id: str, direction: direction.Direction, qty: int | float | NA[float] 
     # This is a key difference - strategy.order can open unlimited trades in the same direction
     # It uses _order_type_normal to distinguish it from entry/exit orders
 
-    size = _size_round(size)
+    size = _size_round(size) if default_qty else direction_sign * _explicit_qty_round(qty)
     if size == 0.0:
         return
 
