@@ -394,6 +394,10 @@ class ScriptRunner:
                         and (not self.script.realtime_trade or self.bar_index < self.script.last_bar_index)):
                     position.process_close_orders()
 
+                if (is_strat and position and position._margin is not None
+                        and (not self.script.realtime_trade or self.bar_index < self.script.last_bar_index)):
+                    position._margin.after_script(position)
+
                 # Update plot data with the results
                 if res is not None:
                     assert isinstance(res, dict), "The 'main' function must return a dictionary!"
