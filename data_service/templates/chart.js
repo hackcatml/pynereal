@@ -1073,6 +1073,11 @@ App.chart = {
     if (this.bgcolorPrimitive) {
       this.bgcolorPrimitive.clear();
     }
+    if (this.plotVisuals) {
+      const hadColors = this.plotVisuals.bars.size > 0;
+      this.plotVisuals.clear();
+      if (!resetCandles && hadColors) this.candleSeries.setData(collections.ohlcvData);
+    }
     collections.markers.length = 0;
     collections.markerKeys.clear();
     collections.plotcharMarkers.length = 0;

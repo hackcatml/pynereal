@@ -363,7 +363,9 @@ def on_plot_event(plot_data):
     """Callback for plot events - stores/updates plot options"""
     title = plot_data['title']
     kind = plot_data.get("kind", "line")
-    if kind == "bgcolor":
+    if kind in ("plot_color", "barcolor", "fill"):
+        new_options = {key: value for key, value in plot_data.items() if key != "title"}
+    elif kind == "bgcolor":
         new_options = {
             "kind": "bgcolor",
             "offset": plot_data.get("offset", 0),
@@ -685,7 +687,7 @@ def _plot_wire_value(value: Any, kind: str) -> float | int | None:
     if value is None or str(value) == "":
         return None
     try:
-        if kind == "bgcolor":
+        if kind in ("bgcolor", "plot_color", "barcolor", "fill"):
             return int(value)
         text = format(value, ".8g") if isinstance(value, float) else str(value)
         return float(text)

@@ -220,12 +220,7 @@ def timestamp(year: int | float, month: int | float, day: int | float, hour: int
 
 # TODO: implement creating plot metadata to be able to plot in a different module
 
-def barcolor(*_, **__):
-    ...
-
-
-def fill(*_, **__):
-    ...
+from .plot_visuals import barcolor, fill
 
 
 def plotarrow(*_, **__):

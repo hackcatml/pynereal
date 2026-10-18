@@ -96,6 +96,7 @@ def read_plot_window(path: Path, options: dict, start: int, end: int) -> list:
     plots = []
     for title, option in options.items():
         plots.append({
+            **option,
             "title": title, "kind": str(option.get("kind") or "line"),
             "color": option.get("color"), "linewidth": option.get("linewidth"),
             "style": option.get("style"), "offset": option.get("offset", 0),
@@ -128,7 +129,7 @@ def read_plot_window(path: Path, options: dict, start: int, end: int) -> list:
                     try:
                         number = float(row[column])
                         if math.isfinite(number):
-                            value = int(number) if plot["kind"] == "bgcolor" else number
+                            value = int(number) if plot["kind"] in ("bgcolor", "plot_color", "barcolor", "fill") else number
                     except ValueError:
                         pass
                 plot["data"].append({"time": timestamp, "value": value})
