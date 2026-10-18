@@ -14,6 +14,7 @@ from ..core.module_property import module_property
 from pynecore.core.overload import overload
 
 from ..core import safe_convert
+from ..core.pine_comparison import EPSILON as _CROSS_EPSILON
 
 # We need to use this kind of import to make transformer work
 from pynecore.lib import open, high, low, close, volume, hl2, bar_index, array, session, math as lib_math
@@ -400,7 +401,18 @@ def cross(source1: float, source2: float) -> bool | NA[bool]:
     :param source2: The second source series
     :return: True if the source series crossed over the given series
     """
-    return crossover(source1, source2) or crossunder(source1, source2)
+    # Upstream's TV probes keep the last strict side through equality plateaus.
+    # A separate state also avoids skipping crossunder after an upward cross.
+    armed: Persistent[int] = 0
+    if not (source1 == source1 and source2 == source2):
+        return NA(bool)
+    result = (armed < 0 and source1 > source2) or (armed > 0 and source1 < source2)
+    difference = source1 - source2
+    if difference < -_CROSS_EPSILON:
+        armed = -1
+    elif difference > _CROSS_EPSILON:
+        armed = 1
+    return result
 
 
 # noinspection PyUnusedLocal
@@ -412,7 +424,9 @@ def crossover(source1: float, source2: float) -> bool | NA[bool]:
     :param source2: The second source series
     :return: True if the source series crossed over the given series
     """
-    l1_lte_l2: Persistent[bool] = NA(bool)
+    l1_lte_l2: Persistent[bool] = False
+    if not (source1 == source1 and source2 == source2):
+        return NA(bool)
     res = source1 > source2 and l1_lte_l2
     l1_lte_l2 = source1 <= source2
     return res
@@ -427,7 +441,9 @@ def crossunder(source1: float, source2: float) -> bool | NA[bool]:
     :param source2: The second source series
     :return: True if the source series crossed under the given series
     """
-    l1_gte_l2: Persistent[bool] = NA(bool)
+    l1_gte_l2: Persistent[bool] = False
+    if not (source1 == source1 and source2 == source2):
+        return NA(bool)
     res = source1 < source2 and l1_gte_l2
     l1_gte_l2 = source1 >= source2
     return res
