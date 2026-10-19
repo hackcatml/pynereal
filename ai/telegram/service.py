@@ -20,6 +20,7 @@ from .attachments import validate_attachment
 from .actions import ProposalConflict, action_summary
 from .commands import BOT_COMMANDS, command_keyboard
 from .session_control import SessionCommandError
+from .account_reports import menu_text_entities
 
 logger = logging.getLogger(__name__)
 
@@ -388,19 +389,32 @@ class TelegramAIService:
                 self._send_ready.set()
 
     async def _account_snapshot(self, job: dict) -> None:
+        request = {}
         try:
             request = json.loads(job["input"])
             view = request["view"]
             async with asyncio.timeout(120):
+                if view in {"positions", "assets", "pnl"} and request.get("operation") in {"menu", "report"}:
+                    if view == "pnl":
+                        result = await self.agent.pnl_view(days=request["days"])
+                    else:
+                        lookup = self.agent.position_view if view == "positions" else self.agent.asset_view
+                        result = await lookup(exchange=request.get("exchange"))
+                    await self._db("finish_account_command", job, result)
+                    return
                 options = ({"days": request["days"]} if view == "pnl" else
-                           {"exchange": request.get("exchange")} if view == "assets" else {})
+                           {"exchange": request.get("exchange")} if view in {"assets", "positions"} else {})
                 report = await self.agent.account_snapshot(view, **options)
-            await self._db("finish", job, report)
+            await self._db("finish", job, report, "done", menu_text_entities(report))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self._log(logging.ERROR, "account command failed (%s)", type(exc).__name__)
-            await self._db("finish", job, "Account lookup failed or timed out. Please retry the command.", "failed")
+            error = "Account lookup failed or timed out. Please retry the command."
+            if request.get("view") in {"positions", "assets", "pnl"} and request.get("operation") in {"menu", "report"}:
+                await self._db("finish_account_command", job, None, error)
+            else:
+                await self._db("finish", job, error, "failed")
 
     async def _session_command(self, job: dict) -> None:
         try:
@@ -450,8 +464,8 @@ class TelegramAIService:
         try:
             target = json.loads(job["input"])
             sessions = await self.agent.screenshot_sessions()
-            if not any(all(item.get(key) == value for key, value in target.items()) for item in sessions):
-                await self._db("finish", job, "The selected session changed or was removed. Use /screenshot again.", "failed")
+            if not any(all(item.get(key) == target[key] for key in ("session_id", "exchange", "symbol", "timeframe")) for item in sessions):
+                await self._db("finish_screenshot", job, None, "The selected session changed or was removed. Use /screenshot again.")
                 return
             data = await self.agent.capture_screenshot(target["session_id"])
             await self._db("finish_screenshot", job, data)
@@ -469,8 +483,8 @@ class TelegramAIService:
                 "chart_not_ready": "Chart OHLCV data is still loading. Retry /screenshot after it is ready.",
             }
             self._log(logging.ERROR, "screenshot failed (%s reason=%s)", type(exc).__name__, reason)
-            await self._db("finish", job, messages.get(reason,
-                           "Chart capture failed. Check the session and retry /screenshot."), "failed")
+            await self._db("finish_screenshot", job, None, messages.get(reason,
+                           "Chart capture failed. Check the session and retry /screenshot."))
 
     async def _work(self) -> None:
         while True:
@@ -587,6 +601,7 @@ class TelegramAIService:
                              or (item.get("session_menu_expires") or 0) > time.time()
                              or (item.get("pnl_menu_expires") or 0) > time.time()
                              or (item.get("asset_menu_expires") or 0) > time.time()
+                             or (item.get("position_menu_expires") or 0) > time.time()
                              or (item.get("alert_menu_expires") or 0) > time.time())
             if (item.get("requires_id") is not None and item.get("required_state") != "sent"
                     or item.get("markup") and not valid_buttons):
@@ -599,6 +614,8 @@ class TelegramAIService:
             method = "editMessageText" if target is not None else "sendMessage"
             payload = {"chat_id": item["chat"], "text": item["text"],
                        "link_preview_options": {"is_disabled": True}}
+            if item.get("entities"):
+                payload["entities"] = json.loads(item["entities"])
             if target is not None:
                 payload["message_id"] = target
                 payload["reply_markup"] = {"inline_keyboard": []}

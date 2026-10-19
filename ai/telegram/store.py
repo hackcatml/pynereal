@@ -7,11 +7,13 @@ import sqlite3
 import time
 from pathlib import Path
 
-from .transport import PENDING_TEXT, message_chunks
+from .transport import PENDING_TEXT, message_chunks, formatted_message_pages
 from .attachments import attachment_descriptor
 from .commands import match_sessions, session_label, pnl_days, PNL_PERIODS
 from .session_menus import SessionMenuStore
 from .alert_menus import AlertMenuStore
+from .account_menus import AccountMenuStore
+from .account_reports import menu_text_entities
 
 
 COMMAND_HELP = (
@@ -23,7 +25,7 @@ COMMAND_HELP = (
     "/screenshot [session] selects or captures a chart\n"
     "/price [session] shows the last-trade price\n"
     "/assets selects all assets or an exchange\n"
-    "/positions shows open positions\n"
+    "/positions selects all positions or an exchange\n"
     "/sessions selects a session and controls runner/alerts\n"
     "/pnl [7d, 30d, 90d, 6m, 1y, all] shows PnL\n"
     "/alerts lists/sets/sends Manual Alerts or edits templates\n"
@@ -33,7 +35,7 @@ AI_MODE_NOTICE = "AI mode on. Send text, images or scripts.\nChanges require you
 SCREENSHOT_PAGE_SIZE = 10
 
 
-class TelegramStore(SessionMenuStore, AlertMenuStore):
+class TelegramStore(SessionMenuStore, AlertMenuStore, AccountMenuStore):
     """All methods run on the service's dedicated single-thread executor."""
 
     def __init__(self, path: Path) -> None:
@@ -98,21 +100,31 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
                     expires REAL NOT NULL, outbox_id INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS screenshot_menus (
                     nonce TEXT PRIMARY KEY, bot INTEGER, chat INTEGER, actor INTEGER,
-                    sessions TEXT NOT NULL, expires REAL NOT NULL, outbox_id INTEGER NOT NULL);
+                    sessions TEXT NOT NULL, expires REAL NOT NULL, outbox_id INTEGER NOT NULL,
+                    payload TEXT NOT NULL DEFAULT '{}');
                 CREATE TABLE IF NOT EXISTS session_menus (
                     nonce TEXT PRIMARY KEY, bot INTEGER, chat INTEGER, actor INTEGER,
                     payload TEXT NOT NULL, expires REAL NOT NULL, outbox_id INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS pnl_menus (
                     nonce TEXT PRIMARY KEY, bot INTEGER, chat INTEGER, actor INTEGER,
-                    expires REAL NOT NULL, outbox_id INTEGER NOT NULL);
+                    expires REAL NOT NULL, outbox_id INTEGER NOT NULL, payload TEXT NOT NULL DEFAULT '{}');
                 CREATE TABLE IF NOT EXISTS asset_menus (
                     nonce TEXT PRIMARY KEY, bot INTEGER, chat INTEGER, actor INTEGER,
-                    exchanges TEXT NOT NULL, expires REAL NOT NULL, outbox_id INTEGER NOT NULL);
+                    exchanges TEXT NOT NULL, expires REAL NOT NULL, outbox_id INTEGER NOT NULL,
+                    payload TEXT NOT NULL DEFAULT '{}');
+                CREATE TABLE IF NOT EXISTS position_menus (
+                    nonce TEXT PRIMARY KEY, bot INTEGER, chat INTEGER, actor INTEGER,
+                    exchanges TEXT NOT NULL, expires REAL NOT NULL, outbox_id INTEGER NOT NULL,
+                    payload TEXT NOT NULL DEFAULT '{}');
                 CREATE TABLE IF NOT EXISTS alert_menus (
                     nonce TEXT PRIMARY KEY, bot INTEGER, chat INTEGER, actor INTEGER,
                     payload TEXT NOT NULL, expires REAL NOT NULL, outbox_id INTEGER NOT NULL);
             """)
             with self.db:
+                for table in ("position_menus", "asset_menus", "pnl_menus", "screenshot_menus"):
+                    menu_columns = {row["name"] for row in self.db.execute(f"PRAGMA table_info({table})")}
+                    if "payload" not in menu_columns:
+                        self.db.execute(f"ALTER TABLE {table} ADD COLUMN payload TEXT NOT NULL DEFAULT '{{}}'")
                 chat_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(chats)")}
                 for name in ("model", "effort", "service_tier"):
                     if name not in chat_columns:
@@ -124,6 +136,7 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
                 self.db.execute("DELETE FROM session_menus WHERE bot=?", (bot_id,))
                 self.db.execute("DELETE FROM pnl_menus WHERE bot=?", (bot_id,))
                 self.db.execute("DELETE FROM asset_menus WHERE bot=?", (bot_id,))
+                self.db.execute("DELETE FROM position_menus WHERE bot=?", (bot_id,))
                 self.db.execute("DELETE FROM alert_menus WHERE bot=?", (bot_id,))
                 columns = {row["name"] for row in self.db.execute("PRAGMA table_info(outbox)")}
                 for name in ("job_id", "replace_id"):
@@ -132,6 +145,7 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
                 for name, definition in {
                     "kind": "TEXT NOT NULL DEFAULT 'text'", "data": "BLOB", "filename": "TEXT",
                     "mime": "TEXT", "markup": "TEXT", "request_id": "INTEGER", "requires_id": "INTEGER",
+                    "entities": "TEXT",
                 }.items():
                     if name not in columns:
                         self.db.execute(f"ALTER TABLE outbox ADD COLUMN {name} {definition}")
@@ -193,7 +207,14 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
         return row[0] if row else 0
 
     def _reply(self, chat: int, text: str, *, job_id: int | None = None, replace_id: int | None = None,
-               request_id: int | None = None, command_menu: bool = False) -> None:
+               request_id: int | None = None, command_menu: bool = False, entities=None) -> None:
+        if entities is not None and job_id is None:
+            for index, page in enumerate(formatted_message_pages(text, entities)):
+                formatted = [{**span, "offset": span["offset"] + 3} for span in page["entities"]]
+                self.db.execute("INSERT INTO outbox(bot,chat,text,replace_id,request_id,entities) VALUES (?,?,?,?,?,?)",
+                                (self.bot_id, chat, "\U0001f916 " + page["text"], replace_id if index == 0 else None,
+                                 request_id, json.dumps(formatted) if formatted else None))
+            return
         chunks = [PENDING_TEXT] if job_id is not None else message_chunks(text)
         self.db.executemany(
             "INSERT INTO outbox(bot,chat,text,job_id,replace_id,request_id,kind) VALUES (?,?,?,?,?,?,?)",
@@ -211,22 +232,29 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
             if existing is None:
                 self._reply(chat, "Command menu ready. Select a command below.", command_menu=True)
 
-    def _complete_reply(self, job, text: str) -> None:
+    def _complete_reply(self, job, text: str, *, entities=None) -> None:
         placeholder = self.db.execute(
             "SELECT id FROM outbox WHERE bot=? AND job_id=? ORDER BY id LIMIT 1",
             (self.bot_id, job["id"]),
         ).fetchone()
-        self._reply(job["chat"], text, replace_id=placeholder["id"] if placeholder else None, request_id=job["id"])
+        self._reply(job["chat"], text, replace_id=placeholder["id"] if placeholder else None, request_id=job["id"],
+                    entities=entities)
 
     def preferences(self, chat: int, actor: int) -> dict:
         row = self.db.execute("SELECT model,effort,service_tier FROM chats WHERE bot=? AND chat=? AND actor=?",
                               (self.bot_id, chat, actor)).fetchone()
         return dict(row) if row else {"model": None, "effort": None, "service_tier": None}
 
-    def _menu_message(self, chat: int, text: str, buttons: list, *, replace_id=None) -> int:
-        return self.db.execute("INSERT INTO outbox(bot,chat,text,markup,replace_id) VALUES (?,?,?,?,?)",
-                               (self.bot_id, chat, "\U0001f916 " + text,
-                                json.dumps({"inline_keyboard": buttons}), replace_id)).lastrowid
+    def _menu_message(self, chat: int, text: str, buttons: list, *, replace_id=None, entities=None) -> int:
+        if entities is None:
+            entities = menu_text_entities(text)
+        prefix = "\U0001f916 "
+        prefix_length = len(prefix.encode("utf-16-le")) // 2
+        formatted = [{**entity, "offset": entity["offset"] + prefix_length} for entity in entities] if entities else None
+        return self.db.execute("INSERT INTO outbox(bot,chat,text,markup,replace_id,entities) VALUES (?,?,?,?,?,?)",
+                               (self.bot_id, chat, prefix + text,
+                                json.dumps({"inline_keyboard": buttons}), replace_id,
+                                json.dumps(formatted) if formatted else None)).lastrowid
 
     def _queue_direct(self, update_id: int, chat: int, actor: int, kind: str, prompt: str, metadata: dict) -> bool:
         pending = self.db.execute("SELECT COUNT(*) FROM jobs WHERE bot=? AND state IN ('queued','running','executing')",
@@ -239,11 +267,13 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
                         (self.bot_id, update_id, chat, actor, prompt, json.dumps(metadata), kind))
         return True
 
-    def _queue_screenshot(self, update_id: int, chat: int, actor: int, session: dict) -> bool:
+    def _queue_screenshot(self, update_id: int, chat: int, actor: int, session: dict, *, menu_nonce=None) -> bool:
         target = {key: session[key] for key in ("session_id", "exchange", "symbol", "timeframe")}
+        if menu_nonce is not None:
+            target["menu_nonce"] = menu_nonce
         return self._queue_direct(update_id, chat, actor, "screenshot", "/screenshot " + session_label(session), target)
 
-    def _screenshot_page(self, chat: int, nonce: str, sessions: list[dict], page: int, *, replace_id=None) -> int:
+    def _screenshot_page(self, chat: int, nonce: str, sessions: list[dict], page: int, *, replace_id=None, notice="") -> int:
         start = page * SCREENSHOT_PAGE_SIZE
         pages = (len(sessions) + SCREENSHOT_PAGE_SIZE - 1) // SCREENSHOT_PAGE_SIZE
         buttons = [[{"text": session_label(item)[:120], "callback_data": f"ts:{nonce}:{index}"}]
@@ -256,8 +286,10 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
         if navigation:
             buttons.append(navigation)
         buttons.append([{"text": "Cancel", "callback_data": f"ts:{nonce}:c"}])
-        return self._menu_message(chat, f"Select a session to capture ({page + 1}/{pages}). "
-                                  "Only you can select within 10 minutes.", buttons, replace_id=replace_id)
+        text = f"Select a session to capture ({page + 1}/{pages}). Only you can select within 10 minutes."
+        if notice:
+            text += "\n\n" + notice
+        return self._menu_message(chat, text, buttons, replace_id=replace_id)
 
     def _screenshot_request(self, update_id: int, chat: int, actor: int, argument: str,
                             sessions: list[dict] | None, now: float) -> None:
@@ -279,7 +311,7 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
             return
         nonce = secrets.token_urlsafe(18)
         item_id = self._screenshot_page(chat, nonce, matches, 0)
-        self.db.execute("INSERT INTO screenshot_menus VALUES (?,?,?,?,?,?,?)",
+        self.db.execute("INSERT INTO screenshot_menus(nonce,bot,chat,actor,sessions,expires,outbox_id) VALUES (?,?,?,?,?,?,?)",
                         (nonce, self.bot_id, chat, actor, json.dumps(matches), now + 600, item_id))
 
     def _screenshot_callback(self, update_id: int, query: dict, parts: list[str], now: float) -> str:
@@ -296,34 +328,63 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
             self._reply(row["chat"], "Screenshot cancelled.", replace_id=row["outbox_id"])
             return "Cancelled."
         sessions = json.loads(row["sessions"])
+        state = json.loads(row["payload"])
+        if state.get("busy"):
+            return "A chart is being captured. Please wait."
         choice = parts[2]
         if choice.startswith("p"):
             raw_page = choice[1:]
             if (not raw_page.isascii() or not raw_page.isdecimal() or len(raw_page) > 6
                     or int(raw_page) * SCREENSHOT_PAGE_SIZE >= len(sessions)):
                 return "Invalid session page."
-            item_id = self._screenshot_page(row["chat"], row["nonce"], sessions, int(raw_page), replace_id=row["outbox_id"])
-            self.db.execute("UPDATE screenshot_menus SET outbox_id=? WHERE nonce=?", (item_id, row["nonce"]))
+            state["page"] = int(raw_page)
+            item_id = self._screenshot_page(row["chat"], row["nonce"], sessions, int(raw_page), replace_id=row["outbox_id"],
+                                            notice=state.get("notice", ""))
+            self.db.execute("UPDATE screenshot_menus SET outbox_id=?,payload=? WHERE nonce=?",
+                            (item_id, json.dumps(state), row["nonce"]))
             return "Select a session."
         if not choice.isascii() or not choice.isdecimal() or len(choice) > 6 or int(choice) >= len(sessions):
             return "Invalid session selection."
         selected = sessions[int(parts[2])]
-        if not self._queue_screenshot(update_id, row["chat"], row["actor"], selected):
+        if not self._queue_screenshot(update_id, row["chat"], row["actor"], selected, menu_nonce=row["nonce"]):
             return "Request queue is full. Try again later."
-        self.db.execute("DELETE FROM screenshot_menus WHERE nonce=?", (row["nonce"],))
-        self._reply(row["chat"], "Capturing chart: " + session_label(selected), replace_id=row["outbox_id"])
+        state["busy"] = update_id
+        self.db.execute("UPDATE screenshot_menus SET payload=? WHERE nonce=?", (json.dumps(state), row["nonce"]))
+        self.db.execute("UPDATE outbox SET job_id=? WHERE bot=? AND id=?", (update_id, self.bot_id, row["outbox_id"]))
         return "Capturing chart."
 
-    def finish_screenshot(self, job: dict, data: bytes) -> None:
+    def finish_screenshot(self, job: dict, data: bytes | None, error: str = "") -> None:
         with self.db:
+            current = self.db.execute("SELECT state FROM jobs WHERE bot=? AND id=?", (self.bot_id, job["id"])).fetchone()
+            if current is None or current["state"] != "running":
+                return
             target = json.loads(job["input"])
+            row = None
+            if target.get("menu_nonce"):
+                row = self.db.execute("SELECT * FROM screenshot_menus WHERE bot=? AND nonce=?",
+                                      (self.bot_id, target["menu_nonce"])).fetchone()
+                if row is None or row["expires"] <= time.time():
+                    self.db.execute("UPDATE jobs SET state='cancelled' WHERE bot=? AND id=?", (self.bot_id, job["id"]))
+                    return
             caption = "Chart: " + session_label(target)
-            item_id = self._insert_media(job, kind="photo", data=data, filename="chart.png", mime="image/png", caption=caption)
-            self.db.execute("UPDATE outbox SET state='pending' WHERE id=?", (item_id,))
-            self.db.execute("UPDATE jobs SET state='done',answer=? WHERE bot=? AND id=?", (caption, self.bot_id, job["id"]))
+            if not error:
+                item_id = self._insert_media(job, kind="photo", data=data, filename="chart.png", mime="image/png", caption=caption)
+                self.db.execute("UPDATE outbox SET state='pending' WHERE id=?", (item_id,))
+            self.db.execute("UPDATE jobs SET state=?,answer=? WHERE bot=? AND id=?",
+                            ("failed" if error else "done", error or caption, self.bot_id, job["id"]))
+            if row:
+                state = json.loads(row["payload"])
+                state.pop("busy", None)
+                state["notice"] = error or "Captured " + caption
+                item_id = self._screenshot_page(row["chat"], row["nonce"], json.loads(row["sessions"]), state.get("page", 0),
+                                                replace_id=row["outbox_id"], notice=state["notice"])
+                self.db.execute("UPDATE screenshot_menus SET outbox_id=?,payload=? WHERE nonce=?",
+                                (item_id, json.dumps(state), row["nonce"]))
+            elif error:
+                self._reply(job["chat"], error, entities=menu_text_entities(error))
 
     def _asset_menu(self, chat: int, actor: int, exchanges: list[str] | None, now: float) -> None:
-        self.db.execute("DELETE FROM asset_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
+        self._cancel_account_queries("assets", chat, actor)
         if exchanges is None:
             self._reply(chat, "Exchange options are unavailable. Please retry /assets.")
             return
@@ -331,74 +392,13 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
         if not exchanges:
             self._reply(chat, "No asset accounts configured.")
             return
-        nonce = secrets.token_urlsafe(18)
-        choices = [{"text": exchange.upper(), "callback_data": f"te:{nonce}:{index}"}
-                   for index, exchange in enumerate(exchanges)]
-        buttons = [[{"text": "All", "callback_data": f"te:{nonce}:all"}]]
-        buttons.extend(choices[index:index + 2] for index in range(0, len(choices), 2))
-        buttons.append([{"text": "Cancel", "callback_data": f"te:{nonce}:cancel"}])
-        item_id = self._menu_message(chat, "Select all assets or an exchange. Only you can select within 10 minutes.", buttons)
-        self.db.execute("INSERT INTO asset_menus VALUES (?,?,?,?,?,?,?)",
-                        (nonce, self.bot_id, chat, actor, json.dumps(exchanges), now + 600, item_id))
-
-    def _asset_callback(self, update_id: int, query: dict, parts: list[str], now: float) -> str:
-        row = self.db.execute("SELECT m.*,o.message_id FROM asset_menus m JOIN outbox o ON o.id=m.outbox_id "
-                              "WHERE m.bot=? AND m.nonce=?", (self.bot_id, parts[1])).fetchone()
-        message = query.get("message") or {}
-        if row is None or row["expires"] <= now:
-            return "This selection expired or was handled already. Use /assets again."
-        if (row["chat"] != message.get("chat", {}).get("id") or row["actor"] != query.get("from", {}).get("id")
-                or row["message_id"] is None or row["message_id"] != message.get("message_id")):
-            return "Only the requester can use the current exchange buttons."
-        choice = parts[2]
-        if choice == "cancel":
-            self.db.execute("DELETE FROM asset_menus WHERE nonce=?", (row["nonce"],))
-            self._reply(row["chat"], "Asset selection cancelled.", replace_id=row["outbox_id"])
-            return "Cancelled."
-        choices = {str(index): exchange for index, exchange in enumerate(json.loads(row["exchanges"]))}
-        if choice != "all" and choice not in choices:
-            return "Invalid exchange selection."
-        request = {"view": "assets", "exchange": choices.get(choice)}
-        if not self._queue_direct(update_id, row["chat"], row["actor"], "account", "/assets", request):
-            return "Request queue is full. Retry later."
-        self.db.execute("UPDATE outbox SET job_id=? WHERE bot=? AND id=?", (update_id, self.bot_id, row["outbox_id"]))
-        self.db.execute("DELETE FROM asset_menus WHERE nonce=?", (row["nonce"],))
-        return "Loading assets."
+        self._create_account_menu("assets", chat, actor, exchanges, now)
 
     def _pnl_menu(self, chat: int, actor: int, now: float) -> None:
-        nonce = secrets.token_urlsafe(18)
-        choices = [{"text": key.upper() if key != "all" else "All", "callback_data": f"tp:{nonce}:{key}"}
-                   for key in PNL_PERIODS]
-        buttons = [choices[:3], choices[3:], [{"text": "Cancel", "callback_data": f"tp:{nonce}:cancel"}]]
-        item_id = self._menu_message(chat, "Select a PnL period. Only you can select within 10 minutes.", buttons)
-        self.db.execute("DELETE FROM pnl_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
-        self.db.execute("INSERT INTO pnl_menus VALUES (?,?,?,?,?,?)", (nonce, self.bot_id, chat, actor, now + 600, item_id))
+        self._cancel_account_queries("pnl", chat, actor)
+        self._create_account_menu("pnl", chat, actor, [], now)
 
-    def _pnl_callback(self, update_id: int, query: dict, parts: list[str], now: float) -> str:
-        row = self.db.execute("SELECT m.*,o.message_id FROM pnl_menus m JOIN outbox o ON o.id=m.outbox_id "
-                              "WHERE m.bot=? AND m.nonce=?", (self.bot_id, parts[1])).fetchone()
-        message = query.get("message") or {}
-        if row is None or row["expires"] <= now:
-            return "This selection expired or was handled already. Use /pnl again."
-        if (row["chat"] != message.get("chat", {}).get("id") or row["actor"] != query.get("from", {}).get("id")
-                or row["message_id"] is None or row["message_id"] != message.get("message_id")):
-            return "Only the requester can use the current period buttons."
-        period = parts[2]
-        if period == "cancel":
-            self.db.execute("DELETE FROM pnl_menus WHERE nonce=?", (row["nonce"],))
-            self._reply(row["chat"], "PnL selection cancelled.", replace_id=row["outbox_id"])
-            return "Cancelled."
-        if period not in PNL_PERIODS:
-            return "Invalid PnL period."
-        if not self._queue_direct(update_id, row["chat"], row["actor"], "account", "/pnl " + period,
-                                  {"view": "pnl", "days": PNL_PERIODS[period]}):
-            return "Request queue is full. Retry later."
-        # Reuse the selected menu as the reply target, including cancellation/restart notices.
-        self.db.execute("UPDATE outbox SET job_id=? WHERE bot=? AND id=?", (update_id, self.bot_id, row["outbox_id"]))
-        self.db.execute("DELETE FROM pnl_menus WHERE nonce=?", (row["nonce"],))
-        return "Loading PnL."
-
-    def _model_menu(self, chat: int, actor: int, catalog: dict, now: float) -> None:
+    def _model_menu(self, chat: int, actor: int, catalog: dict, now: float, *, replace_id=None, notice="") -> None:
         current = self.preferences(chat, actor)
         model = current["model"] or catalog["model"]
         effort = current["effort"] or catalog["effort"]
@@ -411,8 +411,11 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
                      "callback_data": f"tm:m:{nonce}:{index}"}]
                    for index, item in enumerate(catalog["options"])]
         buttons.append([{"text": "Cancel", "callback_data": f"tm:c:{nonce}:0"}])
-        item_id = self._menu_message(chat, f"Model: {model}\nEffort: {effort}\nSpeed: {speed}"
-                                     "\n\nSelect a model, then effort and speed.", buttons)
+        text = f"Model: {model}\nEffort: {effort}\nSpeed: {speed}"
+        if notice:
+            text += "\n\n" + notice
+        item_id = self._menu_message(chat, text + "\n\nSelect a model, then effort and speed.", buttons,
+                                     replace_id=replace_id)
         self.db.execute("INSERT INTO model_menus(nonce,bot,chat,actor,catalog,stage,expires,outbox_id) "
                         "VALUES (?,?,?,?,?,'model',?,?)",
                         (nonce, self.bot_id, chat, actor, json.dumps(catalog), now + 600, item_id))
@@ -430,6 +433,9 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
             self.db.execute("DELETE FROM model_menus WHERE nonce=?", (row["nonce"],))
             self._reply(row["chat"], "Selection cancelled. Settings unchanged.", replace_id=row["outbox_id"])
             return "Cancelled."
+        if parts[1] == "b":
+            self._model_menu(row["chat"], row["actor"], json.loads(row["catalog"]), now, replace_id=row["outbox_id"])
+            return "Select a model."
         if not parts[3].isascii() or not parts[3].isdecimal():
             return "Invalid selection. Use /model again."
         index = int(parts[3])
@@ -439,7 +445,8 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
             choices = [{"text": effort, "callback_data": f"tm:e:{row['nonce']}:{i}"}
                        for i, effort in enumerate(selected["efforts"])]
             buttons = [choices[i:i + 2] for i in range(0, len(choices), 2)]
-            buttons.append([{"text": "Cancel", "callback_data": f"tm:c:{row['nonce']}:0"}])
+            buttons.append([{"text": "Models", "callback_data": f"tm:b:{row['nonce']}:0"},
+                            {"text": "Cancel", "callback_data": f"tm:c:{row['nonce']}:0"}])
             item_id = self._menu_message(row["chat"], f"Model: {selected['value']}\n\nSelect reasoning effort.",
                                          buttons, replace_id=row["outbox_id"])
             self.db.execute("UPDATE model_menus SET stage='effort',selected=?,outbox_id=? WHERE nonce=?",
@@ -458,7 +465,8 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
                             "callback_data": f"tm:s:{row['nonce']}:{i}"}
                            for i, speed in enumerate(speeds)]
                 buttons = [choices[i:i + 2] for i in range(0, len(choices), 2)]
-                buttons.append([{"text": "Cancel", "callback_data": f"tm:c:{row['nonce']}:0"}])
+                buttons.append([{"text": "Models", "callback_data": f"tm:b:{row['nonce']}:0"},
+                                {"text": "Cancel", "callback_data": f"tm:c:{row['nonce']}:0"}])
                 descriptions = "\n".join(f"{speed['label']}: {speed['description']}"
                                          for speed in speeds if speed.get("description"))
                 text = f"Model: {selected['value']}\nEffort: {effort}\n\nSelect speed."
@@ -479,9 +487,8 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
                         "ON CONFLICT(bot,chat,actor) DO UPDATE SET model=excluded.model,effort=excluded.effort,"
                         "service_tier=excluded.service_tier",
                         (self.bot_id, row["chat"], row["actor"], selected["value"], effort, speed["value"]))
-        self.db.execute("DELETE FROM model_menus WHERE nonce=?", (row["nonce"],))
-        self._reply(row["chat"], f"Model: {selected['value']}\nEffort: {effort}\nSpeed: {speed['label']}"
-                    "\n\nSaved for your next requests in this chat.", replace_id=row["outbox_id"])
+        self._model_menu(row["chat"], row["actor"], json.loads(row["catalog"]), time.time(),
+                         replace_id=row["outbox_id"], notice="Saved for your next requests in this chat.")
         return "Saved. Applies to your next requests."
 
     def accept(
@@ -542,17 +549,19 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
                 else:
                     self._asset_menu(chat, actor, asset_exchanges, now)
                 return False
+            if command == "/positions":
+                if argument:
+                    self._reply(chat, "Use /positions without arguments, then select All or an exchange.")
+                else:
+                    self._cancel_position_queries(chat, actor)
+                    self._queue_direct(update_id, chat, actor, "account", command,
+                                       {"view": "positions", "operation": "menu"})
+                return False
             if command in {"/alerts", "/alert"}:
                 if argument:
                     self._reply(chat, "Use /alerts without arguments, then select List, Set alert, Send alert or Set templates.")
                 else:
                     self._alert_menu({"chat": chat, "actor": actor}, {"stage": "home"})
-                return False
-            if command == "/positions":
-                if argument:
-                    self._reply(chat, f"Use {command} without arguments to view all configured accounts.")
-                else:
-                    self._queue_direct(update_id, chat, actor, "account", command, {"view": command[1:]})
                 return False
             if command == "/model":
                 if not ai_enabled:
@@ -574,6 +583,7 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
                 self.db.execute("DELETE FROM session_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
                 self.db.execute("DELETE FROM pnl_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
                 self.db.execute("DELETE FROM asset_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
+                self.db.execute("DELETE FROM position_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
                 self.db.execute("DELETE FROM alert_menus WHERE bot=? AND chat=? AND actor=?", (self.bot_id, chat, actor))
                 cancelled = self.db.execute(
                     "SELECT id,chat FROM jobs WHERE bot=? AND chat=? AND actor=? AND state IN ('queued','running')",
@@ -690,14 +700,14 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
             ])
         return result
 
-    def finish(self, job: dict, answer: str, state: str = "done") -> None:
+    def finish(self, job: dict, answer: str, state: str = "done", entities=None) -> None:
         with self.db:
             changed = self.db.execute(
                 "UPDATE jobs SET state=?,answer=? WHERE bot=? AND id=? AND state='running'",
                 (state, answer, self.bot_id, job["id"]),
             ).rowcount
             if changed:
-                self._complete_reply(job, answer)
+                self._complete_reply(job, answer, entities=entities)
                 if state == "done":
                     self.db.execute("UPDATE proposals SET state='pending',expires=? WHERE bot=? AND job=? AND state='draft'",
                                     (time.time() + 600, self.bot_id, job["id"]))
@@ -716,6 +726,7 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
             "m.stage AS menu_stage,m.expires AS menu_expires,s.expires AS screenshot_expires,"
             "c.expires AS session_menu_expires,n.expires AS pnl_menu_expires,"
             "e.expires AS asset_menu_expires,"
+            "v.expires AS position_menu_expires,"
             "l.expires AS alert_menu_expires,"
             "j.state AS request_state FROM outbox o "
             "LEFT JOIN outbox p ON p.id=o.replace_id AND p.bot=o.bot "
@@ -724,8 +735,9 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
             "LEFT JOIN model_menus m ON m.outbox_id=o.id AND m.bot=o.bot "
             "LEFT JOIN screenshot_menus s ON s.outbox_id=o.id AND s.bot=o.bot "
             "LEFT JOIN session_menus c ON c.outbox_id=o.id AND c.bot=o.bot "
-            "LEFT JOIN pnl_menus n ON n.outbox_id=o.id AND n.bot=o.bot "
-            "LEFT JOIN asset_menus e ON e.outbox_id=o.id AND e.bot=o.bot "
+            "LEFT JOIN pnl_menus n ON (n.outbox_id=o.id OR n.outbox_id=o.replace_id) AND n.bot=o.bot "
+            "LEFT JOIN asset_menus e ON (e.outbox_id=o.id OR e.outbox_id=o.replace_id) AND e.bot=o.bot "
+            "LEFT JOIN position_menus v ON (v.outbox_id=o.id OR v.outbox_id=o.replace_id) AND v.bot=o.bot "
             "LEFT JOIN alert_menus l ON l.outbox_id=o.id AND l.bot=o.bot "
             "LEFT JOIN jobs j ON j.id=o.request_id AND j.bot=o.bot "
             "WHERE o.bot=? AND o.state='pending' ORDER BY o.id LIMIT 1", (self.bot_id,),
@@ -757,6 +769,7 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
         self.db.execute("DELETE FROM session_menus WHERE expires<?", (now,))
         self.db.execute("DELETE FROM pnl_menus WHERE expires<?", (now,))
         self.db.execute("DELETE FROM asset_menus WHERE expires<?", (now,))
+        self.db.execute("DELETE FROM position_menus WHERE expires<?", (now,))
         self.db.execute("DELETE FROM alert_menus WHERE expires<?", (now,))
         self.db.execute("DELETE FROM attachments WHERE created<?", (now - 86400,))
         self.db.execute("UPDATE proposals SET state='expired',payload='{}',guard='{}' "
@@ -872,6 +885,8 @@ class TelegramStore(SessionMenuStore, AlertMenuStore):
                 return self._pnl_callback(update_id, query, parts, now)
             if len(parts) == 3 and parts[0] == "te":
                 return self._asset_callback(update_id, query, parts, now)
+            if len(parts) == 3 and parts[0] == "to":
+                return self._position_callback(update_id, query, parts, now)
             if len(parts) == 3 and parts[0] == "tl":
                 return self._alert_callback(update_id, query, parts, now)
             if len(parts) == 4 and parts[0] == "tm":

@@ -39,6 +39,33 @@ def message_chunks(text: str) -> list[str]:
     return chunks
 
 
+def formatted_message_pages(text: str, entities: list[dict]) -> list[dict]:
+    pages = []
+    start = offset = 0
+    while start < len(text):
+        end = min(start + 1900, len(text))
+        if end < len(text):
+            newline = text.rfind("\n\n", start, end)
+            if newline <= start + (end - start) // 2:
+                newline = text.rfind("\n", start, end)
+            if newline > start + (end - start) // 2:
+                end = newline
+        content = text[start:end]
+        length = len(content.encode("utf-16-le")) // 2
+        clipped = []
+        for entity in entities:
+            left = max(offset, entity["offset"])
+            right = min(offset + length, entity["offset"] + entity["length"])
+            if left < right:
+                clipped.append({**entity, "offset": left - offset, "length": right - left})
+        pages.append({"text": content, "entities": sorted(clipped, key=lambda entity: (entity["offset"], -entity["length"]))})
+        start, offset = end, offset + length
+        while start < len(text) and text[start] == "\n":
+            start += 1
+            offset += 1
+    return pages or [{"text": "No answer returned.", "entities": []}]
+
+
 class TelegramTransport:
     def __init__(self, token: str) -> None:
         self._base = f"https://api.telegram.org/bot{token}/"

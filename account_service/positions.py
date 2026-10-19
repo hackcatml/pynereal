@@ -107,10 +107,10 @@ def _collect_positions_snapshot(
     }
 
 
-def collect_positions_snapshot(config_path: str) -> dict[str, Any]:
-    """Collect every configured account without exposing credentials to the parent."""
+def collect_positions_snapshot(config_path: str, *, exchange_id: str = "") -> dict[str, Any]:
+    """Collect configured accounts, optionally limited to one exchange."""
 
-    return _collect_positions_snapshot(config_path)
+    return _collect_positions_snapshot(config_path, exchange_id=exchange_id)
 
 
 def collect_positions_snapshot_scope(

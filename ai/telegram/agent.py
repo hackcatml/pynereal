@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .actions import TelegramActions, MUTATION_TOOLS
 from .attachments import attachment_content, validate_attachment, IMAGE_LIMIT
-from .account_reports import format_account_snapshot, format_alerts
+from .account_reports import format_account_snapshot, format_alerts, format_asset_report, format_position_report, format_pnl_report
 from .commands import match_sessions
 from .session_control import TelegramSessionControl
 
@@ -324,6 +324,28 @@ class TelegramAgent:
     async def asset_exchanges(self) -> list[str]:
         return await self.tools.asset_service.configured_exchanges()
 
+    async def asset_view(self, exchange: str | None = None) -> dict:
+        snapshot = await self.tools.asset_service.snapshot(**({"exchange": exchange} if exchange else {}))
+        return await asyncio.to_thread(format_asset_report, snapshot, exchange=exchange)
+
+    async def pnl_view(self, days: int | None = 90) -> dict:
+        snapshot = await self.tools.account_service.pnl(days=days)
+        return await asyncio.to_thread(format_pnl_report, snapshot)
+
+    async def position_view(self, exchange: str | None = None) -> dict:
+        snapshot = await self.tools.account_service.positions(**({"exchange": exchange} if exchange else {}))
+        rows = snapshot.get("results", [])
+        if exchange:
+            rows = [row for row in rows if str(row.get("exchange", "")).lower() == exchange.lower()]
+        exchanges = sorted({str(row["exchange"]).lower() for row in rows
+                            if row.get("status") == "ok" and row.get("positions")})
+        return {
+            "exchanges": exchanges,
+            "complete": not (snapshot.get("error") or (snapshot.get("summary") or {}).get("failed")
+                              or any(row.get("status") != "ok" for row in rows)),
+            **await asyncio.to_thread(format_position_report, snapshot, exchange=exchange),
+        }
+
     async def account_snapshot(self, view: str, *, days: int | None = 90, exchange: str | None = None) -> str:
         if view == "alerts":
             context = await self.codex.dynamic_tools.manual_alert.bridge._execute_on_loop("context", {})
@@ -335,6 +357,8 @@ class TelegramAgent:
             snapshot = await self.tools.account_service.pnl(days=days)
         elif view == "assets" and exchange is not None:
             snapshot = await self.tools.asset_service.snapshot(exchange=exchange)
+        elif view == "positions" and exchange is not None:
+            snapshot = await self.tools.account_service.positions(exchange=exchange)
         else:
             snapshot = await self.tools._snapshot(SnapshotRequest(view=view))
         return await asyncio.to_thread(format_account_snapshot, view, snapshot, exchange=exchange)

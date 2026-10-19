@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import Executor, ProcessPoolExecutor
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -104,7 +105,7 @@ class AccountDataService:
         cache_path: Path | None = None,
         cache_ttl_seconds: float = 10.0,
         executor_factory: Callable[[], Executor] | None = None,
-        positions_collector: Callable[[str], dict[str, Any]] = collect_positions_snapshot,
+        positions_collector: Callable[..., dict[str, Any]] = collect_positions_snapshot,
         on_positions: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.config_path = config_path.resolve()
@@ -192,7 +193,12 @@ class AccountDataService:
             and time.monotonic() - self._positions_at < self.cache_ttl_seconds
         )
 
-    async def positions(self, *, force: bool = False) -> dict[str, Any]:
+    async def positions(self, *, force: bool = False, exchange: str | None = None) -> dict[str, Any]:
+        if exchange is not None:
+            exchange = exchange.strip().lower()
+            if not exchange:
+                raise AccountDataError("Exchange must not be empty")
+            return await self._positions_for_exchange(exchange, force=force)
         requested_at = time.monotonic()
         if not force and self._positions_cache_valid():
             result = copy.deepcopy(self._positions)
@@ -233,6 +239,37 @@ class AccountDataService:
             output = copy.deepcopy(result)
             output["cached"] = False
             return output
+
+    async def _positions_for_exchange(self, exchange: str, *, force: bool) -> dict[str, Any]:
+        def cached_scope() -> dict[str, Any]:
+            snapshot = copy.deepcopy(self._positions)
+            rows = [row for row in snapshot["results"] if row.get("exchange") == exchange]
+            snapshot["results"] = rows
+            succeeded = sum(row.get("status") == "ok" for row in rows)
+            snapshot["summary"] = {
+                "accounts": len(rows), "succeeded": succeeded, "failed": len(rows) - succeeded,
+                "open_positions": sum(len(row.get("positions", [])) for row in rows if row.get("status") == "ok"),
+            }
+            snapshot["cached"] = True
+            return snapshot
+
+        if not force and self._positions_cache_valid():
+            return cached_scope()
+        async with self._positions_lock:
+            if not force and self._positions_cache_valid():
+                return cached_scope()
+            try:
+                snapshot = await asyncio.get_running_loop().run_in_executor(
+                    self._ensure_executor(),
+                    partial(self._positions_collector, str(self.config_path), exchange_id=exchange),
+                )
+            except Exception as exc:
+                message = str(exc).replace("\n", " ").strip()
+                raise AccountDataError(message[:500] or type(exc).__name__) from exc
+            # A partial snapshot must not replace the dashboard's all-account cache.
+            snapshot = _add_exchange_logos(snapshot)
+            snapshot["cached"] = False
+            return snapshot
 
     async def session_evaluation_evidence(
         self,
