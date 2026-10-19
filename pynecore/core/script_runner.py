@@ -196,7 +196,8 @@ class ScriptRunner:
 
     __slots__ = ('script_module', 'script', 'ohlcv_iter', 'syminfo', 'update_syminfo_every_run',
                  'bar_index', 'tz', 'plot_writer', 'strat_writer', 'trades_writer', 'last_bar_index',
-                 'equity_curve', 'drawdown_curve', 'first_price', 'last_price', '_step_iter', '_all_ohlcv')
+                 'equity_curve', 'drawdown_curve', 'first_price', 'last_price', '_step_iter', '_all_ohlcv',
+                 'magnifier')
 
     def __init__(self, script_path: Path, ohlcv_iter: Iterable[OHLCV], syminfo: SymInfo, *,
                  plot_path: Path | None = None, strat_path: Path | None = None,
@@ -269,6 +270,7 @@ class ScriptRunner:
         self.script.custom_inputs = custom_inputs   # noqa
         # step 실행용 내부 제너레이터
         self._step_iter: Iterator[Any] | None = None
+        self.magnifier = None
 
         self.bar_index = 0
 
@@ -295,6 +297,21 @@ class ScriptRunner:
             "Cumulative profit %", f"Run-up {syminfo.currency}", "Run-up %", f"Drawdown {syminfo.currency}",
             "Drawdown %",
         )) if trade_path and not self.script.realtime_trade else None
+
+    def set_bar_magnifier(self, candles, *, source_seconds: int, source: str = '') -> None:
+        """Attach a historical fill source; live runners must never use it."""
+        from .bar_magnifier import BarMagnifier, fixed_seconds
+        if self.script.realtime_trade:
+            raise ValueError('Bar Magnifier is available only for backtests')
+        if self.script.script_type != script_type.strategy or not self.script.use_bar_magnifier:
+            raise ValueError('Set use_bar_magnifier=True on the strategy first')
+        if self.script.calc_on_order_fills:
+            raise ValueError('Bar Magnifier currently requires calc_on_order_fills=False')
+        if self.magnifier is not None:
+            self.magnifier.close()
+        self.magnifier = BarMagnifier(candles, chart_seconds=fixed_seconds(self.syminfo.period),
+                                     source_seconds=source_seconds, mintick=self.syminfo.mintick,
+                                     source=source)
 
     # noinspection PyProtectedMember
     def run_iter(self, on_progress: Callable[[datetime], None] | None = None) \
@@ -352,6 +369,7 @@ class ScriptRunner:
 
         # Position shortcut
         position = self.script.position
+        magnifier = self.magnifier if not self.script.realtime_trade else None
 
         try:
             for candle in self.ohlcv_iter:
@@ -378,7 +396,11 @@ class ScriptRunner:
 
                 # Process limit orders
                 if is_strat and position:
-                    position.process_orders()
+                    sub_bars = magnifier.window(candle) if magnifier is not None else None
+                    if sub_bars is None:
+                        position.process_orders()
+                    else:
+                        position.process_orders_magnified(sub_bars)
 
                 # Execute registered library main functions before main script
                 lib._lib_semaphore = True
@@ -485,6 +507,8 @@ class ScriptRunner:
         except GeneratorExit:
             pass
         finally:  # Python reference counter will close this even if the iterator is not exhausted
+            if magnifier is not None:
+                magnifier.close()
             if is_strat and position:
                 # Export remaining open trades before closing
                 if self.trades_writer and position.open_trades and self.last_price is not None:
@@ -645,6 +669,8 @@ class ScriptRunner:
         except Exception:
             pass
         self._step_iter = None
+        if self.magnifier is not None:
+            self.magnifier.close()
 
         # script 모듈 언로드해서 다음에 완전히 새로 import 되도록 만들기
         module_name = None
