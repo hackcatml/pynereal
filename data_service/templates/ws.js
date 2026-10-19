@@ -259,7 +259,7 @@ App.ws = {
             position: "belowBar",
             color: "#0b33e8",
             shape: "arrowUp",
-            text: msg.comment || "",
+            text: msg.comment || msg.id || "",
             size: 0.5
           });
           collections.markerKeys.add(markerKey);
@@ -294,7 +294,7 @@ App.ws = {
             position: "aboveBar",
             color: "#9d0bec",
             shape: "arrowDown",
-            text: msg.comment || "",
+            text: msg.comment || msg.exit_id || msg.id || "",
             size: 0.5
           });
           collections.markerKeys.add(markerKey);
