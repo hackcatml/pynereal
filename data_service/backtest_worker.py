@@ -97,6 +97,7 @@ def _plot_option(plot_data: dict[str, Any], order: int) -> dict[str, Any]:
             "color": plot_data.get("color"),
             "linewidth": plot_data.get("linewidth"),
             "style": plot_data.get("style"),
+            "offset": int(plot_data.get("offset") or 0),
         })
     return option
 

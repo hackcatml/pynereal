@@ -380,6 +380,7 @@ def on_plot_event(plot_data):
             "color": plot_data.get('color'),
             "linewidth": plot_data.get('linewidth'),
             "style": plot_data.get('style'),
+            "offset": int(plot_data.get('offset') or 0),
         }
 
     # Check if title exists and options are the same

@@ -162,6 +162,7 @@ App.data = {
       collections.ohlcvVolumePrefix.push((collections.ohlcvVolumePrefix[lastIndex] || 0) + cachedBar.volume);
       if (App.measure) App.measure.scheduleRender();
       if (App.chart?.bgcolorPrimitive) App.chart.bgcolorPrimitive.onOhlcvChanged();
+      if (App.chart?.plotVisuals?.onBarAdded(cachedBar)) this.refreshOffsetPlots();
       App.indicators?.update(cachedBar);
       return;
     } else {
@@ -268,6 +269,9 @@ App.data = {
       collections.plotSeriesMap.set(plot.title, { type: "bgcolor" });
       return;
     }
+    if (plot.offset && chart.plotVisuals) {
+      seriesData = seriesData.map(point => chart.plotVisuals.projectPoint(plot.title, point)).filter(Boolean);
+    }
     const { title, color, linewidth, style } = plot;
     const { options, isLineBreakStyle } = this.buildPlotSeriesOptions(color, linewidth, style);
     const hasHistoryGaps = plot.historyGaps?.length && options.lineVisible !== false;
@@ -314,6 +318,10 @@ App.data = {
       return;
     }
     if (chart.plotVisuals) linePoint = chart.plotVisuals.colorPoint(title, linePoint);
+    if (chart.plotVisuals?.offsets.has(title)) {
+      linePoint = chart.plotVisuals.projectPoint(title, linePoint);
+      if (!linePoint) return;
+    }
 
     if (controller.type !== "linebr") {
       controller.series.update(linePoint);
@@ -341,6 +349,30 @@ App.data = {
     controller.series.update(linePoint);
     controller.activeSeries.update(linePoint);
     controller.lastHadValue = true;
+  },
+  refreshOffsetPlots() {
+    const chart = App.chart, collections = App.collections, visuals = chart.plotVisuals;
+    for (const title of visuals.offsets.keys()) {
+      const controller = collections.plotSeriesMap.get(title);
+      if (!controller?.series) continue;
+      const points = [...visuals.lines.get(title)].map(([time, value]) => {
+        const point = this.toLinePoint(time, value);
+        return visuals.projectPoint(title, visuals.colorPoint(title, point));
+      }).filter(Boolean).sort((a, b) => a.time - b.time);
+      if (controller.type !== 'linebr') { controller.series.setData(points); continue; }
+      const shown = controller.connectNulls ? points.filter(point => this.hasLineValue(point)) : points;
+      for (const time of visuals.historyGaps) shown.push({ time });
+      shown.sort((a, b) => a.time - b.time);
+      controller.primitive.points = shown;
+      controller.primitive.requestUpdate?.();
+      controller.series.setData(shown.filter(point => this.hasLineValue(point)));
+      let start = shown.length;
+      while (start > 0 && this.hasLineValue(shown[start - 1])) start--;
+      controller.labelSeries.setData(shown.slice(start));
+      controller.lastHadValue = Boolean(this.hasLineValue(shown.at(-1)));
+      controller.activeSeries = controller.lastHadValue ? controller.labelSeries : null;
+      controller.labelSeries.applyOptions({ lastValueVisible: Boolean(controller.lastHadValue && chart.plotValueLabelsVisible) });
+    }
   },
   normalizePriceMarkerData(data) {
     // A line series requires one price per timestamp, even when several orders
@@ -494,7 +526,7 @@ App.data = {
     const collections = App.collections;
     const chart = App.chart;
     this.clearPlotData();
-    if (App.PlotVisuals && plots.some(plot => App.PlotVisuals.isVisual(plot.kind))) {
+    if (App.PlotVisuals && plots.some(plot => plot.offset || App.PlotVisuals.isVisual(plot.kind))) {
       chart.plotVisuals ||= new App.PlotVisuals(chart, collections);
       chart.plotVisuals.load(plots);
       chart.candleSeries.setData(collections.ohlcvData.map(bar => chart.plotVisuals.colorBar(bar)));
