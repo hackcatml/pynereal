@@ -84,6 +84,8 @@ def run(
         trade_path: Path | None = Option(None, "--trade", "-tp",
                                          help="Path to save the trade data",
                                          rich_help_panel="Out Path Options"),
+        magnifier_data: Path | None = Option(None, "--magnifier-data",
+                                             help="Lower-timeframe OHLCV file for use_bar_magnifier=True"),
         api_key: str | None = Option(None, "--api-key", "-a",
                                      help="PyneSys API key for compilation (overrides configuration file)",
                                      envvar="PYNESYS_API_KEY",
@@ -352,6 +354,21 @@ def run(
             # Mark as completed
             loading_progress.update(loading_task, completed=1)
 
+        if magnifier_data is not None or (runner.script.use_bar_magnifier and not runner.script.realtime_trade):
+            from pynecore.core.bar_magnifier import attach_file, fixed_seconds
+            if magnifier_data is None:
+                runner.destroy()
+                secho('Bar Magnifier requires --magnifier-data <lower-timeframe.ohlcv>', fg='red', err=True)
+                raise Exit(1)
+            if len(magnifier_data.parts) == 1:
+                magnifier_data = app_state.data_dir / magnifier_data
+            try:
+                attach_file(runner, magnifier_data, time_from_ts,
+                            preload_list[-1].timestamp + fixed_seconds(syminfo.period))
+            except Exception:
+                runner.destroy()
+                raise
+
         if not pyne_section.get("no_progress", False):
             # Now run with the main progress bar
             with Progress(
@@ -430,3 +447,10 @@ def run(
 
         else:
             runner.run()
+
+        if runner.magnifier is not None:
+            report = runner.magnifier.report()
+            console.print(f"Bar Magnifier: {report['magnified_bars']} magnified bars, "
+                          f"{report['fallback_bars']} fallback bars")
+            if not report['magnified_bars']:
+                raise Exit(1)
