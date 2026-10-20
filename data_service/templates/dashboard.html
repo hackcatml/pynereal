@@ -10,7 +10,7 @@
       document.documentElement.dataset.theme = localStorage.getItem("pyne.hub.theme") === "light" ? "light" : "dark";
     } catch { document.documentElement.dataset.theme = "dark"; }
   </script>
-  <link rel="stylesheet" href="/static/dashboard.css?v=203" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=204" />
   <link rel="stylesheet" href="/static/notifications.css?v=14" />
   <link rel="stylesheet" href="/static/telegram_status.css?v=2" />
   <link rel="stylesheet" href="/static/scripting_backtest.css?v=49" />
@@ -224,14 +224,59 @@
     <form id="add-form" class="add-form">
       <div class="field"><input name="provider" placeholder="provider" value="ccxt" required /></div>
       <div class="field">
-        <input name="exchange" placeholder="exchange (okx)" required />
+        <div class="script-select script-select-animated add-session-select" id="add-exchange-control">
+          <select name="exchange" id="add-exchange" class="script-native-select" tabindex="-1" aria-hidden="true" required>
+            <option value="" disabled selected>Exchange</option>
+            <option value="binance">Binance</option>
+            <option value="bitget">Bitget</option>
+            <option value="bybit">Bybit</option>
+            <option value="okx">OKX</option>
+            <option value="hyperliquid">Hyperliquid</option>
+          </select>
+          <button type="button" id="add-exchange-button" class="script-select-button" role="combobox"
+                  aria-label="Exchange" aria-haspopup="listbox" aria-expanded="false" aria-controls="add-exchange-options">
+            <span id="add-exchange-label" class="script-select-label">Exchange</span>
+            <span class="script-select-toggle-chevron" aria-hidden="true"></span>
+          </button>
+          <div id="add-exchange-options" class="script-select-options hidden" role="listbox" aria-label="Exchange"></div>
+        </div>
         <small class="field-error" id="exchange-error"></small>
       </div>
       <div class="field">
         <input name="symbol" placeholder="symbol (BTC/USDT:USDT)" required />
         <small class="field-error" id="symbol-error"></small>
       </div>
-      <div class="field"><input name="timeframe" placeholder="timeframe (1m)" required /></div>
+      <div class="field add-timeframe-field">
+        <div class="script-select script-select-animated add-session-select" id="add-timeframe-control">
+          <select name="timeframe" id="add-timeframe" class="script-native-select" tabindex="-1" aria-hidden="true" required>
+            <option value="" disabled selected>Timeframe</option>
+            <option value="custom">Custom</option>
+            <option value="1m">1m</option>
+            <option value="3m">3m</option>
+            <option value="5m">5m</option>
+            <option value="15m">15m</option>
+            <option value="30m">30m</option>
+            <option value="1h">1h</option>
+            <option value="2h">2h</option>
+            <option value="4h">4h</option>
+            <option value="6h">6h</option>
+            <option value="8h">8h</option>
+            <option value="12h">12h</option>
+            <option value="1d">1D</option>
+            <option value="1w">1W</option>
+            <option value="1M">1M</option>
+          </select>
+          <button type="button" id="add-timeframe-button" class="script-select-button" role="combobox"
+                  aria-label="Timeframe" aria-haspopup="listbox" aria-expanded="false" aria-controls="add-timeframe-options">
+            <span id="add-timeframe-label" class="script-select-label">Timeframe</span>
+            <span class="script-select-toggle-chevron" aria-hidden="true"></span>
+          </button>
+          <div id="add-timeframe-options" class="script-select-options hidden" role="listbox" aria-label="Timeframe"></div>
+        </div>
+        <input id="add-timeframe-custom" class="hidden" placeholder="e.g. 45m, 2h" aria-label="Custom timeframe"
+               autocomplete="off" autocapitalize="off" spellcheck="false" disabled />
+        <small class="field-error" id="timeframe-error"></small>
+      </div>
       <div class="field"><input name="history_since" placeholder="history_since (YYYY-MM-DD, optional)" /></div>
       <div class="field">
         <div class="script-row">
@@ -1922,6 +1967,6 @@
   <script src="/static/scripting.js?v=55"></script>
   <script src="/static/notifications.js?v=12"></script>
   <script src="/static/telegram_status.js?v=1"></script>
-  <script src="/static/dashboard.js?v=189"></script>
+  <script src="/static/dashboard.js?v=190"></script>
 </body>
 </html>

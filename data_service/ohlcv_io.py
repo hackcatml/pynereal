@@ -7,6 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from dateutil.relativedelta import relativedelta
+from pynecore.core.candle_timeframe import candle_timeframe
 from pynecore.core.exchange_policy import fetch_current_open_from_exchange
 from pynecore.core.ohlcv_file import OHLCVReader, OHLCVWriter, ohlcv_number
 from pynecore.types.ohlcv import OHLCV
@@ -16,38 +17,18 @@ from log_utils import log_with_time
 
 
 def convert_timeframe(timeframe: str, to_ms: bool = False) -> int | str:
-    """
-    timeframe을 분 단위 또는 밀리초로 변환
-
-    Args:
-        timeframe: 시간 단위 문자열 (예: "5m", "1h", "1d")
-        to_ms: True면 밀리초로, False면 분 단위 문자열로 반환
-    """
-    unit = timeframe[-1]
-    value = int(timeframe[:-1])
-
-    # 먼저 분 단위로 변환
-    if unit == "m":
-        minutes = value
-    elif unit == "h":
-        minutes = value * 60
-    else:  # "d"
-        minutes = value * 24 * 60
-
-    return minutes * 60 * 1000 if to_ms else str(minutes)
+    """Provider interval, or nominal milliseconds (not calendar arithmetic)."""
+    interval = candle_timeframe(timeframe)
+    if to_ms:
+        return interval.seconds * 1000
+    if interval.unit in ("m", "h"):
+        return str(interval.seconds // 60)
+    return f"{interval.count}{interval.unit.upper()}"
 
 
 def download_history(provider: str, exchange: str, symbol: str, timeframe: str, since: Optional[str]) -> bool:
     # pynecore download uses timeframe as minutes in numeric format
-    tf_modifier = timeframe[-1]
-    tf_value = int(timeframe[:-1])
-
-    if tf_modifier == "m":
-        data_timeframe = str(tf_value)
-    elif tf_modifier == "h":
-        data_timeframe = str(tf_value * 60)
-    else:
-        data_timeframe = timeframe
+    data_timeframe = convert_timeframe(timeframe)
 
     if since is None:
         today = datetime.today()
@@ -66,7 +47,7 @@ def download_history(provider: str, exchange: str, symbol: str, timeframe: str, 
             timeframe=data_timeframe,
             time_from=time_from,
             time_to=time_to,
-            chunk_size=None if exchange.lower() == "hyperliquid" else 100,
+            chunk_size=None if exchange.lower() == "hyperliquid" or candle_timeframe(timeframe).calendar else 100,
             list_symbols=False,
             show_info=False,
         )
@@ -267,6 +248,24 @@ def fetch_ohlcv_data(
     import ccxt
 
     client = make_ccxt_client(ccxt, exchange, market_type=market_type, symbol=symbol)
+    if exchange.lower() in ("bitget", "okx") and timeframe == "1M" and since is not None:
+        from pynecore.providers.ccxt import fetch_ohlcv_page
+        # Monthly windows need calendar pagination, also respecting Bitget's
+        # 90-day history limit. Intraday requests keep their existing path.
+        target = limit if limit is not None else 3
+        collected = {}
+        cursor = since
+        now_ms = client.milliseconds()
+        while len(collected) < target and cursor <= now_ms:
+            page = fetch_ohlcv_page(client, symbol=symbol, timeframe=timeframe, since=cursor,
+                                   limit=2)
+            page = [bar for bar in page if int(bar[0]) >= cursor]
+            if not page:
+                break
+            for bar in page:
+                collected[int(bar[0])] = bar
+            cursor = candle_timeframe(timeframe).shift_ms(max(int(bar[0]) for bar in page))
+        return [collected[key] for key in sorted(collected)][:target]
     return client.fetch_ohlcv(
         symbol=symbol,
         timeframe=timeframe,
@@ -317,7 +316,8 @@ def fix_last_open_if_needed(
                     exchange=exchange,
                     symbol=symbol,
                     timeframe=timeframe,
-                    since=(last_timestamp - interval) * 1000,
+                    since=(candle_timeframe(timeframe).shift(last_timestamp, -1)
+                           if timeframe and candle_timeframe(timeframe).calendar else last_timestamp - interval) * 1000,
                     limit=3,
                     market_type=market_type,
                 )
@@ -450,7 +450,8 @@ def fetch_and_update_ohlcv_data(
             exchange=exchange,
             symbol=symbol,
             timeframe=timeframe,
-            since=last_timestamp_sec * 1000 - interval * 1000,  # Convert to milliseconds
+            since=(candle_timeframe(timeframe).shift(last_timestamp_sec, -1)
+                   if candle_timeframe(timeframe).calendar else last_timestamp_sec - interval) * 1000,
             limit=None,
             market_type=market_type,
         )
@@ -509,7 +510,8 @@ def fetch_and_update_recent_ohlcv_data(
         last_bar.volume,
     ]
 
-    since_ms = (current_ts_sec - interval * bar_count) * 1000
+    since_ms = (candle_timeframe(timeframe).shift(current_ts_sec, -bar_count)
+                if candle_timeframe(timeframe).calendar else current_ts_sec - interval * bar_count) * 1000
 
     try:
         res = fetch_ohlcv_data(

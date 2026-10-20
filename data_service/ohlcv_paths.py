@@ -14,7 +14,7 @@ def _tf_key(timeframe: str) -> str:
     elif tf_modifier == "m":
         return str(tf_value)
     else:
-        return timeframe
+        return timeframe.upper()
 
 
 def make_ohlcv_paths(provider: str, exchange: str, symbol: str, timeframe: str) -> Tuple[Path, Path]:

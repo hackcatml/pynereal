@@ -21,7 +21,6 @@ try:
         default_webhook_url,
     )
     from ..manual_alerts import post_telegram_message, webhook_request_timeout
-    from ..prerun_scheduler import timeframe_seconds
 except ImportError:
     from config import (
         default_telegram_chat_id,
@@ -29,7 +28,6 @@ except ImportError:
         default_webhook_url,
     )
     from manual_alerts import post_telegram_message, webhook_request_timeout
-    from prerun_scheduler import timeframe_seconds
 
 
 _WEBHOOK_RETRY_DELAYS = (1.0, 2.0, 4.0)
@@ -512,10 +510,11 @@ class VerificationDeliveryService:
                 "These are strategy simulation records, not exchange fill confirmations.\n"
                 "No corrective, cancel, or reverse webhook was sent."
             )
-        duration_ms = timeframe_seconds(request.timeframe) * 1000
+        from pynecore.core.candle_timeframe import candle_timeframe
+        boundary_ms = candle_timeframe(request.timeframe).shift_ms(request.candle_timestamp_ms)
         delay_seconds = max(
             0.0,
-            (time.time() * 1000 - request.candle_timestamp_ms - duration_ms) / 1000,
+            (time.time() * 1000 - boundary_ms) / 1000,
         )
         order = (
             f"{str(signal.get('action') or '').upper()} "
