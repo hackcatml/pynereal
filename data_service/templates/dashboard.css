@@ -819,6 +819,15 @@ body {
   font-size: 13px;
 }
 #script-refresh { flex: 0 0 auto; }
+.add-form .add-session-select { min-width: 174px; flex: none; }
+.add-session-select .script-select-button,
+.add-session-select .script-select-option { touch-action: manipulation; }
+.add-session-select .script-select-button { font-size: 13px; }
+.add-session-select .script-select-options { overscroll-behavior: contain; }
+.add-session-select .script-select-option { font-size: 13px; }
+#add-timeframe-custom { width: 174px; margin-top: 8px; }
+#add-timeframe-custom.hidden { display: none; }
+.add-session-select .script-select-button[aria-invalid="true"] { border-color: var(--danger); }
 
 .btn {
   background: var(--ui-hover, #21262d);
@@ -7422,6 +7431,7 @@ tr:last-child td { border-bottom: none; }
   .add-form select,
   .add-form .script-select,
   .add-form .btn { width: 100%; min-width: 0; }
+  #add-timeframe-custom { width: 100%; }
   .script-row { flex-wrap: wrap; }
   .script-row .script-select { flex: 1 1 calc(100% - 50px); }
   .script-select-button { min-width: 0; }

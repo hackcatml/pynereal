@@ -12,6 +12,7 @@ from typing import Any, Iterable
 from ohlcv_cache import delete_bars, import_from_ohlcv
 from ohlcv_io import convert_timeframe, download_history_range_to_file
 from pynecore.core.ohlcv_file import OHLCVReader
+from pynecore.core.candle_timeframe import candle_timeframe
 
 
 _SQLITE_TIMEOUT_SECONDS = 30.0
@@ -50,13 +51,15 @@ def _values_differ(local_value: float, reference_value: float, *, volume: bool =
     )
 
 
-def _invalid_reasons(row: tuple[Any, ...], interval_seconds: int) -> list[str]:
+def _invalid_reasons(row: tuple[Any, ...], interval_seconds: int, timeframe: str = "") -> list[str]:
     timestamp, open_price, high, low, close, volume = row
     reasons: list[str] = []
     values = (open_price, high, low, close, volume)
     if not all(math.isfinite(float(value)) for value in values):
         return ["non-finite value"]
-    if int(timestamp) % interval_seconds != 0:
+    aligned = (candle_timeframe(timeframe).start(timestamp) == int(timestamp)
+               if timeframe else int(timestamp) % interval_seconds == 0)
+    if not aligned:
         reasons.append("timestamp is off timeframe grid")
     if min(float(open_price), float(high), float(low), float(close)) <= 0:
         reasons.append("price is not positive")
@@ -76,7 +79,7 @@ def _append_sample(samples: list[dict[str, Any]], sample: dict[str, Any]) -> Non
         samples.append(sample)
 
 
-def _timestamp_ranges(timestamps: Iterable[int], interval_seconds: int) -> list[dict[str, Any]]:
+def _timestamp_ranges(timestamps: Iterable[int], interval_seconds: int, timeframe: str = "") -> list[dict[str, Any]]:
     ordered = sorted({int(timestamp) for timestamp in timestamps})
     ranges: list[dict[str, Any]] = []
     if not ordered:
@@ -84,7 +87,9 @@ def _timestamp_ranges(timestamps: Iterable[int], interval_seconds: int) -> list[
     start = previous = ordered[0]
     count = 1
     for timestamp in ordered[1:]:
-        if timestamp == previous + interval_seconds:
+        expected = (candle_timeframe(timeframe).shift(previous)
+                    if timeframe else previous + interval_seconds)
+        if timestamp == expected:
             previous = timestamp
             count += 1
             continue
@@ -121,8 +126,9 @@ def inspect_data_integrity(
     _raise_if_cancelled(cancel_event)
     interval_seconds = int(convert_timeframe(timeframe, to_ms=True) / 1000)
     now = int(time.time())
-    current_bar_start = (now // interval_seconds) * interval_seconds
-    confirmed_end = current_bar_start - (2 * interval_seconds)
+    interval = candle_timeframe(timeframe)
+    current_bar_start = interval.start(now)
+    confirmed_end = interval.shift(current_bar_start, -2)
 
     with _connect(cache_path) as conn:
         bounds = conn.execute(
@@ -199,7 +205,7 @@ def inspect_data_integrity(
 
                 if local_row is not None and (reference_ts is None or local_ts < reference_ts):
                     local_count += 1
-                    reasons = _invalid_reasons(local_row, interval_seconds)
+                    reasons = _invalid_reasons(local_row, interval_seconds, timeframe)
                     if reasons:
                         counts["invalid"] += 1
                         repair_timestamps.add(local_ts)
@@ -241,7 +247,7 @@ def inspect_data_integrity(
 
                 assert local_row is not None and reference_bar is not None
                 local_count += 1
-                reasons = _invalid_reasons(local_row, interval_seconds)
+                reasons = _invalid_reasons(local_row, interval_seconds, timeframe)
                 if reasons:
                     counts["invalid"] += 1
                     repair_timestamps.add(local_ts)
@@ -301,7 +307,7 @@ def inspect_data_integrity(
             "reference_bars": reference_count,
             "repairable": issue_count > 0 and reference_count > 0,
             "issues": counts,
-            "missing_ranges": _timestamp_ranges(missing_timestamps, interval_seconds),
+            "missing_ranges": _timestamp_ranges(missing_timestamps, interval_seconds, timeframe),
             "samples": samples,
         }
 

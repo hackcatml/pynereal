@@ -311,7 +311,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         )
     if not candles:
         raise ValueError("no OHLCV candles found in the selected range")
-    with OHLCVWriter(data_snapshot, truncate=True, precision=data_precision) as writer:
+    with OHLCVWriter(data_snapshot, truncate=True, precision=data_precision, timeframe=syminfo.period) as writer:
         for candle in candles:
             writer.write(candle)
     shutil.copy2(source_metadata, metadata_snapshot)

@@ -6,6 +6,9 @@
   let scriptsLoading = false;
   let scriptOptions = [];
   let scriptActiveIndex = -1;
+  const addSessionSelects = {};
+  let addExchangesLoaded = false;
+  let addExchangesLoading = false;
   let draggedSessionId = null;
   let pendingSessionOrder = null;
   const priceFormatters = new Map();
@@ -7427,6 +7430,7 @@
   function openScriptDropdown() {
     const nodes = scriptSelectNodes();
     if (!nodes.control || !nodes.button || !nodes.options) return;
+    closeAddSessionSelects();
     const currentIndex = addSessionScriptValues().indexOf(selectedScriptValue());
     scriptActiveIndex = currentIndex >= 0 ? currentIndex : 0;
     renderScriptOptions();
@@ -7468,6 +7472,152 @@
     const button = el("script-select-button");
     if (button) button.focus();
     return true;
+  }
+
+  function closeAddSessionSelects(except = "") {
+    Object.entries(addSessionSelects).forEach(([id, menu]) => {
+      if (id !== except) menu.close();
+    });
+  }
+
+  function setupAddSessionSelect(id) {
+    const select = el(id), control = el(`${id}-control`), button = el(`${id}-button`);
+    const label = el(`${id}-label`), options = el(`${id}-options`);
+    let active = 0, search = "", searchAt = 0;
+    const choices = () => Array.from(select.options).filter(option => !option.disabled);
+    const isOpen = () => button.getAttribute("aria-expanded") === "true";
+    const render = () => {
+      options.innerHTML = choices().map((option, index) => (
+        `<button type="button" role="option" tabindex="-1" id="${id}-option-${index}" `
+        + `class="script-select-option${option.value === select.value ? " selected" : ""}${index === active ? " active" : ""}" `
+        + `data-value="${esc(option.value)}" aria-selected="${option.value === select.value}">`
+        + `${esc(option.textContent)}</button>`
+      )).join("");
+      if (isOpen() && choices().length) button.setAttribute("aria-activedescendant", `${id}-option-${active}`);
+    };
+    const sync = () => {
+      label.textContent = select.options[select.selectedIndex]?.textContent || select.options[0]?.textContent || "";
+      active = Math.max(0, choices().findIndex(option => option.value === select.value));
+      if (select.value) button.removeAttribute("aria-invalid");
+      if (isOpen()) render();
+    };
+    const close = () => {
+      if (isOpen()) setAnimatedScriptOptions(control, button, options, false);
+      button.removeAttribute("aria-activedescendant");
+    };
+    const open = () => {
+      closeScriptDropdown();
+      closeAddSessionSelects(id);
+      sync();
+      render();
+      setAnimatedScriptOptions(control, button, options, true);
+      button.setAttribute("aria-activedescendant", `${id}-option-${active}`);
+      search = "";
+    };
+    const choose = (value) => {
+      if (!choices().some(option => option.value === value)) return;
+      select.value = value;
+      close();
+      button.focus({ preventScroll: true });
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    const keydown = (event) => {
+      const key = event.key;
+      if (key === "Tab") { close(); return; }
+      if (key === "Escape") {
+        if (isOpen()) { event.preventDefault(); event.stopPropagation(); close(); button.focus(); }
+        return;
+      }
+      if (key === "Enter" || key === " ") {
+        event.preventDefault();
+        if (isOpen()) choose(choices()[active]?.value);
+        else open();
+        return;
+      }
+      if (["ArrowDown", "ArrowUp", "Home", "End"].includes(key)) {
+        event.preventDefault();
+        const wasOpen = isOpen();
+        if (!wasOpen) open();
+        if (key === "Home") active = 0;
+        else if (key === "End") active = choices().length - 1;
+        else if (wasOpen) active += key === "ArrowDown" ? 1 : -1;
+      } else if (key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        if (!isOpen()) open();
+        search = Date.now() - searchAt > 700 ? key : search + key;
+        searchAt = Date.now();
+        const found = choices().findIndex(option => option.textContent.toLowerCase().startsWith(search.toLowerCase()));
+        if (found < 0) return;
+        active = found;
+        event.preventDefault();
+      } else return;
+      active = Math.max(0, Math.min(active, choices().length - 1));
+      render();
+      options.querySelector(".active")?.scrollIntoView({ block: "nearest" });
+    };
+    button.addEventListener("click", () => { if (isOpen()) close(); else open(); });
+    button.addEventListener("keydown", keydown);
+    options.addEventListener("keydown", keydown);
+    options.addEventListener("click", event => {
+      const option = event.target.closest("[data-value]");
+      if (option) choose(option.dataset.value);
+    });
+    control.addEventListener("focusout", event => {
+      if (event.relatedTarget && !control.contains(event.relatedTarget)) close();
+    });
+    select.addEventListener("change", sync);
+    select.addEventListener("invalid", event => {
+      event.preventDefault();
+      button.setAttribute("aria-invalid", "true");
+      setFieldError(id === "add-exchange" ? "exchange-error" : "timeframe-error", "Select a value.");
+      button.focus();
+    });
+    document.addEventListener("click", event => { if (!control.contains(event.target)) close(); });
+    addSessionSelects[id] = { sync, close };
+    sync();
+  }
+
+  async function loadAddSessionExchanges() {
+    if (addExchangesLoaded || addExchangesLoading) return;
+    addExchangesLoading = true;
+    try {
+      const data = await api("/api/validate/exchanges");
+      if (!Array.isArray(data.exchanges) || !data.exchanges.length) return;
+      const select = el("add-exchange"), value = select.value;
+      const existing = new Set(Array.from(select.options, option => option.value));
+      data.exchanges.forEach(exchange => {
+        if (typeof exchange !== "string" || existing.has(exchange)) return;
+        select.add(new Option(exchange, exchange));
+        existing.add(exchange);
+      });
+      select.value = value;
+      addSessionSelects["add-exchange"].sync();
+      addExchangesLoaded = true;
+    } catch (_) {
+      // Keep the common exchange options available when discovery is offline.
+    } finally {
+      addExchangesLoading = false;
+    }
+  }
+
+  function syncAddSessionTimeframe(focus = false) {
+    const custom = el("add-timeframe").value === "custom";
+    const input = el("add-timeframe-custom");
+    input.classList.toggle("hidden", !custom);
+    input.disabled = !custom;
+    setFieldError("timeframe-error", "");
+    if (custom && focus) input.focus({ preventScroll: true });
+  }
+
+  function addSessionTimeframeValue() {
+    const custom = el("add-timeframe").value === "custom";
+    const input = custom ? el("add-timeframe-custom") : el("add-timeframe");
+    const value = input.value.trim();
+    if (!/^[1-9]\d*[smhdwDWM]$/.test(value)) {
+      setFieldError("timeframe-error", custom ? "Enter a timeframe, e.g. 45m or 2h." : "Select a timeframe.");
+      (custom ? input : el("add-timeframe-button")).focus();
+      return null;
+    }
+    return value.replace(/[DW]$/, unit => unit.toLowerCase());
   }
 
   function isScriptChangeOpen() {
@@ -9523,12 +9673,15 @@
   el("add-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     el("add-error").textContent = "";
+    const timeframe = addSessionTimeframeValue();
+    if (!timeframe) return;
     const fd = new FormData(e.target);
     const payload = {};
     fd.forEach((v, k) => {
       const val = String(v).trim();
       if (val !== "") payload[k] = val;
     });
+    payload.timeframe = timeframe;
     if (payload.symbol) payload.symbol = payload.symbol.toUpperCase();
     // Block Add when exchange/symbol are confirmed invalid.
     const exOk = await checkExchange();
@@ -9849,7 +10002,7 @@
         : unit === "h" ? 3600
           : unit === "d" ? 86400
             : unit === "w" ? 604800
-              : 30 * 86400;
+              : 28 * 86400;
     const duration = amount * multiplier;
     return duration > 300 ? { min: 15, max: duration - 300 } : null;
   }
@@ -9872,7 +10025,19 @@
     const start = Number(session.data_since_time);
     const interval = integrityTimeframeSeconds(session.timeframe);
     const now = Math.floor(Date.now() / 1000);
-    const end = interval ? Math.floor(now / interval) * interval - (2 * interval) : null;
+    let end = interval ? Math.floor(now / interval) * interval - (2 * interval) : null;
+    const calendar = /^(\d+)([wWM])$/.exec(session.timeframe || "");
+    if (calendar) {
+      const count = Number(calendar[1]);
+      if (calendar[2] === "M") {
+        const date = new Date(now * 1000);
+        const month = Math.floor((date.getUTCFullYear() * 12 + date.getUTCMonth()) / count) * count - 2 * count;
+        end = Date.UTC(Math.floor(month / 12), month % 12, 1) / 1000;
+      } else {
+        const width = count * 604800;
+        end = Math.floor((now - 345600) / width) * width + 345600 - 2 * width;
+      }
+    }
     const startText = Number.isFinite(start) && start > 0
       ? formatUtcDate(new Date(start * 1000))
       : "-";
@@ -10394,9 +10559,11 @@
     if (opening) {
       card.classList.remove("collapsed", "add-card-closing");
       loadScripts();  // refresh the script list each time it opens
+      loadAddSessionExchanges();
     } else {
       card.classList.add("add-card-closing");
       closeScriptDropdown();
+      closeAddSessionSelects();
     }
 
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -10442,6 +10609,8 @@
   const symbolInput = addForm.querySelector('[name="symbol"]');
   const providerInput = addForm.querySelector('[name="provider"]');
   let validatedMarketType = "";
+  let exchangeCheckId = 0;
+  let symbolCheckId = 0;
 
   function setFieldError(id, msg, kind) {
     const node = el(id);
@@ -10453,11 +10622,14 @@
   function clearFieldErrors() {
     setFieldError("exchange-error", "");
     setFieldError("symbol-error", "");
+    setFieldError("timeframe-error", "");
   }
 
   // Each returns false only when the value is *confirmed* invalid (blocks Add).
   // A network/verify failure shows a soft warning but does not block.
   async function checkExchange() {
+    const requestId = ++exchangeCheckId;
+    ++symbolCheckId;
     const provider = (providerInput.value || "ccxt").trim();
     const exchange = exchangeInput.value.trim();
     setFieldError("symbol-error", "");  // exchange change invalidates the prior symbol check
@@ -10467,16 +10639,19 @@
     try {
       const data = await api(`/api/validate/exchange?provider=${encodeURIComponent(provider)}` +
         `&exchange=${encodeURIComponent(exchange)}`);
+      if (requestId !== exchangeCheckId || exchange !== exchangeInput.value.trim() || provider !== providerInput.value.trim()) return false;
       if (data.skipped || data.exists) { setFieldError("exchange-error", ""); return true; }
       setFieldError("exchange-error", `exchange '${exchange}' not found`);
       return false;
     } catch (e) {
+      if (requestId !== exchangeCheckId) return false;
       setFieldError("exchange-error", "could not verify exchange", "warn");
       return true;
     }
   }
 
   async function checkSymbol() {
+    const requestId = ++symbolCheckId;
     validatedMarketType = "";
     symbolInput.value = symbolInput.value.toUpperCase();  // canonical-uppercase symbols
     const provider = (providerInput.value || "ccxt").trim();
@@ -10489,6 +10664,8 @@
       const q = `provider=${encodeURIComponent(provider)}&exchange=${encodeURIComponent(exchange)}` +
         `&symbol=${encodeURIComponent(symbol)}`;
       const data = await api(`/api/validate/symbol?${q}`);
+      if (requestId !== symbolCheckId || exchange !== exchangeInput.value.trim()
+          || symbol !== symbolInput.value.trim().toUpperCase() || provider !== providerInput.value.trim()) return false;
       if (data.skipped || data.exists === true) {
         validatedMarketType = data.market_type || "";
         setFieldError("symbol-error", "");
@@ -10501,13 +10678,41 @@
       setFieldError("symbol-error", data.error || "could not verify symbol", "warn");
       return true;
     } catch (e) {
+      if (requestId !== symbolCheckId) return false;
       setFieldError("symbol-error", "could not verify symbol", "warn");
       return true;
     }
   }
 
-  exchangeInput.addEventListener("blur", checkExchange);
+  setupAddSessionSelect("add-exchange");
+  setupAddSessionSelect("add-timeframe");
+  syncAddSessionTimeframe();
+  exchangeInput.addEventListener("change", async () => {
+    if (await checkExchange()) await checkSymbol();
+  });
+  providerInput.addEventListener("change", async () => {
+    if (await checkExchange()) await checkSymbol();
+  });
   symbolInput.addEventListener("blur", checkSymbol);
+  symbolInput.addEventListener("input", () => {
+    ++symbolCheckId;
+    validatedMarketType = "";
+    setFieldError("symbol-error", "");
+  });
+  el("add-timeframe").addEventListener("change", () => syncAddSessionTimeframe(true));
+  el("add-timeframe-custom").addEventListener("input", () => setFieldError("timeframe-error", ""));
+  addForm.addEventListener("reset", () => queueMicrotask(() => {
+    ++exchangeCheckId;
+    ++symbolCheckId;
+    validatedMarketType = "";
+    closeAddSessionSelects();
+    Object.entries(addSessionSelects).forEach(([id, menu]) => {
+      el(`${id}-button`).removeAttribute("aria-invalid");
+      menu.sync();
+    });
+    syncAddSessionTimeframe();
+    clearFieldErrors();
+  }));
 
   // ---- script list (populate the script_name <select>) --------------------
   async function loadScripts() {

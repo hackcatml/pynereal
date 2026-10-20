@@ -21,13 +21,29 @@ from .provider import Provider
 
 from pynecore.core.syminfo import SymInfo, SymInfoInterval, SymInfoSession
 from ..types.ohlcv import OHLCV
+from pynecore.core.candle_timeframe import candle_timeframe
 
 __all__ = ['CCXTProvider']
+
+
+def fetch_ohlcv_page(client, *, symbol, timeframe, since, limit):
+    """Bound reverse-paginated monthly requests by calendar dates, not 30 days."""
+    if timeframe == '1M' and client.id in ('bitget', 'okx'):
+        interval = candle_timeframe(timeframe)
+        start = interval.start_ms(since)
+        if start < since:
+            start = interval.shift_ms(start)
+        end = interval.shift_ms(start)
+        rows = client.fetch_ohlcv(symbol=symbol, timeframe=timeframe, since=start,
+                                  limit=2, params={'until': end}) or []
+        return [bar for bar in rows if start <= int(bar[0]) < end]
+    return client.fetch_ohlcv(symbol=symbol, timeframe=timeframe, since=since, limit=limit)
 
 known_limits = {
     'binance': 1000,
     'bitget': {  # Bitget has strict timeframe-dependent limits
         '1w': 12,     # Weekly: max 12 bars (84 days)
+        '1M': 2,     # Keep monthly history requests within Bitget's 90-day window.
         '1d': 300,    # Daily: max 300 bars
         '4h': 1000,   # 4-hour: max 1000 bars
         'default': 200  # Safe default for other timeframes (1h, 1m, etc.)
@@ -456,7 +472,8 @@ class CCXTProvider(Provider):
                     on_progress(tf)
 
                 # Fetch a part of data
-                res: list = self._client.fetch_ohlcv(
+                res: list = fetch_ohlcv_page(
+                    self._client,
                     symbol=self.symbol,
                     limit=limit,
                     timeframe=self.xchg_timeframe,
@@ -465,7 +482,11 @@ class CCXTProvider(Provider):
 
                 # If no data, skip to the next day, maybe the symbol was not yet traded that day
                 if not res:
-                    tf += timedelta(days=1)
+                    if self.xchg_timeframe.endswith('M'):
+                        interval = candle_timeframe(self.xchg_timeframe)
+                        tf = datetime.fromtimestamp(interval.shift(interval.start(tf.replace(tzinfo=UTC).timestamp())), UTC).replace(tzinfo=None)
+                    else:
+                        tf += timedelta(days=1)
 
                 # Process the data
                 for r in res:
@@ -488,7 +509,9 @@ class CCXTProvider(Provider):
                     # 그러므로 1분봉 캔들 받아올때 마지막 캔들에서는 tf 값을 증가시키지 않아야 함. 마지막 캔들 쓰고 tf 값 증가시키면,
                     # limit 이 200이라고 할때 since 는 201번째 캔들의 timestamp 가 되어서 202번째 캔들부터 200개를 받아오고,
                     # 201 번째 캔들은 gap 으로 기록됨
-                    if self._client.name == "Bitget" and self.xchg_timeframe == '1m' and len(res) == limit:
+                    if self.xchg_timeframe.endswith('M'):
+                        tf = datetime.fromtimestamp(candle_timeframe(self.xchg_timeframe).shift(t), UTC).replace(tzinfo=None)
+                    elif self._client.name == "Bitget" and self.xchg_timeframe == '1m' and len(res) == limit:
                         if t < int(res[-1][0] / 1000):
                             tf = dt + timedelta(minutes=1)
                     else:

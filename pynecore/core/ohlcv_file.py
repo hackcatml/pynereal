@@ -15,7 +15,9 @@ import json
 import math
 import mmap
 import os
+import re
 import struct
+import tomllib
 from collections import Counter
 from dataclasses import dataclass
 try:
@@ -30,6 +32,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from pynecore.types.ohlcv import OHLCV
+from .candle_timeframe import candle_timeframe
 from ..core.syminfo import SymInfoInterval
 
 RECORD_SIZE = 24  # Legacy headerless format; retained for external callers.
@@ -254,6 +257,25 @@ def _parse_timestamp(ts_str: str, timestamp_format: str | None = None, timezone=
     return int(dt.timestamp())
 
 
+def _monthly_timeframe(path: str, timeframe: str | None = None):
+    if timeframe is None:
+        stem = Path(path).stem
+        match = re.search(r"_(\d+M)(?:_\d{4})?$", stem)
+        if match:
+            timeframe = match[1]
+        elif stem.startswith('ccxt_') and re.search(r"_\d+(?:[smhdwDW])?(?:_\d{4})?$", stem):
+            return None
+        else:
+            try:
+                with Path(path).with_suffix('.toml').open('rb') as metadata:
+                    timeframe = tomllib.load(metadata).get('period')
+            except (OSError, ValueError):
+                return None
+    if timeframe and str(timeframe).endswith('M'):
+        return candle_timeframe('1M' if timeframe == 'M' else str(timeframe))
+    return None
+
+
 class OHLCVWriter:
     """
     Binary OHLCV data writer using direct file operations
@@ -263,12 +285,14 @@ class OHLCVWriter:
                  '_price_changes', '_price_decimals', '_last_close', '_analyzed_tick_size',
                  '_analyzed_price_scale', '_analyzed_min_move', '_confidence',
                  '_trading_hours', '_analyzed_opening_hours', '_timestamp_offsets', '_analyzed_timezone',
-                 '_truncate', '_format', '_requested_precision')
+                 '_truncate', '_format', '_requested_precision', '_calendar')
 
-    def __init__(self, path: str | Path, truncate: bool = False, *, precision: int | None = None):
+    def __init__(self, path: str | Path, truncate: bool = False, *, precision: int | None = None,
+                 timeframe: str | None = None):
         self._requested_precision = precision
         self._format = _file_format(64 if precision is None else precision)
         self.path: str = str(path)
+        self._calendar = _monthly_timeframe(self.path, timeframe)
         self._file: BufferedWriter | BufferedRandom | None = None
         self._truncate: bool = truncate
         self._size: int = 0
@@ -332,6 +356,8 @@ class OHLCVWriter:
         """
         Timestamp of the last record
         """
+        if self._calendar:
+            return self._read_timestamp(self._size - 1) if self._size else None
         if self._start_timestamp is None or self._interval is None:
             return None
         return self._start_timestamp + self._interval * (self._size - 1)
@@ -442,6 +468,8 @@ class OHLCVWriter:
             self._interval = second_timestamp - first_timestamp
             assert self._interval is not None
             self._last_timestamp = first_timestamp + self._interval * (self._size - 1)
+            if self._calendar:
+                self._last_timestamp = self._read_timestamp(self._size - 1)
 
         # Position at end for appending
         self._file.seek(0, os.SEEK_END)
@@ -465,15 +493,34 @@ class OHLCVWriter:
         if self._file is None:
             raise IOError("File not opened!")
 
+        if self._calendar and self._size and not overwrite and candle.timestamp == self._last_timestamp:
+            return
         if self._size == 0:
             self._start_timestamp = candle.timestamp
         elif self._size == 1 and self._current_pos != 0:
             # First interval detection
             assert self._start_timestamp is not None
-            self._interval = candle.timestamp - self._start_timestamp
+            self._interval = (self._calendar.shift(self._start_timestamp) - self._start_timestamp
+                              if self._calendar else candle.timestamp - self._start_timestamp)
             if self._interval <= 0:
                 raise ValueError(f"Invalid interval: {self._interval}")
-        elif self._size >= 2:  # Changed from elif self._size == 2: to properly handle all cases
+        if self._calendar and self._size and not overwrite:
+            if candle.timestamp == self._last_timestamp:
+                return
+            if candle.timestamp < self._last_timestamp:
+                raise ValueError("Timestamps must be in chronological order")
+            expected = self._calendar.shift(self._last_timestamp)
+            if expected < candle.timestamp:
+                self._file.seek(self._format.offset + (self._current_pos - 1) * self._format.record.size)
+                prev_close = self._format.record.unpack(self._file.read(self._format.record.size))[4]
+                while expected < candle.timestamp:
+                    self._file.seek(self._format.offset + self._current_pos * self._format.record.size)
+                    self._file.write(self._format.record.pack(
+                        expected, prev_close, prev_close, prev_close, prev_close, -1.0))
+                    self._current_pos += 1
+                    self._size = max(self._size, self._current_pos)
+                    expected = self._calendar.shift(expected)
+        elif not self._calendar and self._size >= 2:
             # Overwrite 모드가 아니고, write 하려는 캔들의 timestamp 가 이미 있는 경우에는 write 하지 않고 return
             if self._last_timestamp is not None and candle.timestamp == self._last_timestamp and not overwrite:
                 return
@@ -545,6 +592,18 @@ class OHLCVWriter:
         Move write position to specific timestamp.
         Uses interval between bars to calculate position.
         """
+        if self._calendar:
+            if self._size and timestamp < self._start_timestamp:
+                raise ValueError("Timestamp before start of data")
+            low, high = 0, self._size
+            while low < high:
+                mid = (low + high) // 2
+                if self._read_timestamp(mid) < timestamp:
+                    low = mid + 1
+                else:
+                    high = mid
+            self.seek(low)
+            return
         if self._size == 1 and timestamp == self._start_timestamp:
             self.seek(0)
             return
@@ -566,6 +625,8 @@ class OHLCVWriter:
         assert self._file is not None
 
         self._current_pos = position
+        if self._calendar:
+            self._last_timestamp = self._read_timestamp(position - 1) if 0 < position <= self._size else None
         self._file.seek(self._format.offset + position * self._format.record.size)
 
     def truncate(self) -> None:
@@ -586,12 +647,22 @@ class OHLCVWriter:
         # "Timestamps must be in chronological order" 에러 방지
         if self._interval is not None:
             self._last_timestamp = self._start_timestamp + self._interval * (self._size - 1)
+        if self._calendar:
+            self._last_timestamp = self._read_timestamp(self._size - 1) if self._size else None
 
         # Update interval if we deleted too much
         if self._size < 2:
             self._interval = None
             if self._size == 0:
                 self._start_timestamp = None
+
+    def _read_timestamp(self, position: int) -> int:
+        offset = self._file.tell()
+        try:
+            self._file.seek(self._format.offset + position * self._format.record.size)
+            return self._format.timestamp.unpack(self._file.read(4))[0]
+        finally:
+            self._file.seek(offset)
 
     def close(self):
         """
@@ -1472,10 +1543,11 @@ class OHLCVReader:
     Very fast OHLCV data reader using memory mapping.
     """
 
-    __slots__ = ('path', '_file', '_mmap', '_size', '_start_timestamp', '_interval', '_format')
+    __slots__ = ('path', '_file', '_mmap', '_size', '_start_timestamp', '_interval', '_format', '_calendar')
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, timeframe: str | None = None):
         self.path = str(path)
+        self._calendar = _monthly_timeframe(self.path, timeframe)
         self._format = _FORMATS[64]
         self._file = None
         self._mmap = None
@@ -1640,7 +1712,7 @@ class OHLCVReader:
                                  exchanges whose TradingView chart hides zero-volume bars.
         :raises ValueError: If start_timestamp is after the last bar
         """
-        if not self._size or not self._interval:
+        if not self._size or (not self._interval and not self._calendar):
             return
 
         # Calculate start and end positions
@@ -1677,6 +1749,21 @@ class OHLCVReader:
         :param end_timestamp: End timestamp
         :return: Tuple of start and end positions
         """
+        if self._calendar:
+            def bound(timestamp, upper=False):
+                low, high = 0, self._size
+                while low < high:
+                    mid = (low + high) // 2
+                    ts = self._format.timestamp.unpack_from(
+                        self._mmap, self._format.offset + mid * self._format.record.size)[0]
+                    if ts < timestamp or (upper and ts == timestamp):
+                        low = mid + 1
+                    else:
+                        high = mid
+                return low
+            start = 0 if start_timestamp is None else bound(start_timestamp)
+            end = self._size if end_timestamp is None else bound(end_timestamp, True)
+            return start, max(start, end)
         if not self._size or not self._interval:
             return 0, 0
         assert self._start_timestamp is not None
@@ -1714,7 +1801,7 @@ class OHLCVReader:
         :param end_timestamp: End timestamp
         :return: Number of records
         """
-        if not self._size or not self._interval:
+        if not self._size or (not self._interval and not self._calendar):
             return 0
 
         start_pos, end_pos = self.get_positions(start_timestamp, end_timestamp)

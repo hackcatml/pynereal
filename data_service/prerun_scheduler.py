@@ -54,6 +54,9 @@ def scheduling_window(timeframe: str) -> tuple[int, int, int] | None:
         return FIVE_MINUTE_SLOTS[0], FIVE_MINUTE_SLOTS[-1], STANDARD_SLOT_INTERVAL_SECONDS
 
     duration = timeframe_seconds(value)
+    if value.endswith("M"):
+        # Warm-up must fit even in February; this is a budget, not a boundary.
+        duration = int(value[:-1]) * 28 * 86400
     if duration > 5 * 60:
         return 15, duration - 5 * 60, STANDARD_SLOT_INTERVAL_SECONDS
     return None

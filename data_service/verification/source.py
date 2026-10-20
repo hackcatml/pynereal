@@ -14,7 +14,7 @@ from pynecore.core.ohlcv_file import ohlcv_number
 from exchange_clock import release_exchange_clock, retain_exchange_clock
 from market_data_diagnostics import ohlcv_bar_data
 from ohlcv_io import make_ccxt_pro_client
-from prerun_scheduler import timeframe_seconds
+from pynecore.core.candle_timeframe import candle_timeframe
 
 
 _MAX_PENDING_CANDLES = 128
@@ -107,7 +107,7 @@ class FinalizedCandleProbe:
         self.on_event = on_event
         self.on_authoritative = on_authoritative
         self.data_precision = data_precision
-        self._timeframe_ms = timeframe_seconds(timeframe) * 1000
+        self._interval = candle_timeframe(timeframe)
         self._finalized_bars: dict[int, dict[str, int | float]] = {}
         self._published_timestamps: set[int] = set()
         self._inferred_latest_bar: dict[str, int | float] | None = None
@@ -225,7 +225,7 @@ class FinalizedCandleProbe:
     ) -> dict[str, int | float]:
         close = float(finalized["close"])
         return {
-            "timestamp_ms": int(finalized["timestamp_ms"]) + self._timeframe_ms,
+            "timestamp_ms": self._interval.shift_ms(int(finalized["timestamp_ms"])),
             "open": close,
             "high": close,
             "low": close,
@@ -278,9 +278,7 @@ class FinalizedCandleProbe:
                         await exchange.load_markets()
                     if target_timestamp_ms is None:
                         now_ms = int(await clock.now_ms())
-                        target_timestamp_ms = (
-                            now_ms // self._timeframe_ms
-                        ) * self._timeframe_ms
+                        target_timestamp_ms = self._interval.start_ms(now_ms)
                     self._emit_event({
                         "event": self._rest_event_name("probe_started"),
                         "source": source_name,
@@ -298,7 +296,7 @@ class FinalizedCandleProbe:
                                 "candle_timestamp_ms": target_timestamp_ms,
                                 "reason": "primary candle was not calculated",
                             })
-                            target_timestamp_ms += self._timeframe_ms
+                            target_timestamp_ms = self._interval.shift_ms(target_timestamp_ms)
                             continue
                         await self._stabilize_rest_candle(
                             exchange,
@@ -307,7 +305,7 @@ class FinalizedCandleProbe:
                             target_timestamp_ms,
                             primary_volume,
                         )
-                        target_timestamp_ms += self._timeframe_ms
+                        target_timestamp_ms = self._interval.shift_ms(target_timestamp_ms)
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
@@ -331,7 +329,7 @@ class FinalizedCandleProbe:
         target_timestamp_ms: int,
         primary_volume: float,
     ) -> None:
-        boundary_timestamp_ms = target_timestamp_ms + self._timeframe_ms
+        boundary_timestamp_ms = self._interval.shift_ms(target_timestamp_ms)
         source_name = self._rest_source_name
         previous_bar: dict[str, int | float] | None = None
         previous_sample_completed_ms: int | None = None
@@ -546,6 +544,11 @@ class FinalizedCandleProbe:
                 market_type=self.market_type,
                 symbol=self.symbol,
             )
+            if self.exchange_name == "okx" and self._interval.unit in ("d", "w", "M"):
+                # This client is WS-only. CCXT REST selects UTC candles, but
+                # its WS map defaults to HK candles unless explicitly changed.
+                exchange.timeframes = dict(exchange.timeframes)
+                exchange.timeframes[self.timeframe] = f"{self._interval.count}{self._interval.unit.upper()}utc"
             self._connection_attempt += 1
             attempt = self._connection_attempt
             self._awaiting_first_message = True
@@ -636,12 +639,12 @@ class FinalizedCandleProbe:
     def _begin_disconnect_trace(self) -> None:
         now_ms = int(time.time() * 1000)
         now_monotonic_ns = time.monotonic_ns()
-        candle_timestamp_ms = (now_ms // self._timeframe_ms) * self._timeframe_ms
+        candle_timestamp_ms = self._interval.start_ms(now_ms)
         self._disconnect_trace_sequence += 1
         trace = _ReconnectTrace(
             trace_id=self._disconnect_trace_sequence,
             candle_timestamp_ms=candle_timestamp_ms,
-            boundary_timestamp_ms=candle_timestamp_ms + self._timeframe_ms,
+            boundary_timestamp_ms=self._interval.shift_ms(candle_timestamp_ms),
             last_disconnect_monotonic_ns=now_monotonic_ns,
         )
         self._pending_reconnect_trace = trace
