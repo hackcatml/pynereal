@@ -2183,7 +2183,7 @@ def build_validation_router() -> APIRouter:
 
     @r.get("/api/validate/exchanges")
     async def list_exchanges() -> JSONResponse:
-        return JSONResponse({"exchanges": sorted(ccxtpro.exchanges)})
+        return JSONResponse({"exchanges": ["binance", "bitget", "bybit", "hyperliquid", "okx"]})
 
     @r.get("/api/validate/exchange")
     async def validate_exchange(provider: str = "ccxt", exchange: str = "") -> JSONResponse:
