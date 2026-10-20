@@ -117,6 +117,17 @@ def _round_adapter(number, precision=NA(int)):
     return _native_scalar(number, precision)
 
 
+class _LegacyCallSlot:
+    """Keep transformed calls inside the fallback's private state tree."""
+
+    def __init__(self, isolate, slot):
+        self.isolate = isolate
+        self.call_id = slot.call_id
+
+    def resolve(self, function, parent, closure_count=-1, counter=1):
+        return self.isolate(function, self.call_id, parent, closure_count, counter)
+
+
 class _LegacyIndicator:
     """Cold-path handoff to isolated copies of the actual transformed Python functions."""
 
@@ -181,6 +192,8 @@ class _LegacyIndicator:
             namespace[variable] = SeriesImpl(namespace[variable]._max_bars_back)
         namespace.update({key: value for key, value in self.originals.items() if key != 'sum'})
         namespace['isolate_function'] = self._isolate
+        for variable in namespace.get('__function_call_slots__', {}).get(original.__qualname__, ()):
+            namespace[variable] = _LegacyCallSlot(self._isolate, namespace[variable])
         namespace['__scope_id__'] = path
         function = FunctionType(original.__code__, namespace, original.__name__, original.__defaults__, original.__closure__)
         self.functions[path] = function
@@ -198,6 +211,10 @@ class _LegacyIndicator:
     def _child(self, parent, name, number=0):
         candidates = [value for value in parent.__code__.co_consts if isinstance(value, str)
                       and len(value.split('\u00b7')) == 3 and value.split('\u00b7')[1].split('.')[-1] == name]
+        for variable in parent.__globals__.get('__function_call_slots__', {}).get(parent.__qualname__, ()):
+            call_id = parent.__globals__[variable].call_id
+            if len(call_id.split('\u00b7')) == 3 and call_id.split('\u00b7')[1].split('.')[-1] == name:
+                candidates.append(call_id)
         call_id = sorted(candidates, key=lambda value: int(value.split('\u00b7')[-1]))[number]
         return self._get(name, (parent.__globals__['__scope_id__'], call_id, 1))
 

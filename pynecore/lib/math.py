@@ -347,7 +347,9 @@ def sum(source: Series[TFI | NA[TFI]], length: int) -> float | NA[float] | Serie
         if isna:
             return __persistent_summ_summ__
         # Kahan summation for removing old value
-        old_value = safe_convert.safe_float(__series_summ_source__[length])
+        old_value = __series_summ_source__[length]
+        if type(old_value) is not float:
+            old_value = safe_convert.safe_float(old_value)
         corrected_old = -old_value - __persistent_summ_compensation__
         new_sum = __persistent_summ_summ__ + corrected_old
         __persistent_summ_compensation__ = (new_sum - __persistent_summ_summ__) - corrected_old

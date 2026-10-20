@@ -135,6 +135,31 @@ class FunctionIsolationTransformer(ast.NodeTransformer):
         # Track counter variables that need to be initialized per function
         self.function_counters: dict[str, set[str]] = {}
         self.security_expression_counters: list[set[str]] = []
+        self.function_slots: dict[str, dict[str, str]] = {}
+        self._repeat_depth = 0
+        self._qualname = []
+        self._slot_owner = None
+
+    def _can_cache_call(self, node: ast.Call, closure_count: int) -> bool:
+        if self.security_expression_counters:
+            return False
+        path = self._get_func_path(node.func)
+        return bool(path and path not in ('request.security', 'lib.request.security'))
+
+    def _visit_repeated(self, node: ast.AST) -> ast.AST:
+        self._repeat_depth += 1
+        try:
+            return self.generic_visit(node)
+        finally:
+            self._repeat_depth -= 1
+
+    visit_For = _visit_repeated
+    visit_AsyncFor = _visit_repeated
+    visit_While = _visit_repeated
+    visit_ListComp = _visit_repeated
+    visit_SetComp = _visit_repeated
+    visit_DictComp = _visit_repeated
+    visit_GeneratorExp = _visit_repeated
 
     def _is_dataclass_constructor(self, func: ast.Name | ast.Attribute) -> bool:
         """
@@ -269,7 +294,8 @@ class FunctionIsolationTransformer(ast.NodeTransformer):
         )
         import_stmt = ast.ImportFrom(
             module='pynecore.core.function_isolation',
-            names=[ast.alias(name='isolate_function', asname=None)],
+            names=[ast.alias(name='isolate_function', asname=None),
+                   ast.alias(name='FunctionCallSlot', asname=None)],
             level=0
         )
 
@@ -290,6 +316,21 @@ class FunctionIsolationTransformer(ast.NodeTransformer):
 
         node.body.insert(insert_pos, scope_id_assign)
         node.body.insert(insert_pos, import_stmt)
+        slot_nodes = []
+        for slots in self.function_slots.values():
+            for name, call_id in slots.items():
+                slot_nodes.append(ast.Assign(
+                    targets=[ast.Name(id=name, ctx=ast.Store())],
+                    value=ast.Call(func=ast.Name(id='FunctionCallSlot', ctx=ast.Load()),
+                                   args=[ast.Constant(value=call_id)], keywords=[])))
+        if slot_nodes:
+            slot_nodes.append(ast.Assign(
+                targets=[ast.Name(id='__function_call_slots__', ctx=ast.Store())],
+                value=ast.Dict(
+                    keys=[ast.Constant(value=key) for key in self.function_slots],
+                    values=[ast.Tuple(elts=[ast.Constant(value=name) for name in slots], ctx=ast.Load())
+                            for slots in self.function_slots.values()])))
+            node.body[insert_pos + 2:insert_pos + 2] = slot_nodes
 
         return node
 
@@ -339,6 +380,11 @@ class FunctionIsolationTransformer(ast.NodeTransformer):
         """Handle function scope and visit decorators with context"""
         # Store old state
         old_function = self.current_function
+        old_repeat_depth = self._repeat_depth
+        self._repeat_depth = 0
+        old_slot_owner = self._slot_owner
+        self._qualname.append(node.name)
+        self._slot_owner = '.'.join(self._qualname)
 
         # Reset counter for each function to ensure synchronization with collector
         self._call_id_counter = 0
@@ -420,8 +466,18 @@ class FunctionIsolationTransformer(ast.NodeTransformer):
         if self.parent_functions:
             self.parent_functions.pop()
         self.current_function = old_function
+        self._repeat_depth = old_repeat_depth
+        self._qualname.pop()
+        self._slot_owner = old_slot_owner
 
         return node
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> ast.ClassDef:
+        self._qualname.append(node.name)
+        try:
+            return self.generic_visit(node)
+        finally:
+            self._qualname.pop()
 
     def visit_Call(self, node: ast.Call) -> ast.Call:
         """Transform function calls to use isolate_function wrapper"""
@@ -453,6 +509,20 @@ class FunctionIsolationTransformer(ast.NodeTransformer):
 
         # Check if this call has closure arguments (marked by ClosureArgumentsTransformer)
         closure_vars_count = getattr(node, '_closure_vars_count', -1)
+        slot_name = None
+        if self._can_cache_call(node, closure_vars_count):
+            slot_name = f'__call_slot_{sum(map(len, self.function_slots.values()))}__'
+            self.function_slots.setdefault(self._slot_owner, {})[slot_name] = call_id
+        if slot_name is not None and not self._repeat_depth:
+            wrapped = ast.Call(
+                func=ast.Call(
+                    func=ast.Attribute(value=ast.Name(id=slot_name, ctx=ast.Load()),
+                                       attr='resolve', ctx=ast.Load()),
+                    args=[node.func, ast.Name(id='__scope_id__', ctx=ast.Load()),
+                          ast.Constant(value=closure_vars_count)], keywords=[]),
+                args=node.args, keywords=node.keywords)
+            setattr(wrapped, '_call_processed', True)
+            return wrapped
 
         # Use the exact same call_id as the variable name (it's already a valid Python identifier)
         counter_var_name = f"__call_counter·{call_id}__"
@@ -492,10 +562,21 @@ class FunctionIsolationTransformer(ast.NodeTransformer):
             args=node.args,
             keywords=node.keywords
         )
+        if slot_name is not None:
+            wrapped.func.func = ast.Attribute(value=ast.Name(id=slot_name, ctx=ast.Load()),
+                                              attr='resolve', ctx=ast.Load())
+            del wrapped.func.args[1]
         setattr(wrapped, '_call_processed', True)
         return wrapped
 
     def visit_Lambda(self, node: ast.Lambda) -> ast.AST:
+        self._repeat_depth += 1
+        try:
+            return self._visit_lambda_body(node)
+        finally:
+            self._repeat_depth -= 1
+
+    def _visit_lambda_body(self, node: ast.Lambda) -> ast.AST:
         if not getattr(node, "_security_expression", False):
             return self.generic_visit(node)
         counters: set[str] = set()

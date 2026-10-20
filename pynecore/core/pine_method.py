@@ -8,9 +8,11 @@ from ..types import table as table_types
 from ..types import linefill as linefill_types
 from ..types import polyline as polyline_types
 
-from .function_isolation import isolate_function
+from .function_isolation import FunctionCallSlot
 
 __scope_id__ = ''
+_method_slot = FunctionCallSlot('__method_call__', 0)
+__function_call_slots__ = {'method_call': ('_method_slot',)}
 
 
 def method(func: Callable) -> Callable:
@@ -106,7 +108,7 @@ def method_call(method: str | Callable, var: Any, *args, _closure_vars_count: in
             pre_args = ()
 
         # If not in kwargs, check if the method has closure arguments information on the function itself
-        return (isolate_function(method, '__method_call__', __scope_id__, _closure_vars_count)
+        return (_method_slot.resolve(method, __scope_id__, _closure_vars_count, 0)
                 (*pre_args, var, *args, **kwargs))
 
     return None

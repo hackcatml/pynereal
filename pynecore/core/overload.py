@@ -3,9 +3,9 @@ from typing import (TypeVar, Callable, get_type_hints, overload as typing_overlo
                     Any, Type, Union, get_args, get_origin, cast)
 from inspect import signature
 from collections import defaultdict
-from types import FunctionType
+from types import FunctionType, UnionType
 
-from .function_isolation import isolate_function
+from .function_isolation import FunctionCallSlot
 from ..types.na import NA
 
 __all__ = ['overload']
@@ -13,6 +13,9 @@ __all__ = ['overload']
 T = TypeVar('T')
 
 __scope_id__ = ""
+_implementation_slot = FunctionCallSlot('__overloaded__', 0)
+__function_call_slots__ = {'overload.dispatcher': ('_implementation_slot',)}
+_BASIC_TYPES = (int, float, bool, str, bytes, type(None))
 
 
 class Implementation:
@@ -36,6 +39,14 @@ class Implementation:
 _registry: dict[str, list[Implementation]] = defaultdict(list)
 _implementations: dict[str, Implementation] = {}  # Store implementations separately
 _dispatchers: dict[str, Callable] = {}  # Store dispatchers separately
+
+
+def _cacheable_annotation(annotation):
+    if any(annotation is basic for basic in _BASIC_TYPES):
+        return True
+    if get_origin(annotation) in (Union, UnionType):
+        return all(_cacheable_annotation(arg) for arg in get_args(annotation))
+    return False
 
 
 def _check_type(value: Any, expected_type: Type) -> bool:
@@ -124,26 +135,51 @@ def overload(func: Callable[..., T]) -> Callable[..., T]:
     _implementations[qualname_with_line] = impl
 
     if qualname not in _dispatchers:
+        positional_cache = {}
+        registry_size = -1
+        cacheable = False
+
         # noinspection PyShadowingNames
         def dispatcher(*args: Any, **kwargs: Any) -> Any:
+            nonlocal registry_size, cacheable
+            implementations = _registry[qualname]
             # Quick path: try direct positional args match first
             # (trailing parameters with defaults may be omitted)
             if not kwargs:
-                for impl in _registry[qualname]:
+                if registry_size != len(implementations):
+                    positional_cache.clear()
+                    registry_size = len(implementations)
+                    cacheable = all(_cacheable_annotation(type_)
+                                    for item in implementations for _, type_ in item.param_types)
+                # NA and custom instance checks may depend on values, not just types.
+                key = tuple(map(type, args)) if cacheable else None
+                if key is not None and any(type_ is not float and type_ is not int and type_ is not bool
+                                           and type_ is not str and type_ is not bytes and type_ is not type(None)
+                                           for type_ in key):
+                    key = None
+                if key is not None:
+                    impl = positional_cache.get(key)
+                    if impl is not None:
+                        return _implementation_slot.resolve(impl.func, __scope_id__, -1, 0)(*args)
+                for impl in implementations:
                     if impl.min_args <= len(args) <= len(impl.param_types):
                         if all(_check_type(arg, type_)
                                for arg, (_, type_) in zip(args, impl.param_types)):
-                            return isolate_function(impl.func, '__overloaded__', __scope_id__)(*args)
+                            if key is not None:
+                                if len(positional_cache) >= 64:
+                                    positional_cache.clear()
+                                positional_cache[key] = impl
+                            return _implementation_slot.resolve(impl.func, __scope_id__, -1, 0)(*args)
 
             # Slower path: handle mixed args/kwargs
-            for impl in _registry[qualname]:
+            for impl in implementations:
                 try:
                     bound = impl.sig.bind(*args, **kwargs)
                     bound.apply_defaults()
 
                     if all(_check_type(value, impl.type_hints.get(name, Any))
                            for name, value in bound.arguments.items()):
-                        return isolate_function(impl.func, '__overloaded__', __scope_id__)(*args, **kwargs)
+                        return _implementation_slot.resolve(impl.func, __scope_id__, -1, 0)(*args, **kwargs)
                 except TypeError:
                     continue
 

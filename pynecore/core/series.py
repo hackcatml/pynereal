@@ -134,10 +134,10 @@ class SeriesImpl(Generic[T]):
         :return: The same value that was added (for chaining or inline usage).
         """
         # Optimize attribute lookup by using local variable
-        lib = SeriesImpl._lib
+        bar_index = SeriesImpl._lib.bar_index
 
         # Set data instead of adding a new one if the bar index is the same
-        if self._last_bar_index == lib.bar_index:
+        if self._last_bar_index == bar_index:
             return self.set(value)
 
         if self._size < self._capacity:
@@ -156,7 +156,7 @@ class SeriesImpl(Generic[T]):
             self._buffer[pos] = value
 
         # Store the last bar index to prevent adding more than one value per bar
-        self._last_bar_index = lib.bar_index
+        self._last_bar_index = bar_index
 
         return value
 
@@ -185,7 +185,7 @@ class SeriesImpl(Generic[T]):
         :raises IndexError: If index is out of range or negative
         :raises TypeError: If key is not int or slice
         """
-        if isinstance(key, float):
+        if type(key) is not int and isinstance(key, float):
             key = int(key)
 
         if isinstance(key, int):
