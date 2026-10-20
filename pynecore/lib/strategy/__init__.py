@@ -1556,17 +1556,32 @@ class Position:
                 if self._margin.check(self, end, can_defer=phase == 1, fill_mark=mark):
                     break
 
-    def process_orders(self):
+    def process_orders_magnified(self, sub_bars) -> None:
+        """Replay lower candles without advancing script time or recalculating signals."""
+        closed = []
+        drawdown = drawdown_percent = 0.0
+        for candle in sub_bars:
+            self.process_orders(candle)
+            closed.extend(self.new_closed_trades)
+            drawdown = max(drawdown, self.current_drawdown)
+            drawdown_percent = max(drawdown_percent, self.current_drawdown_percent)
+        # The normal runner consumes this list once per chart candle, not per sub-bar.
+        self.new_closed_trades[:] = closed
+        self.current_drawdown = drawdown
+        self.current_drawdown_percent = drawdown_percent
+
+    def process_orders(self, candle=None):
         """ Process orders """
         if lib._script.process_orders_on_close:
             self._close_tick_orders.clear()
         # Match order-level decimal prices for exact stop/limit touches. Keep
         # _tick_snap for fills so their existing tick-rounding behavior is unchanged.
         mintick, minmove, pricescale = syminfo.mintick, syminfo.minmove, syminfo.pricescale
-        self.o = floor(lib.open / mintick + 0.5) * minmove / pricescale
-        self.h = floor(lib.high / mintick + 0.5) * minmove / pricescale
-        self.l = floor(lib.low / mintick + 0.5) * minmove / pricescale
-        self.c = floor(lib.close / mintick + 0.5) * minmove / pricescale
+        source = lib if candle is None else candle
+        self.o = floor(source.open / mintick + 0.5) * minmove / pricescale
+        self.h = floor(source.high / mintick + 0.5) * minmove / pricescale
+        self.l = floor(source.low / mintick + 0.5) * minmove / pricescale
+        self.c = floor(source.close / mintick + 0.5) * minmove / pricescale
         self._entry_fill_phases.clear()
         self._fill_phase = 0
 
@@ -1685,7 +1700,7 @@ class Position:
             self._margin.check(self, self.o)
 
         # Process orders: open → high → low → close
-        if any(order.trail_offset is not None and
+        if candle is not None or any(order.trail_offset is not None and
                (order.trail_price is not None or order.trail_points_ticks is not None)
                for order in self.exit_orders.values()):
             self._process_trailing_path(ohlc)

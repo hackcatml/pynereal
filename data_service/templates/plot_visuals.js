@@ -16,6 +16,7 @@ App.PlotVisuals = class {
     this.collections = collections;
     this.layers = new Map();
     this.lines = new Map();
+    this.offsets = new Map();
     this.colors = new Map();
     this.bars = new Map();
     this.fills = [];
@@ -34,6 +35,9 @@ App.PlotVisuals = class {
   clear() {
     this.layers.clear();
     this.lines.clear();
+    this.offsets.clear();
+    this.timeline = [];
+    this.timelineIndex = new Map();
     this.colors.clear();
     this.bars.clear();
     this.fills = [];
@@ -52,11 +56,60 @@ App.PlotVisuals = class {
         if (plot.kind === 'plot_color') this.colors.set(plot.target, layer);
       } else if (!plot.kind || plot.kind === 'line') {
         this.lines.set(plot.title, points);
+        const offset = Math.trunc(Number(plot.offset) || 0);
+        if (offset) this.offsets.set(plot.title, offset);
       }
     }
+    if (this.offsets.size) this.rebuildTimeline();
     this.rebuildBarColors();
     this.dirty = true;
     this.requestUpdate?.();
+  }
+
+  rebuildTimeline() {
+    this.timeline = [];
+    this.timelineIndex = new Map();
+    let segment = 0;
+    for (const bar of this.collections.ohlcvData || []) {
+      // Unread history is a barrier, not a candle to count in plot offsets.
+      if (bar.close == null) { segment++; continue; }
+      this.timelineIndex.set(Number(bar.time), this.timeline.length);
+      this.timeline.push({ time: Number(bar.time), segment });
+    }
+    const data = this.timeline;
+    this.interval = Number(App.state?.configuredTimeframeSec || App.state?.timeframeInterval)
+      || (data.length > 1 ? data[1].time - data[0].time : 60);
+  }
+
+  onBarAdded(bar) {
+    if (!this.offsets.size) return false;
+    const last = this.timeline.at(-1);
+    if (!last || Number(bar.time) <= last.time) return false;
+    this.timelineIndex.set(Number(bar.time), this.timeline.length);
+    this.timeline.push({ time: Number(bar.time), segment: last.segment });
+    this.dirty = true;
+    this.requestUpdate?.();
+    // A real candle after a trading gap replaces projected future timestamps.
+    return Number(bar.time) !== last.time + this.interval;
+  }
+
+  shiftedTime(time, offset) {
+    if (!offset) return Number(time);
+    const index = this.timelineIndex.get(Number(time));
+    if (index == null) return null;
+    const source = this.timeline[index], targetIndex = index + offset;
+    const target = this.timeline[targetIndex];
+    if (target) return target.segment === source.segment ? target.time : null;
+    const last = this.timeline.at(-1);
+    if (targetIndex >= this.timeline.length && source.segment === last.segment) {
+      return last.time + (targetIndex - this.timeline.length + 1) * this.interval;
+    }
+    return null;
+  }
+
+  projectPoint(title, point) {
+    const time = this.shiftedTime(point.time, this.offsets.get(title));
+    return time == null ? null : time === point.time ? point : { ...point, time };
   }
 
   rebuildBarColors() {
@@ -118,11 +171,21 @@ App.PlotVisuals = class {
       if (layer.kind !== 'fill') continue;
       const upper = this.lines.get(layer.plot1), lower = this.lines.get(layer.plot2);
       if (!upper || !lower) continue;
+      const upperOffset = this.offsets.get(layer.plot1) || 0;
+      const lowerOffset = this.offsets.get(layer.plot2) || 0;
+      const offset = upperOffset === lowerOffset ? upperOffset : 0;
+      const project = (line, displacement) => !displacement ? line : new Map(
+        [...line].map(([time, value]) => [this.shiftedTime(time, displacement), value])
+          .filter(([time]) => time != null),
+      );
+      const shownUpper = project(upper, upperOffset), shownLower = project(lower, lowerOffset);
       const source = new Map(layer.points);
       for (const time of this.historyGaps) source.set(time, null);
-      let points = [...source].sort((a, b) => a[0] - b[0]).map(([time, color]) => ({
-        time, upper: upper.get(time), lower: lower.get(time), color: App.PlotVisuals.color(color),
-      }));
+      let points = [...source].sort((a, b) => a[0] - b[0]).map(([time, color]) => {
+        const shownTime = this.historyGaps.has(time) ? time : this.shiftedTime(time, offset);
+        return { time: shownTime, upper: shownUpper.get(shownTime), lower: shownLower.get(shownTime),
+          color: App.PlotVisuals.color(color) };
+      }).filter(point => point.time != null).sort((a, b) => a.time - b.time);
       if (layer.show_last != null) points = points.slice(Math.max(0, points.length - layer.show_last));
       if (layer.fillgaps) points = points.filter(p => this.historyGaps.has(p.time) || (p.upper != null && p.lower != null));
       this.fills.push(points);

@@ -43,7 +43,7 @@ class PlotModule(CallableModule):
 
 # noinspection PyProtectedMember
 def plot(series: Any, title: str | None = None, color: Any = None, linewidth: int = 1, style: Any = None,
-         *_, dynamic_color: bool = False, **__):
+         *_, offset: int = 0, dynamic_color: bool = False, **__):
     """
     Plot series, by default a CSV is generated, but this can be extended
 
@@ -53,6 +53,7 @@ def plot(series: Any, title: str | None = None, color: Any = None, linewidth: in
     :param color: The color of the plot, can be a string or a Color object
     :param linewidth: The width of the plot line
     :param style: The style of the plot, can be a PlotEnum value or a string
+    :param offset: Display displacement in bars; stored values retain their calculation time
     :param dynamic_color: Record the supplied color on each bar for chart rendering
     :return: The a Plot object, can be used to reference the plot in other functions
     """
@@ -111,7 +112,8 @@ def plot(series: Any, title: str | None = None, color: Any = None, linewidth: in
                 'title': title,
                 'color': color_str,
                 'linewidth': linewidth,
-                'style': style_str
+                'style': style_str,
+                'offset': int(offset),
             })
         except Exception:
             pass  # Ignore callback errors

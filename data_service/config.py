@@ -26,7 +26,8 @@ def feed_key(provider: str, exchange: str, symbol: str, timeframe: str) -> str:
     """Data-feed id: one per (provider, exchange, symbol, timeframe), shared by
     all sessions on that market. e.g. ccxt + okx + BTC/USDT:USDT + 1m
     -> ccxt_okx_btc_usdt_usdt_1m."""
-    return _slug(f"{provider}_{exchange}_{symbol}_{timeframe}")
+    tf_key = timeframe[:-1] + "mo" if timeframe.endswith("M") else timeframe
+    return _slug(f"{provider}_{exchange}_{symbol}_{tf_key}")
 
 
 def slugify_session_id(exchange: str, symbol: str, timeframe: str, script_name: str = "") -> str:
@@ -35,7 +36,8 @@ def slugify_session_id(exchange: str, symbol: str, timeframe: str, script_name: 
     stay distinct. e.g. okx + BTC/USDT:USDT + 1m + OKX_MU/test.py
     -> okx_btc_usdt_usdt_1m_okx_mu_test."""
     rel = str(Path(script_name).with_suffix("")) if script_name else ""  # keeps subdir: OKX_MU/test
-    raw = f"{exchange}_{symbol}_{timeframe}_{rel}" if rel else f"{exchange}_{symbol}_{timeframe}"
+    tf_key = timeframe[:-1] + "mo" if timeframe.endswith("M") else timeframe
+    raw = f"{exchange}_{symbol}_{tf_key}_{rel}" if rel else f"{exchange}_{symbol}_{tf_key}"
     return _slug(raw)
 
 

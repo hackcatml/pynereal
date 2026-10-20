@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pynecore.core.candle_timeframe import candle_timeframe
+
 import asyncio
 from datetime import datetime, UTC
 from dateutil.relativedelta import relativedelta
@@ -96,6 +98,7 @@ async def file_update_loop(
     exchange = config.exchange
     symbol = config.symbol
     timeframe = config.timeframe
+    candle_interval = candle_timeframe(timeframe)
     market_type = config.market_type
     cache_path = make_cache_path()
     init_cache(cache_path)
@@ -210,7 +213,7 @@ async def file_update_loop(
                 start_ts=gap_start_ts,
             )
             for previous_ts, next_ts in internal_gaps:
-                missing_bars = int((next_ts - previous_ts) / timeframe_seconds) - 1
+                missing_bars = candle_interval.missing(previous_ts, next_ts)
                 print(
                     f"[data_service] repairing internal OHLCV gap: "
                     f"{datetime.fromtimestamp(previous_ts, UTC).isoformat()} -> "
@@ -239,7 +242,7 @@ async def file_update_loop(
                     start_ts=gap_start_ts,
                 )
                 remaining_bars = sum(
-                    int((next_ts - previous_ts) / timeframe_seconds) - 1
+                    candle_interval.missing(previous_ts, next_ts)
                     for previous_ts, next_ts in remaining_gaps
                 )
                 if remaining_bars == 0:
@@ -260,7 +263,7 @@ async def file_update_loop(
                 symbol=symbol,
                 timeframe=timeframe,
                 time_from=datetime.fromtimestamp(
-                    int(last_ts) - timeframe_seconds,
+                    candle_interval.shift(int(last_ts), -1),
                     UTC,
                 ),
                 time_to=datetime.now(UTC),

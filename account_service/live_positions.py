@@ -301,6 +301,10 @@ class LivePositionState:
                 if exchange_id == "hyperliquid"
                 else normalize_position(raw_position)
             )
+            if exchange_id == "bitget":
+                # WS cTime can belong to an old position cycle. Only REST may
+                # establish the opening time; uTime is merely the last update.
+                normalized["opened_timestamp"] = None
             if market_scope:
                 normalized["market_scope"] = market_scope
             if dex:

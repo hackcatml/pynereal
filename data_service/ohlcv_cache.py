@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pynecore.core.candle_timeframe import candle_timeframe
+
 import sqlite3
 import threading
 from pathlib import Path
@@ -131,12 +133,14 @@ def get_internal_gaps(
                 exchange,
                 symbol,
                 timeframe,
-                interval_seconds,
+                27 * 86400 if timeframe.endswith('M') else interval_seconds,
                 start_ts,
                 start_ts,
             ),
         ).fetchall()
-    return [(int(previous_ts), int(next_ts)) for previous_ts, next_ts in rows]
+    interval = candle_timeframe(timeframe)
+    return [(int(previous_ts), int(next_ts)) for previous_ts, next_ts in rows
+            if next_ts > interval.shift(previous_ts)]
 
 
 def upsert_bars(
@@ -261,7 +265,7 @@ def export_to_ohlcv(
             """,
             (provider, exchange, symbol, timeframe),
         )
-        with OHLCVWriter(ohlcv_path, truncate=True) as writer:
+        with OHLCVWriter(ohlcv_path, truncate=True, timeframe=timeframe) as writer:
             for ts, open_p, high, low, close, volume in rows:
                 writer.write(
                     OHLCV(
@@ -295,7 +299,7 @@ def export_to_ohlcv_since(
             """,
             (provider, exchange, symbol, timeframe, start_ts),
         )
-        with OHLCVWriter(ohlcv_path, truncate=True) as writer:
+        with OHLCVWriter(ohlcv_path, truncate=True, timeframe=timeframe) as writer:
             for ts, open_p, high, low, close, volume in rows:
                 writer.write(
                     OHLCV(

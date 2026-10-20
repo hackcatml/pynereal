@@ -73,7 +73,7 @@ class Provider(metaclass=ABCMeta):
         self.timeframe = timeframe
         self.xchg_timeframe = self.to_exchange_timeframe(timeframe) if timeframe else None
         self.ohlcv_path = self.get_ohlcv_path(symbol, timeframe, ohlv_dir) if ohlv_dir else None
-        self.ohlcv_file = OHLCVWriter(self.ohlcv_path) if self.ohlcv_path else None
+        self.ohlcv_file = OHLCVWriter(self.ohlcv_path, timeframe=timeframe) if self.ohlcv_path else None
 
         if not config_dir:  # Default config dir from the parent of the ohlcv_dir
             assert self.ohlcv_path is not None

@@ -984,7 +984,7 @@
   }
 
   function applyPlotData() {
-    if (state.plotDefinitions.some(plot => window.App.PlotVisuals?.isVisual(plot.kind))) {
+    if (state.plotDefinitions.some(plot => plot.offset || window.App.PlotVisuals?.isVisual(plot.kind))) {
       state.plotVisuals ||= new window.App.PlotVisuals(
         { chart: state.priceChart, candleSeries: state.candleSeries }, window.App.collections,
       );
@@ -1002,8 +1002,10 @@
         const point = Number.isFinite(value)
           ? { time: Number(bar.time), value }
           : { time: Number(bar.time) };
-        return state.plotVisuals?.colorPoint(title, point) || point;
-      });
+        const colored = state.plotVisuals?.colorPoint(title, point) || point;
+        return plot.offset && plot.kind !== 'bgcolor'
+          ? state.plotVisuals.projectPoint(title, colored) : colored;
+      }).filter(Boolean);
       if (plot.kind === "bgcolor") {
         if (state.bgcolorPrimitive) state.bgcolorPrimitive.setLayer(plot, points);
         return;

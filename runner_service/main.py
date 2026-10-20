@@ -380,6 +380,7 @@ def on_plot_event(plot_data):
             "color": plot_data.get('color'),
             "linewidth": plot_data.get('linewidth'),
             "style": plot_data.get('style'),
+            "offset": int(plot_data.get('offset') or 0),
         }
 
     # Check if title exists and options are the same
@@ -860,15 +861,8 @@ async def ws_loop():
 
 
 def parse_timeframe_to_ms(tf: str) -> int:
-    unit = tf[-1]
-    value = int(tf[:-1])
-
-    if unit == "m":
-        return value * 60 * 1000
-    elif unit == "h":
-        return value * 60 * 60 * 1000
-    else:
-        return value * 24 * 60 * 60 * 1000
+    from pynecore.core.candle_timeframe import candle_timeframe
+    return candle_timeframe(tf).seconds * 1000
 
 
 def parse_runner_args() -> argparse.Namespace:
@@ -1397,6 +1391,10 @@ async def main():
 
             # Count only visible bars added to the runner's index space.
             timeframe_ms = parse_timeframe_to_ms(tf)
+            if tf.endswith("M"):
+                from pynecore.core.candle_timeframe import candle_timeframe
+                timeframe_ms = (candle_timeframe(tf).shift(int(ctx.last_new_bar_ts_sec))
+                                - int(ctx.last_new_bar_ts_sec)) * 1000
             interval_ms = (int(new_ohlcv.timestamp) - int(ctx.last_new_bar_ts_sec)) * 1000
             # last_bar_index tracks visible bars. If pre_run skipped a hidden fake open bar,
             # the confirmed bar may be appended as a new visible bar here.

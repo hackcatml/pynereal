@@ -9,7 +9,7 @@ BOT_COMMANDS = [
     {"command": "screenshot", "description": "Choose a session or capture directly: /screenshot mrvl"},
     {"command": "price", "description": "Select a session or get its last-trade price: /price btc"},
     {"command": "assets", "description": "Select all assets or an exchange"},
-    {"command": "positions", "description": "Show open positions across all configured accounts"},
+    {"command": "positions", "description": "Select all positions or an exchange"},
     {"command": "sessions", "description": "Select a session and control runner, webhook and Telegram"},
     {"command": "pnl", "description": "Select a PnL period or use /pnl 30d"},
     {"command": "alerts", "description": "List/set/send Manual Alerts or create/edit session templates"},

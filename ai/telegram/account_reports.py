@@ -45,6 +45,36 @@ def _header(title: str, snapshot: dict) -> list[str]:
             "Source: Account Center" + (" (cached)" if snapshot.get("cached") else "")]
 
 
+def _add_line_entities(lines: list[str], spans: list[tuple], entities: list[dict] | None) -> None:
+    if entities is None:
+        return
+    # Telegram entity offsets count UTF-16 units, not Python characters.
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line.encode("utf-16-le")) // 2 + 1)
+    entities.extend(sorted(
+        ({"type": kind, "offset": offsets[start], "length": offsets[end] - offsets[start] - 1}
+         for kind, start, end in spans),
+        key=lambda entity: (entity["offset"], -entity["length"]),
+    ))
+
+
+def menu_text_entities(text: str) -> list[dict]:
+    lines = text.split("\n")
+    spans = [("bold", 0, 1)]
+    end = len(lines)
+    while end > 1 and not lines[end - 1].strip():
+        end -= 1
+    if end > 1:
+        spans.append(("blockquote", 1, end))
+        for index, line in enumerate(lines[1:end], 1):
+            if line.startswith(("Last trade:", "Model:", "Effort:", "Speed:", "Runner:", "Webhook:", "Telegram alerts:")):
+                spans.append(("bold", index, index + 1))
+    entities = []
+    _add_line_entities(lines, spans, entities)
+    return entities
+
+
 def _account(row: dict) -> str:
     return f"{_text(row.get('exchange')).upper()} | {_text(row.get('account'))}"
 
@@ -87,7 +117,7 @@ def _below_asset_threshold(holding: dict, portfolio: dict) -> bool:
         return False
 
 
-def _assets(snapshot: dict, exchange: str | None = None) -> str:
+def _assets(snapshot: dict, exchange: str | None = None, *, entities: list[dict] | None = None) -> str:
     portfolios = snapshot["portfolios"]
     totals = snapshot.get("totals_by_quote", [])
     if exchange:
@@ -101,6 +131,7 @@ def _assets(snapshot: dict, exchange: str | None = None) -> str:
             scoped_totals[quote] = scoped_totals.get(quote, 0.0) + float(row["total_value"])
         totals = [{"currency": quote, "value": value} for quote, value in sorted(scoped_totals.items())]
     lines = _header("Assets" + (f" | {exchange.upper()}" if exchange else ""), snapshot)
+    spans = [("bold", 0, 1)]
     if not portfolios:
         if exchange:
             return "\n".join([*lines, "No account data available for this exchange."])
@@ -117,13 +148,18 @@ def _assets(snapshot: dict, exchange: str | None = None) -> str:
         if _text(total.get("currency")) in available_quotes:
             lines.append("Total" + (" (available values)" if partial else "") + ": "
                          + _money(total.get("value"), _text(total.get("currency"))))
+            spans.append(("bold", len(lines) - 1, len(lines)))
     for row in portfolios:
         lines.extend(["", _account(row)])
+        spans.append(("bold", len(lines) - 1, len(lines)))
+        detail_start = len(lines)
         if row.get("status") not in {"ok", "empty"}:
             lines.append("Unavailable: account lookup failed.")
+            spans.append(("blockquote", detail_start, len(lines)))
             continue
         quote = _text(row.get("quote_currency"))
         lines.append("Value: " + _money(row.get("total_value"), quote))
+        spans.append(("bold", len(lines) - 1, len(lines)))
         if row.get("warnings") or row.get("unpriced_asset_count"):
             lines.append("Partial data for this account.")
         for holding in row.get("assets", []):
@@ -134,19 +170,30 @@ def _assets(snapshot: dict, exchange: str | None = None) -> str:
                          f" | Value: {value}")
         if not row.get("assets"):
             lines.append("No nonzero assets reported.")
+        spans.append(("blockquote", detail_start, len(lines)))
+    _add_line_entities(lines, spans, entities)
     return "\n".join(lines)
 
 
-def _positions(snapshot: dict) -> str:
+def _positions(snapshot: dict, exchange: str | None = None, *, entities: list[dict] | None = None) -> str:
     results = snapshot["results"]
+    if exchange:
+        results = [row for row in results if _text(row.get("exchange")).lower() == exchange.lower()]
     count = sum(len(row.get("positions", [])) for row in results if row.get("status") == "ok")
     failed = any(row.get("status") != "ok" for row in results)
-    failed = failed or bool(snapshot.get("error") or (snapshot.get("summary") or {}).get("failed"))
+    if not exchange:
+        failed = failed or bool(snapshot.get("error") or (snapshot.get("summary") or {}).get("failed"))
+    elif not results:
+        failed = bool(snapshot.get("error"))
     reported_count = count if not failed or any(row.get("status") == "ok" for row in results) else "Unavailable"
-    lines = _header(f"Open positions: {reported_count}", snapshot)
+    lines = _header(f"Open positions: {reported_count}" + (f" | {exchange.upper()}" if exchange else ""), snapshot)
+    spans = [("bold", 0, 1)]
     if failed:
         lines.append("Partial data: failed account scopes are not counted.")
     if not results:
+        if exchange:
+            return "\n".join([*lines, "Position lookup failed." if failed else
+                              "No account data available for this exchange."])
         return "\n".join([*lines, "Position lookup failed." if failed else "No accounts configured."])
     if not count:
         lines.append("No open positions in successfully queried accounts." if failed else "No open positions.")
@@ -166,27 +213,46 @@ def _positions(snapshot: dict) -> str:
             side = _text(position.get("side")).upper() or "UNKNOWN"
             leverage = _number(position.get("leverage"))
             lines.extend(["", label, f"{symbol} | {side}" + (f" | {leverage}x" if leverage != "Unavailable" else "")])
+            spans.extend([("bold", len(lines) - 2, len(lines) - 1), ("bold", len(lines) - 1, len(lines))])
+            detail_start = len(lines)
             quantity = position.get("quantity")
             lines.append("Size: " + _number(quantity) if quantity is not None
                          else "Contracts: " + _number(position.get("contracts")))
             lines.append(f"Entry: {_number(position.get('entry_price'))} | Mark: {_number(position.get('mark_price'))}")
             lines.append("Unrealized PnL: " + _money(position.get("unrealized_pnl"), currency, signed=True))
+            spans.append(("bold", len(lines) - 1, len(lines)))
             rate = _number(position.get("percentage"), places=2, signed=True)
             lines.append("Return: " + rate + ("%" if rate != "Unavailable" else ""))
+            spans.append(("bold", len(lines) - 1, len(lines)))
             lines.append("Realized PnL: " + _money(position.get("realized_pnl"), currency, signed=True))
             if breakdown and not breakdown.get("complete"):
                 lines.append("Realized PnL breakdown is incomplete.")
             lines.append("Duration: " + _position_duration(
                 position.get("opened_timestamp"), snapshot.get("collected_at"),
             ))
+            spans.append(("blockquote", detail_start, len(lines)))
+    _add_line_entities(lines, spans, entities)
     return "\n".join(lines)
 
 
-def _pnl(snapshot: dict) -> str:
+def format_position_report(snapshot: dict, *, exchange: str | None = None) -> dict:
+    entities = []
+    report = _positions(snapshot, exchange, entities=entities)
+    return {"report": report, "entities": entities}
+
+
+def format_asset_report(snapshot: dict, *, exchange: str | None = None) -> dict:
+    entities = []
+    report = _assets(snapshot, exchange, entities=entities)
+    return {"report": report, "entities": entities}
+
+
+def _pnl(snapshot: dict, *, entities: list[dict] | None = None) -> str:
     period = snapshot.get("period") or {}
     days = period.get("days")
     label = f"{days} days" if days is not None else "All cached history"
     lines = _header(f"PnL | {label}", snapshot)
+    spans = [("bold", 0, 1)]
     lines.append("Cached history may be partial. Unrealized PnL is the current cached value.")
     if not snapshot.get("results"):
         return "\n".join([*lines, "No cached PnL records for this period."])
@@ -194,11 +260,23 @@ def _pnl(snapshot: dict) -> str:
         for row in rows:
             currency = _text(row.get("currency"))
             lines.extend(["", title or _account(row)])
+            spans.append(("bold", len(lines) - 1, len(lines)))
+            start = len(lines)
             for key, name in (("net_pnl", "Net PnL"), ("realized_pnl", "Realized"), ("unrealized_pnl", "Unrealized")):
                 lines.append(name + ": " + _money(row.get(key), currency, signed=True))
+                if key == "net_pnl":
+                    spans.append(("bold", len(lines) - 1, len(lines)))
             if row.get("complete") is False:
                 lines.append("Partial data: some PnL values are unavailable.")
+            spans.append(("blockquote", start, len(lines)))
+    _add_line_entities(lines, spans, entities)
     return "\n".join(lines)
+
+
+def format_pnl_report(snapshot: dict) -> dict:
+    entities = []
+    report = _pnl(snapshot, entities=entities)
+    return {"report": report, "entities": entities}
 
 
 def format_alerts(context: dict) -> str:
@@ -221,7 +299,7 @@ def format_account_snapshot(view: str, snapshot: dict, *, exchange: str | None =
     if view == "assets":
         return _assets(snapshot, exchange)
     if view == "positions":
-        return _positions(snapshot)
+        return _positions(snapshot, exchange)
     if view == "pnl":
         return _pnl(snapshot)
     raise ValueError("Unsupported account report")

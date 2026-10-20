@@ -6,7 +6,8 @@ from typing import Callable, Optional, Awaitable
 import ccxt.pro as ccxt
 
 from state import DataState
-from ohlcv_io import convert_timeframe, make_ccxt_pro_client
+from ohlcv_io import make_ccxt_pro_client
+from pynecore.core.candle_timeframe import candle_timeframe
 from exchange_clock import release_exchange_clock, retain_exchange_clock
 
 
@@ -45,14 +46,10 @@ async def watch_trades_loop(
     ex = make_ccxt_pro_client(ccxt, exchange_name, market_type=market_type, symbol=symbol)
 
     tf = timeframe
-    tf_modifier = tf[-1]
-    tf_value = int(tf[:-1])
-    if tf_modifier == "h":
-        tf_multiplier = tf_value * 60
-    else:
-        tf_multiplier = tf_value
-
-    since = ex.milliseconds() - int(tf_multiplier) * 60 * 1000
+    interval = candle_timeframe(tf)
+    calendar_bar = None
+    since = (interval.start_ms(ex.milliseconds()) if interval.unit in ("d", "w", "M")
+             else ex.milliseconds() - interval.seconds * 1000)
 
     try:
         while True:
@@ -65,10 +62,14 @@ async def watch_trades_loop(
 
                 async with state.lock:
                     since = _advance_trade_window(ex, state, since)
-                    state.collected_trades.extend(
-                        ex.filter_by_since_limit(ws_trades, since)
-                    )
-                    generated = ex.build_ohlcvc(state.collected_trades, tf, since)
+                    recent = ex.filter_by_since_limit(ws_trades, since)
+                    if interval.calendar:
+                        generated = build_calendar_ohlcvc(ex, recent, tf, since, calendar_bar)
+                        if generated:
+                            calendar_bar = generated[-1].copy()
+                    else:
+                        state.collected_trades.extend(recent)
+                        generated = ex.build_ohlcvc(state.collected_trades, tf, since)
                     bars = state.live_bars
 
                     for bar in generated:
@@ -104,7 +105,7 @@ async def fix_missing_bars_loop(
     check_interval_sec: float = 0.1,
     time_sync_interval_sec: float = 10 * 60,
 ) -> None:
-    tf_ms = convert_timeframe(timeframe, to_ms=True)
+    interval = candle_timeframe(timeframe)
     grace_ms = 0.2 * 1000
     clock = retain_exchange_clock(exchange_name, time_sync_interval_sec)
 
@@ -124,7 +125,7 @@ async def fix_missing_bars_loop(
                     continue
 
                 last_open_ts = bars[-1][0]
-                expected = last_open_ts + tf_ms
+                expected = interval.shift_ms(last_open_ts)
 
                 if now_ms >= expected + grace_ms:
                     has_next = any(b[0] == expected for b in bars)
@@ -143,3 +144,43 @@ async def fix_missing_bars_loop(
                 state.last_fix_bar_ts = missing_ts
     finally:
         await release_exchange_clock(exchange_name)
+
+
+def build_calendar_ohlcvc(ex, trades: list, timeframe: str, since: int, previous: list | None = None) -> list:
+    """Keep CCXT's trade aggregation, replacing only its week/month buckets."""
+    interval = candle_timeframe(timeframe)
+    if not interval.calendar:
+        return ex.build_ohlcvc(trades, timeframe, since)
+    # CCXT assumes epoch-aligned weeks and fixed 30-day months. Feeding each
+    # calendar bucket through its normal builder preserves OHLCVC semantics.
+    groups: dict[int, list] = {}
+    for trade in trades:
+        ts = trade["timestamp"]
+        if ts < since:
+            continue
+        start = interval.start_ms(ts)
+        if start < since:
+            continue
+        groups.setdefault(start, []).append(trade)
+    bars = []
+    for start, group in sorted(groups.items()):
+        shifted = [dict(trade, timestamp=0) for trade in group]
+        built = ex.build_ohlcvc(shifted, "1m", 0)
+        if built:
+            bar = built[0]
+            bar[0] = start
+            if previous is not None and previous[0] == start:
+                bar[1] = previous[1]
+                bar[2] = max(previous[2], bar[2])
+                bar[3] = min(previous[3], bar[3])
+                # Add in the same order as CCXT's full build, including its
+                # zero-price policy, without retaining a month of raw trades.
+                volume = previous[5]
+                skip_zero = ex.safe_bool(ex.safe_dict(ex.options, 'buildOHLCVC', {}), 'skipZeroPrices', True)
+                for trade in group:
+                    if not skip_zero or trade['price'] > 0 or trade['price'] < 0:
+                        volume = ex.sum(volume, trade['amount'])
+                bar[5] = volume
+                bar[6] += previous[6]
+            bars.append(bar)
+    return bars

@@ -12,7 +12,6 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from registry import SessionRegistry
-from prerun_scheduler import timeframe_seconds
 from scripting_history import ScriptingRevisionNotFoundError
 from scripting_workspace import (
     ScriptingConflictError,
@@ -121,7 +120,8 @@ def next_warmup_at(session: object) -> int | None:
         return int(scheduled)
     spec = getattr(session, "spec", None)
     timeframe = str(getattr(spec, "timeframe", "") or "")
-    duration_ms = max(1000, timeframe_seconds(timeframe) * 1000)
+    from pynecore.core.candle_timeframe import candle_timeframe
+    interval = candle_timeframe(timeframe or "1m")
     offset_ms = max(
         0,
         int(getattr(session, "prerun_effective_offset_seconds", 0) or 0) * 1000,
@@ -129,12 +129,13 @@ def next_warmup_at(session: object) -> int | None:
     feed = getattr(session, "feed", None)
     last_bar_time = feed.last_bar_time() if feed is not None else None
     if isinstance(last_bar_time, (int, float)) and last_bar_time > 0:
-        next_bar_ms = int(last_bar_time * 1000) + duration_ms
+        next_bar_ms = interval.shift_ms(int(last_bar_time * 1000))
     else:
-        next_bar_ms = ((now_ms // duration_ms) + 1) * duration_ms
+        next_bar_ms = interval.shift_ms(interval.start_ms(now_ms))
     target_ms = next_bar_ms + offset_ms
     while target_ms <= now_ms:
-        target_ms += duration_ms
+        next_bar_ms = interval.shift_ms(next_bar_ms)
+        target_ms = next_bar_ms + offset_ms
     return target_ms
 
 

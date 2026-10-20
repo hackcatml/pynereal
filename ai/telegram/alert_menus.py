@@ -305,6 +305,13 @@ class AlertMenuStore:
                     buttons.append([button("Keep", "keep")])
                 if stage == "ai":
                     buttons.append([button("Clear" if draft.get("ai") else "Skip", "skip")])
+        if stage not in {"home", "alerts", "trigger"}:
+            navigation = [button("Menu", "home")]
+            if payload.get("target"):
+                navigation.append(button("Templates", "back_templates"))
+            if stage != "sessions":
+                navigation.append(button("Sessions", "back_sessions"))
+            buttons.append(navigation)
         buttons.append([button("Close" if stage in {"alerts", "trigger"} else "Cancel", "cancel")])
         item_id = self._menu_message(owner["chat"], text, buttons, replace_id=replace_id)
         self.db.execute("DELETE FROM alert_menus WHERE bot=? AND chat=? AND actor=?",
@@ -339,6 +346,16 @@ class AlertMenuStore:
             self._reply(row["chat"], "Menu closed. No changes applied." if stage in {"alerts", "trigger"} else
                         "Alert/template setup cancelled. Nothing was saved.", replace_id=row["outbox_id"])
             return "Cancelled."
+        if operation == "home":
+            self._alert_menu(row, {"stage": "home"}, replace_id=row["outbox_id"])
+            return "Select an action."
+        if operation in {"back_sessions", "back_templates"}:
+            request = {"mode": payload.get("mode", "template")}
+            if operation == "back_templates":
+                if not payload.get("target"):
+                    return "Select a session first."
+                request["target"] = payload["target"]
+            return self._queue_alert(update_id, row, request, "sessions" if operation == "back_sessions" else "templates")
         if stage in {"home", "alerts", "trigger"} and operation in {"list", "sessions", "set_alert", "send_alert"}:
             if operation in {"set_alert", "send_alert"}:
                 return self._queue_alert(update_id, row, {"mode": "send" if operation == "send_alert" else "trigger"}, "sessions")
@@ -481,14 +498,17 @@ class AlertMenuStore:
             request = json.loads(job["input"])
             row = self.db.execute("SELECT * FROM alert_menus WHERE bot=? AND nonce=?",
                                   (self.bot_id, request["menu_nonce"])).fetchone()
-            if error and request["operation"] in {"list", "delete_trigger", "set_trigger", "send_alert"} and row:
+            if error and row:
                 self._alert_menu(job, {"stage": "home", "notice": error}, replace_id=row["outbox_id"])
-            elif error or payload["stage"] == "saved":
-                text = error or (session_label(payload["target"]) + "\nTemplate saved: " + payload["title"]
-                                 + "\nExisting price triggers are unchanged. No alert was sent.")
-                self._reply(job["chat"], text, replace_id=row["outbox_id"] if row else None)
+            elif not error and payload["stage"] == "saved":
+                notice = (session_label(payload["target"]) + "\nTemplate saved: " + payload["title"]
+                          + "\nExisting price triggers are unchanged. No alert was sent.")
                 if row:
-                    self.db.execute("DELETE FROM alert_menus WHERE nonce=?", (row["nonce"],))
+                    self._alert_menu(job, {"stage": "home", "notice": notice}, replace_id=row["outbox_id"])
+                else:
+                    self._reply(job["chat"], notice)
+            elif error:
+                self._reply(job["chat"], error)
             elif row and row["expires"] > time.time():
                 self._alert_menu(job, payload, replace_id=row["outbox_id"])
             elif payload.get("notice"):
