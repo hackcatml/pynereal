@@ -1305,7 +1305,7 @@ App.chart = {
       endBtn.style.right = `${rightInset + this.chart.priceScale("right").width() + 12}px`;
       return;
     }
-    if (this.isMobileViewport()) {
+    if (this.isMobileViewport() && !App.replay?.inset) {
       startBtn.style.bottom = "";
       endBtn.style.bottom = "";
       endBtn.style.right = "";
@@ -1337,7 +1337,8 @@ App.chart = {
     const startBtn = document.getElementById("nav-to-start");
     const endBtn = document.getElementById("nav-to-end");
     if (!startBtn || !endBtn) return;
-    if (this.isMobileViewport()) {
+    const inset = Boolean(App.replay?.inset);
+    if (this.isMobileViewport() && !inset) {
       startBtn.classList.add("visible");
       endBtn.classList.add("visible");
       startBtn.addEventListener("click", () => this.goToStart());
@@ -1353,6 +1354,16 @@ App.chart = {
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
       const inChart = x >= 0 && x <= rect.width && y >= 0 && y <= rect.height;
+      if (inset) {
+        if (inChart) this.positionNavButtons();
+        for (const button of [startBtn, endBtn]) {
+          const bounds = button.getBoundingClientRect();
+          const nearby = inChart && e.clientX >= bounds.left - 24 && e.clientX <= bounds.right + 24
+            && e.clientY >= bounds.top - 24 && e.clientY <= bounds.bottom + 24;
+          button.classList.toggle("visible", nearby);
+        }
+        return;
+      }
       const paneBottom = this.pricePaneHeight();
       const inBottom = inChart && y <= paneBottom && y >= paneBottom - CORNER_H;
       const showStart = inBottom && x <= CORNER_W;

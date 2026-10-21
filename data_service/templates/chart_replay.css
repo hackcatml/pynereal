@@ -33,15 +33,10 @@
 .replay-toolbar.dragging .replay-toolbar-handle::after { display: none; }
 .replay-toolbar output { min-width: 0; max-width: 270px; overflow-wrap: anywhere; }
 .replay-toolbar .error { color: #be293a; }
-.replay-speed { position: relative; flex: 0 0 48px; width: 48px; min-width: 0; }
-.replay-speed button { color: inherit; font: inherit; cursor: pointer; touch-action: manipulation; }
-.replay-speed-toggle {
-  display: flex; align-items: center; justify-content: space-between; gap: 3px; width: 100%; height: 28px;
-  padding: 0 4px; border: 1px solid #d8dce2; border-radius: 4px; background: white;
-}
+.replay-speed { position: relative; display: flex; flex: 0 0 auto; min-width: 0; }
+.replay-speed-toggle { padding: 2px; font: inherit; }
 .replay-speed-toggle span { white-space: nowrap; font-variant-numeric: tabular-nums; }
-.replay-speed-toggle svg { width: 10px; height: 10px; flex: 0 0 10px; }
-.replay-speed-toggle:hover, .replay-speed-toggle[aria-expanded="true"] { background: #edf0f3; }
+.replay-speed-toggle[aria-expanded="true"] { background: #edf0f3; }
 #replay-speed-menu {
   position: absolute; bottom: calc(100% + 8px); left: 0; min-width: 80px; padding: 4px;
   box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain;
@@ -50,7 +45,8 @@
 #replay-speed-menu[hidden] { display: none; }
 #replay-speed-menu button {
   display: block; width: 100%; height: 32px; padding: 0 10px; border: 0; border-radius: 4px;
-  background: transparent; text-align: left;
+  background: transparent; text-align: left; color: inherit; font: inherit;
+  cursor: pointer; touch-action: manipulation;
 }
 #replay-speed-menu button:hover, #replay-speed-menu button:focus-visible { background: #edf0f3; }
 #replay-speed-menu button[aria-checked="true"] { color: #2962ff; background: #e8efff; font-weight: 600; }
@@ -65,16 +61,20 @@
 .replay-chooser input { min-width: 0; width: 100%; box-sizing: border-box; height: 32px; border: 1px solid #cbd0d7; border-radius: 4px; padding: 5px; font: inherit; color: inherit; background: white; }
 .replay-chooser input[aria-invalid="true"] { border-color: #be293a; }
 .replay-chooser-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
-.replay-chooser button[type="submit"] { margin-right: auto; border: 0; border-radius: 4px; background: #2962ff; color: white; padding: 7px 12px; cursor: pointer; touch-action: manipulation; }
+.replay-chooser button[type="submit"] { margin-left: auto; border: 0; border-radius: 4px; background: #2962ff; color: white; padding: 7px 12px; cursor: pointer; touch-action: manipulation; }
 .replay-date-field { position: relative; }
 .replay-calendar {
   box-sizing: border-box; max-height: max(120px, calc(100dvh - 220px)); overflow: auto;
   font: inherit; font-variant-numeric: tabular-nums; overscroll-behavior: contain;
 }
-.replay-calendar > label { margin-bottom: 10px; }
+.replay-calendar-inputs { display: grid; grid-template-columns: minmax(0, 1fr) max-content; align-items: end; gap: 8px; margin-bottom: 10px; }
+.replay-calendar-inputs > label { min-width: 0; }
 .replay-calendar header { display: grid; grid-template-columns: 30px minmax(0, 1fr) 30px; align-items: center; margin-bottom: 6px; }
 .replay-calendar header strong { text-align: center; font-weight: 600; }
 .replay-calendar-weekdays, .replay-calendar-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.replay-calendar-days-viewport { position: relative; overflow: hidden; }
+.replay-calendar-days { touch-action: pan-y pinch-zoom; }
+.replay-calendar-days-previous { position: absolute; inset: 0; pointer-events: none; }
 .replay-calendar-weekdays span { text-align: center; padding: 3px 0; color: #697582; }
 .replay-calendar-days button {
   min-width: 0; height: 30px; padding: 0; border: 0; border-radius: 4px;
@@ -85,10 +85,10 @@
 .replay-calendar-days button[aria-pressed="true"] { background: #e8efff; color: #2962ff; font-weight: 600; }
 .replay-calendar-days button:disabled { opacity: .35; cursor: default; }
 .replay-calendar-days button:focus-visible { outline: 2px solid #2962ff; outline-offset: -2px; }
-.replay-calendar .replay-calendar-time { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid #e5e8ec; margin-top: 8px; padding-top: 8px; }
+.replay-calendar-time { display: grid; gap: 6px; }
 .replay-time-fields { display: flex; align-items: center; gap: 3px; }
 .replay-time-toggle {
-  display: flex; align-items: center; justify-content: center; gap: 4px; width: 51px; height: 30px; padding: 0 5px;
+  display: flex; align-items: center; justify-content: center; gap: 4px; width: 51px; height: 32px; padding: 0 5px;
   border: 1px solid #cbd0d7; border-radius: 4px; background: white; color: inherit; font: inherit;
   cursor: pointer; touch-action: manipulation;
 }
@@ -98,7 +98,13 @@
   position: absolute; z-index: 2; width: 58px; max-height: 160px; padding: 3px; box-sizing: border-box;
   overflow-y: auto; overscroll-behavior: contain; border: 1px solid #d8dce2; border-radius: 4px;
   background: white; color: #414a56; box-shadow: 0 3px 14px #0002; font: 13px/1.5 sans-serif;
+  scrollbar-width: thin; scrollbar-color: #b1b7c0 transparent;
 }
+.replay-time-menu::-webkit-scrollbar { width: 6px; }
+.replay-time-menu::-webkit-scrollbar-track { background: transparent; }
+.replay-time-menu::-webkit-scrollbar-thumb { background: #b1b7c0; border-radius: 6px; }
+.replay-time-menu::-webkit-scrollbar-thumb:hover { background: #88929c; }
+.replay-time-menu::-webkit-scrollbar-button { display: none; }
 .replay-time-menu[hidden] { display: none; }
 .replay-time-menu button {
   display: block; width: 100%; height: 30px; padding: 0; border: 0; border-radius: 3px;
@@ -127,9 +133,20 @@
 .replay-inset #drawing-toolbar, .replay-inset #toolbar, .replay-inset #chart-runner-status,
 .replay-inset .chart-indicator-pane-header, .replay-inset .pwa-back-bar { display: none !important; }
 .replay-inset #chart-info { font-size: 11px; }
+.replay-inset .nav-btn { width: 32px; height: 32px; padding: 0; bottom: 34px; font-size: 19px; opacity: 0; pointer-events: none; }
+.replay-inset .nav-btn.visible, .replay-inset .nav-btn:focus-visible { opacity: 1; pointer-events: auto; }
+.replay-inset .nav-btn-left { left: 10px; }
+.replay-inset .nav-btn-right { right: 12px; }
 .replay-page #chart-session-toggle, .replay-page #chart-timeframe-toggle,
 .replay-inset #chart-session-toggle, .replay-inset #chart-timeframe-toggle { pointer-events: none; border-bottom: 0; }
 .replay-selecting #chart { cursor: crosshair; outline: 2px solid #2962ff; outline-offset: -2px; }
+.replay-selection-guide { position: absolute; inset: 0; z-index: 8; pointer-events: none; overflow: hidden; }
+.replay-selection-guide[hidden] { display: none; }
+.replay-selection-line { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: #2962ff; }
+.replay-selection-time {
+  position: absolute; bottom: 0; padding: 4px 6px; border-radius: 3px 3px 0 0;
+  background: #2962ff; color: #fff; font: 12px/18px sans-serif; font-variant-numeric: tabular-nums; white-space: nowrap;
+}
 @media (max-width: 720px), (hover: none) and (pointer: coarse) {
   .replay-live { top: 90px; right: 5px; width: 43%; height: 22%; min-width: 130px; min-height: 100px; }
   .replay-toolbar { display: grid; grid-template-columns: 18px minmax(0, max-content) 34px; gap: 2px; padding: 5px; }
@@ -139,21 +156,20 @@
   .replay-chooser { bottom: 115px; width: 248px; padding: 8px; font-size: 12px; }
   .replay-chooser label { gap: 4px; }
   .replay-chooser input { height: 28px; padding: 4px; }
-  .replay-calendar > label { margin-bottom: 6px; }
+  .replay-calendar-inputs { margin-bottom: 6px; }
   .replay-calendar header { grid-template-columns: 28px minmax(0, 1fr) 28px; margin-bottom: 4px; }
   .replay-calendar header .replay-button { width: 28px; height: 28px; padding: 5px; }
   .replay-calendar-weekdays span { padding: 2px 0; }
   .replay-calendar-days button { height: 26px; }
-  .replay-calendar .replay-calendar-time { gap: 6px; margin-top: 6px; padding-top: 6px; }
+  .replay-calendar-time { gap: 4px; }
   .replay-time-toggle { width: 46px; height: 28px; gap: 3px; }
   .replay-chooser-actions { gap: 6px; margin-top: 6px; }
   .replay-chooser button[type="submit"] { padding: 6px 10px; }
-  .replay-inset #chart-info, .replay-inset .nav-btn { display: none !important; }
+  .replay-inset #chart-info { display: none !important; }
 }
 @media (max-width: 640px), (hover: none) and (pointer: coarse) {
   .replay-toolbar { grid-template-columns: 18px minmax(0, max-content) 36px; }
   .replay-toolbar .replay-button:not(.replay-toolbar-handle) { flex-basis: 32px; width: 32px; height: 36px; }
   .replay-toolbar .replay-button svg { width: 16px; height: 16px; }
-  .replay-toolbar .replay-speed-toggle { height: 36px; }
   .replay-chooser { bottom: 120px; }
 }

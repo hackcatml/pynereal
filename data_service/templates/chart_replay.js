@@ -13,11 +13,13 @@ App.replay = (() => {
   }
   let socket, heartbeat, timer, playing = false, busy = false, ready = false, ended = false;
   let generation = 0, selecting = false, frames = [], definitions = [], lastTime = 0;
-  let toolbar, status, play, step, startButton, date, chooser, chooserAnchor, calendar;
+  let toolbar, status, play, step, startButton, date, chooser, chooserAnchor, calendar, barSelector;
   let selectionChooserWasOpen = false;
   let playbackSpeed = 1, speedMenu, speedToggle;
-  let stepStartedAt = 0, livePanel, liveFrame, liveToggle;
-  let livePreferred = true, replayCache = [];
+  let nextFrameAt = 0, livePanel, liveFrame, liveToggle;
+  const prefetchLimit = 10;
+  let frameQueue = [], sourceEnded = false, manualStepPending = false;
+  let livePreferred = false, replayCache = [];
   let rewindFrom = null, rewindTo = null, pendingSeek = null;
   let startMarker;
   let crosshairFrame = null;
@@ -114,6 +116,7 @@ App.replay = (() => {
   }
   function pause() {
     playing = false;
+    manualStepPending = false;
     clearTimeout(timer);
     if (play) {
       play.innerHTML = icon("play");
@@ -123,9 +126,9 @@ App.replay = (() => {
   }
   function controls() {
     if (!play) return;
-    play.disabled = !ready || ended || selecting;
-    step.disabled = !ready || busy || playing || ended || selecting;
-    startButton.disabled = !ready || busy || selecting || startMarker.time === null;
+    play.disabled = !ready || ended || selecting || pendingSeek !== null;
+    step.disabled = !ready || manualStepPending || playing || ended || selecting || pendingSeek !== null;
+    startButton.disabled = !ready || selecting || startMarker.time === null;
   }
   function stop() {
     generation++;
@@ -138,23 +141,63 @@ App.replay = (() => {
     }
     ready = false;
     busy = false;
+    frameQueue = [];
+    sourceEnded = false;
+    nextFrameAt = 0;
     rewindFrom = rewindTo = pendingSeek = null;
     replayCache = [];
     startMarker?.setTime(null);
     controls();
   }
   function requestStep() {
-    if (!ready || busy || ended || !socket || socket.readyState !== WebSocket.OPEN) return;
+    if (!ready || playing || manualStepPending || ended || selecting || pendingSeek !== null) return;
+    manualStepPending = true;
+    advanceFrame();
+  }
+  function refillFrames() {
+    if (!ready || busy || sourceEnded || selecting || pendingSeek !== null
+        || !socket || socket.readyState !== WebSocket.OPEN) return;
+    const target = playing ? prefetchLimit : manualStepPending ? 1 : 0;
+    if (frameQueue.length >= target) return;
     busy = true;
-    stepStartedAt = performance.now();
-    controls();
     socket.send(JSON.stringify({ type: "step" }));
   }
   function schedule() {
-    if (playing && !ended) timer = setTimeout(requestStep, Math.max(0, 1000 / playbackSpeed - (performance.now() - stepStartedAt)));
+    clearTimeout(timer);
+    if (playing && ready && !ended && !selecting && pendingSeek === null && frameQueue.length) {
+      timer = setTimeout(advanceFrame, Math.max(0, nextFrameAt - performance.now()));
+    }
+  }
+  function advanceFrame() {
+    if (!ready || ended || selecting || pendingSeek !== null || (!playing && !manualStepPending)) return;
+    if (!frameQueue.length) { refillFrames(); controls(); return; }
+    const data = frameQueue.shift();
+    manualStepPending = false;
+    nextFrameAt = performance.now() + 1000 / playbackSpeed;
+    // Refill while this candle renders; prefetched data stays out of the chart.
+    refillFrames();
+    try {
+      if (data.frame) { renderFrame(data.frame, data.plots); lastTime = data.frame.bar.time; }
+      if (rewindTo !== null) rewindTo = Math.max(rewindTo, lastTime);
+      ended = data.done;
+      message(textTime(lastTime) + (ended ? " · End" : ""));
+      if (ended) pause(); else schedule();
+      controls();
+    } catch (error) { stop(); message(error.message, true); }
+  }
+  function resume() {
+    if (!ready || ended || selecting || pendingSeek !== null) return;
+    playing = true;
+    manualStepPending = false;
+    nextFrameAt = performance.now();
+    play.innerHTML = icon("pause");
+    play.dataset.tooltip = "Pause";
+    play.setAttribute("aria-label", "Pause");
+    refillFrames();
+    schedule();
   }
   function goToStart() {
-    if (!ready || busy || startMarker.time === null) return;
+    if (!ready || selecting || startMarker.time === null) return;
     const scale = App.chart.chart.timeScale(), range = scale.getVisibleLogicalRange();
     // A cached seek returns a 60-day display window. Keep earlier rendered
     // frames by reference so this navigation never rewinds the replay cursor.
@@ -175,6 +218,8 @@ App.replay = (() => {
   }
   function seek(time) {
     pause();
+    frameQueue = [];
+    sourceEnded = false;
     pendingSeek = time;
     if (busy) { controls(); return; }
     pendingSeek = null;
@@ -228,11 +273,25 @@ App.replay = (() => {
     if (!chooser || chooser.hidden || !chooserAnchor?.isConnected) return;
     const view = viewportBounds(), anchor = chooserAnchor.getBoundingClientRect();
     if (!anchor.width || !anchor.height) return;
+    chooser.style.maxHeight = "";
+    chooser.style.overflowY = "";
     const rect = chooser.getBoundingClientRect(), gap = 8;
     const clampLeft = value => Math.max(view.left + gap, Math.min(value, view.right - rect.width - gap));
     const clampTop = value => Math.max(view.top + gap, Math.min(value, view.bottom - rect.height - gap));
+    const anchorToolbar = chooserAnchor.closest(".replay-toolbar");
     let left, top = anchor.top;
-    if (anchor.right + gap + rect.width <= view.right - gap) left = anchor.right + gap;
+    if (anchorToolbar) {
+      const bounds = anchorToolbar.getBoundingClientRect();
+      const above = Math.max(0, bounds.top - view.top - gap * 2);
+      const below = Math.max(0, view.bottom - bounds.bottom - gap * 2);
+      const upward = above >= rect.height || above >= below;
+      const available = upward ? above : below;
+      const height = Math.min(rect.height, available);
+      chooser.style.maxHeight = `${available}px`;
+      if (rect.height > available) chooser.style.overflowY = "auto";
+      left = anchor.left;
+      top = upward ? bounds.top - height - gap : bounds.bottom + gap;
+    } else if (anchor.right + gap + rect.width <= view.right - gap) left = anchor.right + gap;
     else if (anchor.left - gap - rect.width >= view.left + gap) left = anchor.left - gap - rect.width;
     else {
       left = anchor.left;
@@ -242,7 +301,7 @@ App.replay = (() => {
     chooser.style.transform = "none";
     chooser.style.bottom = "auto";
     chooser.style.left = `${clampLeft(left)}px`;
-    chooser.style.top = `${clampTop(top)}px`;
+    chooser.style.top = `${anchorToolbar ? top : clampTop(top)}px`;
   }
   function placeSpeedMenu() {
     if (!speedMenu || speedMenu.hidden) return;
@@ -323,12 +382,13 @@ App.replay = (() => {
     container.className = "replay-speed";
     speedToggle = document.createElement("button");
     speedToggle.type = "button";
-    speedToggle.className = "replay-speed-toggle";
+    speedToggle.className = "replay-button replay-speed-toggle";
+    speedToggle.dataset.tooltip = "Replay speed";
     speedToggle.setAttribute("aria-label", "Replay speed: 1x");
     speedToggle.setAttribute("aria-haspopup", "menu");
     speedToggle.setAttribute("aria-expanded", "false");
     speedToggle.setAttribute("aria-controls", "replay-speed-menu");
-    speedToggle.innerHTML = '<span>1x</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
+    speedToggle.innerHTML = '<span>1x</span>';
     speedMenu = document.createElement("div");
     speedMenu.id = "replay-speed-menu";
     speedMenu.setAttribute("role", "menu");
@@ -348,8 +408,8 @@ App.replay = (() => {
         speedToggle.setAttribute("aria-label", `Replay speed: ${value}x`);
         items.forEach(option => option.setAttribute("aria-checked", String(option === item)));
         closeSpeedMenu(true);
-        clearTimeout(timer);
-        if (!busy) schedule();
+        nextFrameAt = performance.now() + 1000 / playbackSpeed;
+        schedule();
       });
       speedMenu.append(item);
       return item;
@@ -410,6 +470,7 @@ App.replay = (() => {
     App.volumeProfile?.setActive(false);
     App.ui.closeManualAlertMenu?.();
     document.body.classList.toggle("replay-selecting", value);
+    if (value) barSelector?.show(); else barSelector?.hide();
     App.ui.refreshMobileViewportLock();
     document.querySelectorAll('[aria-label="Select a bar"]').forEach(node => node.setAttribute("aria-pressed", String(value)));
     controls();
@@ -553,7 +614,10 @@ App.replay = (() => {
     dateLabel.textContent = "Date (UTC)";
     dateLabel.htmlFor = date.id;
     dateLabel.append(date);
-    panel.append(dateLabel);
+    const inputs = document.createElement("div");
+    inputs.className = "replay-calendar-inputs";
+    inputs.append(dateLabel);
+    panel.append(inputs);
     const header = document.createElement("header");
     panel.append(header);
     let month;
@@ -572,6 +636,10 @@ App.replay = (() => {
     grid.className = "replay-calendar-days";
     grid.setAttribute("role", "group");
     grid.setAttribute("aria-label", "Days");
+    const daysViewport = document.createElement("div");
+    daysViewport.className = "replay-calendar-days-viewport";
+    daysViewport.append(grid);
+    let monthTransition = null;
     const timeLabel = document.createElement("div");
     timeLabel.className = "replay-calendar-time";
     timeLabel.textContent = "Time (UTC)";
@@ -676,7 +744,8 @@ App.replay = (() => {
     time.append(separator);
     const minute = timeSelect("minute", 60);
     timeLabel.append(time);
-    panel.append(weekdays, grid, timeLabel);
+    inputs.append(timeLabel);
+    panel.append(weekdays, daysViewport);
     function dayKey(value) { return value.toISOString().slice(0, 10); }
     function selected() { return selectedDateTime() || parseDate(date.max) || new Date(); }
     function clockValue() { return `${hour.value}:${minute.value}`; }
@@ -684,6 +753,7 @@ App.replay = (() => {
       validateDate();
     }
     function render(focusKey) {
+      stopMonthTransition();
       const value = selected(), selectedKey = dayKey(value);
       const year = month.getUTCFullYear(), index = month.getUTCMonth();
       caption.textContent = month.toLocaleDateString("en-US", { timeZone: "UTC", month: "long", year: "numeric" });
@@ -714,8 +784,75 @@ App.replay = (() => {
       if (focused) { focused.tabIndex = 0; if (focusKey) focused.focus({ preventScroll: true }); }
     }
     function setMonth(value) { month = new Date(value); month.setUTCDate(1); month.setUTCHours(0, 0, 0, 0); }
-    function moveMonth(delta) { month.setUTCMonth(month.getUTCMonth() + delta); render(); }
+    function stopMonthTransition() {
+      if (!monthTransition) return;
+      monthTransition.animations.forEach(animation => animation.cancel());
+      monthTransition.previous.remove();
+      monthTransition = null;
+    }
+    function moveMonth(delta) {
+      if ((delta < 0 ? previous : next).disabled) return;
+      stopMonthTransition();
+      const animate = typeof grid.animate === "function" && !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const oldDays = animate ? grid.cloneNode(true) : null;
+      month.setUTCMonth(month.getUTCMonth() + delta);
+      render();
+      if (!oldDays) return;
+      oldDays.classList.add("replay-calendar-days-previous");
+      oldDays.setAttribute("aria-hidden", "true");
+      oldDays.inert = true;
+      daysViewport.append(oldDays);
+      const timing = { duration: 220, easing: "cubic-bezier(0.22, 0.61, 0.36, 1)" };
+      const incoming = grid.animate([
+        { transform: `translateX(${delta * 100}%)`, opacity: 0.4 },
+        { transform: "translateX(0)", opacity: 1 },
+      ], timing);
+      const outgoing = oldDays.animate([
+        { transform: "translateX(0)", opacity: 1 },
+        { transform: `translateX(${-delta * 100}%)`, opacity: 0.4 },
+      ], timing);
+      monthTransition = { previous: oldDays, animations: [incoming, outgoing] };
+      incoming.onfinish = () => { if (monthTransition?.previous === oldDays) stopMonthTransition(); };
+    }
+    let swipe = null, suppressDateClickUntil = 0;
+    function cancelSwipe() {
+      if (swipe && grid.hasPointerCapture(swipe.id)) grid.releasePointerCapture(swipe.id);
+      swipe = null;
+    }
+    grid.addEventListener("pointerdown", event => {
+      if (event.pointerType === "mouse") return;
+      if (event.isPrimary === false || swipe) { cancelSwipe(); return; }
+      suppressDateClickUntil = 0;
+      swipe = { id: event.pointerId, x: event.clientX, y: event.clientY, horizontal: false };
+    });
+    grid.addEventListener("pointermove", event => {
+      if (!swipe || event.pointerId !== swipe.id) return;
+      const dx = Math.abs(event.clientX - swipe.x), dy = Math.abs(event.clientY - swipe.y);
+      if (!swipe.horizontal) {
+        if (dy > 10 && dy >= dx) { cancelSwipe(); return; }
+        if (dx < 10 || dx < dy * 1.25) return;
+        swipe.horizontal = true;
+        grid.setPointerCapture(event.pointerId);
+      }
+      event.preventDefault();
+      event.stopPropagation();
+    }, { passive: false });
+    grid.addEventListener("pointerup", event => {
+      if (!swipe || event.pointerId !== swipe.id) return;
+      const dx = event.clientX - swipe.x, dy = Math.abs(event.clientY - swipe.y);
+      const changeMonth = Math.abs(dx) >= 40 && Math.abs(dx) > dy * 1.25;
+      if (swipe.horizontal || changeMonth) {
+        event.preventDefault();
+        event.stopPropagation();
+        suppressDateClickUntil = performance.now() + 500;
+        if (changeMonth) moveMonth(dx < 0 ? 1 : -1);
+      }
+      cancelSwipe();
+    });
+    grid.addEventListener("pointercancel", cancelSwipe);
     function close() {
+      cancelSwipe();
+      stopMonthTransition();
       clockMenus.forEach(item => item.close());
     }
     function open(value) {
@@ -726,6 +863,7 @@ App.replay = (() => {
       render(dayKey(value));
     }
     grid.addEventListener("click", event => {
+      if (performance.now() < suppressDateClickUntil) { event.preventDefault(); return; }
       const cell = event.target.closest("[data-day]");
       if (!cell || cell.disabled) return;
       date.value = cell.dataset.day;
@@ -782,9 +920,8 @@ App.replay = (() => {
     const submit = document.createElement("button");
     submit.type = "submit";
     submit.textContent = "Start replay";
+    if (!active) button(actions, "select", "Select a bar", () => setSelection(!selecting));
     actions.append(submit);
-    button(actions, "select", "Select a bar", () => setSelection(!selecting));
-    button(actions, "close", "Cancel", () => { chooser.hidden = true; setSelection(false); });
     chooser.append(actions);
     chooser.addEventListener("submit", event => {
       event.preventDefault();
@@ -792,13 +929,17 @@ App.replay = (() => {
       else date.reportValidity();
     });
     document.body.append(chooser);
+    document.addEventListener("pointerdown", event => {
+      if (chooser.hidden || chooser.contains(event.target) || chooserAnchor?.contains(event.target)) return;
+      calendar.close();
+      chooser.hidden = true;
+      App.ui.refreshMobileViewportLock();
+    }, true);
     window.addEventListener("resize", placeChooser);
     window.visualViewport?.addEventListener("resize", placeChooser);
     window.visualViewport?.addEventListener("scroll", placeChooser);
     new ResizeObserver(placeChooser).observe(chooser);
-    App.chart.chart.subscribeClick(event => {
-      if (selecting && typeof event.time === "number") launch(event.time);
-    });
+    barSelector = buildBarSelector();
     document.addEventListener("keydown", event => {
       if (event.key === "Escape") {
         const restoreChooser = selecting && selectionChooserWasOpen;
@@ -806,13 +947,161 @@ App.replay = (() => {
         chooser.hidden = !restoreChooser;
         App.ui.refreshMobileViewportLock();
         placeChooser();
-        if (restoreChooser) chooser.querySelector('[aria-label="Select a bar"]').focus({ preventScroll: true });
+        if (restoreChooser) (chooser.querySelector('[aria-label="Select a bar"]') ||
+          toolbar?.querySelector('[aria-label="Select a bar"]'))?.focus({ preventScroll: true });
       }
       if (!active || event.defaultPrevented || event.isComposing ||
           event.target.closest?.("input, textarea, select, [contenteditable], .replay-chooser")) return;
       if (event.code === "Space" && !play?.disabled) { event.preventDefault(); play.click(); }
       if (event.key === "ArrowRight" && !step?.disabled) { event.preventDefault(); step.click(); }
     });
+  }
+  function buildBarSelector() {
+    const chart = App.chart.chart, container = App.chart.container;
+    const guide = document.createElement("div");
+    guide.className = "replay-selection-guide";
+    guide.hidden = true;
+    guide.setAttribute("aria-hidden", "true");
+    const line = document.createElement("div");
+    line.className = "replay-selection-line";
+    const label = document.createElement("div");
+    label.className = "replay-selection-time";
+    guide.append(line, label);
+    container.append(guide);
+    let time = null, pointer = null, previousOptions = null, suppressUntil = 0;
+    let pinnedTime = null, touchGesture = null;
+    const consume = event => { event.preventDefault(); event.stopImmediatePropagation(); };
+    function release() {
+      const id = pointer;
+      pointer = null;
+      touchGesture = null;
+      if (id !== null && container.hasPointerCapture(id)) container.releasePointerCapture(id);
+    }
+    function render() {
+      if (!selecting || time === null) { guide.hidden = true; return; }
+      const scale = chart.timeScale(), x = scale.timeToCoordinate(time);
+      const width = scale.width();
+      guide.hidden = x === null || x < 0 || x > width;
+      if (guide.hidden) return;
+      line.style.left = `${x}px`;
+      label.textContent = textTime(time);
+      const labelWidth = label.offsetWidth;
+      label.style.left = `${Math.max(0, Math.min(x - labelWidth / 2, width - labelWidth))}px`;
+    }
+    function pick(clientX, clientY) {
+      const point = App.chart.plotPointFromClient(clientX, clientY);
+      const bars = App.collections.ohlcvData;
+      if (!point || !bars.length) return null;
+      const scale = chart.timeScale(), target = scale.coordinateToTime(point.x);
+      let end = bars.length - 1;
+      const duration = App.state.configuredTimeframeSec || 60;
+      const now = Date.now() / 1000;
+      while (end >= 0 && bars[end].time + duration > now) end--;
+      if (end < 0) return null;
+      let index;
+      if (typeof target === "number") {
+        let low = 0, high = end + 1;
+        while (low < high) {
+          const mid = (low + high) >>> 1;
+          if (bars[mid].time < target) low = mid + 1; else high = mid;
+        }
+        const candidates = [Math.max(0, low - 1), Math.min(low, end)];
+        index = candidates.reduce((closest, next) =>
+          Math.abs(scale.timeToCoordinate(bars[next].time) - point.x) <
+          Math.abs(scale.timeToCoordinate(bars[closest].time) - point.x) ? next : closest);
+      } else {
+        const firstX = scale.timeToCoordinate(bars[0].time), lastX = scale.timeToCoordinate(bars[end].time);
+        if (point.x <= firstX) index = 0;
+        else if (point.x >= lastX) index = end;
+        else return null;
+      }
+      time = bars[index].time;
+      render();
+      return time;
+    }
+    function pickGesture(event) {
+      if (!touchGesture) return pick(event.clientX, event.clientY);
+      if (!App.chart.plotPointFromClient(event.clientX, event.clientY)) return null;
+      if (touchGesture && touchGesture.confirmTime !== null &&
+          Math.hypot(event.clientX - touchGesture.x, event.clientY - touchGesture.y) > 8) {
+        touchGesture.confirmTime = null;
+        pinnedTime = null;
+      }
+      if (touchGesture && touchGesture.confirmTime !== null) {
+        return touchGesture.confirmTime;
+      }
+      const rect = container.getBoundingClientRect(), width = chart.timeScale().width();
+      const x = Math.max(0, Math.min(touchGesture.lineX + event.clientX - touchGesture.x, width - 1));
+      return pick(rect.left + x, rect.top + App.chart.pricePaneHeight() / 2);
+    }
+    container.addEventListener("pointerdown", event => {
+      if (!selecting || event.target.closest?.("button, input, select, textarea")) return;
+      if (event.isPrimary === false) { release(); consume(event); return; }
+      if (event.button !== 0 || !App.chart.plotPointFromClient(event.clientX, event.clientY)) return;
+      touchGesture = event.pointerType !== "mouse"
+        ? { x: event.clientX, y: event.clientY, lineX: chart.timeScale().timeToCoordinate(time), confirmTime: pinnedTime } : null;
+      if (pickGesture(event) === null) { touchGesture = null; return; }
+      consume(event);
+      pointer = event.pointerId;
+      container.setPointerCapture(pointer);
+    }, { capture: true, passive: false });
+    window.addEventListener("pointermove", event => {
+      if (!selecting || (pointer === null ? event.pointerType !== "mouse" || !container.contains(event.target) : event.pointerId !== pointer)) return;
+      consume(event);
+      pickGesture(event);
+    }, { capture: true, passive: false });
+    window.addEventListener("pointerup", event => {
+      if (!selecting || event.pointerId !== pointer) return;
+      consume(event);
+      const selected = pickGesture(event);
+      const confirmTouch = touchGesture !== null && touchGesture.confirmTime !== null;
+      release();
+      suppressUntil = performance.now() + 500;
+      if (selected === null) return;
+      if (event.pointerType === "mouse" || confirmTouch) launch(selected);
+      else pinnedTime = selected;
+    }, { capture: true, passive: false });
+    window.addEventListener("pointercancel", event => {
+      if (event.pointerId === pointer) release();
+    }, true);
+    container.addEventListener("lostpointercapture", event => {
+      if (event.pointerId === pointer) pointer = null;
+    });
+    // Consume compatibility touch/click events so selecting a bar cannot pan
+    // the chart or open a manual alert after the selection is confirmed.
+    for (const type of ["touchstart", "touchmove", "touchend", "click", "dblclick"]) {
+      container.addEventListener(type, event => {
+        if (selecting || performance.now() < suppressUntil) consume(event);
+      }, { capture: true, passive: false });
+    }
+    window.addEventListener("blur", release);
+    chart.timeScale().subscribeVisibleLogicalRangeChange(render);
+    new ResizeObserver(render).observe(container);
+    return {
+      show() {
+        pinnedTime = null;
+        if (previousOptions === null) {
+          const options = chart.options();
+          previousOptions = structuredClone({ handleScroll: options.handleScroll, handleScale: options.handleScale, crosshair: options.crosshair });
+          chart.applyOptions({ handleScroll: false, handleScale: false, crosshair: {
+            vertLine: { visible: false, labelVisible: false }, horzLine: { visible: false, labelVisible: false },
+          } });
+        }
+        const rect = container.getBoundingClientRect();
+        pick(rect.left + chart.timeScale().width() / 2, rect.top + App.chart.pricePaneHeight() / 2);
+      },
+      hide() {
+        release();
+        guide.hidden = true;
+        time = null;
+        pinnedTime = null;
+        if (previousOptions !== null) {
+          chart.applyOptions(previousOptions);
+          previousOptions = null;
+          chart.clearCrosshairPosition();
+        }
+      },
+    };
   }
   function addLiveChart() {
     const panel = livePanel = document.createElement("section");
@@ -990,19 +1279,23 @@ App.replay = (() => {
           ready = true;
           busy = false;
           ended = data.done;
+          sourceEnded = data.done;
+          frameQueue = [];
           rewindFrom = data.seek_supported === true && Number.isFinite(data.rewind_from) ? data.rewind_from : null;
-          rewindTo = data.seek_supported === true && Number.isFinite(data.rewind_to) ? data.rewind_to : null;
+          rewindTo = data.seek_supported === true && Number.isFinite(data.rewind_to)
+            ? Math.min(data.rewind_to, Math.max(rewindTo ?? data.time, data.time)) : null;
           startMarker.setTime(Number.isFinite(data.rewind_from) ? data.rewind_from : (startMarker.time ?? data.time));
           message(textTime(lastTime));
           if (pendingSeek !== null) seek(pendingSeek);
         } else if (data.type === "frame") {
-          if (data.frame) { renderFrame(data.frame, data.plots); lastTime = data.frame.bar.time; }
-          if (rewindTo !== null) rewindTo = Math.max(rewindTo, lastTime);
           busy = false;
-          ended = data.done;
-          message(textTime(lastTime) + (ended ? " · End" : ""));
           if (pendingSeek !== null) seek(pendingSeek);
-          else if (ended) pause(); else schedule();
+          else {
+            frameQueue.push(data);
+            sourceEnded = data.done;
+            refillFrames();
+            if (manualStepPending) advanceFrame(); else schedule();
+          }
         }
         controls();
       } catch (error) { stop(); message(error.message, true); }
@@ -1037,8 +1330,7 @@ App.replay = (() => {
     button(toolbarControls, "select", "Select a bar", () => setSelection(!selecting));
     startButton = button(toolbarControls, "start", "Go to replay start", goToStart);
     play = button(toolbarControls, "play", "Play", () => {
-      if (playing) pause();
-      else { playing = true; play.innerHTML = icon("pause"); play.dataset.tooltip = "Pause"; play.setAttribute("aria-label", "Pause"); requestStep(); }
+      if (playing) pause(); else resume();
       controls();
     });
     step = button(toolbarControls, "step", "Next bar", requestStep);
@@ -1056,7 +1348,7 @@ App.replay = (() => {
     }).classList.add("replay-toolbar-exit");
     document.body.append(toolbar);
     addToolbarHandle();
-    try { livePreferred = localStorage.getItem(App.config.storageKey("replay-live-visible")) !== "false"; } catch {}
+    try { livePreferred = localStorage.getItem(App.config.storageKey("replay-live-visible")) === "true"; } catch {}
     setLiveVisible(livePreferred, false);
     mobile.addEventListener("change", () => {
       setLiveVisible(livePreferred, false);
