@@ -161,7 +161,9 @@ def _closed_position_history_matches(
     if payload.get("opened_at_known") is not False:
         record_opened_at = _timestamp_seconds(record.get("opened_at"))
         position_opened_at = _timestamp_seconds(
-            closed_position.get("datetime") or closed_position.get("timestamp")
+            closed_position.get("opened_timestamp")
+            or closed_position.get("datetime")
+            or closed_position.get("timestamp")
         )
         if (
             record_opened_at is not None
@@ -436,7 +438,7 @@ class AccountHistoryBuffer:
         for raw_order in orders:
             if not isinstance(raw_order, dict):
                 continue
-            payload = normalize_order(raw_order)
+            payload = normalize_order(raw_order, exchange=exchange)
             resolved_scope = market_scope
             if exchange == "okx":
                 resolved_scope = (
