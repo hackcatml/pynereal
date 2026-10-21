@@ -1,0 +1,159 @@
+.replay-button {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  flex: 0 0 30px; width: 30px; height: 30px; padding: 5px; border: 0; border-radius: 4px;
+  color: #4b5563; background: transparent; cursor: pointer; touch-action: manipulation;
+}
+.replay-button svg { width: 18px; height: 18px; }
+.replay-button[hidden], #chart-replay-toggle[hidden] { display: none; }
+.replay-button[aria-pressed="true"] { color: #2962ff; background: #e8efff; }
+.replay-button:disabled { opacity: .35; cursor: default; }
+.replay-button:focus-visible { outline: 2px solid #2962ff; }
+@media (hover: hover) and (pointer: fine) {
+  .replay-button:hover { background: #edf0f3; }
+  .replay-button[data-tooltip]:hover::after {
+    content: attr(data-tooltip); position: absolute; bottom: calc(100% + 6px); left: 50%;
+    transform: translateX(-50%); white-space: nowrap; font: 12px/1.3 sans-serif;
+    background: #30343b; color: white; padding: 5px 7px; border-radius: 4px; pointer-events: none; z-index: 1;
+  }
+}
+.replay-toolbar {
+  position: fixed; bottom: max(32px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 3px; width: max-content; max-width: calc(100% - 20px); padding: 6px 5px;
+  box-sizing: border-box;
+  border: 1px solid #d8dce2; border-radius: 6px; background: #fff; color: #414a56;
+  box-shadow: 0 2px 10px #0002; z-index: 1150; font: 12px/1.4 sans-serif;
+}
+.replay-toolbar-controls { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.replay-toolbar-exit { margin-left: 4px; }
+.replay-toolbar .replay-toolbar-handle {
+  flex: 0 0 18px; width: 18px; height: auto; align-self: stretch; padding: 0;
+  cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none;
+}
+.replay-toolbar.dragging .replay-toolbar-handle { cursor: grabbing; }
+.replay-toolbar.dragging .replay-toolbar-handle::after { display: none; }
+.replay-toolbar output { min-width: 0; max-width: 270px; overflow-wrap: anywhere; }
+.replay-toolbar .error { color: #be293a; }
+.replay-speed { position: relative; flex: 0 0 48px; width: 48px; min-width: 0; }
+.replay-speed button { color: inherit; font: inherit; cursor: pointer; touch-action: manipulation; }
+.replay-speed-toggle {
+  display: flex; align-items: center; justify-content: space-between; gap: 3px; width: 100%; height: 28px;
+  padding: 0 4px; border: 1px solid #d8dce2; border-radius: 4px; background: white;
+}
+.replay-speed-toggle span { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.replay-speed-toggle svg { width: 10px; height: 10px; flex: 0 0 10px; }
+.replay-speed-toggle:hover, .replay-speed-toggle[aria-expanded="true"] { background: #edf0f3; }
+#replay-speed-menu {
+  position: absolute; bottom: calc(100% + 8px); left: 0; min-width: 80px; padding: 4px;
+  box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain;
+  border: 1px solid #d8dce2; border-radius: 6px; background: white; box-shadow: 0 3px 14px #0002;
+}
+#replay-speed-menu[hidden] { display: none; }
+#replay-speed-menu button {
+  display: block; width: 100%; height: 32px; padding: 0 10px; border: 0; border-radius: 4px;
+  background: transparent; text-align: left;
+}
+#replay-speed-menu button:hover, #replay-speed-menu button:focus-visible { background: #edf0f3; }
+#replay-speed-menu button[aria-checked="true"] { color: #2962ff; background: #e8efff; font-weight: 600; }
+.replay-speed button:focus-visible { outline: 2px solid #2962ff; outline-offset: -2px; }
+.replay-chooser {
+  position: fixed; bottom: 84px; left: 50%; transform: translateX(-50%); z-index: 1151;
+  padding: 12px; width: 286px; max-width: calc(100% - 24px); box-sizing: border-box; background: white; color: #414a56;
+  border: 1px solid #d8dce2; border-radius: 6px; box-shadow: 0 3px 14px #0002; font: 13px/1.5 sans-serif;
+}
+.replay-chooser[hidden] { display: none; }
+.replay-chooser label { display: grid; gap: 6px; }
+.replay-chooser input { min-width: 0; width: 100%; box-sizing: border-box; height: 32px; border: 1px solid #cbd0d7; border-radius: 4px; padding: 5px; font: inherit; color: inherit; background: white; }
+.replay-chooser input[aria-invalid="true"] { border-color: #be293a; }
+.replay-chooser-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.replay-chooser button[type="submit"] { margin-right: auto; border: 0; border-radius: 4px; background: #2962ff; color: white; padding: 7px 12px; cursor: pointer; touch-action: manipulation; }
+.replay-date-field { position: relative; }
+.replay-calendar {
+  box-sizing: border-box; max-height: max(120px, calc(100dvh - 220px)); overflow: auto;
+  font: inherit; font-variant-numeric: tabular-nums; overscroll-behavior: contain;
+}
+.replay-calendar > label { margin-bottom: 10px; }
+.replay-calendar header { display: grid; grid-template-columns: 30px minmax(0, 1fr) 30px; align-items: center; margin-bottom: 6px; }
+.replay-calendar header strong { text-align: center; font-weight: 600; }
+.replay-calendar-weekdays, .replay-calendar-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.replay-calendar-weekdays span { text-align: center; padding: 3px 0; color: #697582; }
+.replay-calendar-days button {
+  min-width: 0; height: 30px; padding: 0; border: 0; border-radius: 4px;
+  color: inherit; background: transparent; font: inherit; cursor: pointer; touch-action: manipulation;
+}
+.replay-calendar-days button.outside { color: #88929c; }
+.replay-calendar-days button:hover:not(:disabled) { background: #edf0f3; }
+.replay-calendar-days button[aria-pressed="true"] { background: #e8efff; color: #2962ff; font-weight: 600; }
+.replay-calendar-days button:disabled { opacity: .35; cursor: default; }
+.replay-calendar-days button:focus-visible { outline: 2px solid #2962ff; outline-offset: -2px; }
+.replay-calendar .replay-calendar-time { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid #e5e8ec; margin-top: 8px; padding-top: 8px; }
+.replay-time-fields { display: flex; align-items: center; gap: 3px; }
+.replay-time-toggle {
+  display: flex; align-items: center; justify-content: center; gap: 4px; width: 51px; height: 30px; padding: 0 5px;
+  border: 1px solid #cbd0d7; border-radius: 4px; background: white; color: inherit; font: inherit;
+  cursor: pointer; touch-action: manipulation;
+}
+.replay-time-toggle svg { width: 12px; height: 12px; }
+.replay-time-toggle:hover, .replay-time-toggle[aria-expanded="true"] { background: #edf0f3; }
+.replay-time-menu {
+  position: absolute; z-index: 2; width: 58px; max-height: 160px; padding: 3px; box-sizing: border-box;
+  overflow-y: auto; overscroll-behavior: contain; border: 1px solid #d8dce2; border-radius: 4px;
+  background: white; color: #414a56; box-shadow: 0 3px 14px #0002; font: 13px/1.5 sans-serif;
+}
+.replay-time-menu[hidden] { display: none; }
+.replay-time-menu button {
+  display: block; width: 100%; height: 30px; padding: 0; border: 0; border-radius: 3px;
+  background: transparent; color: inherit; font: inherit; cursor: pointer; touch-action: manipulation;
+}
+.replay-time-menu button:hover, .replay-time-menu button:focus-visible { background: #edf0f3; }
+.replay-time-menu button[aria-selected="true"] { color: #2962ff; background: #e8efff; font-weight: 600; }
+.replay-time-toggle:focus-visible, .replay-time-menu button:focus-visible { outline: 2px solid #2962ff; outline-offset: -2px; }
+.replay-live {
+  position: fixed; top: 12px; right: 72px; width: 32%; height: 27%; min-width: 240px;
+  max-width: min(600px, calc(100vw - 8px)); min-height: 150px; max-height: calc(100dvh - 8px); z-index: 100; background: white;
+  border: 1px solid #cbd0d7; border-radius: 5px; overflow: hidden; resize: both;
+}
+.replay-live-handle {
+  display: flex; align-items: center; gap: 3px; width: 100%; height: 22px; padding: 0 5px;
+  border: 0; border-radius: 0; background: #f5f6f8; color: #20845b; font: 12px/22px sans-serif;
+  text-align: left; cursor: grab; touch-action: none; user-select: none;
+}
+.replay-live-handle svg { width: 16px; height: 16px; flex: 0 0 16px; }
+.replay-live-handle:focus-visible { outline: 2px solid #2962ff; outline-offset: -2px; }
+.replay-live.dragging .replay-live-handle { cursor: grabbing; }
+.replay-live.dragging iframe { pointer-events: none; }
+.replay-live iframe { width: 100%; height: calc(100% - 22px); border: 0; display: block; }
+.replay-page #toolbar, .replay-page #chart-runner-status,
+.replay-page #chart-indicators-toggle, .replay-page #frvp-tool-toggle, .replay-page #avp-tool-toggle,
+.replay-inset #drawing-toolbar, .replay-inset #toolbar, .replay-inset #chart-runner-status,
+.replay-inset .chart-indicator-pane-header, .replay-inset .pwa-back-bar { display: none !important; }
+.replay-inset #chart-info { font-size: 11px; }
+.replay-page #chart-session-toggle, .replay-page #chart-timeframe-toggle,
+.replay-inset #chart-session-toggle, .replay-inset #chart-timeframe-toggle { pointer-events: none; border-bottom: 0; }
+.replay-selecting #chart { cursor: crosshair; outline: 2px solid #2962ff; outline-offset: -2px; }
+@media (max-width: 720px), (hover: none) and (pointer: coarse) {
+  .replay-live { top: 90px; right: 5px; width: 43%; height: 22%; min-width: 130px; min-height: 100px; }
+  .replay-toolbar { display: grid; grid-template-columns: 18px minmax(0, max-content) 34px; gap: 2px; padding: 5px; }
+  .replay-toolbar-controls { gap: 2px; }
+  .replay-toolbar output { grid-row: 2; grid-column: 1 / -1; max-width: none; text-align: center; }
+  .replay-toolbar-exit { grid-row: 1; grid-column: 3; }
+  .replay-chooser { bottom: 115px; width: 248px; padding: 8px; font-size: 12px; }
+  .replay-chooser label { gap: 4px; }
+  .replay-chooser input { height: 28px; padding: 4px; }
+  .replay-calendar > label { margin-bottom: 6px; }
+  .replay-calendar header { grid-template-columns: 28px minmax(0, 1fr) 28px; margin-bottom: 4px; }
+  .replay-calendar header .replay-button { width: 28px; height: 28px; padding: 5px; }
+  .replay-calendar-weekdays span { padding: 2px 0; }
+  .replay-calendar-days button { height: 26px; }
+  .replay-calendar .replay-calendar-time { gap: 6px; margin-top: 6px; padding-top: 6px; }
+  .replay-time-toggle { width: 46px; height: 28px; gap: 3px; }
+  .replay-chooser-actions { gap: 6px; margin-top: 6px; }
+  .replay-chooser button[type="submit"] { padding: 6px 10px; }
+  .replay-inset #chart-info, .replay-inset .nav-btn { display: none !important; }
+}
+@media (max-width: 640px), (hover: none) and (pointer: coarse) {
+  .replay-toolbar { grid-template-columns: 18px minmax(0, max-content) 36px; }
+  .replay-toolbar .replay-button:not(.replay-toolbar-handle) { flex-basis: 32px; width: 32px; height: 36px; }
+  .replay-toolbar .replay-button svg { width: 16px; height: 16px; }
+  .replay-toolbar .replay-speed-toggle { height: 36px; }
+  .replay-chooser { bottom: 120px; }
+}

@@ -560,6 +560,7 @@ App.chart = {
     return rect.top + coordinate;
   },
   manualAlertLineDragEnabled() {
+    if (App.replay?.active || App.replay?.selecting || App.replay?.inset) return false;
     if (!App.ui || !App.ui.manualAlertTriggerActive || !App.ui.manualAlertTriggerActive()) return false;
     if (App.state.manualAlertMenuOpen || App.state.manualAlertConfirmOpen) return false;
     if (App.state.measureToolActive || App.trendline?.active || App.trendline?.selectedId != null || App.state.sourcePanelOpen) return false;
@@ -824,6 +825,7 @@ App.chart = {
     };
   },
   openManualAlertMenuFromPointer(pointer) {
+    if (App.replay?.active || App.replay?.selecting || App.replay?.inset) return;
     if (App.state.measureToolActive || App.trendline?.active || App.trendline?.selectedId != null) return;
     if (App.state.sourcePanelOpen) return;
     if (!App.ui.elements.alertTemplateModal.classList.contains("hidden")) return;
@@ -1021,7 +1023,7 @@ App.chart = {
       }
     );
 
-    this.chart.subscribeCrosshairMove((param) => {
+    const updateCrosshairInfo = (param) => {
       const state = App.state;
       if (!param || !param.time) {
         if (!state.lastOhlcv) {
@@ -1039,6 +1041,10 @@ App.chart = {
       }
       const volumeValue = volBar ? volBar.value : (state.lastOhlcv ? state.lastOhlcv.volume : null);
       App.ui.setChartInfo(this.formatOhlcvText(bar, volumeValue));
+    };
+    this.chart.subscribeCrosshairMove(param => {
+      if (App.replay?.active) App.replay.queueCrosshair(updateCrosshairInfo, param);
+      else updateCrosshairInfo(param);
     });
     this.attachManualAlertGesture();
     this.attachTouchGuards();

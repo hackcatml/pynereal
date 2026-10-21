@@ -75,7 +75,7 @@ App.indicators = {
         params.slowPeriod = def.slowPeriod;
       }
       return {
-        id: def.id, enabled: old?.enabled === true,
+        id: def.id, enabled: old?.enabled === true && !(this.overlayOnly && def.pane),
         ...params,
         colors: def.colors.map((color, index) => /^#[0-9a-f]{6}$/i.test(colors?.[index]) ? colors[index] : color),
         ...(["sma", "ema"].includes(def.id) ? {
@@ -99,9 +99,11 @@ App.indicators = {
     }));
   },
   saveLocal() {
+    if (this.readOnly) return;
     try { localStorage.setItem(App.config.storageKey("indicators"), JSON.stringify(this.settings)); } catch {}
   },
   async requestSettings(payload) {
+    if (this.readOnly && payload) return payload.settings;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
     try {
@@ -128,7 +130,7 @@ App.indicators = {
       let shared = await this.requestSettings();
       // Only an existing browser preference can seed an unconfigured session.
       // A fresh capture must never write the default (all-disabled) settings.
-      if (shared === null && Array.isArray(saved) && !App.chart.captureMode) {
+      if (shared === null && Array.isArray(saved) && !App.chart.captureMode && !this.readOnly) {
         shared = await this.requestSettings({ settings: this.sharedSettings(this.loadSettings(saved)), initialize_only: true });
       }
       if (shared !== null && version === this.settingsVersion) {
@@ -166,6 +168,7 @@ App.indicators = {
     }
   },
   save() {
+    if (this.readOnly) return;
     this.saveLocal();
     if (!this.settingsLoaded || App.chart.captureMode) return;
     const settings = this.sharedSettings(), key = JSON.stringify(settings);
@@ -195,7 +198,9 @@ App.indicators = {
     ));
     return { ready, signature: this.revision };
   },
-  init() {
+  init({ overlayOnly = false, readOnly = false } = {}) {
+    this.overlayOnly = overlayOnly;
+    this.readOnly = readOnly;
     this.button = document.getElementById("chart-indicators-toggle");
     this.menu = document.getElementById("chart-indicators-menu");
     if (!this.button || !this.menu) return;
@@ -215,7 +220,11 @@ App.indicators = {
       });
       this.legendObserver.observe(info);
     }
-    App.chart.chart.subscribeCrosshairMove(param => this.updateCrosshairValue(param));
+    const updateCrosshair = param => this.updateCrosshairValue(param);
+    App.chart.chart.subscribeCrosshairMove(param => {
+      if (App.replay?.active) App.replay.queueCrosshair(updateCrosshair, param);
+      else updateCrosshair(param);
+    });
     this.renderMenu();
     this.button.addEventListener("click", event => {
       if (App.measure?.shouldSuppressToolbarClick(event)) return;

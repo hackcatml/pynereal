@@ -275,9 +275,8 @@ App.ws = {
           }
 
           if (collections.seriesMarkers) {
-            collections.seriesMarkers.setMarkers([]);
-          }
-          collections.seriesMarkers = LightweightCharts.createSeriesMarkers(chart.candleSeries, collections.markers);
+            collections.seriesMarkers.setMarkers(collections.markers);
+          } else collections.seriesMarkers = LightweightCharts.createSeriesMarkers(chart.candleSeries, collections.markers);
         } else if (msg.type === "trade_close") {
           if (state.firstBarTime !== null && msg.time < state.firstBarTime) {
             return;
@@ -310,9 +309,8 @@ App.ws = {
           }
 
           if (collections.seriesMarkers) {
-            collections.seriesMarkers.setMarkers([]);
-          }
-          collections.seriesMarkers = LightweightCharts.createSeriesMarkers(chart.candleSeries, collections.markers);
+            collections.seriesMarkers.setMarkers(collections.markers);
+          } else collections.seriesMarkers = LightweightCharts.createSeriesMarkers(chart.candleSeries, collections.markers);
         } else if (msg.type === "plotchar") {
           if (state.firstBarTime !== null && msg.time < state.firstBarTime) {
             return;
@@ -341,12 +339,9 @@ App.ws = {
           collections.plotcharMarkerKeys.add(markerKey);
 
           if (collections.plotcharSeriesMarkers) {
-            collections.plotcharSeriesMarkers.setMarkers([]);
-          }
-          collections.plotcharSeriesMarkers = LightweightCharts.createSeriesMarkers(
-            chart.candleSeries,
-            collections.plotcharMarkers
-          );
+            collections.plotcharSeriesMarkers.setMarkers(collections.plotcharMarkers);
+          } else collections.plotcharSeriesMarkers = LightweightCharts.createSeriesMarkers(
+            chart.candleSeries, collections.plotcharMarkers);
         } else if (msg.type === "plot_data") {
           const { title, time, value } = msg;
           App.data.updatePlotSeries(chart, collections, title, time, value);
