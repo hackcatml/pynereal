@@ -261,8 +261,8 @@ def plotchar(series: Any, title: str | None = None, char: str = "•", text: str
     if title is None:
         title = 'PlotChar'
 
-    # No plotchar callback if the bar is progressing
-    if _bar_state.bar_index == _script.last_bar_index:
+    # Only live runners include a progressing candle; replay steps are confirmed.
+    if _script.realtime_trade and _bar_state.bar_index == _script.last_bar_index:
         return
 
     # Call plotchar callback if exists

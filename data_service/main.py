@@ -35,6 +35,7 @@ from scripting_api import ScriptingExecutor, build_scripting_router
 from scripting_ai_api import build_scripting_ai_router
 from scripting_backtest import ScriptingBacktestManager
 from scripting_backtest_api import build_scripting_backtest_router
+from chart_replay import ChartReplayService, build_chart_replay_router
 from scripting_history import ScriptingHistoryStore
 from scripting_workspace import ScriptingWorkspace
 from ui import build_ui_router
@@ -79,6 +80,8 @@ def build_app(
         registry=registry,
     )
     app.state.scripting_backtest_manager = scripting_backtest_manager
+    app.state.chart_replay_service = ChartReplayService(registry, _PROJECT_ROOT)
+    app.include_router(build_chart_replay_router(app.state.chart_replay_service))
 
     @app.exception_handler(StarletteHTTPException)
     async def log_history_import_body_error(
@@ -410,7 +413,10 @@ async def main() -> None:
                             try:
                                 await app.state.scripting_backtest_manager.close()
                             finally:
-                                app.state.scripting_executor.close()
+                                try:
+                                    await app.state.chart_replay_service.close()
+                                finally:
+                                    app.state.scripting_executor.close()
     if update_shutdown.is_set():
         update_service.apply_and_restart()
 
