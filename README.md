@@ -27,6 +27,8 @@ Run your crypto trading strategy in real time without TradingView.
 - 📝 **Scripting workspace** — manage, edit, compare, and restore strategy
   files with CodeMirror 6 and AI-assisted editing; run parallel backtests and
   compare their performance and result charts
+- **Bar replay**: recalculate historical strategy candles with playback,
+  stepping, rewind, and an optional live chart alongside
 - 📱 Full mobile dashboard
 
 ## 🤖 AI Copilot
@@ -435,6 +437,59 @@ PyneReal runs PyneCore strategy scripts in realtime, so the file should declare
 The runner can be started before opening a chart, or the chart can be opened
 before the runner starts. Source code, script title, and alert toggles are still
 available from the chart page.
+
+## Chart Replay
+
+Open a session chart and select **Bar replay** in the chart toolbar. The session
+needs a saved script and loaded candle history; its live runner does not need to
+be running. Replay uses a snapshot of the saved script and local candle data
+taken when preparation starts. Only completed candles are available.
+
+1. Choose a date from the calendar or enter it directly, select the UTC hour and
+   minute, and click **Start replay**. The time defaults to **00:00 UTC**.
+2. Alternatively, choose **Select a bar**. On desktop, move the vertical guide
+   and click the desired candle. On mobile, drag to move the guide and release
+   to fix its position, then tap the chart again to confirm. `Esc` cancels bar
+   selection on desktop.
+3. Wait for **Preparing replay** to finish, then use **Play**, **Pause**, or
+   **Next bar**. The chart displays the strategy's plots and entry/exit markers
+   as the replay advances.
+
+Drag the toolbar's dotted handle to move it. The speed menu offers **0.5x, 1x,
+2x, 5x, and 10x**; 1x targets one candle per second. Up to ten candles are
+calculated ahead and buffered, but they are displayed only at their playback
+time. Playback pauses when the tab is hidden. Close the toolbar with **Exit
+replay** to return to the normal chart.
+
+A blue marker identifies the initial replay candle. **Go to replay start**
+moves the chart view to that marker without changing the playback position.
+To rewind playback, use **Select date** or **Select a bar** again. Selecting a
+candle between the initial replay point and the latest displayed replay candle
+restores cached results without another warm-up. Selecting outside that range
+starts a new preparation. These cached results last only for the current replay
+connection.
+
+On desktop, **Show LIVE chart** opens a separate, draggable live view that can
+be panned and zoomed independently. It is hidden by default, and the visibility
+preference is saved in the browser. Lower indicator panes are omitted from this
+compact view. Mobile supports replay with the toolbar over the chart, but does
+not show the simultaneous LIVE view. The calendar supports horizontal swipes
+to change months and closes when you tap outside it.
+
+Preparation warms up a separate runner from the beginning of the saved candle
+history through the selected candle, using the same PyneCore engine as live
+warm-up. Installed native indicator kernels are enabled by default. The initial
+chart shows up to 60 days of calculated history before the selected point;
+this display window does not limit the warm-up history. Subsequent candles
+advance the existing runner one at a time. Higher-timeframe values from
+`request.security`, including `lookahead_on`, follow the data available at the
+replay cursor; the replayed path can therefore differ from a later full-history
+recalculation.
+
+Replay runs in separate processes with Webhook and Telegram delivery disabled.
+Live runners continue independently, although replay shares the server's CPU
+and memory. Up to four replay connections can run at once. Exiting replay,
+closing its tab, or disconnecting stops its worker and removes temporary files.
 
 ## Browser Chart Indicators
 

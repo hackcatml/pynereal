@@ -10,7 +10,8 @@ window.App.config = {
   apiBase: window.API_BASE || "/api",
   wsPath: window.WS_PATH || "/ws",
   storageKey(name) {
-    return this.runtimeId ? `${name}:${this.runtimeId}` : name;
+    const key = this.runtimeId ? `${name}:${this.runtimeId}` : name;
+    return window.App.replay?.active ? `${key}:replay` : key;
   }
 };
 

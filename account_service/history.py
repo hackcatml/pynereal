@@ -82,7 +82,9 @@ def _updated_timestamp(order: dict[str, Any]) -> int | None:
     return _integer(order.get("timestamp"))
 
 
-def normalize_order(order: dict[str, Any]) -> dict[str, Any]:
+def normalize_order(
+    order: dict[str, Any], *, exchange: str | None = None,
+) -> dict[str, Any]:
     order_id = str(order.get("id") or "").strip()
     client_order_id = str(order.get("clientOrderId") or "").strip()
     timestamp = _integer(order.get("timestamp"))
@@ -103,7 +105,7 @@ def normalize_order(order: dict[str, Any]) -> dict[str, Any]:
                 ],
             )
         )
-    return {
+    normalized = {
         "id": order_id,
         "client_order_id": client_order_id,
         "symbol": symbol,
@@ -128,6 +130,24 @@ def normalize_order(order: dict[str, Any]) -> dict[str, Any]:
         "updated_timestamp": _updated_timestamp(order),
         "fee": _fee(order.get("fee")),
     }
+    info = order.get("info")
+    if exchange == "bitget" and isinstance(info, dict) and "posMode" in info:
+        # V2 contract WS baseVolume/fillNotionalUsd describe the last fill,
+        # whereas accBaseVolume/priceAvg describe the whole order.
+        filled = _decimal(info.get("accBaseVolume"))
+        if filled is not None and filled >= 0:
+            amount = _decimal(order.get("amount"))
+            average = _decimal(info.get("priceAvg"))
+            normalized["filled"] = float(filled)
+            if amount is not None and amount >= 0:
+                normalized["remaining"] = float(max(amount - filled, Decimal(0)))
+            if filled == 0:
+                normalized["cost"] = 0.0
+            elif average is not None and average > 0:
+                normalized["cost"] = float(filled * average)
+            else:
+                normalized["cost"] = None
+    return normalized
 
 
 def normalize_fill(trade: dict[str, Any]) -> dict[str, Any]:

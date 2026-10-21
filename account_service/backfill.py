@@ -1197,19 +1197,31 @@ async def _fetch_position_window(
     symbol: str | None = None,
 ) -> list[dict[str, Any]]:
     params = {**(scope.position_params or {}), "until": until}
+    query_since = since
+    if account.exchange_id == "bitget":
+        # The API filters by closure, but CCXT's since post-filter uses the
+        # opening timestamp and would discard long-held positions.
+        params["startTime"] = since
+        query_since = None
     rows = await _fetch_with_retry(
         exchange,
         account,
         f"{scope.name} position history",
         lambda: exchange.fetch_positions_history(
             [symbol] if symbol else None,
-            since,
+            query_since,
             POSITION_PAGE_LIMIT,
             params,
         ),
         stop,
     )
     if len(rows) < POSITION_PAGE_LIMIT or until - since <= POSITION_MIN_WINDOW_MS:
+        if account.exchange_id == "bitget":
+            return [
+                position for position in rows
+                if (closed_ms := _position_closed_ms(position)) is not None
+                and since <= closed_ms <= until
+            ]
         return rows
     midpoint = since + (until - since) // 2
     left = await _fetch_position_window(

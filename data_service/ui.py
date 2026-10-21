@@ -30,6 +30,8 @@ _STATIC_FILES = {
     "bgcolor.js": "text/javascript",
     "plot_visuals.js": "text/javascript",
     "chart.js": "text/javascript",
+    "chart_replay.js": "text/javascript",
+    "chart_replay.css": "text/css",
     "measure.js": "text/javascript",
     "trendline.js": "text/javascript",
     "volume_profile.js": "text/javascript",
