@@ -13,22 +13,10 @@ struct Value {
     explicit Value(double n) : number(n), missing(false) {}
 };
 
-static PyObject *na_value, *na_int_value, *na_type, *round_method, *digits, *sqrt_method, *builtin_round;
+static PyObject *na_value, *na_int_value, *na_type, *sqrt_method, *builtin_round;
 
 static PyObject *object(Value value) {
     return value.missing ? Py_NewRef(na_value) : PyFloat_FromDouble(value.number);
-}
-
-static Value rounded(Value value) {
-    if (value.missing) return value;
-    PyObject *input = PyFloat_FromDouble(value.number);
-    if (!input) return {};
-    PyObject *result = PyObject_CallFunctionObjArgs(round_method, input, digits, nullptr);
-    Py_DECREF(input);
-    if (!result) return {};
-    double n = PyFloat_AsDouble(result);
-    Py_DECREF(result);
-    return Value(n);
 }
 
 struct Sum {
@@ -54,6 +42,16 @@ struct Sum {
         if (total.missing || compensation.missing || delta.missing) {
             total = compensation = Value();
             return;
+        }
+        double terms[4] = {total.number, -compensation.number, delta.number};
+        double precise, residual;
+        if (finite_fsum(terms, 3, precise)) {
+            terms[3] = -precise;
+            if (finite_fsum(terms, 4, residual)) {
+                total = Value(precise);
+                compensation = Value(-residual);
+                return;
+            }
         }
         double corrected = delta.number - compensation.number;
         double updated = total.number + corrected;
@@ -90,7 +88,7 @@ struct Sum {
     Value sma(Value source, long long length, long long bar) {
         Value result = step(source, length, bar);
         if (!result.missing) result.number /= static_cast<double>(length);
-        return rounded(result);
+        return result;
     }
 };
 
@@ -702,8 +700,6 @@ PyMODINIT_FUNC PyInit__pynereal_native_ta() {
     na_int_value = PyObject_GetAttrString(na_module, "na_int");
     na_type = PyObject_GetAttrString(na_module, "NA");
     Py_DECREF(na_module);
-    round_method = PyObject_GetAttrString(reinterpret_cast<PyObject *>(&PyFloat_Type), "__round__");
-    digits = PyLong_FromLong(15);
     PyObject *math_module = PyImport_ImportModule("math");
     if (!math_module) return nullptr;
     sqrt_method = PyObject_GetAttrString(math_module, "sqrt");
@@ -712,7 +708,7 @@ PyMODINIT_FUNC PyInit__pynereal_native_ta() {
     if (!builtins) return nullptr;
     builtin_round = PyObject_GetAttrString(builtins, "round");
     Py_DECREF(builtins);
-    if (!na_value || !na_int_value || !na_type || !round_method || !digits || !sqrt_method || !builtin_round)
+    if (!na_value || !na_int_value || !na_type || !sqrt_method || !builtin_round)
         return nullptr;
     IndicatorType.tp_name = "_pynereal_native_ta.State";
     IndicatorType.tp_basicsize = sizeof(Indicator);
@@ -744,6 +740,10 @@ PyMODINIT_FUNC PyInit__pynereal_native_ta() {
         return nullptr;
     }
     if (PyModule_AddIntConstant(result, "SCALAR_MATH_SUPPORTED", 1) < 0) {
+        Py_DECREF(result);
+        return nullptr;
+    }
+    if (PyModule_AddIntConstant(result, "ACCURATE_SUM_SUPPORTED", 1) < 0) {
         Py_DECREF(result);
         return nullptr;
     }
