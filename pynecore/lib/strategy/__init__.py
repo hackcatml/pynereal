@@ -1301,8 +1301,9 @@ class Position:
 
             # Check risk allowed direction for new positions (when no current position)
             if self.size == 0.0 and self.risk_allowed_direction is not None:
-                if (order.sign > 0 and self.risk_allowed_direction != long) or \
-                        (order.sign < 0 and self.risk_allowed_direction != short):
+                # Only the opposite restriction blocks entry; direction.all permits both.
+                if (order.sign > 0 and self.risk_allowed_direction == short) or \
+                        (order.sign < 0 and self.risk_allowed_direction == long):
                     # Direction not allowed - don't fill the entry order
                     self._remove_order(order)
                     return False
@@ -1362,8 +1363,8 @@ class Position:
             # According to Pine Script docs: "long exit trades will be made instead of reverse trades"
             new_direction_sign = 1.0 if new_size > 0.0 else -1.0
             if self.risk_allowed_direction is not None:
-                if (new_direction_sign > 0 and self.risk_allowed_direction != long) or \
-                        (new_direction_sign < 0 and self.risk_allowed_direction != short):
+                if (new_direction_sign > 0 and self.risk_allowed_direction == short) or \
+                        (new_direction_sign < 0 and self.risk_allowed_direction == long):
                     # Direction not allowed - convert entry to exit only
                     # Don't open new position in restricted direction
                     self._remove_order(order)
