@@ -386,7 +386,8 @@ def max(id: list[Number]) -> Number:
     :param id: Input array
     :return: Maximum value in the array
     """
-    return builtins.max(id)
+    values = [value for value in id if value == value]
+    return builtins.max(values) if values else NA(float)
 
 
 # noinspection PyShadowingBuiltins
@@ -397,7 +398,8 @@ def median(id: list[Number]) -> float:
     :param id: Input array
     :return: Median value of the elements in the array
     """
-    return statistics.median(id)
+    values = [value for value in id if value == value]
+    return statistics.median(values) if values else NA(float)
 
 
 # noinspection PyShadowingBuiltins
@@ -408,7 +410,8 @@ def min(id: list[Number]) -> float:
     :param id: Input array
     :return: Minimum value in the array
     """
-    return builtins.min(id)
+    values = [value for value in id if value == value]
+    return builtins.min(values) if values else NA(float)
 
 
 # noinspection PyShadowingBuiltins
@@ -993,14 +996,16 @@ def some(id: list[Any]) -> bool:
 
 
 # noinspection PyShadowingBuiltins
-def sort(id: list[int | float | str], order: _order.Order = _order.ascending) -> None:
+def sort(id: list[int | float | str] | SequenceView, order: _order.Order = _order.ascending) -> None:
     """
     Sorts the elements in the array in ascending or descending order.
 
     :param id: Input array
     :param order: Order to sort the elements in
     """
-    id.sort(reverse=order == _order.descending)
+    values = [id[index] for index in sort_indices(id, order)]
+    for index, value in enumerate(values):
+        id[index] = value
 
 
 # noinspection PyShadowingBuiltins
@@ -1013,7 +1018,13 @@ def sort_indices(id: list[T], order: _order.Order = _order.ascending) -> list[Su
     :param order: Order to sort the elements in
     :return: Array of indices to access the elements in their sorted order
     """
-    indices = sorted(builtins.range(len(id)), key=id.__getitem__)  # type: ignore
+    # NA compares false to every value, so it must be partitioned before sorting.
+    indices, missing = [], []
+    for index, value in enumerate(id):
+        (indices if value == value else missing).append(index)
+    indices.sort(key=id.__getitem__)
+    strings = bool(indices) and isinstance(id[indices[0]], str)
+    indices = missing + indices if strings else indices + missing
     if order == _order.descending:
         indices.reverse()
     return indices
@@ -1087,7 +1098,8 @@ def sum(id: list[float | int]) -> float | int:
     :param id: Input array
     :return: Sum of the elements in the array
     """
-    return builtins.sum(id)
+    values = [value for value in id if value == value]
+    return builtins.sum(values) if values else NA(float)
 
 
 # noinspection PyShadowingBuiltins

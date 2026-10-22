@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 import sys
 
 from functools import lru_cache
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 
 from pynecore.types.source import Source
 
@@ -678,6 +678,49 @@ def timenow():
     return int(datetime.now(UTC).timestamp() * 1000)
 
 
+def _current_bar_close_time() -> int | NA[int]:
+    """Close the chart bar on its calendar boundary, capped by known trading hours."""
+    try:
+        period = timeframe_module.period()
+        modifier, multiplier = timeframe_module._process_tf(period)
+        duration = timeframe_module.in_seconds(period)
+        start_ms = _bar_state._time
+        start = datetime.fromtimestamp(start_ms / 1000, _parse_timezone(syminfo.timezone))
+        if modifier == 'M':
+            month = start.year * 12 + start.month - 1 + multiplier
+            year, month = divmod(month, 12)
+            end = start.replace(year=year, month=month + 1, day=1)
+        elif modifier in ('D', 'W'):
+            end = start + timedelta(days=multiplier * (7 if modifier == 'W' else 1))
+        else:
+            end = datetime.fromtimestamp((start_ms + duration * 1000) / 1000, start.tzinfo)
+
+        end_ms = int(end.timestamp() * 1000)
+        if not syminfo._opening_hours:
+            return end_ms
+        # Only the final week is needed for a recurring weekday schedule.
+        date = max(start - timedelta(days=1), end - timedelta(days=7))
+        closes = []
+        while date.date() <= end.date():
+            for weekday, opening, closing in syminfo._opening_hours:
+                if weekday != date.weekday():
+                    continue
+                session_start = datetime.combine(date.date(), opening, start.tzinfo)
+                session_end = datetime.combine(date.date(), closing, start.tzinfo)
+                if closing <= opening:
+                    session_end += timedelta(days=1)
+                # CCXT encodes a full calendar day with an inclusive 23:59:59.
+                if opening.isoformat() == '00:00:00' and closing.isoformat() == '23:59:59':
+                    session_end += timedelta(seconds=1)
+                left, right = int(session_start.timestamp() * 1000), int(session_end.timestamp() * 1000)
+                if left < end_ms and right > start_ms:
+                    closes.append(min(end_ms, right))
+            date += timedelta(days=1)
+        return max(closes) if closes else end_ms
+    except (ValueError, AssertionError):
+        return NA(int)
+
+
 @module_property
 def time_close(timeframe: str | None = None, session: str | None = None, timezone: str | None = None) -> int | NA[int]:
     """
@@ -699,7 +742,7 @@ def time_close(timeframe: str | None = None, session: str | None = None, timezon
     :return: UNIX time in milliseconds of bar close or NA if bar is outside session or invalid parameters
     """
     if timeframe is None:
-        return _bar_state._time
+        return _current_bar_close_time()
 
     # Get resampler for the requested timeframe
     try:
