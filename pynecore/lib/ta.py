@@ -1467,24 +1467,40 @@ def rci(source: Series[float], length: int) -> float | NA[float]:
     except IndexError:
         return NA(float)
 
-    # Calculate sums for correlation
-    sum_x = sum_y = sum_xy = sum_x2 = sum_y2 = 0.0
+    # Match Pine's rank grouping and operation order; tiny residuals affect crosses.
+    if any(isinstance(value, NA) or not math.isfinite(value) for value in values):
+        return NA(float)
+    order = sorted(builtins.range(length), key=lambda k: values[k])
+    ranks = [0.0] * length
+    i = 0
+    while i < length:
+        anchor = values[order[i]]
+        j = i
+        while j < length and values[order[j]] - anchor < 1e-10:
+            j += 1
+        rank = (length - 1) - (i + j - 1) / 2.0
+        for k in builtins.range(i, j):
+            ranks[order[k]] = rank
+        i = j
 
+    n = float(length)
+    sum_x = sum_y = sum_x2 = sum_y2 = 0.0
     for i in builtins.range(length):
-        x = i + 1  # Time rank (newest value gets highest rank)
-        y = _avgrank(values, values[i])  # Data rank  # type: ignore
-
+        x, y = float(i), ranks[i]
         sum_x += x
         sum_y += y
-        sum_xy += x * y
         sum_x2 += x * x
         sum_y2 += y * y
-
-    # Calculate correlation coefficient
-    n = length
-    numerator = n * sum_xy - sum_x * sum_y
-    denominator = math.sqrt((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y))
-    return (numerator / denominator) * 100
+    mean_x, mean_y = sum_x / n, sum_y / n
+    var_x = sum_x2 / n - mean_x * mean_x
+    var_y = sum_y2 / n - mean_y * mean_y
+    if var_x <= 0 or var_y <= 0:
+        return NA(float)
+    covariance = 0.0
+    for i in builtins.range(length):
+        covariance += (float(i) - mean_x) * (ranks[i] - mean_y)
+    covariance /= n
+    return (100.0 * covariance) / (math.sqrt(var_x) * math.sqrt(var_y))
 
 
 # noinspection PyUnusedLocal
@@ -1674,8 +1690,7 @@ def sma(source: Series[float], length: int) -> float | NA[float]:
     :param length: The length of the moving average
     :return: The Simple Moving Average (SMA)
     """
-    # Round is necessary to solve precision issues
-    return round(lib_math.sum(source, length) / length, 15)
+    return lib_math.sum(source, length) / length
 
 
 def stdev(source: float, length: int, biased=True) -> float | NA[float]:

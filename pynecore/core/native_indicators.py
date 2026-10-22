@@ -13,6 +13,7 @@ _supports_extrema = False
 _supports_valuewhen = False
 _supports_statistics = False
 _supports_scalar_math = False
+_supports_accurate_sum = False
 # Set PYNECORE_NATIVE_INDICATORS=0 before import to use only Python indicators.
 if os.environ.get('PYNECORE_NATIVE_INDICATORS', '1') == '1':
     try:
@@ -23,6 +24,7 @@ if os.environ.get('PYNECORE_NATIVE_INDICATORS', '1') == '1':
         _supports_valuewhen = bool(getattr(_pynereal_native_ta, 'VALUEWHEN_SUPPORTED', False))
         _supports_statistics = bool(getattr(_pynereal_native_ta, 'STATISTICS_SUPPORTED', False))
         _supports_scalar_math = bool(getattr(_pynereal_native_ta, 'SCALAR_MATH_SUPPORTED', False))
+        _supports_accurate_sum = bool(getattr(_pynereal_native_ta, 'ACCURATE_SUM_SUPPORTED', False))
     except ImportError:
         pass
 
@@ -289,6 +291,8 @@ def install(namespace):
     wma_compatible = all(f'__persistent_wma\u00b7{name}__' in wma_registry
                          for name in ('last', 'sum_low', 'weighted_low'))
     for kind, name in enumerate(names):
+        if name in ('sma', 'ema', 'rma', 'rsi') and not _supports_accurate_sum:
+            continue
         if name == 'wma' and not (_supports_wma and wma_compatible):
             continue
         globals_ = {**globals(), '_kind': kind, '_name': name, '_lib': lib, '_originals': originals,
@@ -304,6 +308,8 @@ def install(namespace):
     if _supports_statistics:
         capacity = statistics_originals['variance'].__globals__['__series_variance\u00b7source__']._capacity
         for kind, name in enumerate(('variance', 'stdev', 'bb'), 9):
+            if name == 'bb' and not _supports_accurate_sum:
+                continue
             original = namespace[name]
             globals_ = {**globals(), '_kind': kind, '_name': name, '_lib': lib,
                         '_capacity': capacity, '_originals': statistics_originals, '_direct': original,
@@ -362,7 +368,7 @@ def install_math(namespace):
             function = FunctionType(code, globals_, name, original.__defaults__)
             function.__qualname__, function.__doc__ = name, original.__doc__
             namespace[name] = function
-    if not _supports_statistics:
+    if not (_supports_statistics and _supports_accurate_sum):
         return
     from .. import lib
     original = namespace['sum']

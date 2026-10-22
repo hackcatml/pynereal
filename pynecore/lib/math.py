@@ -313,7 +313,7 @@ __series_function_vars__['sum'] = ['__series_summ_source__']
 # noinspection PyShadowingBuiltins
 def sum(source: Series[TFI | NA[TFI]], length: int) -> float | NA[float] | Series[TFI | NA[TFI]]:
     """
-    Returns the sum of a series over a specified length using Kahan summation.
+    Returns the sum of a series over a specified length with a retained low part.
 
     :param source: Source series
     :param length: Length of the sum
@@ -333,11 +333,8 @@ def sum(source: Series[TFI | NA[TFI]], length: int) -> float | NA[float] | Serie
     if __persistent_summ_count__ < length - 1:
         if not isna:
             __persistent_summ_count__ += 1
-            # Kahan summation for adding new value
-            corrected_value = float(source) - __persistent_summ_compensation__
-            new_sum = __persistent_summ_summ__ + corrected_value
-            __persistent_summ_compensation__ = (new_sum - __persistent_summ_summ__) - corrected_value
-            __persistent_summ_summ__ = new_sum
+            __persistent_summ_summ__, __persistent_summ_compensation__ = _sum_add(
+                __persistent_summ_summ__, __persistent_summ_compensation__, float(source))
         return NA(float)
     elif __persistent_summ_count__ == length - 1:
         if isna:
@@ -346,20 +343,26 @@ def sum(source: Series[TFI | NA[TFI]], length: int) -> float | NA[float] | Serie
     else:
         if isna:
             return __persistent_summ_summ__
-        # Kahan summation for removing old value
         old_value = safe_convert.safe_float(__series_summ_source__[length])
-        corrected_old = -old_value - __persistent_summ_compensation__
-        new_sum = __persistent_summ_summ__ + corrected_old
-        __persistent_summ_compensation__ = (new_sum - __persistent_summ_summ__) - corrected_old
-        __persistent_summ_summ__ = new_sum
+        __persistent_summ_summ__, __persistent_summ_compensation__ = _sum_add(
+            __persistent_summ_summ__, __persistent_summ_compensation__, -old_value)
 
-    # Kahan summation for adding new value
-    corrected_value = float(source) - __persistent_summ_compensation__
-    new_sum = __persistent_summ_summ__ + corrected_value
-    __persistent_summ_compensation__ = (new_sum - __persistent_summ_summ__) - corrected_value
-    __persistent_summ_summ__ = new_sum
+    __persistent_summ_summ__, __persistent_summ_compensation__ = _sum_add(
+        __persistent_summ_summ__, __persistent_summ_compensation__, float(source))
 
     return __persistent_summ_summ__
+
+
+def _sum_add(total, compensation, value):
+    # Preserve the rounding residue of both addition and eviction, as in WMA.
+    try:
+        updated = math.fsum((total, -compensation, value))
+        residual = -math.fsum((total, -compensation, value, -updated))
+        return updated, residual
+    except (OverflowError, ValueError, TypeError):
+        corrected = value - compensation
+        updated = total + corrected
+        return updated, (updated - total) - corrected
 
 
 def tan(angle: TFI | NA[TFI]) -> float | NA[float]:
