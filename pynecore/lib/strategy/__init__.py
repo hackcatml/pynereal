@@ -563,7 +563,7 @@ class Position:
                 remaining = _size_add(size, order.size)
                 size = remaining if remaining * size > 0.0 else 0.0
             elif order.order_type is _order_type_entry:
-                size = _size_add(size, order.size) if size * order.size >= 0.0 else order.size
+                size = _size_add(size, order.size) if size * order.sign >= 0.0 else order.size
         return size
 
     def _add_order(self, order: Order):
@@ -1273,6 +1273,9 @@ class Position:
                 return False
         close_only = False
         if order.qty_budget is not None and not self._resolve_price_order_qty(order, price):
+            return False
+        if order.order_type == _order_type_entry and order.size == 0.0:
+            self._remove_order(order)
             return False
         # Apply risk management only to entry orders, not normal orders from strategy.order()
         if order.order_type == _order_type_entry or order.order_type == _order_type_normal:
@@ -2311,8 +2314,8 @@ def entry(id: str, direction: direction.Direction, qty: int | float | NA[float] 
     if qty_budget is not None:
         qty = _budget_quantity(qty_budget, qty_price)
 
-    # qty must be greater than 0
-    if qty <= 0.0:
+    # Only a positive finite request can become a zero-lot reversal.
+    if not 0.0 < qty < float("inf"):
         return
 
     # We need a signed size instead of qty, the sign is the direction
@@ -2320,7 +2323,15 @@ def entry(id: str, direction: direction.Direction, qty: int | float | NA[float] 
 
     size = _size_round(size) if default_qty else direction_sign * _explicit_qty_round(qty)
     if size == 0.0:
-        return
+        existing = position.entry_orders.get(id)
+        same_bar_update = (existing is not None and not existing.cancelled
+                           and existing.bar_index == lib.bar_index)
+        # A sub-lot opposing entry still closes the position. A zero-lot
+        # replacement with no closing leg cancels the old pending order.
+        if same_bar_update or position.size * direction_sign >= 0.0:
+            if existing is not None:
+                position._remove_order(existing)
+            return
 
     flip_qty = 0.0
     if isinstance(limit, NA):
@@ -2353,6 +2364,12 @@ def entry(id: str, direction: direction.Direction, qty: int | float | NA[float] 
             size -= flippable
             flip_qty = abs(flippable)
 
+        if size == 0.0:
+            existing = position.entry_orders.get(id)
+            if existing is not None:
+                position._remove_order(existing)
+            return
+
     bar_time = lib._time
     alert_message = f'{{"timestamp": {bar_time}, "message": {alert_message}}}' if alert_message else None
     ai_instruction = str(ai).strip() if ai is not None else None
@@ -2361,6 +2378,9 @@ def entry(id: str, direction: direction.Direction, qty: int | float | NA[float] 
                   comment=None if isinstance(comment, NA) else comment,
                   alert_message=None if isinstance(alert_message, NA) else alert_message,
                   ai_instruction=ai_instruction or None)
+    # Market reversals add the closing quantity at execution, not placement.
+    if size == 0.0:
+        order.sign = direction_sign
     order.qty_budget, order.qty_price, order.flip_qty = qty_budget, qty_price, flip_qty
     # Store in entry_orders dict
     position._add_order(order)
