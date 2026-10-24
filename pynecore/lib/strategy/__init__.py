@@ -1962,11 +1962,7 @@ def default_entry_qty(fill_price: float | NA[float]) -> float:
             raise ValueError("Unknown default qty type: ", script.default_qty_type)
         if not isfinite(money) or not isfinite(cost) or cost == 0.0:
             return 0.0
-        # Upstream's TV probes size a default budget at ten significant digits.
-        if money > 0.0:
-            dec = Decimal(repr(float(money)))
-            money = float(dec.quantize(Decimal(1).scaleb(dec.adjusted() - 9), rounding=ROUND_HALF_UP))
-        qty = money / cost
+        qty = _round_sizing_budget(money) / cost
     if isinstance(qty, NA) or not isfinite(qty):
         return 0.0
     factor = syminfo._size_round_factor
@@ -2017,10 +2013,18 @@ def _price_order_budget(limit, stop, sign):
     return (money, factor, fee), price
 
 
+def _round_sizing_budget(money: float) -> float:
+    """Apply the same ten-significant-digit money precision to default entries."""
+    if 0.0 < money < float("inf"):
+        dec = Decimal(repr(float(money)))
+        return float(dec.quantize(Decimal(1).scaleb(dec.adjusted() - 9), rounding=ROUND_HALF_UP))
+    return money
+
+
 def _budget_quantity(budget, price):
     money, factor, fee = budget
     cost = price * factor + fee
-    return money / cost if 0.0 < cost < float("inf") else 0.0
+    return _round_sizing_budget(money) / cost if 0.0 < cost < float("inf") else 0.0
 
 # noinspection PyProtectedMember
 def _size_add(qty_a: float, qty_b: float) -> float:
