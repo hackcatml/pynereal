@@ -100,9 +100,10 @@ def avg(id: list[Number]) -> float:
     Returns the average value of the elements in the array.
 
     :param id: Input array
-    :return: Average value of the elements in the array
+    :return: Average of non-na elements, or na if none are available
     """
-    return builtins.sum(id) / len(id)
+    values = [value for value in id if value == value]
+    return builtins.sum(values) / len(values) if values else NA(float)
 
 
 # noinspection PyShadowingBuiltins
