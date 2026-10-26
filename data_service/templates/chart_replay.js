@@ -68,7 +68,7 @@ App.replay = (() => {
     }
   }
   const icons = {
-    replay: '<polygon points="11 19 2 12 11 5 11 19"/><polygon points="22 19 13 12 22 5 22 19"/>',
+    replay: '<path d="M2 5v14" stroke-width="3"/><polygon points="13 19 6 12 13 5 13 19"/><polygon points="22 19 15 12 22 5 22 19"/>',
     calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 11h18"/>',
     select: '<path d="M12 3v18M3 12h18"/><circle cx="12" cy="12" r="4"/>',
     play: '<path d="m7 4 14 8-14 8Z"/>', pause: '<path d="M8 4v16M16 4v16"/>',
