@@ -14,6 +14,7 @@ from pynecore.types.ohlcv import OHLCV
 from ohlcv_cache import import_from_ohlcv
 from pynecore.cli.app import app_state
 from log_utils import log_with_time
+from data_service.ccxt_ws import configure_ccxt_ws
 
 
 def convert_timeframe(timeframe: str, to_ms: bool = False) -> int | str:
@@ -234,7 +235,9 @@ def make_ccxt_pro_client(ccxt_module, exchange: str, market_type: str = "", symb
             markets = await super().fetch_markets(params)
             return _filter_invalid_ccxt_markets(markets)
 
-    return SafeOKXPro(config=config)
+    client = SafeOKXPro(config=config)
+    configure_ccxt_ws(client)
+    return client
 
 
 def fetch_ohlcv_data(

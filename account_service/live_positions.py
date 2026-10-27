@@ -68,6 +68,7 @@ from data_service.schedule_utils import (  # noqa: E402
     seconds_until_manual_refresh_guard_end,
     seconds_until_post_bar_task_window,
 )
+from data_service.ccxt_ws import configure_ccxt_ws  # noqa: E402
 
 
 EMIT_INTERVAL_SECONDS = 0.25
@@ -755,6 +756,7 @@ def _build_live_exchange(account: ExchangeAccount) -> Any:
         options["watchPositions"] = watch_positions
     config["options"] = options
     exchange = exchange_class(config)
+    configure_ccxt_ws(exchange)
     if sandbox:
         exchange.set_sandbox_mode(True)
     if account.exchange_id == "hyperliquid":
