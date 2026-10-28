@@ -103,6 +103,7 @@
   let pnlPayload = null;
   let selectedPnlExchange = null;
   let pnlPeriodDays = 90;
+  let pnlDisplayMode = "summary";
   const pnlRefreshIntervalMs = 10000;
   let pnlRefreshTimer = null;
   let pnlListSizeFrame = null;
@@ -1496,6 +1497,7 @@
 
   function closeAssets(options = {}) {
     if (!isAssetsOpen()) return;
+    window.PnlViews.closeDetails();
     closeAssetTransferHistory();
     closeAssetTransfer();
     closePositionPnlPopover();
@@ -1579,7 +1581,10 @@
       || view === "import-history"
       || view === "pnl"
     );
-    const deferAccountHeight = animateAccountHeight && isAccountHistoryView && Boolean(options.load);
+    // Cached PnL stays visible during refresh, so size it immediately instead
+    // of clipping it to the previous tab's height until the request finishes.
+    const deferAccountHeight = animateAccountHeight && isAccountHistoryView
+      && Boolean(options.load) && !(view === "pnl" && pnlPayload);
     const runAccountHeightTween = () => {
       accountBox.style.height = "";
       const endHeight = accountBox.offsetHeight;
@@ -1613,6 +1618,7 @@
       orderHistoryRequestSeq += 1;
     }
     if (accountView === "pnl" && view !== "pnl") {
+      window.PnlViews.closeDetails();
       clearPnlRefreshTimer();
       pnlRequestSeq += 1;
       setPnlLoading(false);
@@ -3670,6 +3676,7 @@
     metrics.className = "account-history-record-metrics";
     const makeMetric = (label) => {
       const metric = createHistoryMetric(label, "");
+      metric.dataset.pnlMetric = label.toLowerCase();
       metrics.appendChild(metric);
       return metric.querySelector("strong");
     };
@@ -3752,6 +3759,11 @@
   function updatePnlListSizing() {
     const list = el("pnl-list");
     if (!list) return;
+    if (pnlDisplayMode !== "summary") {
+      list.classList.remove("pnl-list-sized", "pnl-list-scrollable");
+      list.style.removeProperty("--pnl-list-height");
+      return;
+    }
     if (
       mobileHubQuery.matches
       || !isAssetsOpen()
@@ -3823,7 +3835,7 @@
       : "PnL";
     el("pnl-summary").classList.toggle("hidden", results.length === 0);
     el("pnl-empty").classList.toggle("hidden", results.length !== 0);
-    el("pnl-list").classList.toggle("hidden", results.length === 0);
+    el("pnl-list").classList.toggle("hidden", results.length === 0 || pnlDisplayMode === "graph");
     el("pnl-list").classList.toggle("pnl-exchange-overview", !selected);
     if (selected) {
       syncPnlList(
@@ -3854,6 +3866,13 @@
       results.length === 0 || notes.length === 0,
     );
     el("pnl-loading").classList.add("hidden");
+    el("pnl-content").dataset.view = pnlDisplayMode;
+    const visual = el("pnl-visual");
+    visual.classList.toggle("hidden", pnlDisplayMode === "summary" || results.length === 0);
+    if (visual.classList.contains("hidden")) window.PnlViews.closeDetails();
+    if (pnlDisplayMode !== "summary" && results.length) {
+      window.PnlViews.render(visual, pnlPayload, { mode: pnlDisplayMode, exchange: selectedPnlExchange });
+    }
     updatePnlListSizing();
     historyFlipCommit();
   }
@@ -3876,6 +3895,7 @@
       el("pnl-summary").classList.add("hidden");
       el("pnl-empty").classList.add("hidden");
       el("pnl-list").classList.add("hidden");
+      el("pnl-visual").classList.add("hidden");
       el("pnl-coverage-note").classList.add("hidden");
       el("pnl-list").replaceChildren();
     }
@@ -3887,7 +3907,7 @@
     const preserveContent = pnlHaveData;
     setPnlLoading(true, preserveContent);
     try {
-      const payload = await api(`/api/account/pnl?days=${pnlPeriodDays}`);
+      const payload = await api(`/api/account/pnl?days=${pnlPeriodDays}${pnlDisplayMode !== "summary" ? "&include_daily=true" : ""}`);
       if (seq !== pnlRequestSeq || !isAssetsOpen() || accountView !== "pnl") return;
       renderPnl(payload);
     } catch (error) {
@@ -6672,6 +6692,19 @@
         });
         historyFlipBegin();
         loadPnl();
+      });
+    });
+    document.querySelectorAll("[data-pnl-view]").forEach((button) => {
+      button.addEventListener("click", () => {
+        historyFlipBegin();
+        pnlDisplayMode = pnlDisplayMode === button.dataset.pnlView ? "summary" : button.dataset.pnlView;
+        document.querySelectorAll("[data-pnl-view]").forEach((item) => {
+          const active = item.dataset.pnlView === pnlDisplayMode;
+          item.classList.toggle("active", active);
+          item.setAttribute("aria-pressed", String(active));
+        });
+        renderPnlView();
+        if (pnlDisplayMode !== "summary" && !Array.isArray(pnlPayload?.daily)) loadPnl();
       });
     });
     el("position-history-filters").addEventListener("submit", (event) => {

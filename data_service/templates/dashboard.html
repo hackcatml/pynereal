@@ -10,7 +10,7 @@
       document.documentElement.dataset.theme = localStorage.getItem("pyne.hub.theme") === "light" ? "light" : "dark";
     } catch { document.documentElement.dataset.theme = "dark"; }
   </script>
-  <link rel="stylesheet" href="/static/dashboard.css?v=204" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=211" />
   <link rel="stylesheet" href="/static/notifications.css?v=14" />
   <link rel="stylesheet" href="/static/telegram_status.css?v=2" />
   <link rel="stylesheet" href="/static/scripting_backtest.css?v=49" />
@@ -1611,6 +1611,7 @@
               <span id="pnl-updated"></span>
             </div>
           </section>
+          <div class="pnl-toolbar">
           <div class="pnl-period-control" role="group" aria-label="PnL period">
             <button type="button" data-pnl-days="7" aria-pressed="false">7D</button>
             <button type="button" data-pnl-days="30" aria-pressed="false">30D</button>
@@ -1619,13 +1620,25 @@
             <button type="button" data-pnl-days="365" aria-pressed="false">1Y</button>
             <button type="button" data-pnl-days="all" aria-pressed="false">All</button>
           </div>
+          <div class="pnl-view-controls" role="group" aria-label="PnL view">
+            <button class="btn btn-icon pnl-icon" type="button" data-pnl-view="calendar" data-tooltip="PnL calendar" aria-label="PnL calendar" aria-pressed="false">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 11h18M8 15h2M14 15h2M8 18h2"/></svg>
+            </button>
+            <button class="btn btn-icon pnl-icon" type="button" data-pnl-view="graph" data-tooltip="PnL graph" aria-label="PnL graph" aria-pressed="false">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18M7 14l4-5 4 3 5-7"/></svg>
+            </button>
+          </div>
+          </div>
           <div id="pnl-loading" class="assets-state">
             <span class="assets-spinner" aria-hidden="true"></span>
             <span>Loading PnL...</span>
           </div>
           <div id="pnl-error" class="assets-state assets-state-error hidden" role="alert"></div>
           <div id="pnl-empty" class="assets-state hidden">No PnL data.</div>
-          <div id="pnl-list" class="account-history-record-list pnl-list hidden"></div>
+          <div id="pnl-content" class="pnl-content">
+            <section id="pnl-visual" class="pnl-visual hidden" aria-label="Realized PnL"></section>
+            <div id="pnl-list" class="account-history-record-list pnl-list hidden"></div>
+          </div>
           <div id="pnl-coverage-note" class="pnl-coverage-note hidden">
             Funding and borrow interest are not included.
           </div>
@@ -1964,6 +1977,7 @@
   <script src="/static/scripting.js?v=55"></script>
   <script src="/static/notifications.js?v=12"></script>
   <script src="/static/telegram_status.js?v=1"></script>
-  <script src="/static/dashboard.js?v=190"></script>
+  <script src="/static/pnl_views.js?v=7"></script>
+  <script src="/static/dashboard.js?v=194"></script>
 </body>
 </html>

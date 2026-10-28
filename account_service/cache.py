@@ -2783,6 +2783,7 @@ class AccountCache:
         days: int | None = 90,
         account: str = "",
         exchange: str = "",
+        include_daily: bool = False,
     ) -> dict[str, Any]:
         if days is not None and (
             isinstance(days, bool) or not 1 <= days <= 365
@@ -2812,12 +2813,13 @@ class AccountCache:
                 "days": days,
                 "results": [],
                 "totals": [],
+                **({"daily": []} if include_daily else {}),
             }
         try:
             if since_text is None:
                 history_rows = connection.execute(
                     f"""
-                    SELECT account, exchange, symbol, payload_json
+                    SELECT account, exchange, symbol, closed_at, payload_json
                     FROM position_history
                     WHERE 1 = 1{common_filter}
                     """,
@@ -2834,7 +2836,7 @@ class AccountCache:
             else:
                 history_rows = connection.execute(
                     f"""
-                    SELECT account, exchange, symbol, payload_json
+                    SELECT account, exchange, symbol, closed_at, payload_json
                     FROM position_history
                     WHERE closed_at >= ?{common_filter}
                     """,
@@ -2860,6 +2862,27 @@ class AccountCache:
             connection.close()
 
         buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
+        daily: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+
+        def add_daily(row, currency, occurred_at, amount, *, closed=False):
+            if not include_daily:
+                return
+            timestamp = _iso_timestamp(occurred_at)
+            if timestamp is None:
+                return
+            day = datetime.fromtimestamp(timestamp, UTC).date().isoformat()
+            key = (day, str(row["exchange"]), str(row["account"]), currency)
+            item = daily.setdefault(key, {
+                "date": day, "exchange": key[1], "account": key[2], "currency": currency,
+                "realized_pnl": Decimal(0), "closed_positions": 0, "complete": True,
+                "profit": Decimal(0), "loss": Decimal(0),
+            })
+            if amount is None:
+                item["complete"] = False
+            else:
+                item["realized_pnl"] += amount
+                item["profit" if amount > 0 else "loss"] += amount
+            item["closed_positions"] += int(closed)
 
         def bucket_for(
             row: sqlite3.Row,
@@ -2896,6 +2919,8 @@ class AccountCache:
                     realized -= allocated_funding
                 bucket["realized_pnl"] += realized
 
+            add_daily(row, bucket["currency"], row["closed_at"], realized, closed=True)
+
             gross = _decimal(breakdown.get("gross_pnl"))
             fees = _decimal(breakdown.get("fees"))
             if breakdown.get("complete") is True and gross is not None and fees is not None:
@@ -2922,6 +2947,7 @@ class AccountCache:
                 continue
             bucket = bucket_for(row, payload, currency)
             bucket["realized_pnl"] += amount
+            add_daily(row, currency, row["occurred_at"], amount)
             if component == "funding":
                 bucket["funding"] += amount
                 bucket["funding_available"] = True
@@ -2983,6 +3009,10 @@ class AccountCache:
             "days": days,
             "results": [_serialize_pnl_bucket(item) for item in ordered_buckets],
             "totals": [_serialize_pnl_bucket(item) for item in ordered_totals],
+            **({"daily": [
+                {**item, **{key: float(item[key]) for key in ("realized_pnl", "profit", "loss")}}
+                for _, item in sorted(daily.items())
+            ]} if include_daily else {}),
         }
 
     def csv_imports(self, *, limit: int = 100) -> dict[str, Any]:

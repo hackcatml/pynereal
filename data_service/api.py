@@ -1194,6 +1194,7 @@ def build_control_router(
         days: str = "90",
         account: str = "",
         exchange: str = "",
+        include_daily: bool = False,
     ) -> JSONResponse:
         normalized_days: int | None
         if days.strip().lower() == "all":
@@ -1211,6 +1212,7 @@ def build_control_router(
                 days=normalized_days,
                 account=account,
                 exchange=exchange,
+                include_daily=include_daily,
             )
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)

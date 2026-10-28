@@ -50,6 +50,7 @@ _STATIC_FILES = {
     "ws.js": "text/javascript",
     "main.js": "text/javascript",
     "dashboard.js": "text/javascript",
+    "pnl_views.js": "text/javascript",
     "dashboard.css": "text/css",
     "notifications.js": "text/javascript",
     "notifications.css": "text/css",

@@ -712,6 +712,7 @@ class AccountDataService:
         days: int | None = 90,
         account: str = "",
         exchange: str = "",
+        include_daily: bool = False,
     ) -> dict[str, Any]:
         try:
             payload = await asyncio.to_thread(
@@ -719,6 +720,7 @@ class AccountDataService:
                 days=days,
                 account=account,
                 exchange=exchange,
+                include_daily=include_daily,
             )
         except ValueError:
             raise
@@ -759,6 +761,7 @@ class AccountDataService:
             },
             "totals": payload.get("totals", []),
             "results": results,
+            **({"daily": payload.get("daily", [])} if include_daily else {}),
             "summary": {
                 "accounts": len(accounts),
                 "rows": len(results),
