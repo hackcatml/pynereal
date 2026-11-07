@@ -11,7 +11,8 @@ else:
     from minute_data.core import Market
 
 
-def attach_shared_minutes(runner, data_root: Path, data_info: dict, start: int, end: int):
+def attach_shared_minutes(runner, data_root: Path, data_info: dict, start: int, end: int,
+                          *, snapshot_path: Path | None = None):
     exchange = str(data_info.get('exchange') or '').lower()
     symbol = str(data_info.get('symbol') or '').upper()
     if not exchange or '/' not in symbol or exchange != runner.syminfo.prefix.lower():
@@ -36,6 +37,8 @@ def attach_shared_minutes(runner, data_root: Path, data_info: dict, start: int, 
             db.close()
 
     def candles():
+        from contextlib import ExitStack
+        from pynecore.core.ohlcv_file import OHLCVWriter
         shared_rows = rows(shared, '''
             SELECT ts,open,high,low,close,volume FROM candles
             WHERE market=? AND ts>=? AND ts<? AND source!='trades' ORDER BY ts
@@ -45,7 +48,10 @@ def attach_shared_minutes(runner, data_root: Path, data_info: dict, start: int, 
             WHERE provider='ccxt' AND exchange=? AND symbol=? AND timeframe='1m'
             AND ts>=? AND ts<? ORDER BY ts
         ''', (exchange, symbol, start, end))
+        stack = ExitStack()
         try:
+            writer = stack.enter_context(OHLCVWriter(snapshot_path, truncate=True,
+                                                    precision=64, timeframe='1')) if snapshot_path else None
             a, b = next(shared_rows, None), next(primary_rows, None)
             while a is not None or b is not None:
                 if a is not None and (b is None or a[0] <= b[0]):
@@ -56,9 +62,13 @@ def attach_shared_minutes(runner, data_root: Path, data_info: dict, start: int, 
                 else:
                     selected = b
                     b = next(primary_rows, None)
-                yield OHLCV(*selected)
+                candle = OHLCV(*selected)
+                if writer is not None:
+                    writer.write(candle)
+                yield candle
         finally:
             shared_rows.close()
             primary_rows.close()
+            stack.close()
 
     runner.set_bar_magnifier(candles(), source_seconds=60, source=f'shared-minute:{market.key}')

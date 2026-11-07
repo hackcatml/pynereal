@@ -104,6 +104,8 @@ class ScriptingBacktestManager:
         self._closed = False
         self.output_root.mkdir(parents=True, exist_ok=True)
         self._recover_jobs()
+        from data_service.backtest_repainting_service import RepaintingChecks
+        self.repainting = RepaintingChecks(self)
 
     async def run_io(
         self,
@@ -464,6 +466,9 @@ class ScriptingBacktestManager:
         return {"ok": True, "deleted": 1, "job_id": job.id}
 
     async def _delete_results_locked(self, targets: list[BacktestJob]) -> list[str]:
+        if any(job.id in self.repainting.active for job in targets):
+            raise ScriptingBacktestError('Stop repainting verification before deleting its backtest',
+                                        code='verification_busy', status_code=409)
         if any(
             job.status not in _TERMINAL_STATUSES
             or (job.monitor_task is not None and not job.monitor_task.done())
@@ -479,6 +484,7 @@ class ScriptingBacktestManager:
         for job_id in job_ids:
             self._jobs.pop(job_id, None)
             self._plot_index_cache.pop(job_id, None)
+            self.repainting.states.pop(job_id, None)
         return job_ids
 
     async def read_script(self, job_id: str) -> dict[str, Any]:
@@ -693,6 +699,7 @@ class ScriptingBacktestManager:
         async with self._lock:
             if self._closed:
                 return
+            await self.repainting.close()
             for job in list(self._jobs.values()):
                 if job.status not in _ACTIVE_STATUSES:
                     continue
@@ -1722,6 +1729,7 @@ class ScriptingBacktestManager:
                 "trades": (job_dir / "trades.csv").is_file(),
                 "equity": (job_dir / "equity.csv").is_file(),
                 "script": (job_dir / "script.py").is_file(),
+                "repainting": (job_dir / "repainting_inputs.zip").is_file(),
             },
         }
 

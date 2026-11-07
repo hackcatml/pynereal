@@ -22,6 +22,8 @@ _STATIC_FILES = {
     "scripting_backtest.css": "text/css",
     "scripting_backtest_chart.js": "text/javascript",
     "scripting_backtest_chart.css": "text/css",
+    "backtest_repainting.js": "text/javascript",
+    "backtest_repainting.css": "text/css",
     "scripting_backtest_workspace.js": "text/javascript",
     "scripting_backtest_workspace.css": "text/css",
     "scripting_backtest_chart_embed.js": "text/javascript",

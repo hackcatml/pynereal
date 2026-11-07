@@ -21,6 +21,7 @@
     entryMarkerSeries: null,
     closeMarkerSeries: null,
     markerApi: null,
+    repainting: null,
     plotDefinitions: [],
     plotSeries: new Map(),
     bgcolorPrimitive: null,
@@ -896,6 +897,22 @@
     });
     state.entryMarkerSeries.setData([...entryPoints.values()].sort((a, b) => a.time - b.time));
     state.closeMarkerSeries.setData([...closePoints.values()].sort((a, b) => a.time - b.time));
+    renderRepaintingAnnotations();
+  }
+
+  let markerLabelContext = null;
+  function renderRepaintingAnnotations() {
+    const first = Number(state.priceBars[0]?.time);
+    const last = Number(state.priceBars.at(-1)?.time);
+    const markers = state.priceMarkers.filter(marker => marker.time >= first && marker.time <= last);
+    let annotations = state.repainting?.markers(first, last) || [];
+    if (annotations.length) {
+      markerLabelContext ||= document.createElement("canvas").getContext("2d");
+      markerLabelContext.font = "12px Arial";
+      annotations = window.BacktestRepainting.fitLabels(annotations, markers,
+        time => state.priceChart.timeScale().timeToCoordinate(time),
+        text => markerLabelContext.measureText(text).width);
+    }
     state.markerApi.setMarkers(markers.map((marker) => ({
       time: marker.time,
       position: marker.position,
@@ -903,7 +920,7 @@
       shape: marker.shape,
       text: marker.text,
       size: marker.size,
-    })).sort((a, b) => a.time - b.time));
+    })).concat(annotations).sort((a, b) => a.time - b.time));
   }
 
   function normalizedPriceMarkers(markers) {
@@ -1710,6 +1727,35 @@
       state.selectedIndex = lastIndex;
       drawEquity();
       await loadPriceAt(lastIndex);
+      state.repainting = window.BacktestRepainting.mount({
+        job: state.job,
+        onChange: renderPriceMarkers,
+        onNavigate: async time => {
+          const index = equityIndexForTime(time);
+          state.selectedIndex = index;
+          focusSynchronizedEquity(index);
+          drawEquity();
+          await loadPriceAt(index);
+        },
+      });
+      state.priceChart.subscribeClick(event => state.repainting.select(event.hoveredObjectId));
+      let markerFrame = 0;
+      let markerSpacing = state.priceChart.timeScale().options().barSpacing;
+      state.priceChart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+        const spacing = state.priceChart.timeScale().options().barSpacing;
+        if (spacing === markerSpacing) return;
+        markerSpacing = spacing;
+        if (markerFrame) return;
+        markerFrame = requestAnimationFrame(() => {
+          markerFrame = 0;
+          renderRepaintingAnnotations();
+        });
+      });
+      state.priceChart.subscribeCrosshairMove(event => {
+        const rect = el("backtest-price-chart").getBoundingClientRect();
+        state.repainting.hover(event.hoveredObjectId, event.point
+          ? { x: rect.left + event.point.x, y: rect.top + event.point.y } : null);
+      });
       window.BacktestChartLink?.attach({
         read: readSynchronizedView,
         apply: applySynchronizedView,

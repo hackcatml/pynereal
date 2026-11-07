@@ -341,6 +341,12 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     runner: ScriptRunner | None = None
     plotchar_handle = None
     try:
+        if __package__:
+            from .backtest_repainting import attach_fill_recorder, engine_identity, save_snapshot
+        else:
+            from backtest_repainting import attach_fill_recorder, engine_identity, save_snapshot
+        verification_engine = engine_identity()
+        verification_events = []
         runner = ScriptRunner(
             script_snapshot,
             iter(candles),
@@ -354,6 +360,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             preload_ohlcv=candles,
             track_drawdown_curve=True,
         )
+        attach_fill_recorder(runner, verification_events)
         if runner.script.use_bar_magnifier:
             if __package__:
                 from .backtest_magnifier import attach_shared_minutes
@@ -361,7 +368,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 from backtest_magnifier import attach_shared_minutes
             from pynecore.core.bar_magnifier import fixed_seconds
             attach_shared_minutes(runner, repo_root / 'workdir' / 'data', job.get('data_info') or {},
-                                  actual_from, actual_to + fixed_seconds(syminfo.period))
+                                  actual_from, actual_to + fixed_seconds(syminfo.period),
+                                  snapshot_path=runtime_dir / 'minutes.ohlcv')
             print('[backtest] Bar Magnifier enabled | source=collected 1-minute candles', flush=True)
         plot_options: dict[str, dict[str, Any]] = {}
 
@@ -399,6 +407,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                   f"fallback={report['fallback_bars']} sub-bars={report.get('sub_bars', 0)}", flush=True)
             if not report['magnified_bars']:
                 raise ValueError('No complete matching minute windows for Bar Magnifier in this range')
+            runner.magnifier.close()
         plotchar_handle.flush()
         _write_json(
             job_dir / "plot_metadata.json",
@@ -414,6 +423,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         )
         if equity_count:
             print(f"[backtest] equity curve ready | points={equity_count}", flush=True)
+        save_snapshot(job_dir, runtime_dir, args.script_path, verification_events,
+                      verification_engine, magnifier=runner.magnifier is not None)
         print(f"[backtest] completed in {elapsed:.3f}s", flush=True)
         return {
             "status": "completed",

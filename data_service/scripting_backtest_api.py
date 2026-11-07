@@ -168,6 +168,55 @@ def build_scripting_backtest_router(
             return _error_response(exc)
         return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
+    @router.get('/api/scripting/backtests/{job_id}/repainting')
+    async def repainting_status(job_id: str):
+        try:
+            return JSONResponse(await manager.repainting.status(job_id), headers={'Cache-Control': 'no-store'})
+        except ScriptingBacktestError as exc:
+            return _error_response(exc)
+
+    @router.post('/api/scripting/backtests/{job_id}/repainting')
+    async def start_repainting(job_id: str, payload: dict):
+        try:
+            return JSONResponse(await manager.repainting.start(job_id, payload.get('start')), status_code=202)
+        except ScriptingBacktestError as exc:
+            return _error_response(exc)
+
+    @router.post('/api/scripting/backtests/{job_id}/repainting/stop')
+    async def stop_repainting(job_id: str):
+        try:
+            return JSONResponse(await manager.repainting.stop(job_id))
+        except ScriptingBacktestError as exc:
+            return _error_response(exc)
+
+    @router.websocket('/ws/scripting/backtests/{job_id}/repainting')
+    async def repainting_ws(ws: WebSocket, job_id: str):
+        from urllib.parse import urlsplit
+        origin = ws.headers.get('origin')
+        if origin and urlsplit(origin).netloc != ws.headers.get('host'):
+            await ws.close(code=1008)
+            return
+        await ws.accept()
+        service = manager.repainting
+        try:
+            while True:
+                version = service.version
+                state = await service.status(job_id)
+                await ws.send_json(state)
+                if state['status'] not in ('preparing', 'running', 'stopping'):
+                    await ws.close()
+                    return
+                async with service.changed:
+                    try:
+                        await asyncio.wait_for(service.changed.wait_for(lambda: version != service.version), 20)
+                    except TimeoutError:
+                        pass
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        except ScriptingBacktestError as exc:
+            await ws.send_json({'status': 'failed', 'error': str(exc)})
+            await ws.close()
+
     @router.get("/api/scripting/backtests/{job_id}/log")
     async def get_backtest_log(
         job_id: str,

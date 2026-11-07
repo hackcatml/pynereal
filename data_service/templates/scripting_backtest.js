@@ -886,6 +886,7 @@
     if (summaryButton.disabled && summaryOpen) setSummaryOpen(false);
     const equityButton = el("scripting-backtest-equity-toggle");
     equityButton.disabled = !equityAvailable();
+    el("scripting-backtest-repainting").disabled = job?.status !== "completed" || !equityAvailable();
     const deleteButton = el("scripting-backtest-delete");
     const canDelete = Boolean(
       jobs.length && jobs.every((item) => terminalStatuses.has(String(item.status || ""))),
@@ -2921,6 +2922,11 @@
     el("scripting-backtest-equity-toggle").addEventListener("dblclick", (event) => {
       event.preventDefault();
     });
+    el("scripting-backtest-repainting").addEventListener("click", () => {
+      if (job?.status !== "completed" || !equityAvailable()) return;
+      window.open(`/backtests/${encodeURIComponent(job.id)}?repainting=1`, "_blank", "noopener");
+    });
+    el("scripting-backtest-repainting").addEventListener("dblclick", event => event.preventDefault());
     el("scripting-backtest-summary-panel").addEventListener(
       "scroll",
       handleSummaryPagerScroll,

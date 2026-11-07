@@ -25,6 +25,8 @@ class _TimeframeCache:
     last_synced_index: int = -1
     last_bar_time: int | None = None
     last_refreshed_base_index: int | None = None
+    aggregation_revision: int = -1
+    replacement_revision: int = -1
     series_snapshots: dict[int, dict[str, "SeriesImpl"]] = field(default_factory=dict)
 
 
@@ -85,16 +87,20 @@ class SecurityContext:
         self._base_bars: list[Any] = []
         self._base_bar_index: int = -1
         self._last_updated_base_index: int | None = None
+        self._base_revision: int = 0
+        self._replacement_revision: int = 0
         self._cache: dict[str, _TimeframeCache] = {}
         self._expr_cache: dict[tuple[str, Any, Any, Any], _ExprCache] = {}
         self._persistent_modules: list[_PersistentModule] = []
         self._collect_persistent_modules()
 
     def update_base_bar(self, candle: Any, bar_index: int) -> None:
+        self._base_revision += 1
         if bar_index == len(self._base_bars):
             self._base_bars.append(candle)
         elif bar_index == len(self._base_bars) - 1:
             self._base_bars[bar_index] = candle
+            self._replacement_revision = self._base_revision
         self._base_bar_index = bar_index
         self._last_updated_base_index = bar_index
 
@@ -114,6 +120,8 @@ class SecurityContext:
             return
         # print(f"prefill base bars len: {len(bars)}, last bar: {bars[-1]}, last bar -1: {bars[-2]}")
         self._base_bars = bars
+        self._base_revision += 1
+        self._replacement_revision = self._base_revision
 
     def _snapshot_persistents(self) -> dict[Any, dict[str, Any]]:
         snapshot: dict[Any, dict[str, Any]] = {}
@@ -265,11 +273,16 @@ class SecurityContext:
         # Always refresh the last HTF bar's OHLCV first
         # because existing candles may have been updated (e.g., in realtime)
         if self._should_refresh_last_htf_bar(cache):
-            self._refresh_last_htf_bar(cache)
+            # Appending already folded this input into the shared cache. Keep
+            # the existing refresh bookkeeping even when no rescan is needed.
+            if cache.aggregation_revision != self._base_revision:
+                self._refresh_last_htf_bar(cache)
+                cache.replacement_revision = self._replacement_revision
             cache.last_refreshed_base_index = self._last_updated_base_index
 
         if len(cache.base_to_high) >= len(self._base_bars):
             return
+        initial_aggregation = not cache.base_to_high
         for idx in range(len(cache.base_to_high), len(self._base_bars)):
             candle = self._base_bars[idx]
             bar_time_ms = cache.resampler.get_bar_time(int(candle.timestamp * 1000))
@@ -296,6 +309,12 @@ class SecurityContext:
             if idx > 0:
                 cache.is_closed[idx - 1] = cache.base_to_high[idx - 1] != cache.base_to_high[idx]
             cache.is_closed.append(False)
+        if initial_aggregation:
+            cache.replacement_revision = self._replacement_revision
+        # A replacement may not have reached the original refresh path yet.
+        # Only append-only changes are proven equivalent to a full rescan.
+        if cache.replacement_revision == self._replacement_revision:
+            cache.aggregation_revision = self._base_revision
 
     def _get_cache(self, timeframe: str) -> _TimeframeCache:
         cache = self._cache.get(timeframe)
