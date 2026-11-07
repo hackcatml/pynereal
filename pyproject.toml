@@ -9,7 +9,7 @@ include-package-data = true
 zip-safe = false  # Critical for import hooks
 
 [tool.setuptools.package-data]
-"pynecore" = ["*.pyi"]
+"pynecore" = ["*.pyi", "native/*.hpp", "native/indicators.cpp", "native/finite_fsum.h", "native/LICENSE.cpython"]
 
 [tool.distutils]
 egg_info.egg_base = "build"

@@ -3,8 +3,25 @@ import os
 import sys
 import importlib.util
 import importlib.machinery
+import hashlib
 import re
 from pathlib import Path
+
+_native_function_cache_tag = None
+
+
+def _native_cache_tag():
+    global _native_function_cache_tag
+    if _native_function_cache_tag is None:
+        root = Path(__file__).resolve().parents[1]
+        paths = [Path(__file__), root / 'core/native_codegen.py', root / 'core/native_functions.py',
+                 root / 'native/indicators.cpp', root / 'native/finite_fsum.h',
+                 *sorted((root / 'native').glob('function_*.hpp'))]
+        digest = hashlib.sha256()
+        for path in paths:
+            digest.update(path.read_bytes())
+        _native_function_cache_tag = digest.hexdigest()[:16]
+    return _native_function_cache_tag
 
 
 class PyneLoader(importlib.machinery.SourceFileLoader):
@@ -13,6 +30,8 @@ class PyneLoader(importlib.machinery.SourceFileLoader):
     @staticmethod
     def cache_path(path):
         # Recompile inline security expressions with per-request function isolation.
+        if os.environ.get('PYNECORE_NATIVE_FUNCTIONS') == '1':
+            return path[:-4] + f'.pyne-cmp6-nf-{_native_cache_tag()}.pyc' if path.endswith('.pyc') else path
         return path[:-4] + '.pyne-cmp6.pyc' if path.endswith('.pyc') else path
 
     def get_data(self, path):
@@ -66,6 +85,11 @@ class PyneLoader(importlib.machinery.SourceFileLoader):
             transformed.body = [node for node in transformed.body
                                 if not (isinstance(node, ast.FunctionDef)
                                         and node.name.startswith('__test_') and node.name.endswith('__'))]
+
+            if (os.environ.get('PYNECORE_NATIVE_FUNCTIONS') == '1'
+                    and not path.resolve().is_relative_to(Path(__file__).resolve().parents[1])):
+                from .native_functions import transform
+                transformed = transform(transformed, path)
 
             # Transform AST - lazy import transformers only when needed
             from pynecore.transformers.import_lifter import ImportLifterTransformer
